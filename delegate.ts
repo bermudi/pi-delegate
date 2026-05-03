@@ -227,8 +227,18 @@ export function resolveModel(spec: string | undefined, registry: ModelRegistry, 
 
 // ── Retry ─────────────────────────────────────────────────────────────────
 
-/** Pattern matching transient errors that benefit from retry. */
-const RETRYABLE_PATTERN = /overloaded|429|rate.?limit|too many requests|500|502|503|504|timed? out|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|terminated|retry delay/i;
+/** Pattern matching transient errors that benefit from retry.
+ *  Exported for testability — add test cases when error signatures evolve. */
+export const RETRYABLE_PATTERN = /overloaded|429|rate.?limit|too many requests|500|502|503|504|timed? out|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|terminated|retry delay/i;
+
+/**
+ * Custom error for abort signals — avoids brittle string-matching on
+ * error messages when distinguishing between expected aborts and real failures.
+ */
+class AbortError extends Error {
+  override name = "AbortError";
+  constructor() { super("Aborted"); }
+}
 
 /** Sleep for ms, aborting early if signal fires. */
 async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
@@ -236,19 +246,31 @@ async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
     if (signal) {
-      const onAbort = () => { clearTimeout(timer); reject(new Error("Aborted")); };
+      const onAbort = () => { clearTimeout(timer); reject(new AbortError()); };
       signal.addEventListener("abort", onAbort, { once: true });
+      // Close TOCTOU window: signal could have fired between our early
+      // aborted check above and addEventListener here.
+      if (signal.aborted) {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        reject(new AbortError());
+      }
     }
   });
 }
 
 // ── Concurrency Limiter ───────────────────────────────────────────────────
 
-/** Map over items with a concurrency cap, returning Promise.allSettled-shaped results. */
+/** Map over items with a concurrency cap, returning Promise.allSettled-shaped results.
+ *  Callers must ensure `fn` always settles (either resolves or throws) — the
+ *  concurrency limiter guarantees every claimed index gets a result assigned.
+ *  If `fn` exits early on abort (via the signal param), it must throw so
+ *  `results[i]` is populated with a rejection. */
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
   fn: (item: T, index: number) => Promise<R>,
+  signal?: AbortSignal,
 ): Promise<PromiseSettledResult<R>[]> {
   if (items.length === 0) return [];
   const limit = Math.max(1, Math.min(concurrency, items.length));
@@ -256,6 +278,7 @@ async function mapWithConcurrency<T, R>(
   let nextIndex = 0;
   const worker = async () => {
     while (true) {
+      if (signal?.aborted) return;
       const i = nextIndex++;
       if (i >= items.length) return;
       try {
@@ -289,13 +312,13 @@ async function runAgent(
   modelRegistry: ModelRegistry,
   signal?: AbortSignal,
   onProgress?: (update: AgentProgressUpdate) => void,
-  retryMax = 3,
+  // maxRetries is the number of *retries* after the initial attempt (total = maxRetries + 1).
+  maxRetries = 3,
   retryBaseMs = 2000,
 ): Promise<{ output: string; error?: string; durationMs: number; tokens: number }> {
   const start = Date.now();
-  let lastError: string | undefined;
 
-  for (let attempt = 0; attempt <= retryMax; attempt++) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal?.aborted) {
       return { output: "", error: "Aborted", durationMs: Date.now() - start, tokens: 0 };
     }
@@ -319,9 +342,11 @@ async function runAgent(
       },
     });
 
-    // Track real-time progress via agent events
+    // Track real-time progress via agent events (reset each attempt so UI
+    // reflects the current attempt, not a stale peak from a failed one).
     let toolUses = 0;
     if (onProgress) {
+      if (attempt > 0) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start });
       agent.subscribe((event) => {
         if (event.type === "tool_execution_end") {
           toolUses++;
@@ -334,16 +359,19 @@ async function runAgent(
       });
     }
 
+    // Register abort handler and clean up on success so listeners don't
+    // accumulate across retries.
+    let abortHandler: (() => void) | undefined;
     if (signal) {
-      const onAbort = () => { try { agent.abort(); } catch { /* */ } };
-      signal.addEventListener("abort", onAbort, { once: true });
+      abortHandler = () => { try { agent.abort(); } catch { /* */ } };
+      signal.addEventListener("abort", abortHandler, { once: true });
     }
 
     try {
       await agent.prompt(prompt);
       await agent.waitForIdle();
 
-      const state = (agent as unknown as { state: { messages: AgentMessage[]; errorMessage?: string } }).state;
+      const state = agent.state as { messages: AgentMessage[]; errorMessage?: string };
       const errorMessage = state.errorMessage;
 
       const output = extractOutput(state.messages);
@@ -357,15 +385,14 @@ async function runAgent(
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      lastError = msg;
 
-      if (attempt < retryMax && RETRYABLE_PATTERN.test(msg)) {
-        if (attempt === 0) {
-          onProgress?.({ tokens: 0, toolUses: 0, durationMs: Date.now() - start });
-        }
+      if (attempt < maxRetries && RETRYABLE_PATTERN.test(msg)) {
         // Exponential backoff with jitter
         const delay = retryBaseMs * Math.pow(2, attempt) + Math.random() * retryBaseMs;
-        try { await sleepWithAbort(delay, signal); } catch { /* aborted during sleep */ }
+        try { await sleepWithAbort(delay, signal); } catch (sleepErr) {
+          // Swallow expected abort during sleep; re-throw anything unexpected.
+          if (!(sleepErr instanceof AbortError)) throw sleepErr;
+        }
         continue;
       }
 
@@ -376,12 +403,17 @@ async function runAgent(
         durationMs: Date.now() - start,
         tokens: 0,
       };
+    } finally {
+      if (signal && abortHandler) {
+        signal.removeEventListener("abort", abortHandler);
+      }
     }
   }
 
+  // Unreachable — every code path inside the loop returns. Defense-in-depth.
   return {
     output: "",
-    error: lastError ?? "Unknown error",
+    error: "Unknown error",
     durationMs: Date.now() - start,
     tokens: 0,
   };
@@ -645,6 +677,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // ── Run parallel (with concurrency limiter) ───────────────────
       const results = await mapWithConcurrency(resolved, MAX_CONCURRENCY, async (t, i) => {
         const p = progress[i]!;
+        // Skip the "running" flash if we're already aborted.
+        if (signal?.aborted) {
+          p.status = "failed"; p.error = "Aborted"; fire();
+          throw new Error("Aborted");
+        }
         p.status = "running"; p.model = t.model?.id; fire();
         try {
           const r = await runAgent(
@@ -661,12 +698,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           fire();
           return { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens };
         } catch (err) {
+          // runAgent swallows most errors internally, but this guards against
+          // aborts raised from this callback and any future thrown-error paths.
           p.status = "failed";
           p.error = err instanceof Error ? err.message : String(err);
           fire();
           throw err;
         }
-      });
+      }, signal);
 
       // ── Format for LLM ────────────────────────────────────────────
       const finalResults = results.map((r, i) =>
