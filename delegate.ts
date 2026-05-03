@@ -87,6 +87,9 @@ export interface TaskResult {
 
 export const DEFAULT_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
 
+/** Maximum concurrent subagent tasks. Prevents rate-limit thundering herds. */
+export const MAX_CONCURRENCY = 3;
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool registry needs generic param to avoid contravariance on execute()
 export const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<any>> = {
   read: createReadTool,
@@ -222,6 +225,50 @@ export function resolveModel(spec: string | undefined, registry: ModelRegistry, 
   return registry.find(spec.slice(0, idx), spec.slice(idx + 1)) ?? undefined;
 }
 
+// ── Retry ─────────────────────────────────────────────────────────────────
+
+/** Pattern matching transient errors that benefit from retry. */
+const RETRYABLE_PATTERN = /overloaded|429|rate.?limit|too many requests|500|502|503|504|timed? out|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|terminated|retry delay/i;
+
+/** Sleep for ms, aborting early if signal fires. */
+async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    if (signal) {
+      const onAbort = () => { clearTimeout(timer); reject(new Error("Aborted")); };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
+// ── Concurrency Limiter ───────────────────────────────────────────────────
+
+/** Map over items with a concurrency cap, returning Promise.allSettled-shaped results. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  if (items.length === 0) return [];
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      try {
+        results[i] = { status: "fulfilled", value: await fn(items[i]!, i) };
+      } catch (err) {
+        results[i] = { status: "rejected", reason: err };
+      }
+    }
+  };
+  await Promise.all(Array(limit).fill(null).map(() => worker()));
+  return results;
+}
+
 // ── Agent Runner ──────────────────────────────────────────────────────────
 
 interface AgentProgressUpdate {
@@ -242,73 +289,102 @@ async function runAgent(
   modelRegistry: ModelRegistry,
   signal?: AbortSignal,
   onProgress?: (update: AgentProgressUpdate) => void,
+  retryMax = 3,
+  retryBaseMs = 2000,
 ): Promise<{ output: string; error?: string; durationMs: number; tokens: number }> {
   const start = Date.now();
+  let lastError: string | undefined;
 
-  const tools = config.tools
-    .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
-    .filter(Boolean) as AgentTool[];
+  for (let attempt = 0; attempt <= retryMax; attempt++) {
+    if (signal?.aborted) {
+      return { output: "", error: "Aborted", durationMs: Date.now() - start, tokens: 0 };
+    }
 
-  let tokens = 0;
-  const agent = new Agent({
-    initialState: {
-      systemPrompt: config.systemPrompt,
-      model: config.model,
-      thinkingLevel: config.thinking,
-      tools,
-    },
-    convertToLlm,
-    streamFn: async (m, context, options) => {
-      const auth = await modelRegistry.getApiKeyAndHeaders(m);
-      if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-      return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
-    },
-  });
+    const tools = config.tools
+      .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
+      .filter(Boolean) as AgentTool[];
 
-  // Track real-time progress via agent events
-  let toolUses = 0;
-  if (onProgress) {
-    agent.subscribe((event) => {
-      if (event.type === "tool_execution_end") {
-        toolUses++;
-        const usage = extractUsage(agent.state.messages);
-        onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start });
-      } else if (event.type === "message_end") {
-        const usage = extractUsage(agent.state.messages);
-        onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start });
-      }
+    const agent = new Agent({
+      initialState: {
+        systemPrompt: config.systemPrompt,
+        model: config.model,
+        thinkingLevel: config.thinking,
+        tools,
+      },
+      convertToLlm,
+      streamFn: async (m, context, options) => {
+        const auth = await modelRegistry.getApiKeyAndHeaders(m);
+        if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+        return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+      },
     });
+
+    // Track real-time progress via agent events
+    let toolUses = 0;
+    if (onProgress) {
+      agent.subscribe((event) => {
+        if (event.type === "tool_execution_end") {
+          toolUses++;
+          const usage = extractUsage(agent.state.messages);
+          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start });
+        } else if (event.type === "message_end") {
+          const usage = extractUsage(agent.state.messages);
+          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start });
+        }
+      });
+    }
+
+    if (signal) {
+      const onAbort = () => { try { agent.abort(); } catch { /* */ } };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    try {
+      await agent.prompt(prompt);
+      await agent.waitForIdle();
+
+      const state = (agent as unknown as { state: { messages: AgentMessage[]; errorMessage?: string } }).state;
+      const errorMessage = state.errorMessage;
+
+      const output = extractOutput(state.messages);
+      const usage = extractUsage(state.messages);
+
+      return {
+        output: output || "(no output)",
+        error: errorMessage,
+        durationMs: Date.now() - start,
+        tokens: usage.total,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastError = msg;
+
+      if (attempt < retryMax && RETRYABLE_PATTERN.test(msg)) {
+        if (attempt === 0) {
+          onProgress?.({ tokens: 0, toolUses: 0, durationMs: Date.now() - start });
+        }
+        // Exponential backoff with jitter
+        const delay = retryBaseMs * Math.pow(2, attempt) + Math.random() * retryBaseMs;
+        try { await sleepWithAbort(delay, signal); } catch { /* aborted during sleep */ }
+        continue;
+      }
+
+      // Non-retryable or max retries exhausted
+      return {
+        output: "",
+        error: msg,
+        durationMs: Date.now() - start,
+        tokens: 0,
+      };
+    }
   }
 
-  if (signal) {
-    const onAbort = () => { try { agent.abort(); } catch { /* */ } };
-    signal.addEventListener("abort", onAbort, { once: true });
-  }
-
-  try {
-    await agent.prompt(prompt);
-    await agent.waitForIdle();
-
-    const state = (agent as unknown as { state: { messages: AgentMessage[]; errorMessage?: string } }).state;
-    const errorMessage = state.errorMessage;
-
-    const output = extractOutput(state.messages);
-    const usage = extractUsage(state.messages);
-
-    return {
-      output: output || "(no output)",
-      error: errorMessage,
-      durationMs: Date.now() - start,
-      tokens: usage.total,
-    };
-  } catch (err) {
-    return {
-      output: "",
-      error: err instanceof Error ? err.message : String(err),
-      durationMs: Date.now() - start,
-      tokens: 0,
-    };
-  }
+  return {
+    output: "",
+    error: lastError ?? "Unknown error",
+    durationMs: Date.now() - start,
+    tokens: 0,
+  };
 }
 
 // ── Output Extraction ────────────────────────────────────────────────────
@@ -566,8 +642,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       });
       fire();
 
-      // ── Run parallel ──────────────────────────────────────────────
-      const results = await Promise.allSettled(resolved.map(async (t, i) => {
+      // ── Run parallel (with concurrency limiter) ───────────────────
+      const results = await mapWithConcurrency(resolved, MAX_CONCURRENCY, async (t, i) => {
         const p = progress[i]!;
         p.status = "running"; p.model = t.model?.id; fire();
         try {
@@ -590,7 +666,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           fire();
           throw err;
         }
-      }));
+      });
 
       // ── Format for LLM ────────────────────────────────────────────
       const finalResults = results.map((r, i) =>
