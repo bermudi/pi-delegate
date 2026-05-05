@@ -1060,17 +1060,26 @@ describe("delegate renderers", () => {
 					index: 0, agent: "inline", task: "task", status: "running",
 					durationMs: 500, tokens: 120, toolUses: 2,
 					activities: [
-						{ id: "tc1", name: "read", args: { path: "src/config.ts" }, startTime: 0, endTime: 100 },
+						{ id: "tc1", name: "read", args: { path: "src/config.ts" }, startTime: 0, endTime: 100, result: { content: [{ type: "text", text: "config" }], isError: false } },
 						{ id: "tc2", name: "bash", args: { command: "git status" }, startTime: 150 },
 					],
 				}],
 			},
 		};
 
-		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).toContain("→ read src/config.ts");
-		expect(rendered).toContain("→ $ git status");
+		// Collapsed: compact activity + Ctrl+O hint
+		const compact = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		const compactText = (compact as any).getText();
+		expect(compactText).toContain("Press Ctrl+O for live detail");
+		// Current in-flight tool shown compactly
+		expect(compactText).toContain("$ git status");
+		expect(compactText).not.toContain("→ read src/config.ts");
+
+		// Expanded: all activities visible
+		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
+		const expandedText = (expanded as any).getText();
+		expect(expandedText).toContain("> $ git status |");
+		expect(expandedText).toContain("read src/config.ts");
 	});
 
 	test("renderResult shows completed tool results in final mode", async () => {
@@ -1200,14 +1209,18 @@ describe("delegate renderers", () => {
 			},
 		};
 
-		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		// Done subagent should still show its activities
-		expect(rendered).toContain("→ read a.ts");
-		// Running subagent shows its activities
-		expect(rendered).toContain("→ $ ls");
-		// Tree uses ├ for non-last item
-		expect(rendered).toContain("├─");
+		// Collapsed: activities hidden, compact hints for running
+		const compact = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		const compactText = (compact as any).getText();
+		expect(compactText).toContain("Press Ctrl+O for live detail");
+		expect(compactText).not.toContain("→ read a.ts");
+		expect(compactText).toContain("├─");
+
+		// Expanded: activities visible for both done and running
+		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
+		const expandedText = (expanded as any).getText();
+		expect(expandedText).toContain("→ read a.ts");
+		expect(expandedText).toContain("$ ls");
 	});
 
 	test("partial render shows last 3 activities when more than 3", async () => {
@@ -1217,6 +1230,7 @@ describe("delegate renderers", () => {
 		const ctx = mockRenderCtx();
 
 		const activities = [
+			{ id: "tc0", name: "read", args: { path: "0.ts" }, startTime: -10, endTime: 0, result: { content: [{ type: "text", text: "z" }], isError: false } },
 			{ id: "tc1", name: "read", args: { path: "1.ts" }, startTime: 0, endTime: 10, result: { content: [{ type: "text", text: "a" }], isError: false } },
 			{ id: "tc2", name: "read", args: { path: "2.ts" }, startTime: 20, endTime: 30, result: { content: [{ type: "text", text: "b" }], isError: false } },
 			{ id: "tc3", name: "read", args: { path: "3.ts" }, startTime: 40, endTime: 50, result: { content: [{ type: "text", text: "c" }], isError: false } },
@@ -1236,13 +1250,21 @@ describe("delegate renderers", () => {
 			},
 		};
 
-		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		// Should show last 3 (2.ts, 3.ts, 4.ts) but not 1.ts
-		expect(rendered).toContain("2.ts");
-		expect(rendered).toContain("3.ts");
-		expect(rendered).toContain("4.ts");
-		expect(rendered).not.toContain("1.ts");
+		// Collapsed: only the current in-flight tool (4.ts)
+		const compact = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		const compactText = (compact as any).getText();
+		expect(compactText).toContain("Press Ctrl+O for live detail");
+		expect(compactText).toContain("read 4.ts");
+		expect(compactText).not.toContain("1.ts");
+
+		// Expanded: last 3 completed tools shown (1.ts, 2.ts, 3.ts), current tool (4.ts); 0.ts dropped
+		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
+		const expandedText = (expanded as any).getText();
+		expect(expandedText).toContain("1.ts");
+		expect(expandedText).toContain("2.ts");
+		expect(expandedText).toContain("3.ts");
+		expect(expandedText).toContain("4.ts");
+		expect(expandedText).not.toContain("0.ts");
 	});
 
 	test("formatToolCallShort: various tool types render correctly", async () => {
@@ -1316,5 +1338,127 @@ describe("delegate renderers", () => {
 		expect(rendered).toContain("●");
 		expect(rendered).toContain("active ");
 		expect(rendered).toContain("s ago");
+	});
+
+	test("collapsed running shows ⎿ with current tool and Ctrl+O hint", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "running",
+					durationMs: 500, tokens: 100, toolUses: 2,
+					activities: [
+						{ id: "tc1", name: "read", args: { path: "done.ts" }, startTime: 0, endTime: 100, result: { content: [{ type: "text", text: "ok" }], isError: false } },
+						{ id: "tc2", name: "bash", args: { command: "npm test" }, startTime: 150 },
+					],
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		const rendered = (text as any).getText();
+		expect(rendered).toContain("Press Ctrl+O for live detail");
+		expect(rendered).toContain("⎿");
+		// Current in-flight tool shown compactly
+		expect(rendered).toContain("$ npm test");
+		// Completed tool NOT shown in collapsed mode
+		expect(rendered).not.toContain("done.ts");
+	});
+
+	test("collapsed running shows thinking… when no current tool", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "running",
+					durationMs: 500, tokens: 100, toolUses: 0,
+					activities: [],
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		const rendered = (text as any).getText();
+		expect(rendered).toContain("thinking…");
+		expect(rendered).toContain("Press Ctrl+O for live detail");
+	});
+
+	test("expanded running shows current tool with elapsed duration", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "running",
+					durationMs: 5000, tokens: 200, toolUses: 3,
+					activities: [
+						{ id: "tc1", name: "read", args: { path: "a.ts" }, startTime: Date.now() - 5000, endTime: Date.now() - 4500, result: { content: [{ type: "text", text: "file contents" }], isError: false } },
+						{ id: "tc2", name: "bash", args: { command: "npm test" }, startTime: Date.now() - 1000 },
+					],
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
+		const rendered = (text as any).getText();
+		// Current tool with elapsed indicator
+		expect(rendered).toContain("> $ npm test |");
+		// Completed tools shown
+		expect(rendered).toContain("read a.ts");
+		expect(rendered).toContain("✓");
+		// Recent output from completed tools
+		expect(rendered).toContain("file contents");
+		// Hint shown in expanded too
+		expect(rendered).toContain("Press Ctrl+O for live detail");
+	});
+
+	test("collapsed done hides activities, expanded shows them", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "done",
+					durationMs: 1000, tokens: 200, toolUses: 1,
+					activities: [
+						{ id: "tc1", name: "bash", args: { command: "cargo build" }, startTime: 0, endTime: 500, result: { content: [{ type: "text", text: "compiled" }], isError: false } },
+					],
+				}],
+			},
+		};
+
+		// Collapsed: no activity details
+		const compact = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		expect((compact as any).getText()).not.toContain("cargo build");
+
+		// Expanded: activities visible
+		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
+		expect((expanded as any).getText()).toContain("cargo build");
 	});
 });
