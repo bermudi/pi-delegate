@@ -24,6 +24,7 @@ import {
   createLsTool,
   createReadTool,
   createWriteTool,
+  SessionManager,
   type ExtensionAPI,
   type ExtensionContext,
   type ModelRegistry,
@@ -53,7 +54,7 @@ export interface TaskDef {
   thinking?: string;
   systemPrompt?: string;
   cwd?: string;
-  context?: "fresh" | "inherit";
+  context?: "fresh" | "inherit" | "fork";
 }
 
 export interface ToolActivity {
@@ -95,6 +96,7 @@ export interface TaskResult {
   error?: string;
   durationMs: number;
   tokens: number;
+  sessionFile?: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -283,6 +285,53 @@ export function extractTextContent(content: string | Array<{ type: string; text?
     .join("");
 }
 
+// ── Session Forking ───────────────────────────────────────────────────────
+
+interface SessionManagerLike {
+  appendMessage(message: unknown): string;
+  getSessionFile(): string | undefined;
+}
+
+/**
+ * Create a session manager for a subagent run.
+ * - `fork`: branches from the parent session so the full conversation is preserved
+ *   and searchable via session_search.
+ * - `fresh` / `inherit`: creates a standalone session file so subagent work is still
+ *   persisted and searchable.
+ */
+function createSubagentSessionManager(
+  parentSessionManager: unknown,
+  context: "fresh" | "inherit" | "fork" | undefined,
+  cwd: string,
+): { manager: SessionManagerLike; file: string } | undefined {
+  if (context === "fork") {
+    if (!parentSessionManager) {
+      throw new Error("Forked subagent context requires a persisted parent session.");
+    }
+    const pm = parentSessionManager as { getSessionFile(): string | undefined; getLeafId(): string | null };
+    const parentFile = pm.getSessionFile();
+    const leafId = pm.getLeafId();
+    if (!parentFile) {
+      throw new Error("Forked subagent context requires a persisted parent session.");
+    }
+    if (!leafId) {
+      throw new Error("Forked subagent context requires a current leaf to fork from.");
+    }
+    const sm = (SessionManager as unknown as { open(path: string): SessionManager }).open(parentFile);
+    const sessionFile = sm.createBranchedSession(leafId);
+    if (!sessionFile) {
+      throw new Error("Session manager did not return a session file.");
+    }
+    return { manager: sm as unknown as SessionManagerLike, file: sessionFile };
+  }
+
+  // Always persist subagent work so the main agent can search it later.
+  const sm = SessionManager.create(cwd);
+  const sessionFile = sm.getSessionFile();
+  if (!sessionFile) return undefined;
+  return { manager: sm as unknown as SessionManagerLike, file: sessionFile };
+}
+
 // ── Skill Loading ─────────────────────────────────────────────────────────
 
 export function loadSkill(name: string, cwd: string): string | null {
@@ -402,6 +451,7 @@ async function runAgent(
   modelRegistry: ModelRegistry,
   signal?: AbortSignal,
   onProgress?: (update: AgentProgressUpdate) => void,
+  sessionManager?: SessionManagerLike,
   // maxRetries is the number of *retries* after the initial attempt (total = maxRetries + 1).
   maxRetries = 3,
   retryBaseMs = 2000,
@@ -496,6 +546,20 @@ async function runAgent(
 
       const output = extractOutput(state.messages);
       const usage = extractUsage(state.messages);
+
+      // Persist subagent conversation to its session file so the main agent
+      // can search it later.
+      if (sessionManager) {
+        try {
+          for (const msg of state.messages) {
+            if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult" || msg.role === "custom") {
+              sessionManager.appendMessage(msg);
+            }
+          }
+        } catch {
+          // Session persistence is best-effort; don't fail the task.
+        }
+      }
 
       return {
         output: output || "(no output)",
@@ -735,8 +799,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             description: "Working directory. Defaults to parent session cwd.",
           })),
           context: Type.Optional(Type.String({
-            enum: ["fresh", "inherit"],
-            description: "'fresh' for clean context, 'inherit' to include parent session transcript.",
+            enum: ["fresh", "inherit", "fork"],
+            description: "'fresh' for clean context, 'inherit' to include parent session transcript, 'fork' to branch the session so subagent work is searchable.",
           })),
         }),
         { minItems: 0, description: "Tasks to run in parallel. Pass an empty array to see available agents and usage docs." },
@@ -794,7 +858,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "- `skills` — Skill names injected into the system prompt.",
             "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
             "- `cwd` — Working directory. Default: parent session cwd.",
-            "- `context` — 'fresh' (default) or 'inherit' to include parent session transcript.",
+            "- `context` — 'fresh' (default), 'inherit' to include parent session transcript, or 'fork' to branch the session so subagent work is persisted and searchable.",
           ].join("\n") }],
           details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
         };
@@ -814,10 +878,13 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       }
 
       // ── Resolve tasks ─────────────────────────────────────────────
-      // Build parent transcript lazily — only computed once if any task uses inherit
+      // Build parent transcript lazily — only computed once if any task uses inherit/fork
       let parentTranscript: string | null = null;
-      const hasInherit = params.tasks.some((t) => t.context === "inherit");
-      if (hasInherit) {
+      const needsParentContext = params.tasks.some((t) => t.context === "inherit" || t.context === "fork");
+      if (needsParentContext) {
+        if (!ctx.sessionManager) {
+          throw new Error("context: 'inherit' or 'fork' requires a persisted parent session.");
+        }
         parentTranscript = buildParentTranscript(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId());
       }
 
@@ -842,17 +909,17 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           systemPrompt = systemPrompt.trimEnd() + "\n\n" + skillBodies.join("\n\n");
         }
 
-        // Build prompt — wrap with parent context if inheriting
+        // Build prompt — wrap with parent context if inheriting or forking
         let prompt = t.prompt;
-        const inheritCtx = t.context === "inherit" && parentTranscript ? parentTranscript : null;
-        if (inheritCtx) {
+        const parentCtx = (t.context === "inherit" || t.context === "fork") && parentTranscript ? parentTranscript : null;
+        if (parentCtx) {
           prompt = [
             "<parent-session>",
             "The following is the conversation from the parent session.",
             "Read this for context, then execute the task below.",
             "Do not continue the parent conversation or respond to prior messages.",
             "",
-            inheritCtx,
+            parentCtx,
             "</parent-session>",
             "",
             "## Task",
@@ -911,6 +978,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           throw new Error("Aborted");
         }
         p.status = "running"; p.model = t.model?.id; fire();
+
+        // Create a session manager for this subagent so its work is persisted
+        // and searchable by the main agent.
+        const session = createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
+
         try {
           const r = await runAgent(
             { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
@@ -918,13 +990,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             ctx.modelRegistry,
             signal,
             (u) => { p.tokens = u.tokens; p.toolUses = u.toolUses; p.durationMs = u.durationMs; p.lastActivityAt = u.lastActivityAt; p.activities = u.activities; fire(); },
+            session?.manager,
           );
           p.status = r.error ? "failed" : "done";
           p.durationMs = r.durationMs;
           p.tokens = r.tokens;
           p.error = r.error;
           fire();
-          return { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens };
+          return { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens, sessionFile: session?.file };
         } catch (err) {
           // runAgent swallows most errors internally, but this guards against
           // aborts raised from this callback and any future thrown-error paths.
@@ -937,7 +1010,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // ── Format for LLM ────────────────────────────────────────────
       const finalResults = results.map((r, i) =>
-        r.status === "fulfilled" ? r.value : { agent: resolved[i]!.agentName, output: "", error: String(r.reason), durationMs: 0, tokens: 0 },
+        r.status === "fulfilled" ? r.value : { agent: resolved[i]!.agentName, output: "", error: String(r.reason), durationMs: 0, tokens: 0, sessionFile: undefined },
       );
       const elapsedTotal = Date.now() - startedAt;
 
@@ -954,7 +1027,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         if (r.error) {
           parts.push(`[FAILED: ${r.error}]`);
         } else {
-          parts.push(`[OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens]\n\n${r.output}`);
+          parts.push(`[OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens]${r.sessionFile ? ` · ${shortenPath(r.sessionFile)}` : ""}\n\n${r.output}`);
         }
       }
 
