@@ -104,6 +104,80 @@ export const DEFAULT_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "wri
 /** Maximum concurrent subagent tasks. Prevents rate-limit thundering herds. */
 export const MAX_CONCURRENCY = 3;
 
+// ── Render helpers ───────────────────────────────────────────────────────
+
+/** Braille spinner frames for live progress animation. */
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+function spinnerFrame(): string {
+  return SPINNER[Math.floor(Date.now() / 80) % SPINNER.length]!;
+}
+
+/** Get terminal width, clamped to a reasonable range. */
+function getTermWidth(): number {
+  return Math.max(40, Math.min(process.stdout.columns || 120, 200));
+}
+
+/**
+ * Truncate a line to maxWidth, preserving ANSI styling through the ellipsis.
+ * Uses Intl.Segmenter for proper Unicode/emoji handling.
+ */
+function truncLine(text: string, maxWidth: number): string {
+  // Quick path for short strings
+  if (text.length <= maxWidth + 20) {
+    const stripped = text.replace(/\x1b\[[0-9;]*m/g, "");
+    if (stripped.length <= maxWidth) return text;
+  }
+
+  const target = maxWidth - 1; // reserve space for "…"
+  let result = "";
+  let vis = 0;
+  let activeStyles: string[] = [];
+  let i = 0;
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+  while (i < text.length) {
+    // Capture ANSI escape sequences
+    const ansiMatch = text.slice(i).match(/^\x1b\[[0-9;]*m/);
+    if (ansiMatch) {
+      const code = ansiMatch[0];
+      result += code;
+      if (code === "\x1b[0m" || code === "\x1b[m") activeStyles = [];
+      else activeStyles.push(code);
+      i += code.length;
+      continue;
+    }
+
+    const ch = text[i++]!;
+    // Count visible width (rough approximation for most chars)
+    const w = ch.codePointAt(0)! > 0x1f00 && ch.codePointAt(0)! < 0xffff ? 2 : 1;
+
+    if (vis + w > target) return result + activeStyles.join("") + "…";
+    result += ch;
+    vis += w;
+  }
+
+  return text;
+}
+
+/** Fit text to terminal width, expanding visually when expanded mode is on. */
+function fit(text: string, width: number, expanded: boolean): string {
+  return expanded ? text : truncLine(text, width);
+}
+
+/**
+ * Apply a line budget so the TUI doesn't overflow the terminal.
+ * Returns lines trimmed to fit within `budget` visible rows.
+ */
+function applyLineBudget(lines: string[], expanded: boolean): string[] {
+  const rows = process.stdout.rows || 30;
+  const budget = expanded
+    ? Math.max(12, Math.min(24, Math.floor(rows * 0.55)))
+    : Math.max(8, Math.min(14, Math.floor(rows * 0.35)));
+  if (lines.length <= budget) return lines;
+  const hidden = lines.length - budget + 1;
+  return [...lines.slice(0, budget - 1), `… ${hidden} lines hidden · Ctrl+O expands`];
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool registry needs generic param to avoid contravariance on execute()
 export const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<any>> = {
   read: createReadTool,
@@ -892,18 +966,31 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
     renderCall(args, theme, ctx) {
       const state = ctx.state as { startedAt?: number; interval?: ReturnType<typeof setInterval> };
-      if (ctx.executionStarted && state.startedAt === undefined) state.startedAt = Date.now();
       const tasks = (args as { tasks?: TaskDef[] }).tasks ?? [];
       const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const w = getTermWidth();
       if (!tasks.length) {
         text.setText(theme.fg("toolTitle", theme.bold("delegate")));
+        return text;
+      }
+      // Show spinner when execution is running
+      if (ctx.executionStarted) {
+        if (state.startedAt === undefined) state.startedAt = Date.now();
+        const elapsed = fmtDuration(Date.now() - state.startedAt);
+        const lines = [theme.fg("toolTitle", theme.bold(`${spinnerFrame()} delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`))];
+        for (let i = 0; i < tasks.length; i++) {
+          const t = tasks[i]!;
+          const label = t.agent ? theme.bold(t.agent) : "inline";
+          lines.push(truncLine(`${tree(i, tasks.length)} ${label} ${theme.fg("muted", trunc(t.prompt, Math.min(60, w - 30)))}`, w));
+        }
+        text.setText(lines.join("\n"));
         return text;
       }
       const lines = [theme.fg("toolTitle", theme.bold(`delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""}`))];
       for (let i = 0; i < tasks.length; i++) {
         const t = tasks[i]!;
         const label = t.agent ? theme.bold(t.agent) : "inline";
-        lines.push(`${tree(i, tasks.length)} ${label} ${theme.fg("muted", trunc(t.prompt, 60))}`);
+        lines.push(truncLine(`${tree(i, tasks.length)} ${label} ${theme.fg("muted", trunc(t.prompt, 60))}`, w));
       }
       text.setText(lines.join("\n"));
       return text;
@@ -911,7 +998,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
     renderResult(result, options, theme, ctx) {
       const state = ctx.state as { startedAt?: number; interval?: ReturnType<typeof setInterval> };
-      if (options.isPartial && !state.interval) state.interval = setInterval(() => ctx.invalidate(), 1000);
+      // Use a faster animation cadence for spinner (80ms) vs the old 1s
+      const tickMs = 80;
+      if (options.isPartial && !state.interval) state.interval = setInterval(() => ctx.invalidate(), tickMs);
       if (!options.isPartial && state.interval) { clearInterval(state.interval); state.interval = undefined; }
       const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 
@@ -927,47 +1016,70 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       const { progress, results: taskResults } = details;
       const total = progress.length;
+      const w = getTermWidth() - 4;
       const lines: string[] = [""];
+
+      const statJoin = (parts: string[]) => parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
+      const modelLabel = (p: TaskProgress) =>
+        p.model && p.model !== details.parentModel ? ` ${theme.fg("accent", p.model)}` : "";
+
+      // ── Helper: format the collapsed "current activity" line ─────
+      const compactActivity = (p: TaskProgress): string => {
+        const current = p.activities.findLast((a) => !a.result);
+        if (current) {
+          const call = formatToolCallShort(current.name, current.args);
+          const toolAge = fmtDuration(Date.now() - current.startTime);
+          return `${call} | ${toolAge}`;
+        }
+        return getActivityAge(p.lastActivityAt) || "thinking…";
+      };
 
       if (options.isPartial) {
         const done = progress.filter((p) => p.status === "done" || p.status === "failed").length;
+        const running = progress.filter((p) => p.status === "running").length;
         const elapsed = state.startedAt ? ` · ${fmtDuration(Date.now() - state.startedAt)}` : "";
-        lines.push(theme.fg("muted", `Running ${total} subagent${total > 1 ? "s" : ""}…${elapsed}`), "");
+
+        // Richer header: agent counts + wall time
+        const headerParts: string[] = [];
+        if (running > 0) headerParts.push(`${running} running`);
+        headerParts.push(`${done}/${total} done`);
+        lines.push(theme.fg("muted", `${headerParts.join(" · ")}${elapsed}`), "");
+
         for (let i = 0; i < total; i++) {
           const p = progress[i]!;
           const ind = indent(i, total);
-          const stats = (parts: string[]) => parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
-          const modelTag = p.model && p.model !== details.parentModel ? theme.fg("accent", ` ${p.model}`) : "";
+          const runParts: string[] = [];
+          if (p.toolUses > 0) runParts.push(`${p.toolUses} tool${p.toolUses > 1 ? "s" : ""}`);
+          if (p.tokens > 0) runParts.push(`${fmtTokens(p.tokens)} tokens`);
+
           switch (p.status) {
             case "done":
-              lines.push(`${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${modelTag}${stats([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`);
+              lines.push(truncLine(`${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`, w));
               if (options.expanded) {
                 for (const activity of p.activities.slice(-3)) {
                   const call = formatToolCallShort(activity.name, activity.args);
                   const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                  lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+                  lines.push(truncLine(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`, w));
                 }
               }
               break;
             case "failed":
-              lines.push(`${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${modelTag}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`);
+              lines.push(truncLine(`${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${modelLabel(p)}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`, w));
               if (options.expanded) {
                 for (const activity of p.activities.slice(-3)) {
                   const call = formatToolCallShort(activity.name, activity.args);
                   const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                  lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+                  lines.push(truncLine(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`, w));
                 }
               }
               break;
             case "running": {
               const activityAge = getActivityAge(p.lastActivityAt);
-              const ageTag = activityAge ? ` · ${theme.fg("muted", activityAge)}` : "";
-              const runParts: string[] = [];
-              if (p.toolUses > 0) runParts.push(`${p.toolUses} tool use${p.toolUses > 1 ? "s" : ""}`);
-              if (p.tokens > 0) runParts.push(`${fmtTokens(p.tokens)} tokens`);
-              lines.push(`${tree(i, total)} ${theme.fg("warning", "●")} ${theme.bold(p.agent)}${modelTag}${stats(runParts)}${ageTag}`);
+              const ageTag = activityAge ? ` · ${activityAge}` : "";
+              const glyph = theme.fg("warning", spinnerFrame());
+              lines.push(truncLine(`${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin(runParts)}${theme.fg("muted", ageTag)}`, w));
 
-              // Current in-flight tool (last activity without a result)
+              // Current in-flight tool
               const current = p.activities.findLast((a) => !a.result);
 
               if (options.expanded) {
@@ -975,41 +1087,41 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 if (current) {
                   const call = formatToolCallShort(current.name, current.args);
                   const elapsedTool = fmtDuration(Date.now() - current.startTime);
-                  lines.push(`${ind}${theme.fg("warning", `> ${call} | ${elapsedTool}`)}`);
+                  lines.push(truncLine(`${ind}${theme.fg("warning", `> ${call} | ${elapsedTool}`)}`, w));
                 }
-                if (activityAge) lines.push(`${ind}${theme.fg("accent", activityAge)}`);
-                lines.push(`${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`);
+                if (activityAge) lines.push(truncLine(`${ind}${activityAge}`, w));
+                lines.push(truncLine(`${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`, w));
                 // Recent completed tools
                 for (const activity of p.activities.filter((a) => a.result).slice(-3)) {
                   const call = formatToolCallShort(activity.name, activity.args);
                   const icon = activity.result!.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                  lines.push(`${ind}  ${theme.fg("muted", call)} ${icon}`);
+                  lines.push(truncLine(`${ind}  ${theme.fg("muted", call)} ${icon}`, w));
                 }
                 // Recent output from completed tools
                 const recentOutput = getRecentOutput(p.activities, 5);
                 for (const line of recentOutput) {
-                  lines.push(`${ind}  ${theme.fg("muted", line)}`);
+                  lines.push(truncLine(`${ind}  ${theme.fg("muted", line)}`, w));
                 }
               } else {
-                // ── Collapsed: compact + hint ──────────────────────
-                const compactActivity = current
-                  ? formatToolCallShort(current.name, current.args)
-                  : activityAge || "thinking…";
-                lines.push(`${ind}${theme.fg("muted", `⎿  ${compactActivity}`)}`);
-                lines.push(`${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`);
+                // ── Collapsed: compact tool line with duration ─────
+                lines.push(truncLine(`${ind}${theme.fg("muted", `⎿  ${compactActivity(p)}`)}`, w));
+                lines.push(truncLine(`${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`, w));
               }
             }
               break;
             default:
-              lines.push(`${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelTag} ${theme.fg("muted", "waiting…")}`);
+              // Pending / waiting
+              lines.push(truncLine(`${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelLabel(p)} ${theme.fg("muted", "waiting…")}`, w));
           }
         }
-        if (done > 0 && done < total) lines.push("", theme.fg("muted", `${done}/${total} complete`));
+        const budgeted = applyLineBudget(lines.filter(Boolean), options.expanded ?? false);
+        lines.length = 0;
+        lines.push(...budgeted);
       } else {
+        // ── Final result ─────────────────────────────────────────────
         const succeeded = progress.filter((p) => p.status === "done").length;
         const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
-        const totalMs = progress.reduce((sum, p) => sum + p.durationMs, 0);
-        const elapsed = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(totalMs);
+        const elapsed = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
         lines.push(theme.fg("muted", `${succeeded}/${total} completed · ${elapsed} wall · ${fmtTokens(totalTokens)} tokens`), "");
 
         for (let i = 0; i < total; i++) {
@@ -1017,33 +1129,33 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const r = taskResults[i];
           const ind = indent(i, total);
           const icon = p.status === "done" ? theme.fg("success", "✓") : theme.fg("error", "✗");
-          const stats = theme.fg("muted", ` · ${fmtDuration(p.durationMs)} · ${fmtTokens(p.tokens)} tokens`);
-          lines.push(`${tree(i, total)} ${icon} ${theme.bold(p.agent)} ${theme.fg("muted", `(${p.task})`)}${stats}`);
+          const taskPreview = theme.fg("muted", trunc(p.task, w - 30));
+          lines.push(truncLine(`${tree(i, total)} ${icon} ${theme.bold(p.agent)} ${taskPreview}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}${modelLabel(p)}`, w));
 
           // Tool activities with expand/collapse parity to native tool calls
           if (p.activities.length > 0) {
             for (const activity of p.activities) {
               const call = formatToolCallShort(activity.name, activity.args);
               if (!activity.result) {
-                lines.push(`${ind}${theme.fg("muted", `→ ${call}`)}`);
+                lines.push(truncLine(`${ind}${theme.fg("muted", `→ ${call}`)}`, w));
                 continue;
               }
               const text = getToolResultText(activity);
               const iconA = activity.result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
               if (options.expanded) {
-                lines.push(`${ind}${theme.fg("muted", "→ ")}${theme.fg("toolTitle", call)} ${iconA}`);
+                lines.push(truncLine(`${ind}${theme.fg("muted", "→ ")}${theme.fg("toolTitle", call)} ${iconA}`, w));
                 if (text) {
                   for (const line of text.split("\n")) {
-                    lines.push(`${ind}  ${theme.fg("toolOutput", line)}`);
+                    lines.push(truncLine(`${ind}  ${theme.fg("toolOutput", line)}`, w));
                   }
                 }
               } else {
                 const textLines = text.split("\n");
-                const preview = textLines[0]?.slice(0, 80) ?? "";
+                const preview = textLines[0]?.slice(0, Math.min(80, w - 10)) ?? "";
                 const remaining = textLines.length - 1;
-                lines.push(`${ind}${theme.fg("muted", "→ ")}${theme.fg("toolTitle", call)} ${iconA}${preview ? `  ${theme.fg("toolOutput", preview)}` : ""}`);
+                lines.push(truncLine(`${ind}${theme.fg("muted", "→ ")}${theme.fg("toolTitle", call)} ${iconA}${preview ? `  ${theme.fg("toolOutput", preview)}` : ""}`, w));
                 if (remaining > 0) {
-                  lines.push(`${ind}  ${theme.fg("muted", `… ${remaining} more lines`)}`);
+                  lines.push(truncLine(`${ind}  ${theme.fg("muted", `… ${remaining} more lines`)}`, w));
                 }
               }
             }
@@ -1053,11 +1165,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           if (r && "output" in r && r.output?.trim() && r.output !== "(no output)") {
             const outputLines = r.output.trim().split("\n");
             const maxLines = options.expanded ? outputLines.length : 3;
-            for (const line of outputLines.slice(0, maxLines)) lines.push(`${ind}${theme.fg("toolOutput", line)}`);
+            for (const line of outputLines.slice(0, maxLines)) lines.push(truncLine(`${ind}${theme.fg("toolOutput", line)}`, w));
             const remaining = outputLines.length - maxLines;
-            if (remaining > 0) lines.push(`${ind}${theme.fg("muted", `… ${remaining} more lines`)}`);
+            if (remaining > 0) lines.push(truncLine(`${ind}${theme.fg("muted", `… ${remaining} more lines`)}`, w));
           } else if (r && "error" in r && r.error) {
-            lines.push(`${ind}${theme.fg("error", r.error)}`);
+            lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
           }
         }
       }
