@@ -606,6 +606,21 @@ function getToolResultText(activity: ToolActivity): string {
   return blocks.map((b) => b.text).join("\n");
 }
 
+/** Collect the last `maxLines` non-empty output lines from completed tool activities. */
+function getRecentOutput(activities: ToolActivity[], maxLines: number): string[] {
+  const lines: string[] = [];
+  for (let i = activities.length - 1; i >= 0 && lines.length < maxLines; i--) {
+    const activity = activities[i]!;
+    if (!activity.result || activity.result.isError) continue;
+    const text = getToolResultText(activity);
+    const textLines = text.split("\n").filter((l) => l.trim());
+    for (let j = textLines.length - 1; j >= 0 && lines.length < maxLines; j--) {
+      lines.unshift(textLines[j]!);
+    }
+  }
+  return lines;
+}
+
 // ── Extension ─────────────────────────────────────────────────────────────
 
 export default function delegateExtension(pi: ExtensionAPI): void {
@@ -926,18 +941,22 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           switch (p.status) {
             case "done":
               lines.push(`${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${modelTag}${stats([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`);
-              for (const activity of p.activities.slice(-3)) {
-                const call = formatToolCallShort(activity.name, activity.args);
-                const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+              if (options.expanded) {
+                for (const activity of p.activities.slice(-3)) {
+                  const call = formatToolCallShort(activity.name, activity.args);
+                  const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+                  lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+                }
               }
               break;
             case "failed":
               lines.push(`${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${modelTag}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`);
-              for (const activity of p.activities.slice(-3)) {
-                const call = formatToolCallShort(activity.name, activity.args);
-                const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+              if (options.expanded) {
+                for (const activity of p.activities.slice(-3)) {
+                  const call = formatToolCallShort(activity.name, activity.args);
+                  const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+                  lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+                }
               }
               break;
             case "running": {
@@ -947,16 +966,39 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               if (p.toolUses > 0) runParts.push(`${p.toolUses} tool use${p.toolUses > 1 ? "s" : ""}`);
               if (p.tokens > 0) runParts.push(`${fmtTokens(p.tokens)} tokens`);
               lines.push(`${tree(i, total)} ${theme.fg("warning", "●")} ${theme.bold(p.agent)}${modelTag}${stats(runParts)}${ageTag}`);
-            }
-              for (const activity of p.activities.slice(-3)) {
-                const call = formatToolCallShort(activity.name, activity.args);
-                if (!activity.result) {
-                  lines.push(`${ind}${theme.fg("muted", `→ ${call}`)}`);
-                } else {
-                  const icon = activity.result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                  lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+
+              // Current in-flight tool (last activity without a result)
+              const current = p.activities.findLast((a) => !a.result);
+
+              if (options.expanded) {
+                // ── Expanded: detailed live view ────────────────────
+                if (current) {
+                  const call = formatToolCallShort(current.name, current.args);
+                  const elapsedTool = fmtDuration(Date.now() - current.startTime);
+                  lines.push(`${ind}${theme.fg("warning", `> ${call} | ${elapsedTool}`)}`);
                 }
+                if (activityAge) lines.push(`${ind}${theme.fg("accent", activityAge)}`);
+                lines.push(`${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`);
+                // Recent completed tools
+                for (const activity of p.activities.filter((a) => a.result).slice(-3)) {
+                  const call = formatToolCallShort(activity.name, activity.args);
+                  const icon = activity.result!.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+                  lines.push(`${ind}  ${theme.fg("muted", call)} ${icon}`);
+                }
+                // Recent output from completed tools
+                const recentOutput = getRecentOutput(p.activities, 5);
+                for (const line of recentOutput) {
+                  lines.push(`${ind}  ${theme.fg("muted", line)}`);
+                }
+              } else {
+                // ── Collapsed: compact + hint ──────────────────────
+                const compactActivity = current
+                  ? formatToolCallShort(current.name, current.args)
+                  : activityAge || "thinking…";
+                lines.push(`${ind}${theme.fg("muted", `⎿  ${compactActivity}`)}`);
+                lines.push(`${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`);
               }
+            }
               break;
             default:
               lines.push(`${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelTag} ${theme.fg("muted", "waiting…")}`);
