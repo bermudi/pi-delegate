@@ -26,6 +26,7 @@ import {
 	DEFAULT_TOOLS,
 	VALID_THINKING,
 	TOOL_FACTORIES,
+	extractTouchedFromActivities,
 	type AgentConfig,
 } from "./delegate.ts";
 
@@ -749,6 +750,65 @@ describe("getActivityAge", () => {
 	test("boundary: 999ms is active now, 1000ms is seconds", () => {
 		expect(getActivityAge(Date.now() - 999)).toBe("active now");
 		expect(getActivityAge(Date.now() - 1000)).toMatch(/^active \d+s ago$/);
+	});
+});
+
+// ── File Tracking ───────────────────────────────────────────────────────
+
+describe("extractTouchedFromActivities", () => {
+	const cwd = "/home/user/project";
+
+	test("extracts paths from edit and write tool calls", () => {
+		const activities = [
+			{ id: "1", name: "edit", args: { path: "src/foo.ts" }, startTime: 0 },
+			{ id: "2", name: "write", args: { path: "src/bar.ts", content: "..." }, startTime: 0 },
+			{ id: "3", name: "read", args: { path: "src/baz.ts" }, startTime: 0 },
+		];
+		const result = extractTouchedFromActivities(activities as any, cwd);
+		expect(result).toEqual([
+			path.resolve(cwd, "src/foo.ts"),
+			path.resolve(cwd, "src/bar.ts"),
+		]);
+	});
+
+	test("returns empty array when no mutating tools", () => {
+		const activities = [
+			{ id: "1", name: "read", args: { path: "src/foo.ts" }, startTime: 0 },
+			{ id: "2", name: "bash", args: { command: "ls" }, startTime: 0 },
+		];
+		expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([]);
+	});
+
+	test("deduplicates paths", () => {
+		const activities = [
+			{ id: "1", name: "edit", args: { path: "src/foo.ts" }, startTime: 0 },
+			{ id: "2", name: "write", args: { path: "src/foo.ts" }, startTime: 0 },
+		];
+		expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
+			path.resolve(cwd, "src/foo.ts"),
+		]);
+	});
+
+	test("handles missing path gracefully", () => {
+		const activities = [
+			{ id: "1", name: "edit", args: {}, startTime: 0 },
+			{ id: "2", name: "write", args: { path: null }, startTime: 0 },
+			{ id: "3", name: "edit", args: { path: "" }, startTime: 0 },
+		];
+		expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([]);
+	});
+
+	test("handles args with filePath key", () => {
+		const activities = [
+			{ id: "1", name: "edit", args: { filePath: "src/qux.ts" }, startTime: 0 },
+		];
+		expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
+			path.resolve(cwd, "src/qux.ts"),
+		]);
+	});
+
+	test("returns empty for empty activities", () => {
+		expect(extractTouchedFromActivities([], cwd)).toEqual([]);
 	});
 });
 
