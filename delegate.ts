@@ -9,6 +9,7 @@
  * Each task can reference a named agent and/or supply inline overrides.
  */
 
+import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -97,6 +98,7 @@ export interface TaskResult {
   durationMs: number;
   tokens: number;
   sessionFile?: string;
+  touchedFiles: string[];
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -285,6 +287,42 @@ export function extractTextContent(content: string | Array<{ type: string; text?
     .join("");
 }
 
+// ── File Tracking (git + activity) ────────────────────────────────────────
+
+async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
+  try {
+    const result = await new Promise<string>((resolve, reject) => {
+      execFile("git", ["status", "--porcelain", "--untracked-files=all"], { cwd, timeout: 5000 }, (err, stdout) => {
+        if (err) reject(err);
+        else resolve(stdout);
+      });
+    });
+    const files = new Set<string>();
+    for (const line of result.split("\n")) {
+      if (line.length < 4) continue;
+      const rawPath = line.slice(3).trim();
+      if (!rawPath) continue;
+      const targetPath = rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1) : rawPath;
+      if (targetPath) files.add(path.resolve(cwd, targetPath.replace(/^"|"$/g, "")));
+    }
+    return files;
+  } catch {
+    return new Set();
+  }
+}
+
+/** Extract file paths mutated by edit/write from the activity log. */
+export function extractTouchedFromActivities(activities: ToolActivity[], cwd: string): string[] {
+  const files = new Set<string>();
+  for (const a of activities) {
+    if (a.name !== "edit" && a.name !== "write") continue;
+    const raw = a.args?.path ?? a.args?.file_path ?? a.args?.filePath;
+    if (typeof raw !== "string" || !raw) continue;
+    files.add(path.resolve(cwd, raw));
+  }
+  return [...files];
+}
+
 // ── Session Forking ───────────────────────────────────────────────────────
 
 interface SessionManagerLike {
@@ -455,12 +493,15 @@ async function runAgent(
   // maxRetries is the number of *retries* after the initial attempt (total = maxRetries + 1).
   maxRetries = 3,
   retryBaseMs = 2000,
-): Promise<{ output: string; error?: string; durationMs: number; tokens: number }> {
+): Promise<{ output: string; error?: string; durationMs: number; tokens: number; touchedFiles: string[] }> {
   const start = Date.now();
+
+  // Snapshot git status before the agent starts so we can diff after.
+  const gitBaseline = await getGitChangedFiles(config.cwd);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal?.aborted) {
-      return { output: "", error: "Aborted", durationMs: Date.now() - start, tokens: 0 };
+      return { output: "", error: "Aborted", durationMs: Date.now() - start, tokens: 0, touchedFiles: [] };
     }
 
     const tools = config.tools
@@ -482,52 +523,50 @@ async function runAgent(
       },
     });
 
-    // Track real-time progress via agent events (reset each attempt so UI
-    // reflects the current attempt, not a stale peak from a failed one).
+    // Track activities always (for touchedFiles extraction) and optionally
+    // fire progress updates for the UI.
     let toolUses = 0;
     let lastActivityAt: number | undefined;
     const activities: ToolActivity[] = [];
     const pendingById = new Map<string, ToolActivity>();
+    const fireProgress = () => {
+      if (!onProgress) return;
+      const usage = extractUsage(agent.state.messages);
+      onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start, lastActivityAt, activities: [...activities] });
+    };
 
-    if (onProgress) {
-      if (attempt > 0) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start, activities: [] });
-      agent.subscribe((event) => {
-        if (event.type === "tool_execution_start") {
-          const now = Date.now();
-          lastActivityAt = now;
-          const activity: ToolActivity = {
-            id: event.toolCallId,
-            name: event.toolName,
-            args: event.args,
-            startTime: now,
+    if (onProgress && attempt > 0) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start, activities: [] });
+    agent.subscribe((event) => {
+      if (event.type === "tool_execution_start") {
+        const now = Date.now();
+        lastActivityAt = now;
+        const activity: ToolActivity = {
+          id: event.toolCallId,
+          name: event.toolName,
+          args: event.args,
+          startTime: now,
+        };
+        pendingById.set(event.toolCallId, activity);
+        activities.push(activity);
+        fireProgress();
+      } else if (event.type === "tool_execution_end") {
+        lastActivityAt = Date.now();
+        const activity = pendingById.get(event.toolCallId);
+        if (activity) {
+          activity.result = {
+            content: event.result?.content ?? [],
+            isError: event.isError,
           };
-          pendingById.set(event.toolCallId, activity);
-          activities.push(activity);
-          // Fire progress so UI shows the new activity immediately,
-          // not just when the tool completes.
-          const usage = extractUsage(agent.state.messages);
-          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start, lastActivityAt, activities: [...activities] });
-        } else if (event.type === "tool_execution_end") {
-          lastActivityAt = Date.now();
-          const activity = pendingById.get(event.toolCallId);
-          if (activity) {
-            activity.result = {
-              content: event.result?.content ?? [],
-              isError: event.isError,
-            };
-            activity.endTime = lastActivityAt;
-            pendingById.delete(event.toolCallId);
-          }
-          toolUses++;
-          const usage = extractUsage(agent.state.messages);
-          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start, lastActivityAt, activities: [...activities] });
-        } else if (event.type === "message_end") {
-          lastActivityAt = Date.now();
-          const usage = extractUsage(agent.state.messages);
-          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start, lastActivityAt, activities: [...activities] });
+          activity.endTime = lastActivityAt;
+          pendingById.delete(event.toolCallId);
         }
-      });
-    }
+        toolUses++;
+        fireProgress();
+      } else if (event.type === "message_end") {
+        lastActivityAt = Date.now();
+        fireProgress();
+      }
+    });
 
     // Register abort handler and clean up on success so listeners don't
     // accumulate across retries.
@@ -561,11 +600,18 @@ async function runAgent(
         }
       }
 
+      // Compute touched files: union of activity-based (edit/write) and git diff.
+      const fromActivities = extractTouchedFromActivities(activities, config.cwd);
+      const gitAfter = await getGitChangedFiles(config.cwd);
+      const fromGit = [...gitAfter].filter((f) => !gitBaseline.has(f));
+      const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
+
       return {
         output: output || "(no output)",
         error: errorMessage,
         durationMs: Date.now() - start,
         tokens: usage.total,
+        touchedFiles,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -586,6 +632,7 @@ async function runAgent(
         error: msg,
         durationMs: Date.now() - start,
         tokens: 0,
+        touchedFiles: [],
       };
     } finally {
       if (signal && abortHandler) {
@@ -997,7 +1044,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           p.tokens = r.tokens;
           p.error = r.error;
           fire();
-          return { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens, sessionFile: session?.file };
+          return { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens, sessionFile: session?.file, touchedFiles: r.touchedFiles };
         } catch (err) {
           // runAgent swallows most errors internally, but this guards against
           // aborts raised from this callback and any future thrown-error paths.
@@ -1010,7 +1057,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // ── Format for LLM ────────────────────────────────────────────
       const finalResults = results.map((r, i) =>
-        r.status === "fulfilled" ? r.value : { agent: resolved[i]!.agentName, output: "", error: String(r.reason), durationMs: 0, tokens: 0, sessionFile: undefined },
+        r.status === "fulfilled" ? r.value : { agent: resolved[i]!.agentName, output: "", error: String(r.reason), durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] },
       );
       const elapsedTotal = Date.now() - startedAt;
 
@@ -1027,7 +1074,13 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         if (r.error) {
           parts.push(`[FAILED: ${r.error}]`);
         } else {
-          parts.push(`[OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens]${r.sessionFile ? ` · ${shortenPath(r.sessionFile)}` : ""}\n\n${r.output}`);
+          const meta = [`OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`];
+          if (r.sessionFile) meta.push(shortenPath(r.sessionFile));
+          if (r.touchedFiles.length > 0) {
+            const rel = r.touchedFiles.map((f) => path.relative(t.cwd, f)).filter((f) => f && !f.startsWith(".."));
+            if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
+          }
+          parts.push(`[${meta.join(" · ")}]\n\n${r.output}`);
         }
       }
 
