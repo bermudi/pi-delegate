@@ -56,6 +56,18 @@ export interface TaskDef {
   context?: "fresh" | "inherit";
 }
 
+export interface ToolActivity {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  result?: {
+    content: Array<{ type: string; text?: string }>;
+    isError: boolean;
+  };
+  startTime: number;
+  endTime?: number;
+}
+
 export interface TaskProgress {
   index: number;
   agent: string;
@@ -66,6 +78,8 @@ export interface TaskProgress {
   toolUses: number;
   error?: string;
   model?: string;
+  lastActivityAt?: number;
+  activities: ToolActivity[];
 }
 
 export interface DelegateDetails {
@@ -298,6 +312,8 @@ interface AgentProgressUpdate {
   tokens: number;
   toolUses: number;
   durationMs: number;
+  lastActivityAt?: number;
+  activities: ToolActivity[];
 }
 
 async function runAgent(
@@ -345,16 +361,46 @@ async function runAgent(
     // Track real-time progress via agent events (reset each attempt so UI
     // reflects the current attempt, not a stale peak from a failed one).
     let toolUses = 0;
+    let lastActivityAt: number | undefined;
+    const activities: ToolActivity[] = [];
+    const pendingById = new Map<string, ToolActivity>();
+
     if (onProgress) {
-      if (attempt > 0) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start });
+      if (attempt > 0) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start, activities: [] });
       agent.subscribe((event) => {
-        if (event.type === "tool_execution_end") {
+        if (event.type === "tool_execution_start") {
+          const now = Date.now();
+          lastActivityAt = now;
+          const activity: ToolActivity = {
+            id: event.toolCallId,
+            name: event.toolName,
+            args: event.args,
+            startTime: now,
+          };
+          pendingById.set(event.toolCallId, activity);
+          activities.push(activity);
+          // Fire progress so UI shows the new activity immediately,
+          // not just when the tool completes.
+          const usage = extractUsage(agent.state.messages);
+          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start, lastActivityAt, activities: [...activities] });
+        } else if (event.type === "tool_execution_end") {
+          lastActivityAt = Date.now();
+          const activity = pendingById.get(event.toolCallId);
+          if (activity) {
+            activity.result = {
+              content: event.result?.content ?? [],
+              isError: event.isError,
+            };
+            activity.endTime = lastActivityAt;
+            pendingById.delete(event.toolCallId);
+          }
           toolUses++;
           const usage = extractUsage(agent.state.messages);
-          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start });
+          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start, lastActivityAt, activities: [...activities] });
         } else if (event.type === "message_end") {
+          lastActivityAt = Date.now();
           const usage = extractUsage(agent.state.messages);
-          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start });
+          onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start, lastActivityAt, activities: [...activities] });
         }
       });
     }
@@ -448,6 +494,27 @@ export function extractUsage(messages: AgentMessage[]) {
 
 // ── Formatting ────────────────────────────────────────────────────────────
 
+/** Shorten a path by replacing $HOME with ~ */
+export function shortenPath(p: string): string {
+  const home = process.env.HOME;
+  if (!home || home === "/") return p;
+  // Exact home match
+  if (p === home) return "~";
+  // Prefix check with separator to avoid /home/alice matching /home/alice2
+  const prefix = home.endsWith(path.sep) ? home : home + path.sep;
+  if (p.startsWith(prefix)) return "~" + path.sep + p.slice(prefix.length);
+  return p;
+}
+
+/** Human-readable activity age ("active now", "active 5s ago", etc.) */
+export function getActivityAge(lastActivityAt: number | undefined): string {
+  if (lastActivityAt === undefined) return "";
+  const ago = Math.max(0, Date.now() - lastActivityAt);
+  if (ago < 1000) return "active now";
+  if (ago < 60000) return `active ${Math.floor(ago / 1000)}s ago`;
+  return `active ${Math.floor(ago / 60000)}m ago`;
+}
+
 export function fmtDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;
@@ -467,6 +534,77 @@ export function trunc(s: string, n: number): string {
 
 export const tree = (i: number, n: number) => i === n - 1 ? "└─" : "├─";
 export const indent = (i: number, n: number) => i === n - 1 ? "   " : "│  ";
+
+// ── Tool Activity Formatting ─────────────────────────────────────────────
+
+/** Pick the first non-empty arg value for display, preferring the named key then common fallbacks. */
+function firstArg(args: Record<string, unknown>, primary: string, fallbacks: string[] = []): string | undefined {
+  for (const key of [primary, ...fallbacks]) {
+    const val = args[key];
+    if (typeof val === "string" && val.trim()) return val;
+  }
+  return undefined;
+}
+
+function formatToolCallShort(name: string, args: Record<string, unknown>): string {
+  if (!args || typeof args !== "object") return name;
+  switch (name) {
+    case "bash": {
+      const cmd = firstArg(args, "command") ?? "...";
+      const maxLen = 80;
+      return `$ ${cmd.length > maxLen ? cmd.slice(0, maxLen) + "…" : cmd}`;
+    }
+    case "read": {
+      const p = shortenPath(firstArg(args, "path", ["file_path"]) ?? "...");
+      const offset = typeof args.offset === "number" ? args.offset : undefined;
+      const limit = typeof args.limit === "number" ? args.limit : undefined;
+      let line = `read ${p}`;
+      if (offset !== undefined || limit !== undefined) {
+        const start = offset ?? 1;
+        const end = limit !== undefined ? start + limit - 1 : "";
+        line += `:${start}${end ? `-${end}` : ""}`;
+      }
+      return line;
+    }
+    case "write": {
+      const p = shortenPath(firstArg(args, "path", ["file_path"]) ?? "...");
+      const lines = String(args.content ?? "").split("\n").length;
+      return `write ${p}${lines > 1 ? ` (${lines} lines)` : ""}`;
+    }
+    case "edit": {
+      const p = shortenPath(firstArg(args, "path", ["file_path"]) ?? "...");
+      return `edit ${p}`;
+    }
+    case "ls": return `ls ${shortenPath(String(args.path ?? "."))}`;
+    case "grep": return `grep /${String(args.pattern ?? "")}/ in ${shortenPath(String(args.path ?? "."))}`;
+    case "find": return `find ${String(args.pattern ?? "*")} in ${shortenPath(String(args.path ?? "."))}`;
+    default: {
+      // Try to pick a meaningful first arg before falling back to JSON
+      for (const key of ["command", "path", "file_path", "pattern", "query", "url", "task", "prompt"]) {
+        const val = args[key];
+        if (typeof val === "string" && val.trim()) {
+          const preview = val.length > 50 ? val.slice(0, 50) + "…" : val;
+          return `${name} ${preview}`;
+        }
+      }
+      try {
+        const preview = JSON.stringify(args).slice(0, 50);
+        return `${name} ${preview}${preview.length >= 50 ? "…" : ""}`;
+      } catch {
+        return name;
+      }
+    }
+  }
+}
+
+
+function getToolResultText(activity: ToolActivity): string {
+  if (!activity.result) return "";
+  const blocks = activity.result.content.filter(
+    (c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string",
+  );
+  return blocks.map((b) => b.text).join("\n");
+}
 
 // ── Extension ─────────────────────────────────────────────────────────────
 
@@ -666,6 +804,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         durationMs: 0,
         tokens: 0,
         toolUses: 0,
+        activities: [],
         model: t.model?.id,
       }));
       const fire = () => onUpdate?.({
@@ -689,7 +828,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             t.prompt,
             ctx.modelRegistry,
             signal,
-            (u) => { p.tokens = u.tokens; p.toolUses = u.toolUses; p.durationMs = u.durationMs; fire(); },
+            (u) => { p.tokens = u.tokens; p.toolUses = u.toolUses; p.durationMs = u.durationMs; p.lastActivityAt = u.lastActivityAt; p.activities = u.activities; fire(); },
           );
           p.status = r.error ? "failed" : "done";
           p.durationMs = r.durationMs;
@@ -781,17 +920,43 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         lines.push(theme.fg("muted", `Running ${total} subagent${total > 1 ? "s" : ""}…${elapsed}`), "");
         for (let i = 0; i < total; i++) {
           const p = progress[i]!;
+          const ind = indent(i, total);
           const stats = (parts: string[]) => parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
           const modelTag = p.model && p.model !== details.parentModel ? theme.fg("accent", ` ${p.model}`) : "";
           switch (p.status) {
             case "done":
               lines.push(`${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${modelTag}${stats([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`);
+              for (const activity of p.activities.slice(-3)) {
+                const call = formatToolCallShort(activity.name, activity.args);
+                const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+                lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+              }
               break;
             case "failed":
               lines.push(`${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${modelTag}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`);
+              for (const activity of p.activities.slice(-3)) {
+                const call = formatToolCallShort(activity.name, activity.args);
+                const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+                lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+              }
               break;
-            case "running":
-              lines.push(`${tree(i, total)} ${theme.fg("warning", "●")} ${theme.bold(p.agent)}${modelTag}${stats(p.toolUses > 0 ? [`${p.toolUses} tool use${p.toolUses > 1 ? "s" : ""}`, `${fmtTokens(p.tokens)} tokens`] : [])}`);
+            case "running": {
+              const activityAge = getActivityAge(p.lastActivityAt);
+              const ageTag = activityAge ? ` · ${theme.fg("muted", activityAge)}` : "";
+              const runParts: string[] = [];
+              if (p.toolUses > 0) runParts.push(`${p.toolUses} tool use${p.toolUses > 1 ? "s" : ""}`);
+              if (p.tokens > 0) runParts.push(`${fmtTokens(p.tokens)} tokens`);
+              lines.push(`${tree(i, total)} ${theme.fg("warning", "●")} ${theme.bold(p.agent)}${modelTag}${stats(runParts)}${ageTag}`);
+            }
+              for (const activity of p.activities.slice(-3)) {
+                const call = formatToolCallShort(activity.name, activity.args);
+                if (!activity.result) {
+                  lines.push(`${ind}${theme.fg("muted", `→ ${call}`)}`);
+                } else {
+                  const icon = activity.result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+                  lines.push(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`);
+                }
+              }
               break;
             default:
               lines.push(`${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelTag} ${theme.fg("muted", "waiting…")}`);
@@ -812,6 +977,36 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const icon = p.status === "done" ? theme.fg("success", "✓") : theme.fg("error", "✗");
           const stats = theme.fg("muted", ` · ${fmtDuration(p.durationMs)} · ${fmtTokens(p.tokens)} tokens`);
           lines.push(`${tree(i, total)} ${icon} ${theme.bold(p.agent)} ${theme.fg("muted", `(${p.task})`)}${stats}`);
+
+          // Tool activities with expand/collapse parity to native tool calls
+          if (p.activities.length > 0) {
+            for (const activity of p.activities) {
+              const call = formatToolCallShort(activity.name, activity.args);
+              if (!activity.result) {
+                lines.push(`${ind}${theme.fg("muted", `→ ${call}`)}`);
+                continue;
+              }
+              const text = getToolResultText(activity);
+              const iconA = activity.result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+              if (options.expanded) {
+                lines.push(`${ind}${theme.fg("muted", "→ ")}${theme.fg("toolTitle", call)} ${iconA}`);
+                if (text) {
+                  for (const line of text.split("\n")) {
+                    lines.push(`${ind}  ${theme.fg("toolOutput", line)}`);
+                  }
+                }
+              } else {
+                const textLines = text.split("\n");
+                const preview = textLines[0]?.slice(0, 80) ?? "";
+                const remaining = textLines.length - 1;
+                lines.push(`${ind}${theme.fg("muted", "→ ")}${theme.fg("toolTitle", call)} ${iconA}${preview ? `  ${theme.fg("toolOutput", preview)}` : ""}`);
+                if (remaining > 0) {
+                  lines.push(`${ind}  ${theme.fg("muted", `… ${remaining} more lines`)}`);
+                }
+              }
+            }
+            lines.push("");
+          }
 
           if (r && "output" in r && r.output?.trim() && r.output !== "(no output)") {
             const outputLines = r.output.trim().split("\n");

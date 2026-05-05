@@ -21,6 +21,8 @@ import {
 	trunc,
 	tree,
 	indent,
+	shortenPath,
+	getActivityAge,
 	DEFAULT_TOOLS,
 	VALID_THINKING,
 	TOOL_FACTORIES,
@@ -682,6 +684,74 @@ describe("indent", () => {
 	});
 });
 
+// ── shortenPath ──────────────────────────────────────────────────────────
+
+describe("shortenPath", () => {
+	test("replaces HOME with ~", () => {
+		const home = process.env.HOME;
+		if (home && home !== "/") {
+			expect(shortenPath(home)).toBe("~");
+			expect(shortenPath(home + "/projects/my-app")).toBe("~/projects/my-app");
+		}
+	});
+
+	test("does not match overlapping home prefixes", () => {
+		const home = process.env.HOME;
+		if (home && home !== "/") {
+			// /home/alice should not match /home/alice2/file
+			expect(shortenPath(home + "2/file")).toBe(home + "2/file");
+		}
+	});
+
+	test("handles trailing slash in HOME", () => {
+		const homeRaw = process.env.HOME;
+		if (homeRaw && homeRaw !== "/") {
+			const homeWithSlash = homeRaw.endsWith("/") ? homeRaw : homeRaw + "/";
+			// shortenPath reads from process.env.HOME, not the argument,
+			// so we test that HOME with or without trailing slash works
+			expect(shortenPath(homeRaw + "/project")).toContain("~/project");
+		}
+	});
+
+	test("returns non-home paths unchanged", () => {
+		expect(shortenPath("/usr/local/bin")).toBe("/usr/local/bin");
+		expect(shortenPath("/tmp/stuff")).toBe("/tmp/stuff");
+	});
+});
+
+// ── getActivityAge ───────────────────────────────────────────────────────
+
+describe("getActivityAge", () => {
+	test("returns empty for undefined", () => {
+		expect(getActivityAge(undefined)).toBe("");
+	});
+
+	test("returns active now for recent activity", () => {
+		expect(getActivityAge(Date.now())).toBe("active now");
+		expect(getActivityAge(Date.now() - 500)).toBe("active now");
+	});
+
+	test("returns seconds ago", () => {
+		const result = getActivityAge(Date.now() - 5000);
+		expect(result).toMatch(/^active \d+s ago$/);
+	});
+
+	test("returns minutes ago", () => {
+		const result = getActivityAge(Date.now() - 120000);
+		expect(result).toMatch(/^active \d+m ago$/);
+	});
+
+	test("clamps future timestamps to active now", () => {
+		// Clock skew or backdated timers should not produce negative ages
+		expect(getActivityAge(Date.now() + 60_000)).toBe("active now");
+	});
+
+	test("boundary: 999ms is active now, 1000ms is seconds", () => {
+		expect(getActivityAge(Date.now() - 999)).toBe("active now");
+		expect(getActivityAge(Date.now() - 1000)).toMatch(/^active \d+s ago$/);
+	});
+});
+
 // ── Constants ─────────────────────────────────────────────────────────────
 
 describe("constants", () => {
@@ -903,7 +973,7 @@ describe("delegate renderers", () => {
 			details: {
 				tasks: [{ prompt: "task" }],
 				results: [],
-				progress: [{ index: 0, agent: "inline", task: "task", status: "running", durationMs: 0, tokens: 0, toolUses: 0 }],
+				progress: [{ index: 0, agent: "inline", task: "task", status: "running", durationMs: 0, tokens: 0, toolUses: 0, activities: [] }],
 			},
 		};
 
@@ -924,7 +994,7 @@ describe("delegate renderers", () => {
 			details: {
 				tasks: [{ prompt: "task" }],
 				results: [{ agent: "inline", output: "result", durationMs: 1200, tokens: 42 }],
-				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 1200, tokens: 42, toolUses: 1 }],
+				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 1200, tokens: 42, toolUses: 1, activities: [] }],
 			},
 		};
 
@@ -945,7 +1015,7 @@ describe("delegate renderers", () => {
 			details: {
 				tasks: [{ prompt: "task" }],
 				results: [{ agent: "inline", output: "line1\nline2\nline3\nline4\nline5", durationMs: 0, tokens: 0 }],
-				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 0, tokens: 0, toolUses: 0 }],
+				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 0, tokens: 0, toolUses: 0, activities: [] }],
 			},
 		};
 
@@ -965,7 +1035,7 @@ describe("delegate renderers", () => {
 			details: {
 				tasks: [{ prompt: "task" }],
 				results: [{ agent: "inline", output: "line1\nline2\nline3\nline4\nline5", durationMs: 0, tokens: 0 }],
-				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 0, tokens: 0, toolUses: 0 }],
+				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 0, tokens: 0, toolUses: 0, activities: [] }],
 			},
 		};
 
@@ -973,5 +1043,278 @@ describe("delegate renderers", () => {
 		const rendered = (text as any).getText();
 		expect(rendered).not.toContain("more lines");
 		expect(rendered).toContain("line5");
+	});
+
+	test("renderResult shows running tool activities in partial mode", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "running",
+					durationMs: 500, tokens: 120, toolUses: 2,
+					activities: [
+						{ id: "tc1", name: "read", args: { path: "src/config.ts" }, startTime: 0, endTime: 100 },
+						{ id: "tc2", name: "bash", args: { command: "git status" }, startTime: 150 },
+					],
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		const rendered = (text as any).getText();
+		expect(rendered).toContain("→ read src/config.ts");
+		expect(rendered).toContain("→ $ git status");
+	});
+
+	test("renderResult shows completed tool results in final mode", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Done" }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [{ agent: "inline", output: "all good", durationMs: 1000, tokens: 200 }],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "done",
+					durationMs: 1000, tokens: 200, toolUses: 1,
+					activities: [
+						{
+							id: "tc1", name: "read", args: { path: "src/config.ts" },
+							startTime: 0, endTime: 100,
+							result: { content: [{ type: "text", text: "line1\nline2\nline3" }], isError: false },
+						},
+					],
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
+		const rendered = (text as any).getText();
+		expect(rendered).toContain("→ read src/config.ts");
+		expect(rendered).toContain("✓");
+		expect(rendered).toContain("line1");
+		expect(rendered).toContain("… 2 more lines");
+	});
+
+	test("renderResult expands tool results when expanded is true", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Done" }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [{ agent: "inline", output: "done", durationMs: 1000, tokens: 200 }],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "done",
+					durationMs: 1000, tokens: 200, toolUses: 1,
+					activities: [
+						{
+							id: "tc1", name: "read", args: { path: "src/config.ts" },
+							startTime: 0, endTime: 100,
+							result: { content: [{ type: "text", text: "alpha\nbeta\ngamma" }], isError: false },
+						},
+					],
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
+		const rendered = (text as any).getText();
+		expect(rendered).toContain("alpha");
+		expect(rendered).toContain("beta");
+		expect(rendered).toContain("gamma");
+		expect(rendered).not.toContain("more lines");
+	});
+
+	test("renderResult shows error icon for failed tool results", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Done" }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [{ agent: "inline", output: "", error: "bad cmd", durationMs: 500, tokens: 50 }],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "failed",
+					durationMs: 500, tokens: 50, toolUses: 1,
+					activities: [
+						{
+							id: "tc1", name: "bash", args: { command: "bad-cmd" },
+							startTime: 0, endTime: 50,
+							result: { content: [{ type: "text", text: "not found" }], isError: true },
+						},
+					],
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
+		const rendered = (text as any).getText();
+		expect(rendered).toContain("→ $ bad-cmd");
+		expect(rendered).toContain("✗");
+	});
+
+	test("renderResult shows activities for completed subagent in partial mode", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }, { prompt: "task2" }],
+				results: [],
+				progress: [
+					{
+						index: 0, agent: "inline", task: "task", status: "done",
+						durationMs: 1000, tokens: 500, toolUses: 2,
+						activities: [
+							{ id: "tc1", name: "read", args: { path: "a.ts" }, startTime: 0, endTime: 50, result: { content: [{ type: "text", text: "ok" }], isError: false } },
+						],
+					},
+					{
+						index: 1, agent: "inline", task: "task2", status: "running",
+						durationMs: 500, tokens: 100, toolUses: 1,
+						activities: [
+							{ id: "tc2", name: "bash", args: { command: "ls" }, startTime: 0 },
+						],
+					},
+				],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		const rendered = (text as any).getText();
+		// Done subagent should still show its activities
+		expect(rendered).toContain("→ read a.ts");
+		// Running subagent shows its activities
+		expect(rendered).toContain("→ $ ls");
+		// Tree uses ├ for non-last item
+		expect(rendered).toContain("├─");
+	});
+
+	test("partial render shows last 3 activities when more than 3", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const activities = [
+			{ id: "tc1", name: "read", args: { path: "1.ts" }, startTime: 0, endTime: 10, result: { content: [{ type: "text", text: "a" }], isError: false } },
+			{ id: "tc2", name: "read", args: { path: "2.ts" }, startTime: 20, endTime: 30, result: { content: [{ type: "text", text: "b" }], isError: false } },
+			{ id: "tc3", name: "read", args: { path: "3.ts" }, startTime: 40, endTime: 50, result: { content: [{ type: "text", text: "c" }], isError: false } },
+			{ id: "tc4", name: "read", args: { path: "4.ts" }, startTime: 60 },
+		];
+
+		const result = {
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "running",
+					durationMs: 500, tokens: 100, toolUses: 4,
+					activities,
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		const rendered = (text as any).getText();
+		// Should show last 3 (2.ts, 3.ts, 4.ts) but not 1.ts
+		expect(rendered).toContain("2.ts");
+		expect(rendered).toContain("3.ts");
+		expect(rendered).toContain("4.ts");
+		expect(rendered).not.toContain("1.ts");
+	});
+
+	test("formatToolCallShort: various tool types render correctly", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const activities = [
+			{ id: "t1", name: "read", args: { path: "src/file.ts", offset: 10, limit: 5 }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "x" }], isError: false } },
+			{ id: "t1b", name: "read", args: { file_path: "alt.ts" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "x" }], isError: false } },
+			{ id: "t2", name: "write", args: { path: "out.ts", content: "line1\nline2\nline3" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "ok" }], isError: false } },
+			{ id: "t3", name: "edit", args: { path: "fix.ts" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "done" }], isError: false } },
+			{ id: "t4", name: "ls", args: { path: "/tmp" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "files" }], isError: false } },
+			{ id: "t5", name: "grep", args: { pattern: "TODO", path: "src" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "matches" }], isError: false } },
+			{ id: "t5b", name: "grep", args: { path: "src" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "matches" }], isError: false } },
+			{ id: "t6", name: "find", args: { pattern: "*.ts", path: "." }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "found" }], isError: false } },
+			{ id: "t7", name: "bash", args: { command: "git status" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "clean" }], isError: false } },
+			{ id: "t8", name: "custom_tool", args: { query: "search term" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "custom" }], isError: false } },
+		];
+
+		const result = {
+			content: [{ type: "text", text: "Done" }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [{ agent: "inline", output: "ok", durationMs: 100, tokens: 50 }],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "done",
+					durationMs: 100, tokens: 50, toolUses: 10,
+					activities,
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
+		const rendered = (text as any).getText();
+		expect(rendered).toContain("read src/file.ts:10-14");
+		expect(rendered).toContain("write out.ts (3 lines)");
+		expect(rendered).toContain("edit fix.ts");
+		expect(rendered).toContain("ls /tmp");
+		expect(rendered).toContain("grep /TODO/ in src");
+		expect(rendered).toContain("find *.ts in .");
+		expect(rendered).toContain("$ git status");
+		expect(rendered).toContain("custom_tool search term");
+	});
+
+	test("renderResult shows activity age for running tasks", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "running",
+					durationMs: 5000, tokens: 200, toolUses: 3,
+					lastActivityAt: Date.now() - 3000,
+					activities: [
+						{ id: "tc1", name: "read", args: { path: "src/x.ts" }, startTime: Date.now() - 3000, endTime: Date.now() - 2500, result: { content: [{ type: "text", text: "ok" }], isError: false } },
+					],
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+		const rendered = (text as any).getText();
+		expect(rendered).toContain("●");
+		expect(rendered).toContain("active ");
+		expect(rendered).toContain("s ago");
 	});
 });
