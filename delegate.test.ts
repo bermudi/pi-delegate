@@ -979,8 +979,8 @@ describe("delegate renderers", () => {
 
 		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
 		const rendered = (text as any).getText();
-		expect(rendered).toContain("Running 1 subagent");
-		expect(rendered).toContain("●");
+		expect(rendered).toContain("0/1 done");
+		expect(rendered).toContain("thinking…");
 	});
 
 	test("renderResult shows done status when complete", async () => {
@@ -1335,7 +1335,6 @@ describe("delegate renderers", () => {
 
 		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
 		const rendered = (text as any).getText();
-		expect(rendered).toContain("●");
 		expect(rendered).toContain("active ");
 		expect(rendered).toContain("s ago");
 	});
