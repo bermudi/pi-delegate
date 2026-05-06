@@ -176,7 +176,7 @@ function applyLineBudget(lines: string[], expanded: boolean): string[] {
   const rows = process.stdout.rows || 30;
   const budget = expanded
     ? Math.max(12, Math.min(24, Math.floor(rows * 0.55)))
-    : Math.max(8, Math.min(14, Math.floor(rows * 0.35)));
+    : Math.max(8, Math.min(18, Math.floor(rows * 0.35)));
   if (lines.length <= budget) return lines;
   const hidden = lines.length - budget + 1;
   return [...lines.slice(0, budget - 1), `… ${hidden} lines hidden · Ctrl+O expands`];
@@ -1094,31 +1094,21 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       const state = ctx.state as { startedAt?: number; interval?: ReturnType<typeof setInterval> };
       const tasks = (args as { tasks?: TaskDef[] }).tasks ?? [];
       const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      const w = getTermWidth();
       if (!tasks.length) {
         text.setText(theme.fg("toolTitle", theme.bold("delegate")));
         return text;
       }
-      // Show spinner when execution is running
-      if (ctx.executionStarted) {
+      // Minimal call rendering — renderResult handles all detail.
+      // ToolExecutionComponent stacks call + result, so duplication
+      // happens if both show task trees.
+      // Only show spinner while still running (ctx.isPartial).
+      if (ctx.executionStarted && ctx.isPartial) {
         if (state.startedAt === undefined) state.startedAt = Date.now();
         const elapsed = fmtDuration(Date.now() - state.startedAt);
-        const lines = [theme.fg("toolTitle", theme.bold(`${spinnerFrame()} delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`))];
-        for (let i = 0; i < tasks.length; i++) {
-          const t = tasks[i]!;
-          const label = t.agent ? theme.bold(t.agent) : "inline";
-          lines.push(truncLine(`${tree(i, tasks.length)} ${label} ${theme.fg("muted", trunc(t.prompt, Math.min(60, w - 30)))}`, w));
-        }
-        text.setText(lines.join("\n"));
+        text.setText(theme.fg("toolTitle", theme.bold(`${spinnerFrame()} delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`)));
         return text;
       }
-      const lines = [theme.fg("toolTitle", theme.bold(`delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""}`))];
-      for (let i = 0; i < tasks.length; i++) {
-        const t = tasks[i]!;
-        const label = t.agent ? theme.bold(t.agent) : "inline";
-        lines.push(truncLine(`${tree(i, tasks.length)} ${label} ${theme.fg("muted", trunc(t.prompt, 60))}`, w));
-      }
-      text.setText(lines.join("\n"));
+      text.setText(theme.fg("toolTitle", theme.bold(`delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""}`)));
       return text;
     },
 
@@ -1234,7 +1224,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 lines.push(truncLine(`${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`, w));
               }
             }
-              break;
+            break;
             default:
               // Pending / waiting
               lines.push(truncLine(`${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelLabel(p)} ${theme.fg("muted", "waiting…")}`, w));
@@ -1258,39 +1248,36 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const taskPreview = theme.fg("muted", trunc(p.task, w - 30));
           lines.push(truncLine(`${tree(i, total)} ${icon} ${theme.bold(p.agent)} ${taskPreview}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}${modelLabel(p)}`, w));
 
-          // Tool activities with expand/collapse parity to native tool calls
+          // Tool activities: expanded shows full details; collapsed shows a compact summary
           if (p.activities.length > 0) {
-            for (const activity of p.activities) {
-              const call = formatToolCallShort(activity.name, activity.args);
-              if (!activity.result) {
-                lines.push(truncLine(`${ind}${theme.fg("muted", `→ ${call}`)}`, w));
-                continue;
-              }
-              const text = getToolResultText(activity);
-              const iconA = activity.result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-              if (options.expanded) {
+            if (options.expanded) {
+              for (const activity of p.activities) {
+                const call = formatToolCallShort(activity.name, activity.args);
+                if (!activity.result) {
+                  lines.push(truncLine(`${ind}${theme.fg("muted", `→ ${call}`)}`, w));
+                  continue;
+                }
+                const text = getToolResultText(activity);
+                const iconA = activity.result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
                 lines.push(truncLine(`${ind}${theme.fg("muted", "→ ")}${theme.fg("toolTitle", call)} ${iconA}`, w));
                 if (text) {
                   for (const line of text.split("\n")) {
                     lines.push(truncLine(`${ind}  ${theme.fg("toolOutput", line)}`, w));
                   }
                 }
-              } else {
-                const textLines = text.split("\n");
-                const preview = textLines[0]?.slice(0, Math.min(80, w - 10)) ?? "";
-                const remaining = textLines.length - 1;
-                lines.push(truncLine(`${ind}${theme.fg("muted", "→ ")}${theme.fg("toolTitle", call)} ${iconA}${preview ? `  ${theme.fg("toolOutput", preview)}` : ""}`, w));
-                if (remaining > 0) {
-                  lines.push(truncLine(`${ind}  ${theme.fg("muted", `… ${remaining} more lines`)}`, w));
-                }
               }
+            } else {
+              // Collapsed: compact single-line tool summary (token stats already in header)
+              const names = p.activities.map((a) => a.name).filter((n, i, arr) => arr.indexOf(n) === i);
+              const nameList = names.slice(0, 4).join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
+              lines.push(truncLine(`${ind}${theme.fg("muted", `${p.activities.length} tool${p.activities.length > 1 ? "s" : ""}: ${nameList}`)}`, w));
             }
-            lines.push("");
+            if (!options.expanded) lines.push("");
           }
 
           if (r && "output" in r && r.output?.trim() && r.output !== "(no output)") {
             const outputLines = r.output.trim().split("\n");
-            const maxLines = options.expanded ? outputLines.length : 3;
+            const maxLines = options.expanded ? outputLines.length : 12;
             for (const line of outputLines.slice(0, maxLines)) lines.push(truncLine(`${ind}${theme.fg("toolOutput", line)}`, w));
             const remaining = outputLines.length - maxLines;
             if (remaining > 0) lines.push(truncLine(`${ind}${theme.fg("muted", `… ${remaining} more lines`)}`, w));
@@ -1298,6 +1285,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
           }
         }
+
+        // Prevent terminal overflow — only strip blank lines if budget is exceeded
+        const nonEmpty = lines.filter(Boolean);
+        const budgeted = applyLineBudget(nonEmpty, options.expanded ?? false);
+        lines.length = 0;
+        lines.push(...(budgeted.length < nonEmpty.length ? budgeted : nonEmpty));
       }
 
       text.setText(lines.join("\n"));
