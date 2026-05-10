@@ -13,6 +13,7 @@ import {
 	buildParentTranscript,
 	extractTextContent,
 	loadSkill,
+	loadAgentsMdFiles,
 	resolveModel,
 	extractOutput,
 	extractUsage,
@@ -463,6 +464,69 @@ describe("loadSkill", () => {
 		mkdirSync(userSkillDir, { recursive: true });
 		writeFileSync(path.join(userSkillDir, "SKILL.md"), "User skill.", "utf-8");
 		expect(loadSkill("shared", tmpDir)).toBe("User skill.");
+	});
+});
+
+// ── loadAgentsMdFiles ────────────────────────────────────────────────────
+
+describe("loadAgentsMdFiles", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = makeTempDir();
+		mock.module("node:os", () => ({
+			...os,
+			homedir: () => tmpDir,
+		}));
+	});
+
+	afterEach(() => {
+		mock.module("node:os", () => os);
+		cleanup(tmpDir);
+	});
+
+	test("returns empty array when no AGENTS.md files exist", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		expect(loadAgentsMdFiles(projectDir)).toEqual([]);
+	});
+
+	test("loads AGENTS.md from cwd", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		writeFileSync(path.join(projectDir, "AGENTS.md"), "Project instructions.", "utf-8");
+		expect(loadAgentsMdFiles(projectDir)).toEqual(["Project instructions."]);
+	});
+
+	test("loads global AGENTS.md from ~/.pi/agent/", () => {
+		const agentDir = path.join(tmpDir, ".pi", "agent");
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(path.join(agentDir, "AGENTS.md"), "Global instructions.", "utf-8");
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		const result = loadAgentsMdFiles(projectDir);
+		expect(result).toContain("Global instructions.");
+	});
+
+	test("loads both global and project AGENTS.md", () => {
+		const agentDir = path.join(tmpDir, ".pi", "agent");
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(path.join(agentDir, "AGENTS.md"), "Global instructions.", "utf-8");
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		writeFileSync(path.join(projectDir, "AGENTS.md"), "Project instructions.", "utf-8");
+		const result = loadAgentsMdFiles(projectDir);
+		expect(result).toEqual(["Global instructions.", "Project instructions."]);
+	});
+
+	test("walks ancestor directories", () => {
+		const parentDir = path.join(tmpDir, "parent");
+		const childDir = path.join(parentDir, "child");
+		mkdirSync(childDir, { recursive: true });
+		writeFileSync(path.join(parentDir, "AGENTS.md"), "Parent instructions.", "utf-8");
+		writeFileSync(path.join(childDir, "AGENTS.md"), "Child instructions.", "utf-8");
+		const result = loadAgentsMdFiles(childDir);
+		expect(result).toEqual(["Parent instructions.", "Child instructions."]);
 	});
 });
 
