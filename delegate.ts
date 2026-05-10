@@ -396,8 +396,11 @@ export function loadAgentsMdFiles(cwd: string): string[] {
       seen.add(fp);
       try {
         const content = fs.readFileSync(fp, "utf-8").trim();
-        if (content) files.push({ priority, content });
-        return;
+        if (content) {
+          files.push({ priority, content });
+          return; // found valid content, stop trying other candidates in this dir
+        }
+        // empty/whitespace-only file — treat as not found, fall through to next candidate
       } catch { /* skip */ }
     }
   };
@@ -406,7 +409,7 @@ export function loadAgentsMdFiles(cwd: string): string[] {
   const agentDir = path.join(os.homedir(), ".pi", "agent");
   tryLoad(agentDir, 0);
 
-  // Walk from root → cwd (so cwd's AGENTS.md comes last = highest precedence)
+  // Walk from root → cwd, stopping before filesystem root (no one puts AGENTS.md in /)
   const ancestorDirs: string[] = [];
   let current = path.resolve(cwd);
   const root = path.resolve("/");
@@ -418,10 +421,11 @@ export function loadAgentsMdFiles(cwd: string): string[] {
     current = parent;
   }
   for (let i = 0; i < ancestorDirs.length; i++) {
+    if (ancestorDirs[i] === root) continue;
     tryLoad(ancestorDirs[i]!, i + 1);
   }
 
-  return files.map((f) => f.content);
+  return files.sort((a, b) => a.priority - b.priority).map((f) => f.content);
 }
 
 // ── Model Resolution ──────────────────────────────────────────────────────

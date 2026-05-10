@@ -528,6 +528,52 @@ describe("loadAgentsMdFiles", () => {
 		const result = loadAgentsMdFiles(childDir);
 		expect(result).toEqual(["Parent instructions.", "Child instructions."]);
 	});
+
+	test("falls back to CLAUDE.md when AGENTS.md is empty", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		writeFileSync(path.join(projectDir, "AGENTS.md"), "", "utf-8");
+		writeFileSync(path.join(projectDir, "CLAUDE.md"), "Claude instructions.", "utf-8");
+		expect(loadAgentsMdFiles(projectDir)).toEqual(["Claude instructions."]);
+	});
+
+	test("falls back to CLAUDE.md when AGENTS.md is whitespace-only", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		writeFileSync(path.join(projectDir, "AGENTS.md"), "   \n\t\n  ", "utf-8");
+		writeFileSync(path.join(projectDir, "CLAUDE.md"), "Claude instructions.", "utf-8");
+		expect(loadAgentsMdFiles(projectDir)).toEqual(["Claude instructions."]);
+	});
+
+	test("prefers AGENTS.md over CLAUDE.md when both have content", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		writeFileSync(path.join(projectDir, "AGENTS.md"), "Agents win.", "utf-8");
+		writeFileSync(path.join(projectDir, "CLAUDE.md"), "Claude loses.", "utf-8");
+		expect(loadAgentsMdFiles(projectDir)).toEqual(["Agents win."]);
+	});
+
+	test("loads CLAUDE.md when AGENTS.md does not exist", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		writeFileSync(path.join(projectDir, "CLAUDE.md"), "Claude instructions.", "utf-8");
+		expect(loadAgentsMdFiles(projectDir)).toEqual(["Claude instructions."]);
+	});
+
+	test("skips filesystem root", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		// Intentionally write to root — should be ignored
+		try {
+			writeFileSync("/AGENTS.md", "Root instructions.", "utf-8");
+		} catch {
+			// skip if no permission
+		}
+		const result = loadAgentsMdFiles(projectDir);
+		expect(result).not.toContain("Root instructions.");
+		// cleanup
+		try { fs.unlinkSync("/AGENTS.md"); } catch { /* ignore */ }
+	});
 });
 
 // ── resolveModel ──────────────────────────────────────────────────────────
