@@ -5,7 +5,7 @@
  * parallelism) with per-task overrides for model, skills, tools, thinking
  * level, system prompt, and working directory.
  *
- * Agent definitions live in .pi/agents/*.md (project) and ~/.pi/agent/agents/*.md (user).
+ * Agent definitions live in .pi/agents/*.md (project-local).
  * Each task can reference a named agent and/or supply inline overrides.
  */
 
@@ -20,9 +20,6 @@ import {
   convertToLlm,
   createBashTool,
   createEditTool,
-  createFindTool,
-  createGrepTool,
-  createLsTool,
   createReadTool,
   createWriteTool,
   SessionManager,
@@ -103,7 +100,7 @@ export interface TaskResult {
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-export const DEFAULT_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
+export const DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
 
 /** Maximum concurrent subagent tasks. Prevents rate-limit thundering herds. */
 export const MAX_CONCURRENCY = 3;
@@ -185,12 +182,9 @@ function applyLineBudget(lines: string[], expanded: boolean): string[] {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool registry needs generic param to avoid contravariance on execute()
 export const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<any>> = {
   read: createReadTool,
-  bash: createBashTool,
-  edit: createEditTool,
   write: createWriteTool,
-  grep: createGrepTool,
-  find: createFindTool,
-  ls: createLsTool,
+  edit: createEditTool,
+  bash: createBashTool,
 };
 
 export const VALID_THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
@@ -239,10 +233,8 @@ export function loadAgentFile(filePath: string): AgentConfig | null {
 
 export function discoverAgents(cwd: string): Map<string, AgentConfig> {
   const dirs: string[] = [];
-  const userDir = path.join(os.homedir(), ".pi", "agent", "agents");
   const projectRoot = findProjectRoot(cwd);
   if (projectRoot) dirs.push(path.join(projectRoot, ".pi", "agents"));
-  dirs.push(userDir);
 
   const agents = new Map<string, AgentConfig>();
   for (const dir of dirs) {
@@ -760,9 +752,6 @@ function formatToolCallShort(name: string, args: Record<string, unknown>): strin
       const p = shortenPath(firstArg(args, "path", ["file_path"]) ?? "...");
       return `edit ${p}`;
     }
-    case "ls": return `ls ${shortenPath(String(args.path ?? "."))}`;
-    case "grep": return `grep /${String(args.pattern ?? "")}/ in ${shortenPath(String(args.path ?? "."))}`;
-    case "find": return `find ${String(args.pattern ?? "*")} in ${shortenPath(String(args.path ?? "."))}`;
     default: {
       // Try to pick a meaningful first arg before falling back to JSON
       for (const key of ["command", "path", "file_path", "pattern", "query", "url", "task", "prompt"]) {
@@ -814,9 +803,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     label: "Delegate",
     promptSnippet: "Spawn subagents in parallel — each with independent context, model, tools, and skills.",
     promptGuidelines: [
-      "Use delegate to parallelize independent work across subagents. Each task must include \"prompt\"; specify \"agent\" (name from .pi/agents/*.md or ~/.pi/agent/agents/*.md) and/or \"systemPrompt\". All other fields (model, tools, skills, thinking, cwd, context) are optional and fall back to agent defaults or parent session values.",
-      "Subagents only have pi core tools: read, write, edit, bash, grep, find, ls.",
-      "Call delegate with an empty tasks array to see available agents and full usage documentation.",
+      "Use delegate to parallelize independent work across subagents. Each task must include \"prompt\"; specify \"agent\" (name from .pi/agents/*.md) and/or \"systemPrompt\". All other fields (model, tools, skills, thinking, cwd, context) are optional and fall back to agent defaults or parent session values.",
+      "Subagents only have pi core tools: read, write, edit, bash.",
+      "Call delegate with an empty tasks array to see how to use the delegate tool.",
     ],
     description:
       "Spawn subagents in parallel. Call with an empty tasks array for full help.",
@@ -825,7 +814,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         Type.Object({
           prompt: Type.String({ description: "The task for this subagent to perform." }),
           agent: Type.Optional(Type.String({
-            description: "Named agent from .pi/agents/*.md (project) or ~/.pi/agent/agents/*.md (user). Inline fields override agent defaults.",
+            description: "Named agent from .pi/agents/*.md (project-local). Inline fields override agent defaults.",
           })),
           model: Type.Optional(Type.String({
             description: "Model (e.g. 'anthropic/claude-sonnet-4'). Falls back to agent default, then parent model.",
@@ -834,7 +823,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             description: "Skill names to inject into the system prompt.",
           })),
           tools: Type.Optional(Type.Array(Type.String(), {
-            description: "Tools the subagent may use: read, write, edit, bash, grep, find, ls.",
+            description: "Tools the subagent may use: read, write, edit, bash.",
           })),
           thinking: Type.Optional(Type.String({
             description: "Thinking level: off, minimal, low, medium, high, xhigh. Defaults to agent or off.",
@@ -881,7 +870,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "",
             agentList,
             "",
-            "Agents live in `.pi/agents/*.md` (project) and `~/.pi/agent/agents/*.md` (user). Project agents override user agents by name. Each agent file is Markdown with YAML-ish frontmatter:",
+            "Agents live in `.pi/agents/*.md` (project-local). Each agent file is Markdown with YAML-ish frontmatter:",
             "",
             "```markdown",
             "---",
@@ -889,7 +878,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "description: What it does",
             "model: anthropic/claude-haiku-4-5  # optional",
             "thinking: low                     # off/minimal/low/medium/high/xhigh",
-            "tools: read, grep, bash           # default: all 7 core tools",
+            "tools: read, bash                 # default: all 4 core tools",
             "skills: web-content               # comma-separated skill names",
             "---",
             "You are a helpful agent...",
@@ -901,7 +890,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
             "- `systemPrompt` — System prompt. Required if no `agent` specified.",
             "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
-            "- `tools` — Array of tool names. Default: read, write, edit, bash, grep, find, ls.",
+            "- `tools` — Array of tool names. Default: read, write, edit, bash.",
             "- `skills` — Skill names injected into the system prompt.",
             "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
             "- `cwd` — Working directory. Default: parent session cwd.",
@@ -919,7 +908,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       if (unknown.length) {
         const names = [...agents.keys()];
         return {
-          content: [{ type: "text", text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with no tasks for full help.` }],
+          content: [{ type: "text", text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with an empty tasks array for help.` }],
           details: { tasks: params.tasks, results: [], progress: [], parentModel: parentModelId },
         };
       }

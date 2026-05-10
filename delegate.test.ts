@@ -276,17 +276,6 @@ describe("discoverAgents", () => {
 		cleanup(tmpDir);
 	});
 
-	test("discovers agents from user dir", () => {
-		writeAgent(path.join(tmpDir, ".pi", "agent", "agents"), "user.md", `---
-name: user-agent
-description: User agent
----
-Prompt.
-`);
-		const agents = discoverAgents("/nonexistent/project");
-		expect(agents.has("user-agent")).toBe(true);
-	});
-
 	test("discovers agents from project dir", () => {
 		const projectDir = path.join(tmpDir, "project");
 		writeAgent(path.join(projectDir, ".pi", "agents"), "project.md", `---
@@ -299,22 +288,9 @@ Prompt.
 		expect(agents.has("project-agent")).toBe(true);
 	});
 
-	test("project agents override user agents by name", () => {
-		writeAgent(path.join(tmpDir, ".pi", "agent", "agents"), "shared.md", `---
-name: shared
-description: User version
----
-User prompt.
-`);
-		const projectDir = path.join(tmpDir, "project");
-		writeAgent(path.join(projectDir, ".pi", "agents"), "shared.md", `---
-name: shared
-description: Project version
----
-Project prompt.
-`);
-		const agents = discoverAgents(projectDir);
-		expect(agents.get("shared")!.description).toBe("Project version");
+	test("returns empty map when no .pi/agents directory exists", () => {
+		const agents = discoverAgents("/nonexistent");
+		expect(agents.size).toBe(0);
 	});
 
 	test("skips .chain.md files", () => {
@@ -342,7 +318,7 @@ Prompt.
 	});
 
 	test("returns empty map when no agents found", () => {
-		const agents = discoverAgents("/nonexistent");
+		const agents = discoverAgents(tmpDir);
 		expect(agents.size).toBe(0);
 	});
 });
@@ -815,15 +791,12 @@ describe("extractTouchedFromActivities", () => {
 // ── Constants ─────────────────────────────────────────────────────────────
 
 describe("constants", () => {
-	test("DEFAULT_TOOLS has 7 entries", () => {
-		expect(DEFAULT_TOOLS).toHaveLength(7);
+	test("DEFAULT_TOOLS has 4 core tools", () => {
+		expect(DEFAULT_TOOLS).toHaveLength(4);
 		expect(DEFAULT_TOOLS).toContain("read");
-		expect(DEFAULT_TOOLS).toContain("bash");
-		expect(DEFAULT_TOOLS).toContain("edit");
 		expect(DEFAULT_TOOLS).toContain("write");
-		expect(DEFAULT_TOOLS).toContain("grep");
-		expect(DEFAULT_TOOLS).toContain("find");
-		expect(DEFAULT_TOOLS).toContain("ls");
+		expect(DEFAULT_TOOLS).toContain("edit");
+		expect(DEFAULT_TOOLS).toContain("bash");
 	});
 
 	test("VALID_THINKING contains all expected levels", () => {
@@ -1338,12 +1311,8 @@ describe("delegate renderers", () => {
 			{ id: "t1b", name: "read", args: { file_path: "alt.ts" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "x" }], isError: false } },
 			{ id: "t2", name: "write", args: { path: "out.ts", content: "line1\nline2\nline3" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "ok" }], isError: false } },
 			{ id: "t3", name: "edit", args: { path: "fix.ts" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "done" }], isError: false } },
-			{ id: "t4", name: "ls", args: { path: "/tmp" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "files" }], isError: false } },
-			{ id: "t5", name: "grep", args: { pattern: "TODO", path: "src" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "matches" }], isError: false } },
-			{ id: "t5b", name: "grep", args: { path: "src" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "matches" }], isError: false } },
-			{ id: "t6", name: "find", args: { pattern: "*.ts", path: "." }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "found" }], isError: false } },
-			{ id: "t7", name: "bash", args: { command: "git status" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "clean" }], isError: false } },
-			{ id: "t8", name: "custom_tool", args: { query: "search term" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "custom" }], isError: false } },
+			{ id: "t4", name: "bash", args: { command: "git status" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "clean" }], isError: false } },
+			{ id: "t5", name: "custom_tool", args: { query: "search term" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "custom" }], isError: false } },
 		];
 
 		const result = {
@@ -1353,7 +1322,7 @@ describe("delegate renderers", () => {
 				results: [{ agent: "inline", output: "ok", durationMs: 100, tokens: 50 }],
 				progress: [{
 					index: 0, agent: "inline", task: "task", status: "done",
-					durationMs: 100, tokens: 50, toolUses: 10,
+					durationMs: 100, tokens: 50, toolUses: 6,
 					activities,
 				}],
 			},
@@ -1364,9 +1333,6 @@ describe("delegate renderers", () => {
 		expect(rendered).toContain("read src/file.ts:10-14");
 		expect(rendered).toContain("write out.ts (3 lines)");
 		expect(rendered).toContain("edit fix.ts");
-		expect(rendered).toContain("ls /tmp");
-		expect(rendered).toContain("grep /TODO/ in src");
-		expect(rendered).toContain("find *.ts in .");
 		expect(rendered).toContain("$ git status");
 		expect(rendered).toContain("custom_tool search term");
 	});
