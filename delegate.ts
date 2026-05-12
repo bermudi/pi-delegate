@@ -43,6 +43,8 @@ export interface AgentConfig {
   systemPrompt: string;
 }
 
+export type SessionAction = "prompt" | "close" | "list";
+
 export interface TaskDef {
   prompt: string;
   agent?: string;
@@ -53,6 +55,10 @@ export interface TaskDef {
   systemPrompt?: string;
   cwd?: string;
   context?: "fresh" | "inherit" | "fork";
+  /** Name for a persistent subagent session. First use creates it, subsequent uses reuse it. */
+  sessionId?: string;
+  /** Action for session management. Default: "prompt". "close" tears down a pooled agent. "list" shows active sessions. */
+  action?: SessionAction;
 }
 
 export interface ToolActivity {
@@ -104,6 +110,131 @@ export const DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
 
 /** Maximum concurrent subagent tasks. Prevents rate-limit thundering herds. */
 export const MAX_CONCURRENCY = 3;
+
+/** Idle timeout for pooled agents. 10 minutes. */
+const POOL_TTL_MS = 10 * 60 * 1000;
+
+// ── Agent Pool ────────────────────────────────────────────────────────────
+
+interface PooledAgent {
+  agent: Agent;
+  sessionManager: SessionManagerLike;
+  sessionFile: string;
+  /** Config frozen at creation time — used for validation on reuse. */
+  config: {
+    systemPrompt: string;
+    model: Model<Api>;
+    thinking: ThinkingLevel;
+    tools: string[];
+    cwd: string;
+  };
+  lastUsed: number;
+  createdAt: number;
+  /** Total tokens consumed across all prompts on this agent. */
+  totalTokens: number;
+  /** Number of prompts sent to this agent. */
+  promptCount: number;
+}
+
+/** Module-level pool — lives for the entire pi session. */
+export const agentPool = new Map<string, PooledAgent>();
+
+/** Per-session lock — serializes access to a pooled agent so concurrent
+ *  delegate calls with the same sessionId queue instead of interleaving. */
+const sessionLocks = new Map<string, Promise<void>>();
+
+export async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  const existing = sessionLocks.get(sessionId);
+  if (existing) await existing;
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  sessionLocks.set(sessionId, promise);
+  try {
+    return await fn();
+  } finally {
+    sessionLocks.delete(sessionId);
+    resolve();
+  }
+}
+
+/** Close and remove a pooled agent. */
+export function closePooledAgent(sessionId: string): boolean {
+  const pooled = agentPool.get(sessionId);
+  if (!pooled) return false;
+  try { pooled.agent.abort(); } catch { /* best effort */ }
+  agentPool.delete(sessionId);
+  return true;
+}
+
+/** Evict idle agents that exceeded the TTL. */
+export function sweepPool(): void {
+  const now = Date.now();
+  for (const [id, pooled] of agentPool) {
+    if (now - pooled.lastUsed > POOL_TTL_MS) {
+      closePooledAgent(id);
+    }
+  }
+}
+
+/** List active pooled agents for help/status display. */
+export function listPooledAgents(): string[] {
+  sweepPool();
+  const lines: string[] = [];
+  if (agentPool.size === 0) return ["_(no active sessions)_"];
+  for (const [id, pooled] of agentPool) {
+    const idle = fmtDuration(Date.now() - pooled.lastUsed);
+    const age = fmtDuration(Date.now() - pooled.createdAt);
+    lines.push(`- **${id}** · ${pooled.promptCount} prompts · ${fmtTokens(pooled.totalTokens)} tokens · idle ${idle} · age ${age} · ${shortenPath(pooled.sessionFile)}`);
+  }
+  return lines;
+}
+
+/**
+ * Rehydrate an agent from a session file on disk.
+ * Loads the conversation history via SessionManager, creates a new Agent
+ * pre-seeded with those messages.
+ */
+export function rehydrateAgent(
+  sessionFile: string,
+  config: {
+    systemPrompt: string;
+    model: Model<Api>;
+    thinking: ThinkingLevel;
+    tools: string[];
+    cwd: string;
+  },
+  modelRegistry: ModelRegistry,
+): { agent: Agent; sessionManager: SessionManagerLike } | null {
+  try {
+    const sm = (SessionManager as unknown as { open(p: string): SessionManager }).open(sessionFile);
+    const ctx = sm.buildSessionContext();
+    if (!ctx.messages.length) return null;
+
+    const tools = config.tools
+      .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
+      .filter(Boolean) as AgentTool[];
+
+    const agent = new Agent({
+      initialState: {
+        systemPrompt: config.systemPrompt,
+        model: config.model,
+        thinkingLevel: config.thinking,
+        tools,
+        messages: ctx.messages,
+      },
+      convertToLlm,
+      streamFn: async (m, context, options) => {
+        const auth = await modelRegistry.getApiKeyAndHeaders(m);
+        if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+        return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+      },
+    });
+
+    return { agent, sessionManager: sm as unknown as SessionManagerLike };
+  } catch {
+    return null;
+  }
+}
 
 // ── Render helpers ───────────────────────────────────────────────────────
 
@@ -508,6 +639,107 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+/** Run a single prompt on an Agent instance. Shared by both fresh and pooled paths. */
+async function runAgentOnce(
+  agent: Agent,
+  prompt: string,
+  config: { systemPrompt: string; model: Model<Api>; thinking: ThinkingLevel; tools: string[]; cwd: string },
+  modelRegistry: ModelRegistry,
+  signal?: AbortSignal,
+  onProgress?: (update: AgentProgressUpdate) => void,
+  sessionManager?: SessionManagerLike,
+  gitBaseline?: Set<string>,
+  start?: number,
+): Promise<{ output: string; error?: string; durationMs: number; tokens: number; touchedFiles: string[] }> {
+  const startTime = start ?? Date.now();
+  const baseline = gitBaseline ?? new Set<string>();
+  let toolUses = 0;
+  let lastActivityAt: number | undefined;
+  const activities: ToolActivity[] = [];
+  const pendingById = new Map<string, ToolActivity>();
+  let usageBeforeTotal = 0;
+
+  const fireProgress = () => {
+    if (!onProgress) return;
+    const usage = extractUsage(agent.state.messages);
+    const delta = Math.max(0, usage.total - usageBeforeTotal);
+    onProgress({ tokens: delta, toolUses, durationMs: Date.now() - startTime, lastActivityAt, activities: [...activities] });
+  };
+
+  const unsubscribe = agent.subscribe((event) => {
+    if (event.type === "tool_execution_start") {
+      const now = Date.now();
+      lastActivityAt = now;
+      const activity: ToolActivity = { id: event.toolCallId, name: event.toolName, args: event.args, startTime: now };
+      pendingById.set(event.toolCallId, activity);
+      activities.push(activity);
+      fireProgress();
+    } else if (event.type === "tool_execution_end") {
+      lastActivityAt = Date.now();
+      const activity = pendingById.get(event.toolCallId);
+      if (activity) {
+        activity.result = { content: event.result?.content ?? [], isError: event.isError };
+        activity.endTime = lastActivityAt;
+        pendingById.delete(event.toolCallId);
+      }
+      toolUses++;
+      fireProgress();
+    } else if (event.type === "message_end") {
+      lastActivityAt = Date.now();
+      fireProgress();
+    }
+  });
+
+  let abortHandler: (() => void) | undefined;
+  if (signal) {
+    abortHandler = () => { try { agent.abort(); } catch { /* */ } };
+    signal.addEventListener("abort", abortHandler, { once: true });
+  }
+
+  try {
+    // Snapshot state before prompt for delta-based persistence and token counting.
+    const messagesBefore = agent.state.messages.length;
+    const usageBefore = extractUsage(agent.state.messages);
+    usageBeforeTotal = usageBefore.total;
+
+    await agent.prompt(prompt);
+    await agent.waitForIdle();
+
+    const state = agent.state as { messages: AgentMessage[]; errorMessage?: string };
+    const errorMessage = state.errorMessage;
+    // Extract only the new output from this prompt (not cumulative history).
+    const output = extractOutput(state.messages.slice(messagesBefore));
+    const usageAfter = extractUsage(state.messages);
+    const tokensThisCall = usageAfter.total - usageBeforeTotal;
+
+    // Persist only the new messages added by this prompt (avoids duplication on pool reuse).
+    if (sessionManager) {
+      try {
+        for (let mi = messagesBefore; mi < state.messages.length; mi++) {
+          const msg = state.messages[mi]!;
+          if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult" || msg.role === "custom") {
+            sessionManager.appendMessage(msg);
+          }
+        }
+      } catch { /* best effort */ }
+    }
+
+    // Compute touched files: union of activity-based (edit/write) and git diff.
+    const fromActivities = extractTouchedFromActivities(activities, config.cwd);
+    const gitAfter = await getGitChangedFiles(config.cwd);
+    const fromGit = [...gitAfter].filter((f) => !baseline.has(f));
+    const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
+
+    return { output: output || "(no output)", error: errorMessage, durationMs: Date.now() - startTime, tokens: tokensThisCall, touchedFiles };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { output: "", error: msg, durationMs: Date.now() - startTime, tokens: 0, touchedFiles: [] };
+  } finally {
+    if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
+    unsubscribe();
+  }
+}
+
 // ── Agent Runner ──────────────────────────────────────────────────────────
 
 interface AgentProgressUpdate {
@@ -531,14 +763,20 @@ async function runAgent(
   signal?: AbortSignal,
   onProgress?: (update: AgentProgressUpdate) => void,
   sessionManager?: SessionManagerLike,
-  // maxRetries is the number of *retries* after the initial attempt (total = maxRetries + 1).
   maxRetries = 3,
   retryBaseMs = 2000,
+  /** Pre-existing agent for pooled sessions. When provided, skips creation and retry — runs once. */
+  existingAgent?: Agent,
 ): Promise<{ output: string; error?: string; durationMs: number; tokens: number; touchedFiles: string[] }> {
   const start = Date.now();
 
   // Snapshot git status before the agent starts so we can diff after.
   const gitBaseline = await getGitChangedFiles(config.cwd);
+
+  // For pooled agents: single attempt, no retry loop.
+  if (existingAgent) {
+    return runAgentOnce(existingAgent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start);
+  }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal?.aborted) {
@@ -564,122 +802,18 @@ async function runAgent(
       },
     });
 
-    // Track activities always (for touchedFiles extraction) and optionally
-    // fire progress updates for the UI.
-    let toolUses = 0;
-    let lastActivityAt: number | undefined;
-    const activities: ToolActivity[] = [];
-    const pendingById = new Map<string, ToolActivity>();
-    const fireProgress = () => {
-      if (!onProgress) return;
-      const usage = extractUsage(agent.state.messages);
-      onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start, lastActivityAt, activities: [...activities] });
-    };
+    // Signal retry to the progress UI.
+    if (attempt > 0 && onProgress) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start, activities: [] });
 
-    if (onProgress && attempt > 0) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start, activities: [] });
-    agent.subscribe((event) => {
-      if (event.type === "tool_execution_start") {
-        const now = Date.now();
-        lastActivityAt = now;
-        const activity: ToolActivity = {
-          id: event.toolCallId,
-          name: event.toolName,
-          args: event.args,
-          startTime: now,
-        };
-        pendingById.set(event.toolCallId, activity);
-        activities.push(activity);
-        fireProgress();
-      } else if (event.type === "tool_execution_end") {
-        lastActivityAt = Date.now();
-        const activity = pendingById.get(event.toolCallId);
-        if (activity) {
-          activity.result = {
-            content: event.result?.content ?? [],
-            isError: event.isError,
-          };
-          activity.endTime = lastActivityAt;
-          pendingById.delete(event.toolCallId);
-        }
-        toolUses++;
-        fireProgress();
-      } else if (event.type === "message_end") {
-        lastActivityAt = Date.now();
-        fireProgress();
+    const result = await runAgentOnce(agent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start);
+    if (result.error && attempt < maxRetries && RETRYABLE_PATTERN.test(result.error)) {
+      const delay = retryBaseMs * Math.pow(2, attempt) + Math.random() * retryBaseMs;
+      try { await sleepWithAbort(delay, signal); } catch (sleepErr) {
+        if (!(sleepErr instanceof AbortError)) throw sleepErr;
       }
-    });
-
-    // Register abort handler and clean up on success so listeners don't
-    // accumulate across retries.
-    let abortHandler: (() => void) | undefined;
-    if (signal) {
-      abortHandler = () => { try { agent.abort(); } catch { /* */ } };
-      signal.addEventListener("abort", abortHandler, { once: true });
+      continue;
     }
-
-    try {
-      await agent.prompt(prompt);
-      await agent.waitForIdle();
-
-      const state = agent.state as { messages: AgentMessage[]; errorMessage?: string };
-      const errorMessage = state.errorMessage;
-
-      const output = extractOutput(state.messages);
-      const usage = extractUsage(state.messages);
-
-      // Persist subagent conversation to its session file so the main agent
-      // can search it later.
-      if (sessionManager) {
-        try {
-          for (const msg of state.messages) {
-            if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult" || msg.role === "custom") {
-              sessionManager.appendMessage(msg);
-            }
-          }
-        } catch {
-          // Session persistence is best-effort; don't fail the task.
-        }
-      }
-
-      // Compute touched files: union of activity-based (edit/write) and git diff.
-      const fromActivities = extractTouchedFromActivities(activities, config.cwd);
-      const gitAfter = await getGitChangedFiles(config.cwd);
-      const fromGit = [...gitAfter].filter((f) => !gitBaseline.has(f));
-      const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
-
-      return {
-        output: output || "(no output)",
-        error: errorMessage,
-        durationMs: Date.now() - start,
-        tokens: usage.total,
-        touchedFiles,
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-
-      if (attempt < maxRetries && RETRYABLE_PATTERN.test(msg)) {
-        // Exponential backoff with jitter
-        const delay = retryBaseMs * Math.pow(2, attempt) + Math.random() * retryBaseMs;
-        try { await sleepWithAbort(delay, signal); } catch (sleepErr) {
-          // Swallow expected abort during sleep; re-throw anything unexpected.
-          if (!(sleepErr instanceof AbortError)) throw sleepErr;
-        }
-        continue;
-      }
-
-      // Non-retryable or max retries exhausted
-      return {
-        output: "",
-        error: msg,
-        durationMs: Date.now() - start,
-        tokens: 0,
-        touchedFiles: [],
-      };
-    } finally {
-      if (signal && abortHandler) {
-        signal.removeEventListener("abort", abortHandler);
-      }
-    }
+    return result;
   }
 
   // Unreachable — every code path inside the loop returns. Defense-in-depth.
@@ -688,6 +822,7 @@ async function runAgent(
     error: "Unknown error",
     durationMs: Date.now() - start,
     tokens: 0,
+    touchedFiles: [],
   };
 }
 
@@ -861,7 +996,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({
       tasks: Type.Array(
         Type.Object({
-          prompt: Type.String({ description: "The task for this subagent to perform." }),
+          prompt: Type.Optional(Type.String({ description: "The task for this subagent to perform. Required unless action is 'close' or 'list'." })),
           agent: Type.Optional(Type.String({
             description: "Named agent from .pi/agents/*.md (project-local). Inline fields override agent defaults.",
           })),
@@ -886,6 +1021,13 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           context: Type.Optional(Type.String({
             enum: ["fresh", "inherit", "fork"],
             description: "'fresh' for clean context, 'inherit' to include parent session transcript, 'fork' to branch the session so subagent work is searchable.",
+          })),
+          sessionId: Type.Optional(Type.String({
+            description: "Name for a persistent subagent session. First use creates it, subsequent uses reuse the same agent. Use action='close' to tear down.",
+          })),
+          action: Type.Optional(Type.String({
+            enum: ["prompt", "close", "list"],
+            description: "'prompt' (default) runs a task, 'close' tears down a pooled session, 'list' shows active sessions.",
           })),
         }),
         { minItems: 0, description: "Tasks to run in parallel. Pass an empty array to see available agents and usage docs." },
@@ -944,12 +1086,42 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
             "- `cwd` — Working directory. Default: parent session cwd.",
             "- `context` — 'fresh' (default), 'inherit' to include parent session transcript, or 'fork' to branch the session so subagent work is persisted and searchable.",
+            "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
+            "- `action` — 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
+            "",
+            "## Session Reuse",
+            "",
+            "When `sessionId` is set, the subagent is kept alive in a pool for the duration of the pi session.",
+            "Subsequent calls with the same `sessionId` continue the conversation — the agent remembers prior context.",
+            "",
+            "```json",
+            "// First call — creates and runs",
+            "{ \"prompt\": \"Investigate the auth module\", \"agent\": \"scout\", \"sessionId\": \"auth-research\" }",
+            "",
+            "// Second call — continues the same agent",
+            "{ \"prompt\": \"Now check the tests for that module\", \"sessionId\": \"auth-research\" }",
+            "",
+            "// Clean up when done",
+            "{ \"prompt\": \"\", \"sessionId\": \"auth-research\", \"action\": \"close\" }",
+            "```",
+            "",
+            "Pooled agents are automatically closed after 10 minutes of inactivity.",
           ].join("\n") }],
           details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
         };
       }
 
       // ── Validate ──────────────────────────────────────────────────
+      // Disallow same sessionId across multiple parallel tasks (one agent can't serve two prompts concurrently).
+      const sessionIds = params.tasks.map((t) => t.sessionId).filter(Boolean);
+      const duplicateSessions = sessionIds.filter((id, i) => sessionIds.indexOf(id) !== i);
+      if (duplicateSessions.length) {
+        return {
+          content: [{ type: "text", text: `Duplicate sessionId(s) across tasks: ${[...new Set(duplicateSessions)].join(", ")}. A pooled agent can only handle one prompt at a time.` }],
+          details: { tasks: params.tasks, results: [], progress: [], parentModel: parentModelId },
+        };
+      }
+
       const unknown: string[] = [];
       for (const t of params.tasks) {
         if (t.agent && !agents.has(t.agent)) unknown.push(t.agent);
@@ -977,10 +1149,16 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const agent = t.agent ? agents.get(t.agent) : undefined;
         const cwd = t.cwd ?? ctx.cwd;
 
-        // Build system prompt
-        let systemPrompt = t.systemPrompt ?? agent?.systemPrompt ?? "";
+        // Build system prompt (pooled agents already have one baked in)
+        const pooledConfig = t.sessionId ? agentPool.get(t.sessionId)?.config : undefined;
+        let systemPrompt = t.systemPrompt ?? agent?.systemPrompt ?? pooledConfig?.systemPrompt ?? "";
         if (!systemPrompt.trim()) {
           throw new Error(`Task ${i}: no system prompt — specify agent, systemPrompt, or both.`);
+        }
+
+        // Prompt is required for actual task execution.
+        if (t.action !== "close" && t.action !== "list" && !t.prompt?.trim()) {
+          throw new Error(`Task ${i}: prompt is required unless action is 'close' or 'list'.`);
         }
 
         // Inject skills
@@ -1019,24 +1197,29 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         }
 
         // Resolve model (falls back to parent model if specification fails to resolve)
-        const modelSpec = t.model ?? agent?.model;
-        const resolvedModel = resolveModel(modelSpec, ctx.modelRegistry, ctx.model) ?? ctx.model;
-        if (!resolvedModel) {
-          throw new Error(`Task ${i}: no model available — parent session has no model set.`);
-        }
-        const model = resolvedModel;
-
-        // Resolve tools — warn about unknown tool names
-        const tools = t.tools ?? agent?.tools ?? DEFAULT_TOOLS;
-        const unknownTools = tools.filter((name) => !(name in TOOL_FACTORIES));
-
-        // Resolve thinking
-        const thinkingRaw = t.thinking ?? agent?.thinking ?? "off";
-        const thinking = VALID_THINKING.has(thinkingRaw) ? (thinkingRaw as ThinkingLevel) : "off";
-
+        let model: Model<Api> | undefined;
+        let tools: string[] = [];
+        let thinking: ThinkingLevel = "off";
         const warnings: string[] = [];
-        if (unknownTools.length) {
-          warnings.push(`Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`);
+
+        if (t.action !== "close" && t.action !== "list") {
+          const modelSpec = t.model ?? agent?.model ?? pooledConfig?.model?.id;
+          const resolvedModel = resolveModel(modelSpec, ctx.modelRegistry, ctx.model) ?? ctx.model;
+          if (!resolvedModel) {
+            throw new Error(`Task ${i}: no model available — parent session has no model set.`);
+          }
+          model = resolvedModel;
+
+          // Resolve tools — warn about unknown tool names
+          tools = t.tools ?? agent?.tools ?? DEFAULT_TOOLS;
+          const unknownTools = tools.filter((name) => !(name in TOOL_FACTORIES));
+          if (unknownTools.length) {
+            warnings.push(`Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`);
+          }
+
+          // Resolve thinking
+          const thinkingRaw = t.thinking ?? agent?.thinking ?? "off";
+          thinking = VALID_THINKING.has(thinkingRaw) ? (thinkingRaw as ThinkingLevel) : "off";
         }
         return { ...t, cwd, systemPrompt, model, tools, thinking, prompt, agentName: agent?.name ?? "inline", warnings };
       });
@@ -1046,7 +1229,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       const progress: TaskProgress[] = resolved.map((t, i) => ({
         index: i,
         agent: t.agentName,
-        task: trunc(t.prompt, 50),
+        task: trunc(t.prompt || t.action || "", 50),
         status: "pending" as const,
         durationMs: 0,
         tokens: 0,
@@ -1061,6 +1244,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       fire();
 
       // ── Run parallel (with concurrency limiter) ───────────────────
+      // Sweep stale pooled agents before dispatching.
+      sweepPool();
+
       const results = await mapWithConcurrency(resolved, MAX_CONCURRENCY, async (t, i) => {
         const p = progress[i]!;
         // Skip the "running" flash if we're already aborted.
@@ -1070,33 +1256,146 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         }
         p.status = "running"; p.model = t.model?.id; fire();
 
-        // Create a session manager for this subagent so its work is persisted
-        // and searchable by the main agent.
-        const session = createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
-
-        try {
-          const r = await runAgent(
-            { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
-            t.prompt,
-            ctx.modelRegistry,
-            signal,
-            (u) => { p.tokens = u.tokens; p.toolUses = u.toolUses; p.durationMs = u.durationMs; p.lastActivityAt = u.lastActivityAt; p.activities = u.activities; fire(); },
-            session?.manager,
-          );
-          p.status = r.error ? "failed" : "done";
-          p.durationMs = r.durationMs;
-          p.tokens = r.tokens;
-          p.error = r.error;
-          fire();
-          return { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens, sessionFile: session?.file, touchedFiles: r.touchedFiles };
-        } catch (err) {
-          // runAgent swallows most errors internally, but this guards against
-          // aborts raised from this callback and any future thrown-error paths.
-          p.status = "failed";
-          p.error = err instanceof Error ? err.message : String(err);
-          fire();
-          throw err;
+        // ── Session action handling ────────────────────────────────
+        if (t.action === "close") {
+          if (!t.sessionId) {
+            p.status = "failed"; p.error = "action='close' requires sessionId."; fire();
+            return { agent: t.agentName, output: "", error: "action='close' requires sessionId.", durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+          }
+          const closed = closePooledAgent(t.sessionId);
+          p.status = "done"; p.durationMs = Date.now() - startedAt; fire();
+          return { agent: t.agentName, output: closed ? `Session '${t.sessionId}' closed.` : `Session '${t.sessionId}' not found.`, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
         }
+
+        if (t.action === "list") {
+          const listing = listPooledAgents();
+          p.status = "done"; p.durationMs = Date.now() - startedAt; fire();
+          return { agent: t.agentName, output: `Active sessions:\n${listing.join("\n")}`, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+        }
+
+        // ── Pooled agent resolution ────────────────────────────────
+        let existingAgent: Agent | undefined;
+        let poolSessionManager: SessionManagerLike | undefined;
+        let poolSessionFile: string | undefined;
+        let pendingPoolInsert = false; // Set true when we create a new agent that should be pooled on success.
+
+        if (t.sessionId) {
+          const pooled = agentPool.get(t.sessionId);
+          if (pooled) {
+            // Pool hit — validate config compatibility.
+            const frozen = pooled.config;
+            const mismatches: string[] = [];
+            if (frozen.cwd !== t.cwd) mismatches.push(`cwd: '${frozen.cwd}' vs '${t.cwd}'`);
+            if (frozen.thinking !== t.thinking) mismatches.push(`thinking: '${frozen.thinking}' vs '${t.thinking}'`);
+            const frozenToolSet = [...frozen.tools].sort().join(",");
+            const newToolSet = [...t.tools].sort().join(",");
+            if (frozenToolSet !== newToolSet) mismatches.push(`tools: [${frozenToolSet}] vs [${newToolSet}]`);
+            if (mismatches.length) {
+              p.status = "failed"; p.error = `Session '${t.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`; fire();
+              return { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+            }
+            existingAgent = pooled.agent;
+            poolSessionManager = pooled.sessionManager;
+            poolSessionFile = pooled.sessionFile;
+            pooled.lastUsed = Date.now();
+          } else {
+            // Pool miss — try to rehydrate from disk, or create fresh.
+            const session = createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
+            poolSessionManager = session?.manager;
+            poolSessionFile = session?.file;
+
+            const tools = t.tools.map((name) => TOOL_FACTORIES[name]?.(t.cwd)).filter(Boolean) as AgentTool[];
+            const agentConfig = { systemPrompt: t.systemPrompt, model: t.model, thinkingLevel: t.thinking, tools };
+
+            let agent: Agent | undefined;
+            if (poolSessionFile) {
+              const rehydrated = rehydrateAgent(
+                poolSessionFile,
+                { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
+                ctx.modelRegistry,
+              );
+              if (rehydrated) {
+                agent = rehydrated.agent;
+                poolSessionManager = rehydrated.sessionManager;
+              }
+            }
+            if (!agent) {
+              const streamFn = async (m: any, context: any, options: any) => {
+                const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
+                if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+                return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+              };
+              agent = new Agent({ initialState: agentConfig, convertToLlm, streamFn });
+            }
+            pendingPoolInsert = true;
+            existingAgent = agent;
+          }
+        }
+
+        // Create a session manager for non-pooled tasks.
+        const session = t.sessionId
+          ? { manager: poolSessionManager, file: poolSessionFile }
+          : createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
+
+        const isPoolHit = t.sessionId && !pendingPoolInsert;
+
+        const doRun = async (): Promise<TaskResult> => {
+          try {
+            const config = { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd };
+            const r = await runAgent(
+              config,
+              t.prompt,
+              ctx.modelRegistry,
+              signal,
+              (u) => { p.tokens = u.tokens; p.toolUses = u.toolUses; p.durationMs = u.durationMs; p.lastActivityAt = u.lastActivityAt; p.activities = u.activities; fire(); },
+              session?.manager,
+              undefined, // maxRetries (default)
+              2000,      // retryBaseMs
+              existingAgent, // pre-existing agent for pooled sessions
+            );
+
+            // Insert into pool only after successful first run.
+            if (t.sessionId && pendingPoolInsert && !r.error && session?.manager && session?.file) {
+              agentPool.set(t.sessionId, {
+                agent: existingAgent!,
+                sessionManager: session.manager,
+                sessionFile: session.file,
+                config: { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
+                lastUsed: Date.now(),
+                createdAt: Date.now(),
+                totalTokens: r.tokens,
+                promptCount: 1,
+              });
+            }
+
+            // Update pool stats on subsequent successful runs.
+            if (t.sessionId && !pendingPoolInsert) {
+              const pooled = agentPool.get(t.sessionId);
+              if (pooled) {
+                pooled.lastUsed = Date.now();
+                pooled.totalTokens += r.tokens;
+                pooled.promptCount++;
+              }
+            }
+
+            p.status = r.error ? "failed" : "done";
+            p.durationMs = r.durationMs;
+            p.tokens = r.tokens;
+            p.error = r.error;
+            fire();
+            return { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens, sessionFile: session?.file ?? poolSessionFile, touchedFiles: r.touchedFiles };
+          } catch (err) {
+            p.status = "failed";
+            p.error = err instanceof Error ? err.message : String(err);
+            fire();
+            throw err;
+          }
+        };
+
+        if (isPoolHit && t.sessionId) {
+          return withSessionLock(t.sessionId, doRun);
+        }
+        return doRun();
       }, signal);
 
       // ── Format for LLM ────────────────────────────────────────────
@@ -1111,7 +1410,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       for (let i = 0; i < finalResults.length; i++) {
         const r = finalResults[i]!;
         const t = resolved[i]!;
-        parts.push(`=== ${r.agent}: ${trunc(t.prompt, 80)} ===`);
+        parts.push(`=== ${r.agent}: ${trunc(t.prompt || t.action || "", 80)} ===`);
         if (t.warnings?.length) {
           for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
         }
