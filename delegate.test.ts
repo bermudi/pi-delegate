@@ -28,6 +28,12 @@ import {
 	VALID_THINKING,
 	TOOL_FACTORIES,
 	extractTouchedFromActivities,
+	agentPool,
+	closePooledAgent,
+	sweepPool,
+	listPooledAgents,
+	withSessionLock,
+	rehydrateAgent,
 	type AgentConfig,
 } from "./delegate.ts";
 
@@ -988,18 +994,20 @@ describe("delegate extension integration", () => {
 		const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
 		expect(taskSchema.type).toBe("object");
 		expect(taskSchema.properties.prompt.type).toBe("string");
-		expect(taskSchema.required).toContain("prompt");
+		// prompt is optional — required only for non-close/list actions (enforced at runtime).
+		expect(taskSchema.required ?? []).not.toContain("prompt");
 	});
 
 	test("task schema has optional fields", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
-		const optionalFields = ["agent", "model", "skills", "tools", "thinking", "systemPrompt", "cwd", "context"];
+		const optionalFields = ["agent", "model", "skills", "tools", "thinking", "systemPrompt", "cwd", "context", "sessionId", "action"];
 		for (const field of optionalFields) {
 			expect(taskSchema.properties[field]).toBeDefined();
 		}
-		expect(taskSchema.required).toEqual(["prompt"]);
+		// No required fields at the TypeBox level; runtime validation enforces constraints.
+		expect(taskSchema.required).toBeUndefined();
 	});
 
 	test("execute rejects unknown agents and suggests help", async () => {
@@ -1017,7 +1025,7 @@ describe("delegate extension integration", () => {
 		const text = result.content[0].text;
 		expect(text).toContain("Unknown agent");
 		expect(text).toContain("nonexistent-agent-xyz");
-		expect(text).toContain("Call delegate with no tasks for full help");
+		expect(text).toContain("Call delegate with an empty tasks array for help");
 	});
 
 	test("execute throws when no system prompt and no agent", async () => {
@@ -1082,17 +1090,19 @@ describe("delegate renderers", () => {
 		expect((text as any).getText()).toContain("delegate 2 tasks");
 	});
 
-	test("renderCall shows agent name when provided", async () => {
+	test("renderCall shows task count for single task", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
 		const text = toolDef!.renderCall({ tasks: [{ prompt: "do work", agent: "worker" }] }, theme, ctx);
-		expect((text as any).getText()).toContain("**worker**");
+		const rendered = (text as any).getText();
+		// renderCall shows task count; agent name appears in renderResult.
+		expect(rendered).toContain("delegate 1 task");
 	});
 
-	test("renderCall truncates long prompts", async () => {
+	test("renderCall does not bloat with long prompts", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
@@ -1101,8 +1111,9 @@ describe("delegate renderers", () => {
 		const longPrompt = "a".repeat(100);
 		const text = toolDef!.renderCall({ tasks: [{ prompt: longPrompt }] }, theme, ctx);
 		const rendered = (text as any).getText();
-		expect(rendered.length).toBeLessThan(longPrompt.length + 50);
-		expect(rendered).toContain("…");
+		// renderCall is minimal — just the task count. No prompt preview.
+		expect(rendered).toContain("delegate 1 task");
+		expect(rendered.length).toBeLessThan(longPrompt.length);
 	});
 
 	test("renderResult shows progress when partial", async () => {
@@ -1147,24 +1158,29 @@ describe("delegate renderers", () => {
 		expect(rendered).toContain("1/1 completed");
 	});
 
-	test("renderResult truncates output to 3 lines when not expanded", async () => {
+	test("renderResult truncates output beyond 12 lines when not expanded", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
+		const lines = Array.from({ length: 15 }, (_, i) => `line${i + 1}`).join("\n");
 		const result = {
 			content: [{ type: "text", text: "Done" }],
 			details: {
 				tasks: [{ prompt: "task" }],
-				results: [{ agent: "inline", output: "line1\nline2\nline3\nline4\nline5", durationMs: 0, tokens: 0 }],
+				results: [{ agent: "inline", output: lines, durationMs: 0, tokens: 0 }],
 				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 0, tokens: 0, toolUses: 0, activities: [] }],
 			},
 		};
 
 		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
 		const rendered = (text as any).getText();
-		expect(rendered).toContain("… 2 more lines");
+		// Line budget or the 12-line output cap will truncate.
+		// Either way, not all 15 lines appear.
+		expect(rendered).toContain("line1");
+		expect(rendered).not.toContain("line15");
+		expect(rendered).toMatch(/more lines|lines hidden/);
 	});
 
 	test("renderResult shows all lines when expanded", async () => {
@@ -1225,7 +1241,7 @@ describe("delegate renderers", () => {
 		expect(expandedText).toContain("read src/config.ts");
 	});
 
-	test("renderResult shows completed tool results in final mode", async () => {
+	test("renderResult shows compact tool summary in collapsed final mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
@@ -1250,12 +1266,18 @@ describe("delegate renderers", () => {
 			},
 		};
 
+		// Collapsed: compact summary, not individual tool calls.
 		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
 		const rendered = (text as any).getText();
-		expect(rendered).toContain("→ read src/config.ts");
 		expect(rendered).toContain("✓");
-		expect(rendered).toContain("line1");
-		expect(rendered).toContain("… 2 more lines");
+		expect(rendered).toContain("1 tool: read");
+		expect(rendered).toContain("all good");
+
+		// Expanded: individual tool calls with output.
+		const expanded = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
+		const expandedRendered = (expanded as any).getText();
+		expect(expandedRendered).toContain("→ read src/config.ts");
+		expect(expandedRendered).toContain("line1");
 	});
 
 	test("renderResult expands tool results when expanded is true", async () => {
@@ -1291,7 +1313,7 @@ describe("delegate renderers", () => {
 		expect(rendered).not.toContain("more lines");
 	});
 
-	test("renderResult shows error icon for failed tool results", async () => {
+	test("renderResult shows error icon and compact summary for failed tools (collapsed)", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
@@ -1316,10 +1338,18 @@ describe("delegate renderers", () => {
 			},
 		};
 
+		// Collapsed: error icon and compact tool summary.
 		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
 		const rendered = (text as any).getText();
-		expect(rendered).toContain("→ $ bad-cmd");
 		expect(rendered).toContain("✗");
+		expect(rendered).toContain("1 tool: bash");
+		expect(rendered).toContain("bad cmd");
+
+		// Expanded: individual tool call with details.
+		const expanded = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
+		const expandedRendered = (expanded as any).getText();
+		expect(expandedRendered).toContain("→ $ bad-cmd");
+		expect(expandedRendered).toContain("✗");
 	});
 
 	test("renderResult shows activities for completed subagent in partial mode", async () => {
@@ -1595,5 +1625,173 @@ describe("delegate renderers", () => {
 		// Expanded: activities visible
 		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
 		expect((expanded as any).getText()).toContain("cargo build");
+	});
+});
+
+// ── Pool tests ────────────────────────────────────────────────────────────
+
+describe("delegate pool", () => {
+	let ts: TestSession | undefined;
+
+	afterEach(() => {
+		agentPool.clear();
+		ts?.dispose();
+		ts = undefined;
+	});
+
+	test("prompt is optional for close and list actions", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+
+		// list without prompt should work
+		const listResult = await toolDef!.execute(
+			"tc-pool-1",
+			{ tasks: [{ action: "list", systemPrompt: "test" }] },
+			undefined,
+			undefined,
+			ts.session.extensionRunner as any,
+		);
+		expect(listResult.content[0].text).toContain("Active sessions");
+
+		// close without prompt should work (even if session doesn't exist)
+		const closeResult = await toolDef!.execute(
+			"tc-pool-2",
+			{ tasks: [{ action: "close", sessionId: "nonexistent", systemPrompt: "test" }] },
+			undefined,
+			undefined,
+			ts.session.extensionRunner as any,
+		);
+		expect(closeResult.content[0].text).toContain("not found");
+	});
+
+	test("missing prompt throws for non-close/list actions", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+
+		await expect(
+			toolDef!.execute(
+				"tc-pool-3",
+				{ tasks: [{ systemPrompt: "test" }] },
+				undefined,
+				undefined,
+				ts.session.extensionRunner as any,
+			),
+		).rejects.toThrow("prompt is required");
+	});
+
+	test("close action requires sessionId", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+
+		const result = await toolDef!.execute(
+			"tc-pool-4",
+			{ tasks: [{ action: "close", systemPrompt: "test" }] },
+			undefined,
+			undefined,
+			ts.session.extensionRunner as any,
+		);
+		const details = (result as any).details as { results: Array<{ error?: string }> };
+		expect(details.results[0].error).toContain("action='close' requires sessionId");
+	});
+
+	test("closePooledAgent removes agent from pool", () => {
+		// Inject a fake pooled agent
+		agentPool.set("test-session", {
+			agent: {} as any,
+			sessionManager: {} as any,
+			sessionFile: "/tmp/test.jsonl",
+			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
+			lastUsed: Date.now(),
+			createdAt: Date.now(),
+			totalTokens: 0,
+			promptCount: 0,
+		});
+		expect(agentPool.has("test-session")).toBe(true);
+		expect(closePooledAgent("test-session")).toBe(true);
+		expect(agentPool.has("test-session")).toBe(false);
+		expect(closePooledAgent("test-session")).toBe(false);
+	});
+
+	test("sweepPool evicts idle agents", () => {
+		const now = Date.now();
+		agentPool.set("fresh", {
+			agent: {} as any,
+			sessionManager: {} as any,
+			sessionFile: "/tmp/fresh.jsonl",
+			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
+			lastUsed: now,
+			createdAt: now,
+			totalTokens: 0,
+			promptCount: 0,
+		});
+		agentPool.set("stale", {
+			agent: {} as any,
+			sessionManager: {} as any,
+			sessionFile: "/tmp/stale.jsonl",
+			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
+			lastUsed: now - 11 * 60 * 1000, // 11 minutes ago
+			createdAt: now - 11 * 60 * 1000,
+			totalTokens: 0,
+			promptCount: 0,
+		});
+		sweepPool();
+		expect(agentPool.has("fresh")).toBe(true);
+		expect(agentPool.has("stale")).toBe(false);
+		// cleanup
+		agentPool.delete("fresh");
+	});
+
+	test("listPooledAgents shows stats and sweeps stale", () => {
+		agentPool.clear();
+		expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
+
+		const now = Date.now();
+		agentPool.set("session-a", {
+			agent: {} as any,
+			sessionManager: {} as any,
+			sessionFile: "/home/user/.pi/agent/sessions/test.jsonl",
+			config: { systemPrompt: "test", model: { id: "test-model" } as any, thinking: "off" as any, tools: ["read"], cwd: "/tmp" },
+			lastUsed: now,
+			createdAt: now - 5000,
+			totalTokens: 1234,
+			promptCount: 3,
+		});
+		const lines = listPooledAgents();
+		expect(lines.length).toBe(1);
+		expect(lines[0]).toContain("session-a");
+		expect(lines[0]).toContain("3 prompts");
+		expect(lines[0]).toContain("1.2k tokens");
+		expect(lines[0]).toContain("test.jsonl"); // shortened path
+		agentPool.clear();
+	});
+
+	test("withSessionLock serializes concurrent access", async () => {
+		const order: string[] = [];
+		const p1 = withSessionLock("mutex-test", async () => {
+			order.push("a-start");
+			await new Promise((r) => setTimeout(r, 50));
+			order.push("a-end");
+			return "a";
+		});
+		const p2 = withSessionLock("mutex-test", async () => {
+			order.push("b-start");
+			await new Promise((r) => setTimeout(r, 50));
+			order.push("b-end");
+			return "b";
+		});
+		const [r1, r2] = await Promise.all([p1, p2]);
+		expect(r1).toBe("a");
+		expect(r2).toBe("b");
+		// a must complete before b starts
+		expect(order.indexOf("a-end")).toBeLessThan(order.indexOf("b-start"));
+	});
+
+	test("rehydrateAgent returns null for non-existent file", () => {
+		const result = rehydrateAgent(
+			"/nonexistent/path/session.jsonl",
+			{ systemPrompt: "test", model: { id: "test" } as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
+			{} as any,
+		);
+		expect(result).toBeNull();
 	});
 });
