@@ -22,13 +22,14 @@ import {
   createEditTool,
   createReadTool,
   createWriteTool,
+  getMarkdownTheme,
   SessionManager,
   type ExtensionAPI,
   type ExtensionContext,
   type ModelRegistry,
   type SessionEntry,
 } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { Text, Markdown } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -249,51 +250,92 @@ function getTermWidth(): number {
   return Math.max(40, Math.min(process.stdout.columns || 120, 200));
 }
 
+// Re-used segmenter for grapheme-aware truncation
+const _segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const _wideCharRe = /[\u{1100}-\u{10FFFF}]/u;
+// Combining marks (NFD decomposition) — force slow path since length != display width
+const _combiningRe = /[\u0300-\u036F\u1AB0-\u1AFF\u1DC0-\u1DFF\u20D0-\u20FF\uFE20-\uFE2F]/u;
+
+/** Return the display width of a single grapheme cluster. */
+function charWidth(seg: string): number {
+  const cp = seg.codePointAt(0)!;
+  if (cp < 0x20) return 0; // control chars
+  if (cp === 0x7f) return 0; // DEL
+  if (cp >= 0x1100 && cp <= 0x115f) return 2; // Hangul Jamo
+  if (cp >= 0x2e80 && cp <= 0xa4cf) return 2; // CJK, Yi, etc.
+  if (cp >= 0xac00 && cp <= 0xd7a3) return 2; // Hangul Syllables
+  if (cp >= 0xf900 && cp <= 0xfaff) return 2; // CJK Compatibility Ideographs
+  if (cp >= 0xfe10 && cp <= 0xfe19) return 2; // Vertical forms
+  if (cp >= 0xfe30 && cp <= 0xfe6f) return 2; // CJK Compatibility Forms
+  if (cp >= 0xff00 && cp <= 0xff60) return 2; // Fullwidth ASCII variants
+  if (cp >= 0xffe0 && cp <= 0xffe6) return 2; // Fullwidth symbol variants
+  if (cp >= 0x20000 && cp <= 0x3fffd) return 2; // CJK Extensions B-I
+  if (cp >= 0x1f000 && cp <= 0x1fffd) return 2; // Symbols, emoticons, transport, etc.
+  if (cp >= 0xe0000 && cp <= 0xe007f) return 0; // Tags (invisible formatting)
+  // Note: ZWJ sequences (👨‍👩‍👧‍👦) and skin-tone modifiers (👍🏻) are handled
+  // by Intl.Segmenter as single graphemes. The base emoji code point
+  // determines width (typically 2), which is correct for display.
+  return 1;
+}
+
 /**
  * Truncate a line to maxWidth, preserving ANSI styling through the ellipsis.
  * Uses Intl.Segmenter for proper Unicode/emoji handling.
  */
-function truncLine(text: string, maxWidth: number): string {
-  // Quick path for short strings
-  if (text.length <= maxWidth + 20) {
-    const stripped = text.replace(/\x1b\[[0-9;]*m/g, "");
-    if (stripped.length <= maxWidth) return text;
+export function truncLine(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+
+  // Fast path: plain ASCII (no ANSI, no wide chars, no combining marks)
+  if (!/\x1b\[[0-9;]*m/.test(text) && !_wideCharRe.test(text) && !_combiningRe.test(text)) {
+    if (text.length <= maxWidth) return text;
+    return text.slice(0, maxWidth - 1) + "…";
   }
+
+  // Split on ANSI sequences so they remain atomic
+  const parts = text.split(/(\x1b\[[0-9;]*m)/);
+
+  // Pre-check: does the text fit without truncation?
+  let totalVis = 0;
+  for (const part of parts) {
+    if (/^\x1b\[[0-9;]*m$/.test(part)) continue;
+    for (const segment of _segmenter.segment(part)) {
+      totalVis += charWidth(segment.segment);
+      if (totalVis > maxWidth) break;
+    }
+    if (totalVis > maxWidth) break;
+  }
+  if (totalVis <= maxWidth) return text;
 
   const target = maxWidth - 1; // reserve space for "…"
   let result = "";
   let vis = 0;
   let activeStyles: string[] = [];
-  let i = 0;
-  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-  while (i < text.length) {
-    // Capture ANSI escape sequences
-    const ansiMatch = text.slice(i).match(/^\x1b\[[0-9;]*m/);
-    if (ansiMatch) {
-      const code = ansiMatch[0];
-      result += code;
-      if (code === "\x1b[0m" || code === "\x1b[m") activeStyles = [];
-      else activeStyles.push(code);
-      i += code.length;
+  for (const part of parts) {
+    if (/^\x1b\[[0-9;]*m$/.test(part)) {
+      result += part;
+      if (part === "\x1b[0m" || part === "\x1b[m") activeStyles = [];
+      else activeStyles.push(part);
       continue;
     }
 
-    const ch = text[i++]!;
-    // Count visible width (rough approximation for most chars)
-    const w = ch.codePointAt(0)! > 0x1f00 && ch.codePointAt(0)! < 0xffff ? 2 : 1;
+    // Fast path: ASCII-only part that fits entirely (no combining marks)
+    if (!_wideCharRe.test(part) && !_combiningRe.test(part) && vis + part.length <= target) {
+      result += part;
+      vis += part.length;
+      continue;
+    }
 
-    if (vis + w > target) return result + activeStyles.join("") + "…";
-    result += ch;
-    vis += w;
+    for (const segment of _segmenter.segment(part)) {
+      const seg = segment.segment;
+      const w = charWidth(seg);
+      if (vis + w > target) return result + activeStyles.join("") + "…";
+      result += seg;
+      vis += w;
+    }
   }
 
-  return text;
-}
-
-/** Fit text to terminal width, expanding visually when expanded mode is on. */
-function fit(text: string, width: number, expanded: boolean): string {
-  return expanded ? text : truncLine(text, width);
+  return result;
 }
 
 /**
@@ -301,13 +343,12 @@ function fit(text: string, width: number, expanded: boolean): string {
  * Returns lines trimmed to fit within `budget` visible rows.
  */
 function applyLineBudget(lines: string[], expanded: boolean): string[] {
+  if (expanded) return [...lines]; // expanded shows everything
   const rows = process.stdout.rows || 30;
-  const budget = expanded
-    ? Math.max(12, Math.min(24, Math.floor(rows * 0.55)))
-    : Math.max(8, Math.min(18, Math.floor(rows * 0.35)));
-  if (lines.length <= budget) return lines;
+  const budget = Math.max(10, Math.min(18, Math.floor(rows * 0.4)));
+  if (lines.length <= budget) return [...lines];
   const hidden = lines.length - budget + 1;
-  return [...lines.slice(0, budget - 1), `… ${hidden} lines hidden · Ctrl+O expands`];
+  return [...lines.slice(0, budget - 1), truncLine(`… ${hidden} lines hidden · Ctrl+O expands`, getTermWidth())];
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool registry needs generic param to avoid contravariance on execute()
@@ -956,29 +997,6 @@ function formatToolCallShort(name: string, args: Record<string, unknown>): strin
 }
 
 
-function getToolResultText(activity: ToolActivity): string {
-  if (!activity.result) return "";
-  const blocks = activity.result.content.filter(
-    (c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string",
-  );
-  return blocks.map((b) => b.text).join("\n");
-}
-
-/** Collect the last `maxLines` non-empty output lines from completed tool activities. */
-function getRecentOutput(activities: ToolActivity[], maxLines: number): string[] {
-  const lines: string[] = [];
-  for (let i = activities.length - 1; i >= 0 && lines.length < maxLines; i--) {
-    const activity = activities[i]!;
-    if (!activity.result || activity.result.isError) continue;
-    const text = getToolResultText(activity);
-    const textLines = text.split("\n").filter((l) => l.trim());
-    for (let j = textLines.length - 1; j >= 0 && lines.length < maxLines; j--) {
-      lines.unshift(textLines[j]!);
-    }
-  }
-  return lines;
-}
-
 // ── Extension ─────────────────────────────────────────────────────────────
 
 export default function delegateExtension(pi: ExtensionAPI): void {
@@ -1456,7 +1474,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     },
 
     renderResult(result, options, theme, ctx) {
-      const state = ctx.state as { startedAt?: number; interval?: ReturnType<typeof setInterval> };
+      const state = ctx.state as Record<string, unknown> & { startedAt?: number; interval?: ReturnType<typeof setInterval> };
       // Use a faster animation cadence for spinner (80ms) vs the old 1s
       const tickMs = 80;
       if (options.isPartial && !state.interval) state.interval = setInterval(() => ctx.invalidate(), tickMs);
@@ -1480,9 +1498,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       const statJoin = (parts: string[]) => parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
       const modelLabel = (p: TaskProgress) =>
-        p.model && p.model !== details.parentModel ? ` ${theme.fg("accent", p.model)}` : "";
+        p.model ? ` ${theme.fg("accent", p.model)}` : "";
 
-      // ── Helper: format the collapsed "current activity" line ─────
+      // ── Helper: format the "current activity" line (collapsed or expanded fallback) ─────
       const compactActivity = (p: TaskProgress): string => {
         const current = p.activities.findLast((a) => !a.result);
         if (current) {
@@ -1490,7 +1508,13 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const toolAge = fmtDuration(Date.now() - current.startTime);
           return `${call} | ${toolAge}`;
         }
-        return getActivityAge(p.lastActivityAt) || "thinking…";
+        // No current tool — show the last completed one, or "thinking…"
+        if (p.activities.length > 0) {
+          const last = p.activities[p.activities.length - 1]!;
+          const call = formatToolCallShort(last.name, last.args);
+          return `${call} ✓`;
+        }
+        return "thinking…";
       };
 
       if (options.isPartial) {
@@ -1542,25 +1566,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               const current = p.activities.findLast((a) => !a.result);
 
               if (options.expanded) {
-                // ── Expanded: detailed live view ────────────────────
-                if (current) {
-                  const call = formatToolCallShort(current.name, current.args);
-                  const elapsedTool = fmtDuration(Date.now() - current.startTime);
-                  lines.push(truncLine(`${ind}${theme.fg("warning", `> ${call} | ${elapsedTool}`)}`, w));
-                }
-                if (activityAge) lines.push(truncLine(`${ind}${activityAge}`, w));
-                lines.push(truncLine(`${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`, w));
-                // Recent completed tools
-                for (const activity of p.activities.filter((a) => a.result).slice(-3)) {
-                  const call = formatToolCallShort(activity.name, activity.args);
-                  const icon = activity.result!.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                  lines.push(truncLine(`${ind}  ${theme.fg("muted", call)} ${icon}`, w));
-                }
-                // Recent output from completed tools
-                const recentOutput = getRecentOutput(p.activities, 5);
-                for (const line of recentOutput) {
-                  lines.push(truncLine(`${ind}  ${theme.fg("muted", line)}`, w));
-                }
+                // ── Expanded: current activity (or last completed if none in-flight) ──
+                const call = current
+                  ? formatToolCallShort(current.name, current.args)
+                  : compactActivity(p);
+                const elapsedTool = current
+                  ? ` | ${fmtDuration(Date.now() - current.startTime)}`
+                  : "";
+                const prefix = current ? "> " : "  ";
+                lines.push(truncLine(`${ind}${theme.fg("warning", `${prefix}${call}${elapsedTool}`)}`, w));
               } else {
                 // ── Collapsed: compact tool line with duration ─────
                 lines.push(truncLine(`${ind}${theme.fg("muted", `⎿  ${compactActivity(p)}`)}`, w));
@@ -1589,51 +1603,47 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const ind = indent(i, total);
           const icon = p.status === "done" ? theme.fg("success", "✓") : theme.fg("error", "✗");
           const taskPreview = theme.fg("muted", trunc(p.task, w - 30));
-          lines.push(truncLine(`${tree(i, total)} ${icon} ${theme.bold(p.agent)} ${taskPreview}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}${modelLabel(p)}`, w));
+          lines.push(truncLine(`${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`, w));
 
-          // Tool activities: expanded shows full details; collapsed shows a compact summary
-          if (p.activities.length > 0) {
-            if (options.expanded) {
-              for (const activity of p.activities) {
-                const call = formatToolCallShort(activity.name, activity.args);
-                if (!activity.result) {
-                  lines.push(truncLine(`${ind}${theme.fg("muted", `→ ${call}`)}`, w));
-                  continue;
-                }
-                const text = getToolResultText(activity);
-                const iconA = activity.result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                lines.push(truncLine(`${ind}${theme.fg("muted", "→ ")}${theme.fg("toolTitle", call)} ${iconA}`, w));
-                if (text) {
-                  for (const line of text.split("\n")) {
-                    lines.push(truncLine(`${ind}  ${theme.fg("toolOutput", line)}`, w));
-                  }
-                }
-              }
-            } else {
-              // Collapsed: compact single-line tool summary (token stats already in header)
-              const names = p.activities.map((a) => a.name).filter((n, i, arr) => arr.indexOf(n) === i);
-              const nameList = names.slice(0, 4).join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
-              lines.push(truncLine(`${ind}${theme.fg("muted", `${p.activities.length} tool${p.activities.length > 1 ? "s" : ""}: ${nameList}`)}`, w));
-            }
-            if (!options.expanded) lines.push("");
+          // Tool activities: compact summary only in expanded mode.
+          if (p.activities.length > 0 && options.expanded) {
+            const names = p.activities.map((a) => a.name).filter((n, i, arr) => arr.indexOf(n) === i);
+            const nameList = names.slice(0, 4).join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
+            const okCount = p.activities.filter((a) => a.result && !a.result.isError).length;
+            const errCount = p.activities.filter((a) => a.result?.isError).length;
+            const statusParts: string[] = [];
+            if (okCount > 0) statusParts.push(`${okCount} ✓`);
+            if (errCount > 0) statusParts.push(`${errCount} ✗`);
+            const status = statusParts.length ? ` · ${statusParts.join(", ")}` : "";
+            lines.push(truncLine(`${ind}${theme.fg("muted", `${p.activities.length} tool${p.activities.length > 1 ? "s" : ""}: ${nameList}${status}`)}`, w));
           }
 
-          if (r && "output" in r && r.output?.trim() && r.output !== "(no output)") {
-            const outputLines = r.output.trim().split("\n");
-            const maxLines = options.expanded ? outputLines.length : 12;
-            for (const line of outputLines.slice(0, maxLines)) lines.push(truncLine(`${ind}${theme.fg("toolOutput", line)}`, w));
-            const remaining = outputLines.length - maxLines;
-            if (remaining > 0) lines.push(truncLine(`${ind}${theme.fg("muted", `… ${remaining} more lines`)}`, w));
-          } else if (r && "error" in r && r.error) {
+          // Surface errors even when output exists (agent may have emitted text before failing).
+          if (r && "error" in r && r.error) {
             lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
           }
+          // Output: render markdown only in expanded mode.
+          if (r && "output" in r && r.output?.trim() && r.output !== "(no output)" && options.expanded) {
+            const cacheKey = `md_${i}_${options.expanded ? "exp" : "col"}_${w - ind.length}`;
+            let mdLines: string[] | undefined = state[cacheKey] as string[] | undefined;
+            if (!mdLines || state[`${cacheKey}_src`] !== r.output) {
+              const md = new Markdown(r.output.trim(), 0, 0, getMarkdownTheme());
+              mdLines = md.render(Math.max(20, w - ind.length));
+              state[`${cacheKey}_src`] = r.output;
+              state[cacheKey] = mdLines;
+            }
+            for (const line of mdLines) {
+              lines.push(truncLine(ind + line, w));
+            }
+          }
+          // Visual separator between tasks — only in expanded mode.
+          if (options.expanded) lines.push("");
         }
 
-        // Prevent terminal overflow — only strip blank lines if budget is exceeded
-        const nonEmpty = lines.filter(Boolean);
-        const budgeted = applyLineBudget(nonEmpty, options.expanded ?? false);
+        // Prevent terminal overflow — preserve blank lines for visual spacing
+        const budgeted = applyLineBudget(lines, options.expanded ?? false);
         lines.length = 0;
-        lines.push(...(budgeted.length < nonEmpty.length ? budgeted : nonEmpty));
+        lines.push(...budgeted);
       }
 
       text.setText(lines.join("\n"));
