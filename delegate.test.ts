@@ -20,6 +20,7 @@ import {
 	fmtDuration,
 	fmtTokens,
 	trunc,
+	truncLine,
 	tree,
 	indent,
 	shortenPath,
@@ -741,6 +742,72 @@ describe("fmtTokens", () => {
 	});
 });
 
+describe("truncLine", () => {
+	test("returns short text unchanged", () => {
+		expect(truncLine("hello", 10)).toBe("hello");
+	});
+
+	test("truncates ASCII text", () => {
+		expect(truncLine("hello world", 8)).toBe("hello w…");
+	});
+
+	test("preserves ANSI codes and applies them to ellipsis", () => {
+		const red = "\x1b[31mhello world\x1b[0m";
+		const result = truncLine(red, 8);
+		expect(result).toContain("\x1b[31m");
+		expect(result).toContain("…");
+		// The reset code is dropped when truncating; active style is re-applied to ellipsis
+		// Visible width should not exceed 8
+		const stripped = result.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(stripped.length).toBeLessThanOrEqual(8);
+	});
+
+	test("counts CJK characters as width 2", () => {
+		const text = "你好世界"; // 4 CJK chars = width 8
+		expect(truncLine(text, 8)).toBe("你好世界");
+		expect(truncLine(text, 7)).toBe("你好世…");
+		expect(truncLine(text, 5)).toBe("你好…");
+	});
+
+	test("counts emoji as width 2", () => {
+		const text = "😀🎉👍"; // 3 emoji = width 6
+		expect(truncLine(text, 6)).toBe("😀🎉👍");
+		expect(truncLine(text, 5)).toBe("😀🎉…");
+	});
+
+	test("handles mixed ASCII, CJK, and emoji", () => {
+		const text = "a你好😀b"; // 1 + 4 + 2 + 1 = width 8
+		expect(truncLine(text, 8)).toBe("a你好😀b");
+		// "a你好😀…" would be width 8, exceeding maxWidth=7
+		expect(truncLine(text, 7)).toBe("a你好…");
+	});
+
+	test("handles combining characters as one unit", () => {
+		const text = "café"; // e + combining acute = one grapheme
+		expect(truncLine(text, 4)).toBe("café");
+		expect(truncLine(text, 3)).toBe("ca…");
+	});
+
+	test("returns empty string for maxWidth <= 0", () => {
+		expect(truncLine("hello", 0)).toBe("");
+		expect(truncLine("hello", -1)).toBe("");
+	});
+
+	test("handles flag emoji (surrogate pairs + ZWJ)", () => {
+		const text = "🇺🇸🇬🇧"; // 2 flag emoji = width 4
+		expect(truncLine(text, 4)).toBe("🇺🇸🇬🇧");
+		expect(truncLine(text, 3)).toBe("🇺🇸…");
+	});
+
+	test("handles ANSI + CJK mix", () => {
+		const red = "\x1b[31m你好世界\x1b[0m";
+		const result = truncLine(red, 5);
+		const stripped = result.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(stripped.length).toBeLessThanOrEqual(5);
+		expect(stripped).toContain("…");
+	});
+});
+
 describe("trunc", () => {
 	test("returns short strings unchanged", () => {
 		expect(trunc("hello", 10)).toBe("hello");
@@ -1158,7 +1225,7 @@ describe("delegate renderers", () => {
 		expect(rendered).toContain("1/1 completed");
 	});
 
-	test("renderResult truncates output beyond 12 lines when not expanded", async () => {
+	test("renderResult hides output and tool summary in collapsed final mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
@@ -1176,11 +1243,11 @@ describe("delegate renderers", () => {
 
 		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
 		const rendered = (text as any).getText();
-		// Line budget or the 12-line output cap will truncate.
-		// Either way, not all 15 lines appear.
-		expect(rendered).toContain("line1");
+		// Collapsed: header only, no output lines, no "more lines" hint.
+		expect(rendered).toContain("✓");
+		expect(rendered).not.toContain("line1");
 		expect(rendered).not.toContain("line15");
-		expect(rendered).toMatch(/more lines|lines hidden/);
+		expect(rendered).not.toContain("more lines");
 	});
 
 	test("renderResult shows all lines when expanded", async () => {
@@ -1234,14 +1301,14 @@ describe("delegate renderers", () => {
 		expect(compactText).toContain("$ git status");
 		expect(compactText).not.toContain("→ read src/config.ts");
 
-		// Expanded: all activities visible
+		// Expanded: current activity only (no completed tool history)
 		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
 		const expandedText = (expanded as any).getText();
 		expect(expandedText).toContain("> $ git status |");
-		expect(expandedText).toContain("read src/config.ts");
+		expect(expandedText).not.toContain("read src/config.ts");
 	});
 
-	test("renderResult shows compact tool summary in collapsed final mode", async () => {
+	test("renderResult hides tool summary and output in collapsed final mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
@@ -1266,18 +1333,18 @@ describe("delegate renderers", () => {
 			},
 		};
 
-		// Collapsed: compact summary, not individual tool calls.
+		// Collapsed: header only — tool summary and output hidden.
 		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
 		const rendered = (text as any).getText();
 		expect(rendered).toContain("✓");
-		expect(rendered).toContain("1 tool: read");
-		expect(rendered).toContain("all good");
+		expect(rendered).not.toContain("1 tool: read");
+		expect(rendered).not.toContain("all good");
 
-		// Expanded: individual tool calls with output.
+		// Expanded: tool summary and output visible.
 		const expanded = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
 		const expandedRendered = (expanded as any).getText();
-		expect(expandedRendered).toContain("→ read src/config.ts");
-		expect(expandedRendered).toContain("line1");
+		expect(expandedRendered).toContain("1 tool: read");
+		expect(expandedRendered).toContain("all good");
 	});
 
 	test("renderResult expands tool results when expanded is true", async () => {
@@ -1307,13 +1374,13 @@ describe("delegate renderers", () => {
 
 		const text = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
 		const rendered = (text as any).getText();
-		expect(rendered).toContain("alpha");
-		expect(rendered).toContain("beta");
-		expect(rendered).toContain("gamma");
-		expect(rendered).not.toContain("more lines");
+		// Agent output is rendered as markdown; individual tool dumps are gone.
+		expect(rendered).toContain("done");
+		expect(rendered).toContain("1 tool: read");
+		expect(rendered).not.toContain("lines hidden");
 	});
 
-	test("renderResult shows error icon and compact summary for failed tools (collapsed)", async () => {
+	test("renderResult shows error and hides tool summary in collapsed final mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
@@ -1338,17 +1405,17 @@ describe("delegate renderers", () => {
 			},
 		};
 
-		// Collapsed: error icon and compact tool summary.
+		// Collapsed: error icon and error message shown; tool summary hidden.
 		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
 		const rendered = (text as any).getText();
 		expect(rendered).toContain("✗");
-		expect(rendered).toContain("1 tool: bash");
+		expect(rendered).not.toContain("1 tool: bash");
 		expect(rendered).toContain("bad cmd");
 
-		// Expanded: individual tool call with details.
+		// Expanded: tool summary and error visible.
 		const expanded = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
 		const expandedRendered = (expanded as any).getText();
-		expect(expandedRendered).toContain("→ $ bad-cmd");
+		expect(expandedRendered).toContain("1 tool: bash");
 		expect(expandedRendered).toContain("✗");
 	});
 
@@ -1396,7 +1463,7 @@ describe("delegate renderers", () => {
 		expect(expandedText).toContain("$ ls");
 	});
 
-	test("partial render shows last 3 activities when more than 3", async () => {
+	test("partial render shows only current in-flight tool when activities > 3", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
@@ -1430,14 +1497,14 @@ describe("delegate renderers", () => {
 		expect(compactText).toContain("read 4.ts");
 		expect(compactText).not.toContain("1.ts");
 
-		// Expanded: last 3 completed tools shown (1.ts, 2.ts, 3.ts), current tool (4.ts); 0.ts dropped
+		// Expanded: current tool only (no completed tool history)
 		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
 		const expandedText = (expanded as any).getText();
-		expect(expandedText).toContain("1.ts");
-		expect(expandedText).toContain("2.ts");
-		expect(expandedText).toContain("3.ts");
 		expect(expandedText).toContain("4.ts");
 		expect(expandedText).not.toContain("0.ts");
+		expect(expandedText).not.toContain("1.ts");
+		expect(expandedText).not.toContain("2.ts");
+		expect(expandedText).not.toContain("3.ts");
 	});
 
 	test("formatToolCallShort: various tool types render correctly", async () => {
@@ -1468,13 +1535,29 @@ describe("delegate renderers", () => {
 			},
 		};
 
-		const text = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).toContain("read src/file.ts:10-14");
-		expect(rendered).toContain("write out.ts (3 lines)");
-		expect(rendered).toContain("edit fix.ts");
-		expect(rendered).toContain("$ git status");
-		expect(rendered).toContain("custom_tool search term");
+		// Expanded final now shows compact tool summary, not individual calls.
+		// Test formatToolCallShort indirectly via partial mode (current tool only).
+		const mkPartial = (activities: any[]) => ({
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "running",
+					durationMs: 100, tokens: 50, toolUses: activities.length,
+					activities,
+				}],
+			},
+		});
+		const renderPartial = (activities: any[]) =>
+			(toolDef!.renderResult(mkPartial(activities), { isPartial: true, expanded: true }, theme, ctx) as any).getText();
+
+		expect(renderPartial([{ id: "t1", name: "read", args: { path: "src/file.ts", offset: 10, limit: 5 }, startTime: 0 }])).toContain("read src/file.ts:10-14");
+		expect(renderPartial([{ id: "t1b", name: "read", args: { file_path: "alt.ts" }, startTime: 0 }])).toContain("read alt.ts");
+		expect(renderPartial([{ id: "t2", name: "write", args: { path: "out.ts", content: "line1\nline2\nline3" }, startTime: 0 }])).toContain("write out.ts (3 lines)");
+		expect(renderPartial([{ id: "t3", name: "edit", args: { path: "fix.ts" }, startTime: 0 }])).toContain("edit fix.ts");
+		expect(renderPartial([{ id: "t4", name: "bash", args: { command: "git status" }, startTime: 0 }])).toContain("$ git status");
+		expect(renderPartial([{ id: "t5", name: "custom_tool", args: { query: "search term" }, startTime: 0 }])).toContain("custom_tool search term");
 	});
 
 	test("renderResult shows activity age for running tasks", async () => {
@@ -1588,13 +1671,11 @@ describe("delegate renderers", () => {
 		const rendered = (text as any).getText();
 		// Current tool with elapsed indicator
 		expect(rendered).toContain("> $ npm test |");
-		// Completed tools shown
-		expect(rendered).toContain("read a.ts");
-		expect(rendered).toContain("✓");
-		// Recent output from completed tools
-		expect(rendered).toContain("file contents");
-		// Hint shown in expanded too
-		expect(rendered).toContain("Press Ctrl+O for live detail");
+		// Completed tools no longer shown in expanded running
+		expect(rendered).not.toContain("read a.ts");
+		expect(rendered).not.toContain("file contents");
+		// Ctrl+O hint only in collapsed running
+		expect(rendered).not.toContain("Press Ctrl+O for live detail");
 	});
 
 	test("collapsed done hides activities, expanded shows them", async () => {
