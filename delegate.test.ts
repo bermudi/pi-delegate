@@ -1560,7 +1560,7 @@ describe("delegate renderers", () => {
 		expect(renderPartial([{ id: "t5", name: "custom_tool", args: { query: "search term" }, startTime: 0 }])).toContain("custom_tool search term");
 	});
 
-	test("renderResult shows activity age for running tasks", async () => {
+	test("renderResult shows running task with last completed tool", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const theme = mockTheme();
@@ -1584,8 +1584,9 @@ describe("delegate renderers", () => {
 
 		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
 		const rendered = (text as any).getText();
-		expect(rendered).toContain("active ");
-		expect(rendered).toContain("s ago");
+		// No "active X ago" in tree line; last tool shown in ⎿ line
+		expect(rendered).toContain("read src/x.ts");
+		expect(rendered).not.toContain("active ");
 	});
 
 	test("collapsed running shows ⎿ with current tool and Ctrl+O hint", async () => {
