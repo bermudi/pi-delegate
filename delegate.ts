@@ -1557,10 +1557,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               }
               break;
             case "running": {
-              const activityAge = getActivityAge(p.lastActivityAt);
-              const ageTag = activityAge ? ` · ${activityAge}` : "";
               const glyph = theme.fg("warning", spinnerFrame());
-              lines.push(truncLine(`${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin(runParts)}${theme.fg("muted", ageTag)}`, w));
+              lines.push(truncLine(`${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin(runParts)}`, w));
 
               // Current in-flight tool
               const current = p.activities.findLast((a) => !a.result);
