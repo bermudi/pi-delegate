@@ -1171,7 +1171,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const pooledConfig = t.sessionId ? agentPool.get(t.sessionId)?.config : undefined;
         let systemPrompt = t.systemPrompt ?? agent?.systemPrompt ?? pooledConfig?.systemPrompt ?? "";
         if (!systemPrompt.trim()) {
-          throw new Error(`Task ${i}: no system prompt — specify agent, systemPrompt, or both.`);
+          systemPrompt = (typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : "") || "You are a helpful coding assistant.";
         }
 
         // Prompt is required for actual task execution.
