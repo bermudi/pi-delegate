@@ -1095,19 +1095,28 @@ describe("delegate extension integration", () => {
 		expect(text).toContain("Call delegate with an empty tasks array for help");
 	});
 
-	test("execute throws when no system prompt and no agent", async () => {
+	test("execute falls back to hardcoded prompt when no systemPrompt, no agent, no getSystemPrompt", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 
-		await expect(
-			toolDef!.execute(
+		// Test harness has no getSystemPrompt and no model — so we get past
+		// system prompt resolution (hardcoded fallback) and fail at model resolution.
+		try {
+			await toolDef!.execute(
 				"tc-2",
 				{ tasks: [{ prompt: "do something" }] },
 				undefined,
 				undefined,
 				ts.session.extensionRunner as any,
-			),
-		).rejects.toThrow("no system prompt");
+			);
+		} catch (err: any) {
+			// Must NOT be the old "no system prompt" error — that means fallback failed.
+			expect(err.message).not.toContain("no system prompt");
+			// Must be the expected model resolution error — proves we got past system prompt.
+			expect(err.message).toContain("no model available");
+			return;
+		}
+		expect.unreachable("should have thrown at model resolution");
 	});
 });
 
