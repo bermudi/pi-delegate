@@ -407,6 +407,9 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
   const dirs: string[] = [];
   const projectRoot = findProjectRoot(cwd);
   if (projectRoot) dirs.push(path.join(projectRoot, ".pi", "agents"));
+  // Global user agents — same convention as skills, AGENTS.md, and pi-subagents
+  dirs.push(path.join(os.homedir(), ".pi", "agent", "agents"));
+  dirs.push(path.join(os.homedir(), ".agents")); // legacy
 
   const agents = new Map<string, AgentConfig>();
   for (const dir of dirs) {
@@ -613,11 +616,110 @@ export function resolveModel(spec: string | undefined, registry: ModelRegistry, 
   return registry.find(spec.slice(0, idx), spec.slice(idx + 1)) ?? undefined;
 }
 
+// ── Settings Overrides ────────────────────────────────────────────────────
+
+interface DelegateSettings {
+  agentOverrides?: Record<string, { model?: string; thinking?: string; tools?: string[]; skills?: string[] }>;
+}
+
+export function readDelegateSettingsFile(filePath: string): Record<string, unknown> | null {
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch { return null; }
+}
+
+function getDelegateSettings(filePath: string): DelegateSettings | null {
+  const settings = readDelegateSettingsFile(filePath);
+  if (!settings?.delegate || typeof settings.delegate !== "object" || Array.isArray(settings.delegate)) return null;
+  return settings.delegate as DelegateSettings;
+}
+
+/** Load merged delegate settings: project overrides user.
+ *  Result is cached per cwd for the lifetime of the delegate call. */
+const delegateSettingsCache = new Map<string, DelegateSettings | null>();
+export function loadDelegateSettings(cwd: string): DelegateSettings | null {
+  const key = path.resolve(cwd);
+  const cached = delegateSettingsCache.get(key);
+  if (cached !== undefined) return cached;
+
+  const userPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
+  // Look for project root by finding .pi/ directory, not just .pi/agents/
+  let projectPath: string | null = null;
+  let dir = key;
+  const root = path.resolve("/");
+  while (true) {
+    if (fs.existsSync(path.join(dir, ".pi"))) { projectPath = path.join(dir, ".pi", "settings.json"); break; }
+    if (dir === root) break;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  const user = getDelegateSettings(userPath);
+  const project = projectPath ? getDelegateSettings(projectPath) : null;
+
+  if (!user && !project) { delegateSettingsCache.set(key, null); return null; }
+  const result: DelegateSettings = {
+    agentOverrides: {
+      ...(user?.agentOverrides ?? {}),
+      ...(project?.agentOverrides ?? {}),
+    },
+  };
+  delegateSettingsCache.set(key, result);
+  return result;
+}
+
 // ── Retry ─────────────────────────────────────────────────────────────────
 
-/** Pattern matching transient errors that benefit from retry.
- *  Exported for testability — add test cases when error signatures evolve. */
-export const RETRYABLE_PATTERN = /overloaded|429|rate.?limit|too many requests|500|502|503|504|timed? out|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|terminated|retry delay/i;
+/** Patterns matching transient errors that benefit from retry.
+ *  Organized as an array for readability/maintainability.
+ *  Exported for testability. */
+export const RETRYABLE_PATTERNS: RegExp[] = [
+  /rate\s*limit/i,
+  /too many requests/i,
+  /\b429\b/,
+  /overloaded/i,
+  /service unavailable/i,
+  /temporar(?:ily)? unavailable/i,
+  /provider.*unavailable/i,
+  /model.*unavailable/i,
+  /model.*disabled/i,
+  /model.*not found/i,
+  /unknown model/i,
+  /connection refused/i,
+  /connection.*(?:error|lost)/i,
+  /other side closed/i,
+  /reset before headers/i,
+  /fetch failed/i,
+  /network error/i,
+  /socket hang up/i,
+  /ended without/i,
+  /http2 request did not get a response/i,
+  /upstream/i,
+  /timed? out/i,
+  /\btimeout\b/i,
+  /\b500\b/,
+  /\b502\b/,
+  /\b503\b/,
+  /\b504\b/,
+  /retry delay/i,
+];
+
+/** Backward-compat single regex for callers that import the old name.
+ *  @deprecated Use isRetryableError() or RETRYABLE_PATTERNS */
+export const RETRYABLE_PATTERN = new RegExp(
+  RETRYABLE_PATTERNS.map((p) => p.source).join("|"),
+  "i",
+);
+
+/** Check if an error message matches any retryable pattern. */
+export function isRetryableError(error: string): boolean {
+  if (!error) return false;
+  return RETRYABLE_PATTERNS.some((p) => p.test(error));
+}
 
 /**
  * Custom error for abort signals — avoids brittle string-matching on
@@ -649,34 +751,27 @@ async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 
 // ── Concurrency Limiter ───────────────────────────────────────────────────
 
-/** Map over items with a concurrency cap, returning Promise.allSettled-shaped results.
- *  Callers must ensure `fn` always settles (either resolves or throws) — the
- *  concurrency limiter guarantees every claimed index gets a result assigned.
- *  If `fn` exits early on abort (via the signal param), it must throw so
- *  `results[i]` is populated with a rejection. */
-async function mapWithConcurrency<T, R>(
+/** Map over items with a concurrency cap, returning indexed results.
+ *  Errors propagate naturally — no Promise.allSettled wrapper. */
+async function mapConcurrent<T, R>(
   items: T[],
   concurrency: number,
   fn: (item: T, index: number) => Promise<R>,
   signal?: AbortSignal,
-): Promise<PromiseSettledResult<R>[]> {
+): Promise<R[]> {
   if (items.length === 0) return [];
   const limit = Math.max(1, Math.min(concurrency, items.length));
-  const results: PromiseSettledResult<R>[] = new Array(items.length);
-  let nextIndex = 0;
+  const results: R[] = new Array(items.length);
+  let next = 0;
   const worker = async () => {
     while (true) {
       if (signal?.aborted) return;
-      const i = nextIndex++;
+      const i = next++;
       if (i >= items.length) return;
-      try {
-        results[i] = { status: "fulfilled", value: await fn(items[i]!, i) };
-      } catch (err) {
-        results[i] = { status: "rejected", reason: err };
-      }
+      results[i] = await fn(items[i]!, i);
     }
   };
-  await Promise.all(Array(limit).fill(null).map(() => worker()));
+  await Promise.all(Array.from({ length: limit }, () => worker()));
   return results;
 }
 
@@ -847,7 +942,7 @@ async function runAgent(
     if (attempt > 0 && onProgress) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start, activities: [] });
 
     const result = await runAgentOnce(agent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start);
-    if (result.error && attempt < maxRetries && RETRYABLE_PATTERN.test(result.error)) {
+    if (result.error && attempt < maxRetries && isRetryableError(result.error)) {
       const delay = retryBaseMs * Math.pow(2, attempt) + Math.random() * retryBaseMs;
       try { await sleepWithAbort(delay, signal); } catch (sleepErr) {
         if (!(sleepErr instanceof AbortError)) throw sleepErr;
@@ -868,6 +963,43 @@ async function runAgent(
 }
 
 // ── Output Extraction ────────────────────────────────────────────────────
+
+// ── Completion Mutation Guard ──────────────────────────────────────────
+
+const IMPLEMENTATION_PATTERNS = [
+  /\b(?:implement|fix|edit|modify|patch|refactor)\b/i,
+  /\bapply\s+(?:the\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
+  /\bmake\s+(?:the\s+)?changes\b/i,
+  /\bdo those fixes\b/i,
+  /\b(?:update|add|remove|replace|delete|create)\b(?!\s+(?:(?:a|an|the)\s+)?(?:report|summary|findings?|overview|analysis)(?:\b|$))/i,
+];
+
+const REVIEW_ONLY_PATTERNS = [
+  /\breview only\b/i,
+  /\bsuggest fixes only\b/i,
+  /\bonly return findings\b/i,
+  /\breturn findings only\b/i,
+  /\bdo not edit\b/i,
+  /\bdon't edit\b/i,
+  /\bdo not modify\b/i,
+  /\bdo not change files\b/i,
+];
+
+/** Check if a task description implies the agent should produce edits. */
+export function taskImpliesEdits(task: string): boolean {
+  const text = task;
+  if (REVIEW_ONLY_PATTERNS.some((p) => p.test(text))) return false;
+  return IMPLEMENTATION_PATTERNS.some((p) => p.test(text));
+}
+
+/** Check if the agent's tool activities include any mutations (edit/write/mutating bash). */
+export function hasMutationActivity(activities: ToolActivity[]): boolean {
+  return activities.some((a) =>
+    a.name === "edit" || a.name === "write" ||
+    (a.name === "bash" && typeof a.args?.command === "string" &&
+     /\b(?:sed|awk|perl|python\d*|tee|dd|mv|cp|rm|truncate|sponge|git\s+(?:commit|add|rm|mv|cherry-pick|rebase|merge|am|apply|stash\s+pop))\b/i.test(a.args.command))
+  );
+}
 
 export function extractOutput(messages: AgentMessage[]): string {
   const parts: string[] = [];
@@ -1167,6 +1299,10 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const agent = t.agent ? agents.get(t.agent) : undefined;
         const cwd = t.cwd ?? ctx.cwd;
 
+        // Load settings-based overrides for this agent
+        const settings = loadDelegateSettings(cwd);
+        const agentOverride = (t.agent && settings?.agentOverrides?.[t.agent]) ? settings.agentOverrides[t.agent] : undefined;
+
         // Build system prompt (pooled agents already have one baked in)
         const pooledConfig = t.sessionId ? agentPool.get(t.sessionId)?.config : undefined;
         let systemPrompt = t.systemPrompt ?? agent?.systemPrompt ?? pooledConfig?.systemPrompt ?? "";
@@ -1221,7 +1357,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const warnings: string[] = [];
 
         if (t.action !== "close" && t.action !== "list") {
-          const modelSpec = t.model ?? agent?.model ?? pooledConfig?.model?.id;
+          const modelSpec = t.model ?? agentOverride?.model ?? agent?.model ?? pooledConfig?.model?.id;
           const resolvedModel = resolveModel(modelSpec, ctx.modelRegistry, ctx.model) ?? ctx.model;
           if (!resolvedModel) {
             throw new Error(`Task ${i}: no model available — parent session has no model set.`);
@@ -1265,12 +1401,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // Sweep stale pooled agents before dispatching.
       sweepPool();
 
-      const results = await mapWithConcurrency(resolved, MAX_CONCURRENCY, async (t, i) => {
+      const results = await mapConcurrent(resolved, MAX_CONCURRENCY, async (t, i) => {
         const p = progress[i]!;
         // Skip the "running" flash if we're already aborted.
         if (signal?.aborted) {
           p.status = "failed"; p.error = "Aborted"; fire();
-          throw new Error("Aborted");
+          return { agent: t.agentName, output: "", error: "Aborted", durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
         }
         p.status = "running"; p.model = t.model?.id; fire();
 
@@ -1403,10 +1539,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             fire();
             return { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens, sessionFile: session?.file ?? poolSessionFile, touchedFiles: r.touchedFiles };
           } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
             p.status = "failed";
-            p.error = err instanceof Error ? err.message : String(err);
+            p.error = msg;
             fire();
-            throw err;
+            return { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
           }
         };
 
@@ -1417,14 +1554,26 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       }, signal);
 
       // ── Format for LLM ────────────────────────────────────────────
-      const finalResults = results.map((r, i) =>
-        r.status === "fulfilled" ? r.value : { agent: resolved[i]!.agentName, output: "", error: String(r.reason), durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] },
-      );
+      const finalResults = results;
       const elapsedTotal = Date.now() - startedAt;
+
+      // ── Completion mutation guard ───────────────────────────────
+      const mutationWarnings: string[] = [];
+      for (let i = 0; i < finalResults.length; i++) {
+        const r = finalResults[i]!;
+        if (r.error) continue;
+        const t = resolved[i]!;
+        if (t.action === "close" || t.action === "list") continue;
+        const p = progress[i]!;
+        if (taskImpliesEdits(t.prompt || "") && !hasMutationActivity(p.activities)) {
+          mutationWarnings.push(`[GUARD] ${r.agent}: task implies edits but no mutation tools ran (edit/write/mutating bash). Did the agent only produce text below?`);
+        }
+      }
 
       const parts: string[] = [];
       const succeeded = finalResults.filter((r) => !r.error).length;
       parts.push(`${succeeded}/${finalResults.length} tasks completed successfully · ${fmtDuration(elapsedTotal)} wall time\n`);
+      for (const w of mutationWarnings) parts.push(w);
       for (let i = 0; i < finalResults.length; i++) {
         const r = finalResults[i]!;
         const t = resolved[i]!;
