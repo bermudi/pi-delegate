@@ -35,6 +35,13 @@ import {
 	listPooledAgents,
 	withSessionLock,
 	rehydrateAgent,
+	RETRYABLE_PATTERNS,
+	RETRYABLE_PATTERN,
+	isRetryableError,
+	taskImpliesEdits,
+	hasMutationActivity,
+	readDelegateSettingsFile,
+	loadDelegateSettings,
 	type AgentConfig,
 } from "./delegate.ts";
 
@@ -294,6 +301,51 @@ Prompt.
 `);
 		const agents = discoverAgents(projectDir);
 		expect(agents.has("project-agent")).toBe(true);
+	});
+
+	test("discovers agents from global ~/.pi/agent/agents/", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		writeAgent(path.join(tmpDir, ".pi", "agent", "agents"), "global.md", `---
+name: global-agent
+description: Global agent
+---
+Prompt.
+`);
+		const agents = discoverAgents(projectDir);
+		expect(agents.has("global-agent")).toBe(true);
+	});
+
+	test("discovers agents from legacy ~/.agents/", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		writeAgent(path.join(tmpDir, ".agents"), "legacy.md", `---
+name: legacy-agent
+description: Legacy agent
+---
+Prompt.
+`);
+		const agents = discoverAgents(projectDir);
+		expect(agents.has("legacy-agent")).toBe(true);
+	});
+
+	test("project agents override global on name collision", () => {
+		const projectDir = path.join(tmpDir, "project");
+		writeAgent(path.join(projectDir, ".pi", "agents"), "shared.md", `---
+name: shared-agent
+description: Project wins
+---
+Project prompt.
+`);
+		writeAgent(path.join(tmpDir, ".pi", "agent", "agents"), "shared.md", `---
+name: shared-agent
+description: Global loses
+---
+Global prompt.
+`);
+		const agents = discoverAgents(projectDir);
+		expect(agents.has("shared-agent")).toBe(true);
+		expect(agents.get("shared-agent")!.systemPrompt).toBe("Project prompt.");
 	});
 
 	test("returns empty map when no .pi/agents directory exists", () => {
@@ -996,6 +1048,228 @@ describe("constants", () => {
 		for (const name of DEFAULT_TOOLS) {
 			expect(TOOL_FACTORIES[name]).toBeFunction();
 		}
+	});
+});
+
+// ── Retryable Error Patterns ───────────────────────────────────────────────
+
+describe("isRetryableError", () => {
+	test("matches rate limit errors", () => {
+		expect(isRetryableError("rate limit exceeded")).toBe(true);
+		expect(isRetryableError("too many requests")).toBe(true);
+		expect(isRetryableError("HTTP 429")).toBe(true);
+	});
+
+	test("does not match permanent errors (auth, billing, quota)", () => {
+		expect(isRetryableError("quota exceeded")).toBe(false);
+		expect(isRetryableError("billing issue")).toBe(false);
+		expect(isRetryableError("authentication failed")).toBe(false);
+		expect(isRetryableError("unauthorized")).toBe(false);
+		expect(isRetryableError("forbidden")).toBe(false);
+		expect(isRetryableError("api key invalid")).toBe(false);
+		expect(isRetryableError("token expired")).toBe(false);
+	});
+
+	test("matches model availability errors", () => {
+		expect(isRetryableError("model unavailable")).toBe(true);
+		expect(isRetryableError("model disabled")).toBe(true);
+		expect(isRetryableError("model not found")).toBe(true);
+		expect(isRetryableError("unknown model")).toBe(true);
+	});
+
+	test("matches server errors", () => {
+		expect(isRetryableError("HTTP 502")).toBe(true);
+		expect(isRetryableError("HTTP 503")).toBe(true);
+		expect(isRetryableError("HTTP 504")).toBe(true);
+		expect(isRetryableError("service unavailable")).toBe(true);
+		expect(isRetryableError("overloaded")).toBe(true);
+	});
+
+	test("matches network errors", () => {
+		expect(isRetryableError("connection refused")).toBe(true);
+		expect(isRetryableError("fetch failed")).toBe(true);
+		expect(isRetryableError("network error")).toBe(true);
+		expect(isRetryableError("socket hang up")).toBe(true);
+		expect(isRetryableError("timed out")).toBe(true);
+		expect(isRetryableError("timeout")).toBe(true);
+	});
+
+	test("returns false for non-retryable errors", () => {
+		expect(isRetryableError("file not found")).toBe(false);
+		expect(isRetryableError("syntax error")).toBe(false);
+		expect(isRetryableError("")).toBe(false);
+		expect(isRetryableError("unknown error")).toBe(false);
+	});
+
+	test("all patterns are valid regexes", () => {
+		for (const p of RETRYABLE_PATTERNS) {
+			expect(p).toBeInstanceOf(RegExp);
+		}
+		expect(RETRYABLE_PATTERNS.length).toBeGreaterThan(15);
+	});
+
+	test("matches recovered old-pattern coverage", () => {
+		expect(isRetryableError("HTTP 500")).toBe(true);
+		expect(isRetryableError("connection error")).toBe(true);
+		expect(isRetryableError("connection lost")).toBe(true);
+		expect(isRetryableError("other side closed")).toBe(true);
+		expect(isRetryableError("reset before headers")).toBe(true);
+		expect(isRetryableError("ended without response")).toBe(true);
+		expect(isRetryableError("http2 request did not get a response")).toBe(true);
+		expect(isRetryableError("retry delay")).toBe(true);
+	});
+
+	test("RETRYABLE_PATTERN backward-compat export works", () => {
+		expect(RETRYABLE_PATTERN).toBeInstanceOf(RegExp);
+		expect(RETRYABLE_PATTERN.test("rate limit exceeded")).toBe(true);
+		expect(RETRYABLE_PATTERN.test("HTTP 500 internal error")).toBe(true);
+		expect(RETRYABLE_PATTERN.test("file not found")).toBe(false);
+	});
+});
+
+// ── Mutation Guard ──────────────────────────────────────────────────────────
+
+describe("taskImpliesEdits", () => {
+	test("detects implementation tasks", () => {
+		expect(taskImpliesEdits("implement the auth module")).toBe(true);
+		expect(taskImpliesEdits("fix the login bug")).toBe(true);
+		expect(taskImpliesEdits("edit the config file")).toBe(true);
+		expect(taskImpliesEdits("modify the parser")).toBe(true);
+		expect(taskImpliesEdits("patch the vulnerability")).toBe(true);
+		expect(taskImpliesEdits("refactor the database layer")).toBe(true);
+		expect(taskImpliesEdits("apply the changes")).toBe(true);
+		expect(taskImpliesEdits("make the changes")).toBe(true);
+		expect(taskImpliesEdits("do those fixes")).toBe(true);
+		expect(taskImpliesEdits("update the file config.ts")).toBe(true);
+		expect(taskImpliesEdits("add a new component")).toBe(true);
+		expect(taskImpliesEdits("delete the old module")).toBe(true);
+	});
+
+	test("returns false for review-only tasks", () => {
+		expect(taskImpliesEdits("review only, do not edit")).toBe(false);
+		expect(taskImpliesEdits("suggest fixes only")).toBe(false);
+		expect(taskImpliesEdits("only return findings")).toBe(false);
+		expect(taskImpliesEdits("do not edit anything")).toBe(false);
+		expect(taskImpliesEdits("review the code and report issues")).toBe(false);
+		expect(taskImpliesEdits("fix the login bug but do not edit files")).toBe(false);
+	});
+
+	test("returns false for plain text with no implementation words", () => {
+		expect(taskImpliesEdits("read the config file")).toBe(false);
+		expect(taskImpliesEdits("search for bugs")).toBe(false);
+		expect(taskImpliesEdits("explain the architecture")).toBe(false);
+	});
+});
+
+describe("hasMutationActivity", () => {
+	test("detects edit tool calls", () => {
+		const activities = [
+			{ id: "1", name: "read", args: { path: "a.ts" }, startTime: 0 },
+			{ id: "2", name: "edit", args: { path: "a.ts", oldText: "x", newText: "y" }, startTime: 1 },
+		];
+		expect(hasMutationActivity(activities as any)).toBe(true);
+	});
+
+	test("detects write tool calls", () => {
+		const activities = [
+			{ id: "1", name: "write", args: { path: "b.ts", content: "x" }, startTime: 0 },
+		];
+		expect(hasMutationActivity(activities as any)).toBe(true);
+	});
+
+	test("detects mutating bash commands", () => {
+		expect(hasMutationActivity([{ id: "1", name: "bash", args: { command: "sed -i 's/a/b/' file" }, startTime: 0 }] as any)).toBe(true);
+		expect(hasMutationActivity([{ id: "1", name: "bash", args: { command: "git commit -m 'fix'" }, startTime: 0 }] as any)).toBe(true);
+		expect(hasMutationActivity([{ id: "1", name: "bash", args: { command: "rm file" }, startTime: 0 }] as any)).toBe(true);
+		expect(hasMutationActivity([{ id: "1", name: "bash", args: { command: "python3 script.py" }, startTime: 0 }] as any)).toBe(true);
+	});
+
+	test("returns false for read-only activities", () => {
+		const activities = [
+			{ id: "1", name: "read", args: { path: "a.ts" }, startTime: 0 },
+			{ id: "2", name: "bash", args: { command: "git status" }, startTime: 1 },
+			{ id: "3", name: "bash", args: { command: "ls -la" }, startTime: 2 },
+		];
+		expect(hasMutationActivity(activities as any)).toBe(false);
+	});
+
+	test("returns false for empty activities", () => {
+		expect(hasMutationActivity([])).toBe(false);
+	});
+});
+
+// ── Settings Overrides ──────────────────────────────────────────────────────
+
+describe("readDelegateSettingsFile", () => {
+	let tmpDir: string;
+
+	beforeEach(() => { tmpDir = makeTempDir(); });
+	afterEach(() => { cleanup(tmpDir); });
+
+	test("returns null for nonexistent file", () => {
+		expect(readDelegateSettingsFile(path.join(tmpDir, "nonexistent.json"))).toBeNull();
+	});
+
+	test("parses valid JSON settings", () => {
+		const file = path.join(tmpDir, "settings.json");
+		writeFileSync(file, JSON.stringify({ delegate: { agentOverrides: { reviewer: { model: "zai/glm-5-turbo" } } } }));
+		const result = readDelegateSettingsFile(file);
+		expect(result?.delegate).toBeDefined();
+	});
+
+	test("returns null for invalid JSON", () => {
+		const file = path.join(tmpDir, "bad.json");
+		writeFileSync(file, "not json");
+		expect(readDelegateSettingsFile(file)).toBeNull();
+	});
+});
+
+describe("loadDelegateSettings", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = makeTempDir();
+		mock.module("node:os", () => ({ ...os, homedir: () => tmpDir }));
+	});
+
+	afterEach(() => {
+		mock.module("node:os", () => os);
+		cleanup(tmpDir);
+	});
+
+	test("returns null when no settings files exist", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		expect(loadDelegateSettings(projectDir)).toBeNull();
+	});
+
+	test("loads user settings from ~/.pi/agent/settings.json", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		const userSettingsDir = path.join(tmpDir, ".pi", "agent");
+		mkdirSync(userSettingsDir, { recursive: true });
+		writeFileSync(path.join(userSettingsDir, "settings.json"), JSON.stringify({
+			delegate: { agentOverrides: { reviewer: { model: "zai/glm-5-turbo" } } },
+		}));
+		const result = loadDelegateSettings(projectDir);
+		expect(result?.agentOverrides?.reviewer?.model).toBe("zai/glm-5-turbo");
+	});
+
+	test("project settings override user settings", () => {
+		const projectDir = path.join(tmpDir, "project");
+		mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
+		writeFileSync(path.join(projectDir, ".pi", "settings.json"), JSON.stringify({
+			delegate: { agentOverrides: { reviewer: { model: "project/model" } } },
+		}));
+
+		const userDir = path.join(tmpDir, ".pi", "agent");
+		mkdirSync(userDir, { recursive: true });
+		writeFileSync(path.join(userDir, "settings.json"), JSON.stringify({
+			delegate: { agentOverrides: { reviewer: { model: "user/model" } } },
+		}));
+
+		const result = loadDelegateSettings(projectDir);
+		expect(result?.agentOverrides?.reviewer?.model).toBe("project/model");
 	});
 });
 
