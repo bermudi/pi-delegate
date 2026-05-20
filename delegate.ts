@@ -1358,9 +1358,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
         if (t.action !== "close" && t.action !== "list") {
           // For pool hits, the model is already baked into the agent — skip resolution.
-          const isPoolHitPreResolve = t.sessionId && agentPool.has(t.sessionId);
-
-          if (isPoolHitPreResolve) {
+          if (t.sessionId && agentPool.has(t.sessionId)) {
             model = agentPool.get(t.sessionId)!.config.model;
           } else {
             const explicitModelSpec = t.model ?? agentOverride?.model ?? agent?.model;
@@ -1391,7 +1389,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const thinkingRaw = t.thinking ?? agent?.thinking ?? "off";
           thinking = VALID_THINKING.has(thinkingRaw) ? (thinkingRaw as ThinkingLevel) : "off";
         }
-        return { ...t, cwd, systemPrompt, model, tools, thinking, prompt, agentName: agent?.name ?? "inline", warnings };
+        return { ...t, cwd, systemPrompt, model: model!, tools, thinking, prompt, agentName: agent?.name ?? "inline", warnings };
       });
 
       // ── Progress tracking ─────────────────────────────────────────
