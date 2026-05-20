@@ -1350,19 +1350,35 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           ].join("\n");
         }
 
-        // Resolve model (falls back to parent model if specification fails to resolve)
+        // Resolve model — explicit specs must resolve or fail; omitted falls back to parent
         let model: Model<Api> | undefined;
         let tools: string[] = [];
         let thinking: ThinkingLevel = "off";
         const warnings: string[] = [];
 
         if (t.action !== "close" && t.action !== "list") {
-          const modelSpec = t.model ?? agentOverride?.model ?? agent?.model ?? pooledConfig?.model?.id;
-          const resolvedModel = resolveModel(modelSpec, ctx.modelRegistry, ctx.model) ?? ctx.model;
-          if (!resolvedModel) {
+          // For pool hits, the model is already baked into the agent — skip resolution.
+          const isPoolHitPreResolve = t.sessionId && agentPool.has(t.sessionId);
+
+          if (isPoolHitPreResolve) {
+            model = agentPool.get(t.sessionId)!.config.model;
+          } else {
+            const explicitModelSpec = t.model ?? agentOverride?.model ?? agent?.model;
+            const modelSpec = explicitModelSpec ?? pooledConfig?.model?.id;
+            const resolvedModel = resolveModel(modelSpec, ctx.modelRegistry, ctx.model);
+
+            if (explicitModelSpec && !resolvedModel) {
+              // Caller explicitly requested a specific model that couldn't be resolved.
+              // Fail loudly — silent fallback defeats the purpose of specifying a model.
+              throw new Error(`Task ${i}: requested model '${explicitModelSpec}' is not available. Check provider config or remove the model field to use the parent model.`);
+            }
+
+            model = resolvedModel ?? ctx.model;
+          }
+
+          if (!model) {
             throw new Error(`Task ${i}: no model available — parent session has no model set.`);
           }
-          model = resolvedModel;
 
           // Resolve tools — warn about unknown tool names
           tools = t.tools ?? agent?.tools ?? DEFAULT_TOOLS;
@@ -1452,6 +1468,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             poolSessionManager = pooled.sessionManager;
             poolSessionFile = pooled.sessionFile;
             pooled.lastUsed = Date.now();
+            // Model was already resolved from frozen config at task resolution time.
+            // Sync progress display to match.
+            p.model = frozen.model.id;
           } else {
             // Pool miss — try to rehydrate from disk, or create fresh.
             const session = createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
