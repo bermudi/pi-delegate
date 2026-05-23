@@ -60,6 +60,8 @@ export interface TaskDef {
   sessionId?: string;
   /** Action for session management. Default: "prompt". "close" tears down a pooled agent. "list" shows active sessions. */
   action?: SessionAction;
+  /** Absolute path to a previous subagent session .jsonl to continue from. The agent resumes with full conversation context. */
+  resumeFrom?: string;
 }
 
 export interface ToolActivity {
@@ -495,6 +497,20 @@ export function extractTouchedFromActivities(activities: ToolActivity[], cwd: st
 interface SessionManagerLike {
   appendMessage(message: unknown): string;
   getSessionFile(): string | undefined;
+  appendSessionInfo(name: string): string;
+}
+
+/**
+ * Patch the `parentSession` field in a session header.
+ * SessionManager.create() doesn't accept parentSession, so we inject it after creation.
+ * The header may be in memory only (deferred flush) or already on disk.
+ */
+function setParentSession(sm: SessionManager, parentPath: string): void {
+  // @ts-expect-error — accessing private fileEntries to mutate header's parentSession
+  const header = (sm as { fileEntries: Array<{ type: string; parentSession?: string }> }).fileEntries[0];
+  if (header && header.type === "session") {
+    header.parentSession = parentPath;
+  }
 }
 
 /**
@@ -503,30 +519,36 @@ interface SessionManagerLike {
  *   and searchable via session_search.
  * - `fresh` / `inherit`: creates a standalone session file so subagent work is still
  *   persisted and searchable.
+ *
+ * All non-fork sessions get `parentSession` set in their header so they appear as
+ * children of the parent session in `/resume`.
  */
 function createSubagentSessionManager(
   parentSessionManager: unknown,
   context: "fresh" | "inherit" | "fork" | undefined,
   cwd: string,
 ): { manager: SessionManagerLike; file: string } | undefined {
+  // Resolve parent session file path for linking.
+  const parentFile = (parentSessionManager as { getSessionFile?(): string | undefined } | undefined)?.getSessionFile?.();
+
   if (context === "fork") {
     if (!parentSessionManager) {
       throw new Error("Forked subagent context requires a persisted parent session.");
     }
     const pm = parentSessionManager as { getSessionFile(): string | undefined; getLeafId(): string | null };
-    const parentFile = pm.getSessionFile();
     const leafId = pm.getLeafId();
-    if (!parentFile) {
+    if (!pm.getSessionFile()) {
       throw new Error("Forked subagent context requires a persisted parent session.");
     }
     if (!leafId) {
       throw new Error("Forked subagent context requires a current leaf to fork from.");
     }
-    const sm = (SessionManager as unknown as { open(path: string): SessionManager }).open(parentFile);
+    const sm = (SessionManager as unknown as { open(path: string): SessionManager }).open(pm.getSessionFile()!);
     const sessionFile = sm.createBranchedSession(leafId);
     if (!sessionFile) {
       throw new Error("Session manager did not return a session file.");
     }
+    // createBranchedSession already sets parentSession in the header.
     return { manager: sm as unknown as SessionManagerLike, file: sessionFile };
   }
 
@@ -534,6 +556,12 @@ function createSubagentSessionManager(
   const sm = SessionManager.create(cwd);
   const sessionFile = sm.getSessionFile();
   if (!sessionFile) return undefined;
+
+  // Link to parent session so subagent appears as a child in /resume.
+  if (parentFile) {
+    setParentSession(sm, parentFile);
+  }
+
   return { manager: sm as unknown as SessionManagerLike, file: sessionFile };
 }
 
@@ -901,34 +929,40 @@ async function runAgent(
   sessionManager?: SessionManagerLike,
   maxRetries = 3,
   retryBaseMs = 2000,
-  /** Pre-existing agent for pooled sessions. When provided, skips creation and retry — runs once. */
+  /** Pre-existing agent. When provided AND allowRetry=false, skips creation and retry — runs once (pool hits). */
   existingAgent?: Agent,
+  /** When true, existingAgent is a resumed session — safe to retry on transient errors. */
+  allowRetry = false,
 ): Promise<{ output: string; error?: string; durationMs: number; tokens: number; touchedFiles: string[] }> {
   const start = Date.now();
 
   // Snapshot git status before the agent starts so we can diff after.
   const gitBaseline = await getGitChangedFiles(config.cwd);
 
-  // For pooled agents: single attempt, no retry loop.
-  if (existingAgent) {
+  // Pool hits: single attempt, no retry loop (stateful agent with accumulated context).
+  // Resumed agents (allowRetry=true) fall through to the retry loop.
+  if (existingAgent && !allowRetry) {
     return runAgentOnce(existingAgent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start);
   }
+
+  // Snapshot initial message count for resumed agents — on retry, trim back to avoid duplicates.
+  // Fresh agents create a new instance per attempt so this is only needed for existingAgent.
+  const initialMessageCount = existingAgent ? existingAgent.state.messages.length : 0;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal?.aborted) {
       return { output: "", error: "Aborted", durationMs: Date.now() - start, tokens: 0, touchedFiles: [] };
     }
 
-    const tools = config.tools
-      .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
-      .filter(Boolean) as AgentTool[];
-
-    const agent = new Agent({
+    // Resumed agents reuse the rehydrated instance; fresh agents create a new one per attempt.
+    const agent = existingAgent ?? new Agent({
       initialState: {
         systemPrompt: config.systemPrompt,
         model: config.model,
         thinkingLevel: config.thinking,
-        tools,
+        tools: config.tools
+          .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
+          .filter(Boolean) as AgentTool[],
       },
       convertToLlm,
       streamFn: async (m, context, options) => {
@@ -943,6 +977,11 @@ async function runAgent(
 
     const result = await runAgentOnce(agent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start);
     if (result.error && attempt < maxRetries && isRetryableError(result.error)) {
+      // Trim partial state from the failed attempt before retrying.
+      // Only needed for resumed agents — fresh agents create a new instance per attempt.
+      if (existingAgent) {
+        existingAgent.state.messages.length = initialMessageCount;
+      }
       const delay = retryBaseMs * Math.pow(2, attempt) + Math.random() * retryBaseMs;
       try { await sleepWithAbort(delay, signal); } catch (sleepErr) {
         if (!(sleepErr instanceof AbortError)) throw sleepErr;
@@ -1146,7 +1185,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({
       tasks: Type.Array(
         Type.Object({
-          prompt: Type.Optional(Type.String({ description: "The task for this subagent to perform. Required unless action is 'close' or 'list'." })),
+          prompt: Type.Optional(Type.String({ description: "The task for this subagent to perform. Required unless action is 'close'/'list' or resumeFrom is set." })),
           agent: Type.Optional(Type.String({
             description: "Named agent from .pi/agents/*.md (project-local). Inline fields override agent defaults.",
           })),
@@ -1178,6 +1217,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           action: Type.Optional(Type.String({
             enum: ["prompt", "close", "list"],
             description: "'prompt' (default) runs a task, 'close' tears down a pooled session, 'list' shows active sessions.",
+          })),
+          resumeFrom: Type.Optional(Type.String({
+            description: "Absolute path to a previous subagent session .jsonl to continue from. Agent resumes with full context.",
           })),
         }),
         { minItems: 0, description: "Tasks to run in parallel. Pass an empty array to see available agents and usage docs." },
@@ -1227,7 +1269,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "",
             "## Task Fields",
             "",
-            "- `prompt` (required) — The task for this subagent.",
+            "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to 'continue').",
             "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
             "- `systemPrompt` — System prompt. Required if no `agent` specified.",
             "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
@@ -1256,6 +1298,26 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "```",
             "",
             "Pooled agents are automatically closed after 10 minutes of inactivity.",
+            "",
+            "## Resuming Previous Sessions",
+            "",
+            "Use `resumeFrom` to continue a failed or interrupted subagent from where it left off.",
+            "Pass the absolute path to the session `.jsonl` file (shown in delegate output).",
+            "The agent gets the full conversation history and the new `prompt` continues naturally.",
+            "",
+            "```json",
+            "// Resume a failed browser test — agent remembers everything it already did",
+            "{ \"prompt\": \"Continue testing — the server is already running on :3000\",",
+            "  \"resumeFrom\": \"/home/user/.pi/agent/sessions/project/2026-01-01T12-00-00Z_abc123.jsonl\" }",
+            "```",
+            "",
+            "Combine with `sessionId` to resume AND pool the agent for further multi-turn use:",
+            "",
+            "```json",
+            "{ \"prompt\": \"Continue the investigation\",",
+            "  \"resumeFrom\": \"/path/to/session.jsonl\",",
+            "  \"sessionId\": \"my-resumed-agent\" }",
+            "```",
           ].join("\n") }],
           details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
         };
@@ -1310,9 +1372,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           systemPrompt = (typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : "") || "You are a helpful coding assistant.";
         }
 
-        // Prompt is required for actual task execution.
-        if (t.action !== "close" && t.action !== "list" && !t.prompt?.trim()) {
-          throw new Error(`Task ${i}: prompt is required unless action is 'close' or 'list'.`);
+        // Prompt is required for fresh tasks. ResumeFrom provides context already.
+        if (t.action !== "close" && t.action !== "list" && !t.resumeFrom && !t.prompt?.trim()) {
+          throw new Error(`Task ${i}: prompt is required unless action is 'close'/'list' or resumeFrom is set.`);
         }
 
         // Inject skills
@@ -1333,7 +1395,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         }
 
         // Build prompt — wrap with parent context if inheriting or forking
-        let prompt = t.prompt;
+        let prompt = t.prompt || (t.resumeFrom ? "Continue from where you left off. Pick up the task and keep going." : t.prompt);
         const parentCtx = (t.context === "inherit" || t.context === "fork") && parentTranscript ? parentTranscript : null;
         if (parentCtx) {
           prompt = [
@@ -1470,45 +1532,98 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             // Sync progress display to match.
             p.model = frozen.model.id;
           } else {
-            // Pool miss — try to rehydrate from disk, or create fresh.
-            const session = createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
-            poolSessionManager = session?.manager;
-            poolSessionFile = session?.file;
+            // Pool miss — when resumeFrom is specified, defer to the resume block
+            // which will rehydrate from the target session file. Creating a session
+            // here would orphan an empty .jsonl on disk.
+            if (t.resumeFrom) {
+              pendingPoolInsert = true;
+            } else {
+              // Try to rehydrate from disk, or create fresh.
+              const session = createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
+              poolSessionManager = session?.manager;
+              poolSessionFile = session?.file;
 
-            const tools = t.tools.map((name) => TOOL_FACTORIES[name]?.(t.cwd)).filter(Boolean) as AgentTool[];
-            const agentConfig = { systemPrompt: t.systemPrompt, model: t.model, thinkingLevel: t.thinking, tools };
+              const tools = t.tools.map((name) => TOOL_FACTORIES[name]?.(t.cwd)).filter(Boolean) as AgentTool[];
+              const agentConfig = { systemPrompt: t.systemPrompt, model: t.model, thinkingLevel: t.thinking, tools };
 
-            let agent: Agent | undefined;
-            if (poolSessionFile) {
-              const rehydrated = rehydrateAgent(
-                poolSessionFile,
-                { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
-                ctx.modelRegistry,
-              );
-              if (rehydrated) {
-                agent = rehydrated.agent;
-                poolSessionManager = rehydrated.sessionManager;
+              let agent: Agent | undefined;
+              if (poolSessionFile) {
+                const rehydrated = rehydrateAgent(
+                  poolSessionFile,
+                  { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
+                  ctx.modelRegistry,
+                );
+                if (rehydrated) {
+                  agent = rehydrated.agent;
+                  poolSessionManager = rehydrated.sessionManager;
+                }
               }
+              if (!agent) {
+                const streamFn = async (m: any, context: any, options: any) => {
+                  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
+                  if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+                  return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+                };
+                agent = new Agent({ initialState: agentConfig, convertToLlm, streamFn });
+              }
+              pendingPoolInsert = true;
+              existingAgent = agent;
             }
-            if (!agent) {
-              const streamFn = async (m: any, context: any, options: any) => {
-                const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
-                if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-                return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
-              };
-              agent = new Agent({ initialState: agentConfig, convertToLlm, streamFn });
-            }
-            pendingPoolInsert = true;
-            existingAgent = agent;
           }
         }
 
-        // Create a session manager for non-pooled tasks.
-        const session = t.sessionId
-          ? { manager: poolSessionManager, file: poolSessionFile }
-          : createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
+        // ── Resume from previous session ────────────────────────────
+        let resumedSessionManager: SessionManagerLike | undefined;
+        let resumedSessionFile: string | undefined;
+        let isResumedAgent = false; // true when we rehydrated from resumeFrom (not a pool hit)
 
+        // isPoolHit: sessionId exists AND agent was found in pool (not a fresh pool miss).
         const isPoolHit = t.sessionId && !pendingPoolInsert;
+
+        if (t.resumeFrom) {
+          if (isPoolHit) {
+            // Pool has accumulated state — resumeFrom can't override it.
+            // Emit a warning so the caller knows it was ignored.
+            t.warnings!.push(`resumeFrom ignored: sessionId '${t.sessionId}' is already active with its own context.`);
+          } else {
+            const resolvedPath = path.resolve(t.resumeFrom);
+            if (!fs.existsSync(resolvedPath)) {
+              p.status = "failed"; p.error = `resumeFrom: file not found: ${resolvedPath}`; fire();
+              return { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
+            }
+            const resumeConfig = { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd };
+            const rehydrated = rehydrateAgent(resolvedPath, resumeConfig, ctx.modelRegistry);
+            if (!rehydrated) {
+              p.status = "failed"; p.error = `resumeFrom: empty or corrupt session: ${resolvedPath}`; fire();
+              return { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
+            }
+            existingAgent = rehydrated.agent;
+            resumedSessionManager = rehydrated.sessionManager;
+            resumedSessionFile = resolvedPath;
+            isResumedAgent = true;
+
+            // Link resumed session to parent for /resume discoverability.
+            const parentFile = (ctx.sessionManager as { getSessionFile?(): string | undefined } | undefined)?.getSessionFile?.();
+            if (parentFile) {
+              setParentSession(rehydrated.sessionManager as unknown as SessionManager, parentFile);
+            }
+          }
+        }
+
+        // Create a session manager — prefer resumed, then pool, then fresh.
+        // When resumeFrom is active, skip pool-miss session creation to avoid orphaned empty files.
+        const session = resumedSessionManager
+          ? { manager: resumedSessionManager, file: resumedSessionFile }
+          : t.sessionId
+            ? { manager: poolSessionManager, file: poolSessionFile }
+            : createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
+
+        // Label subagent sessions so they're identifiable in /resume.
+        // Skip pool hits (already labeled) and resumed sessions (keep original label).
+        if (session?.manager && !isPoolHit && !resumedSessionManager) {
+          const label = `⎇ delegate · ${t.agentName}`;
+          session.manager.appendSessionInfo(label);
+        }
 
         const doRun = async (): Promise<TaskResult> => {
           try {
@@ -1522,7 +1637,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               session?.manager,
               undefined, // maxRetries (default)
               2000,      // retryBaseMs
-              existingAgent, // pre-existing agent for pooled sessions
+              existingAgent, // pre-existing agent for pooled, resumed, or pool-miss sessions
+              !isPoolHit,    // allowRetry: safe unless pool hit (accumulated multi-turn state)
             );
 
             // Insert into pool only after successful first run.
@@ -1560,7 +1676,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             p.status = "failed";
             p.error = msg;
             fire();
-            return { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+            return { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: session?.file ?? poolSessionFile ?? resumedSessionFile, touchedFiles: [] };
           }
         };
 
@@ -1599,7 +1715,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
         }
         if (r.error) {
-          parts.push(`[FAILED: ${r.error}]`);
+          const failParts = [r.error];
+          if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
+          parts.push(`[FAILED: ${failParts.join(" · ")}]`);
         } else {
           const meta = [`OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`];
           if (r.sessionFile) meta.push(shortenPath(r.sessionFile));
