@@ -55,7 +55,7 @@ export interface TaskDef {
   thinking?: string;
   systemPrompt?: string;
   cwd?: string;
-  context?: "fresh" | "inherit" | "fork";
+  context?: "fresh" | "with-parent-transcript";
   /** Name for a persistent subagent session. First use creates it, subsequent uses reuse it. */
   sessionId?: string;
   /** Action for session management. Default: "prompt". "close" tears down a pooled agent. "list" shows active sessions. */
@@ -515,42 +515,17 @@ function setParentSession(sm: SessionManager, parentPath: string): void {
 
 /**
  * Create a session manager for a subagent run.
- * - `fork`: branches from the parent session so the full conversation is preserved
- *   and searchable via session_search.
- * - `fresh` / `inherit`: creates a standalone session file so subagent work is still
- *   persisted and searchable.
  *
- * All non-fork sessions get `parentSession` set in their header so they appear as
- * children of the parent session in `/resume`.
+ * Always creates a standalone session file in the target cwd.
+ * Sets `parentSession` in the header so subagent work is discoverable
+ * as a child of the parent session in `/resume`.
  */
 function createSubagentSessionManager(
   parentSessionManager: unknown,
-  context: "fresh" | "inherit" | "fork" | undefined,
   cwd: string,
 ): { manager: SessionManagerLike; file: string } | undefined {
   // Resolve parent session file path for linking.
   const parentFile = (parentSessionManager as { getSessionFile?(): string | undefined } | undefined)?.getSessionFile?.();
-
-  if (context === "fork") {
-    if (!parentSessionManager) {
-      throw new Error("Forked subagent context requires a persisted parent session.");
-    }
-    const pm = parentSessionManager as { getSessionFile(): string | undefined; getLeafId(): string | null };
-    const leafId = pm.getLeafId();
-    if (!pm.getSessionFile()) {
-      throw new Error("Forked subagent context requires a persisted parent session.");
-    }
-    if (!leafId) {
-      throw new Error("Forked subagent context requires a current leaf to fork from.");
-    }
-    const sm = (SessionManager as unknown as { open(path: string): SessionManager }).open(pm.getSessionFile()!);
-    const sessionFile = sm.createBranchedSession(leafId);
-    if (!sessionFile) {
-      throw new Error("Session manager did not return a session file.");
-    }
-    // createBranchedSession already sets parentSession in the header.
-    return { manager: sm as unknown as SessionManagerLike, file: sessionFile };
-  }
 
   // Always persist subagent work so the main agent can search it later.
   const sm = SessionManager.create(cwd);
@@ -1208,8 +1183,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             description: "Working directory. Defaults to parent session cwd.",
           })),
           context: Type.Optional(Type.String({
-            enum: ["fresh", "inherit", "fork"],
-            description: "'fresh' for clean context, 'inherit' to include parent session transcript, 'fork' to branch the session so subagent work is searchable.",
+            enum: ["fresh", "with-parent-transcript"],
+            description: "'fresh' (default) for clean context, 'with-parent-transcript' to include the full parent session transcript in the subagent's prompt (expensive — use deliberately)."
           })),
           sessionId: Type.Optional(Type.String({
             description: "Name for a persistent subagent session. First use creates it, subsequent uses reuse the same agent. Use action='close' to tear down.",
@@ -1277,7 +1252,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "- `skills` — Skill names injected into the system prompt.",
             "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
             "- `cwd` — Working directory. Default: parent session cwd.",
-            "- `context` — 'fresh' (default), 'inherit' to include parent session transcript, or 'fork' to branch the session so subagent work is persisted and searchable.",
+            "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
             "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
             "- `action` — 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
             "",
@@ -1347,12 +1322,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       }
 
       // ── Resolve tasks ─────────────────────────────────────────────
-      // Build parent transcript lazily — only computed once if any task uses inherit/fork
+      // Build parent transcript lazily — only computed once if any task uses with-parent-transcript
       let parentTranscript: string | null = null;
-      const needsParentContext = params.tasks.some((t) => t.context === "inherit" || t.context === "fork");
+      const needsParentContext = params.tasks.some((t) => t.context === "with-parent-transcript");
       if (needsParentContext) {
         if (!ctx.sessionManager) {
-          throw new Error("context: 'inherit' or 'fork' requires a persisted parent session.");
+          throw new Error("context: 'with-parent-transcript' requires a persisted parent session.");
         }
         parentTranscript = buildParentTranscript(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId());
       }
@@ -1394,9 +1369,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           systemPrompt = systemPrompt.trimEnd() + "\n\n" + agentsMdFiles.join("\n\n");
         }
 
-        // Build prompt — wrap with parent context if inheriting or forking
+        // Build prompt — wrap with parent context if using with-parent-transcript
         let prompt = t.prompt || (t.resumeFrom ? "Continue from where you left off. Pick up the task and keep going." : t.prompt);
-        const parentCtx = (t.context === "inherit" || t.context === "fork") && parentTranscript ? parentTranscript : null;
+        const parentCtx = t.context === "with-parent-transcript" && parentTranscript ? parentTranscript : null;
         if (parentCtx) {
           prompt = [
             "<parent-session>",
@@ -1539,7 +1514,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               pendingPoolInsert = true;
             } else {
               // Try to rehydrate from disk, or create fresh.
-              const session = createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
+              const session = createSubagentSessionManager(ctx.sessionManager, t.cwd);
               poolSessionManager = session?.manager;
               poolSessionFile = session?.file;
 
@@ -1575,16 +1550,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         // ── Resume from previous session ────────────────────────────
         let resumedSessionManager: SessionManagerLike | undefined;
         let resumedSessionFile: string | undefined;
-        let isResumedAgent = false; // true when we rehydrated from resumeFrom (not a pool hit)
-
         // isPoolHit: sessionId exists AND agent was found in pool (not a fresh pool miss).
         const isPoolHit = t.sessionId && !pendingPoolInsert;
 
         if (t.resumeFrom) {
           if (isPoolHit) {
-            // Pool has accumulated state — resumeFrom can't override it.
-            // Emit a warning so the caller knows it was ignored.
-            t.warnings!.push(`resumeFrom ignored: sessionId '${t.sessionId}' is already active with its own context.`);
+            // Pool has accumulated state — resumeFrom can't override it. Hard error.
+            const msg = `resumeFrom conflicts with active sessionId '${t.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`;
+            p.status = "failed"; p.error = msg; fire();
+            return { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: poolSessionFile, touchedFiles: [] };
           } else {
             const resolvedPath = path.resolve(t.resumeFrom);
             if (!fs.existsSync(resolvedPath)) {
@@ -1600,7 +1574,6 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             existingAgent = rehydrated.agent;
             resumedSessionManager = rehydrated.sessionManager;
             resumedSessionFile = resolvedPath;
-            isResumedAgent = true;
 
             // Link resumed session to parent for /resume discoverability.
             const parentFile = (ctx.sessionManager as { getSessionFile?(): string | undefined } | undefined)?.getSessionFile?.();
@@ -1616,7 +1589,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           ? { manager: resumedSessionManager, file: resumedSessionFile }
           : t.sessionId
             ? { manager: poolSessionManager, file: poolSessionFile }
-            : createSubagentSessionManager(ctx.sessionManager, t.context, t.cwd);
+            : createSubagentSessionManager(ctx.sessionManager, t.cwd);
 
         // Label subagent sessions so they're identifiable in /resume.
         // Skip pool hits (already labeled) and resumed sessions (keep original label).
@@ -1718,6 +1691,10 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const failParts = [r.error];
           if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
           parts.push(`[FAILED: ${failParts.join(" · ")}]`);
+          if (r.sessionFile && fs.existsSync(r.sessionFile)) {
+            const safePath = JSON.stringify(r.sessionFile);
+            parts.push(`→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`);
+          }
         } else {
           const meta = [`OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`];
           if (r.sessionFile) meta.push(shortenPath(r.sessionFile));
