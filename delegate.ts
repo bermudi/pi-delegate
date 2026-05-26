@@ -13,7 +13,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from "@mariozechner/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool, type AgentToolResult, type ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { type Api, type Model, streamSimple } from "@mariozechner/pi-ai";
 import {
   buildSessionContext,
@@ -44,7 +44,7 @@ export interface AgentConfig {
   systemPrompt: string;
 }
 
-export type SessionAction = "prompt" | "close" | "list";
+export type SessionAction = "prompt" | "close" | "list" | "poll" | "cancel";
 
 export interface TaskDef {
   prompt: string;
@@ -58,10 +58,43 @@ export interface TaskDef {
   context?: "fresh" | "with-parent-transcript";
   /** Name for a persistent subagent session. First use creates it, subsequent uses reuse it. */
   sessionId?: string;
-  /** Action for session management. Default: "prompt". "close" tears down a pooled agent. "list" shows active sessions. */
+  /** Action for session management. Default: "prompt". "close" tears down a pooled agent. "list" shows active sessions. "poll" checks async tickets. "cancel" aborts async ticket. */
   action?: SessionAction;
   /** Absolute path to a previous subagent session .jsonl to continue from. The agent resumes with full conversation context. */
   resumeFrom?: string;
+}
+
+// ── Async Ticket Types ─────────────────────────────────────────────────────
+
+export interface AsyncTicket {
+  id: string;
+  created: number;
+  completedAt?: number;
+  tasks: TaskDef[];
+  resolved: ResolvedTask[];
+  status: "running" | "done" | "failed" | "cancelled";
+  results: (TaskResult | undefined)[];
+  progress: TaskProgress[];
+  controller: AbortController;
+  error?: string;
+  parentModelId?: string;
+}
+
+export interface ResolvedTask {
+  prompt: string;
+  agent?: string;
+  model: Model<Api>;
+  skills?: string[];
+  tools: string[];
+  thinking: ThinkingLevel;
+  systemPrompt: string;
+  cwd: string;
+  context?: "fresh" | "with-parent-transcript";
+  sessionId?: string;
+  action?: SessionAction;
+  resumeFrom?: string;
+  agentName: string;
+  warnings: string[];
 }
 
 export interface ToolActivity {
@@ -95,6 +128,7 @@ export interface DelegateDetails {
   results: (TaskResult | { error: string })[];
   progress: TaskProgress[];
   parentModel?: string;
+  ticketId?: string;
 }
 
 export interface TaskResult {
@@ -116,6 +150,15 @@ export const MAX_CONCURRENCY = 3;
 
 /** Idle timeout for pooled agents. 10 minutes. */
 const POOL_TTL_MS = 10 * 60 * 1000;
+
+/** Maximum concurrent background async tickets. */
+const MAX_ASYNC_TICKETS = 5;
+
+/** Completed tickets cleaned up after 30 minutes. */
+const ASYNC_TICKET_TTL_MS = 30 * 60 * 1000;
+
+/** Hard timeout per async ticket. 30 minutes. */
+const ASYNC_MAX_RUNTIME_MS = 30 * 60 * 1000;
 
 // ── Agent Pool ────────────────────────────────────────────────────────────
 
@@ -190,6 +233,109 @@ export function listPooledAgents(): string[] {
     lines.push(`- **${id}** · ${pooled.promptCount} prompts · ${fmtTokens(pooled.totalTokens)} tokens · idle ${idle} · age ${age} · ${shortenPath(pooled.sessionFile)}`);
   }
   return lines;
+}
+
+// ── Async Ticket Registry ────────────────────────────────────────────────
+
+/** Module-level registry for async tickets — lives for the entire pi session. */
+export const ticketRegistry = new Map<string, AsyncTicket>();
+
+function generateTicketId(): string {
+  // 8-char alphanumeric, no lookalikes
+  return Math.random().toString(36).slice(2, 10);
+}
+
+/** Abort and remove tickets that exceeded runtime or TTL. */
+export function sweepTickets(): void {
+  const now = Date.now();
+  for (const [id, ticket] of ticketRegistry) {
+    // Hard runtime timeout
+    if (ticket.status === "running" && now - ticket.created > ASYNC_MAX_RUNTIME_MS) {
+      ticket.controller.abort();
+      ticket.status = "failed";
+      ticket.error = "Exceeded maximum runtime";
+      ticket.completedAt = now;
+    }
+    // TTL cleanup for completed/failed/cancelled
+    if (ticket.status !== "running" && ticket.completedAt && now - ticket.completedAt > ASYNC_TICKET_TTL_MS) {
+      ticketRegistry.delete(id);
+    }
+  }
+}
+
+/** Check if any running async ticket holds a given sessionId. */
+export function isSessionBusy(sessionId: string): string | null {
+  for (const ticket of ticketRegistry.values()) {
+    if (ticket.status !== "running") continue;
+    if (ticket.resolved.some(t => t.sessionId === sessionId)) {
+      return ticket.id;
+    }
+  }
+  return null;
+}
+
+/** Format a completed ticket for LLM consumption. Reuses sync result formatting. */
+function formatCompletedTicket(ticket: AsyncTicket): AgentToolResult<DelegateDetails> {
+  const parts: string[] = [];
+  const succeeded = ticket.results.filter(r => r && !("error" in r && r.error)).length;
+  const elapsedTotal = ticket.completedAt ? ticket.completedAt - ticket.created : 0;
+  parts.push(`${succeeded}/${ticket.results.length} tasks completed · ${fmtDuration(elapsedTotal)} wall time\n`);
+
+  for (let i = 0; i < ticket.results.length; i++) {
+    const r = ticket.results[i];
+    const t = ticket.resolved[i]!;
+    if (!r) {
+      parts.push(`=== ${t.agentName}: ${trunc(t.prompt || "", 80)} ===`);
+      parts.push(`[PENDING — result not available]`);
+      continue;
+    }
+    parts.push(`=== ${r.agent}: ${trunc(t.prompt || "", 80)} ===`);
+    if (t.warnings?.length) {
+      for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
+    }
+    if ("error" in r && r.error) {
+      const failParts = [r.error];
+      if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
+      parts.push(`[FAILED: ${failParts.join(" · ")}]`);
+      if (r.sessionFile && fs.existsSync(r.sessionFile)) {
+        const safePath = JSON.stringify(r.sessionFile);
+        parts.push(`→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`);
+      }
+    } else {
+      const meta = [`OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`];
+      if (r.sessionFile) meta.push(shortenPath(r.sessionFile));
+      if (r.touchedFiles.length > 0) {
+        const rel = r.touchedFiles.map((f) => path.relative(t.cwd, f)).filter((f) => f && !f.startsWith(".."));
+        if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
+      }
+      parts.push(`[${meta.join(" · ")}]\n\n${r.output}`);
+    }
+  }
+
+  return {
+    content: [{ type: "text", text: parts.join("\n\n") }],
+    details: { tasks: ticket.tasks, results: ticket.results.filter((r): r is TaskResult => r !== undefined), progress: [...ticket.progress], parentModel: ticket.parentModelId },
+  };
+}
+
+/** Push results into parent session via sendMessage when background ticket completes. */
+function deliverTicketResults(pi: ExtensionAPI, ticket: AsyncTicket): void {
+  if (!ticket.completedAt) return;
+
+  const status = ticket.status === "done" ? "completed" : ticket.status;
+  const succeeded = ticket.results.filter(r => r && !("error" in r && r.error)).length;
+  const total = ticket.results.length;
+  const summary = `Async delegate ${ticket.id} ${status}: ${succeeded}/${total} tasks`;
+
+  pi.sendMessage({
+    customType: "async_delegate_result",
+    content: summary,
+    display: true,
+    details: { ticketId: ticket.id, status: ticket.status },
+  }, {
+    deliverAs: "followUp",
+    triggerTurn: true,
+  });
 }
 
 /**
@@ -1145,6 +1291,95 @@ function formatToolCallShort(name: string, args: Record<string, unknown>): strin
 
 // ── Extension ─────────────────────────────────────────────────────────────
 
+// ── Async Poll/Cancel Handlers ────────────────────────────────────────────
+
+export function handlePoll(params: { tasks: TaskDef[]; ticket?: string }, ctx: ExtensionContext): AgentToolResult<DelegateDetails> {
+  sweepTickets();
+  const parentModelId = ctx.model?.id;
+
+  // Only use top-level ticket param — per-task prompt is NOT a ticket ID
+  const ticketId = params.ticket;
+
+  // No ticket specified — list all
+  if (!ticketId) {
+    const tickets = [...ticketRegistry.values()];
+    if (!tickets.length) {
+      return {
+        content: [{ type: "text", text: "No async tickets." }],
+        details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
+      };
+    }
+    const lines = tickets.map(t => {
+      const icon = t.status === "running" ? "⏳" : t.status === "done" ? "✓" : "✗";
+      const done = t.progress.filter(p => p.status === "done").length;
+      const age = fmtDuration(Date.now() - t.created);
+      return `${icon} ${t.id} · ${done}/${t.progress.length} tasks · ${t.status} · ${age}`;
+    });
+    return {
+      content: [{ type: "text", text: `Async tickets:\n${lines.join("\n")}` }],
+      details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
+    };
+  }
+
+  // Specific ticket
+  const ticket = ticketRegistry.get(ticketId);
+  if (!ticket) {
+    return {
+      content: [{ type: "text", text: `Ticket '${ticketId}' not found. It may have expired or never existed.` }],
+      details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
+    };
+  }
+
+  if (ticket.status === "running") {
+    const lines = ticket.progress.map(p => {
+      const icon = p.status === "done" ? "✓" : p.status === "running" ? "⏳" : p.status === "failed" ? "✗" : "○";
+      const activity = p.activities.findLast(a => !a.result);
+      const currentTool = activity ? ` · ${formatToolCallShort(activity.name, activity.args)}` : "";
+      const duration = fmtDuration(Date.now() - ticket.created);
+      return `${icon} ${p.agent} · ${p.status}${currentTool} · ${duration}`;
+    });
+    return {
+      content: [{ type: "text", text: `Ticket ${ticket.id}: RUNNING (${fmtDuration(Date.now() - ticket.created)})\n${lines.join("\n")}` }],
+      details: { tasks: ticket.tasks, results: [], progress: [...ticket.progress], parentModel: ticket.parentModelId },
+    };
+  }
+
+  // Done / Failed / Cancelled — full results
+  return formatCompletedTicket(ticket);
+}
+
+export function handleCancel(params: { tasks: TaskDef[]; ticket?: string }): AgentToolResult<DelegateDetails> {
+  sweepTickets();
+  const ticketId = params.ticket;
+
+  if (!ticketId) {
+    return {
+      content: [{ type: "text", text: "action='cancel' requires a ticket ID." }],
+      details: { tasks: [], results: [], progress: [] },
+    };
+  }
+  const ticket = ticketRegistry.get(ticketId);
+  if (!ticket) {
+    return {
+      content: [{ type: "text", text: `Ticket '${ticketId}' not found.` }],
+      details: { tasks: [], results: [], progress: [] },
+    };
+  }
+  if (ticket.status !== "running") {
+    return {
+      content: [{ type: "text", text: `Ticket '${ticketId}' is already ${ticket.status}.` }],
+      details: { tasks: [], results: [], progress: [] },
+    };
+  }
+  ticket.controller.abort();
+  ticket.status = "cancelled";
+  ticket.completedAt = Date.now();
+  return {
+    content: [{ type: "text", text: `Ticket '${ticketId}' cancelled.` }],
+    details: { tasks: [], results: [], progress: [] },
+  };
+}
+
 export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "delegate",
@@ -1154,10 +1389,17 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       "Use delegate to parallelize independent work across subagents. Each task must include \"prompt\"; specify \"agent\" (name from .pi/agents/*.md) and/or \"systemPrompt\". All other fields (model, tools, skills, thinking, cwd, context) are optional and fall back to agent defaults or parent session values.",
       "Subagents only have pi core tools: read, write, edit, bash.",
       "Call delegate with an empty tasks array to see how to use the delegate tool.",
+      "For async mode: set async:true to fire tasks in the background. Results are automatically delivered when complete. Use delegate({action:\"poll\"}) to check status or delegate({action:\"poll\",ticket:\"id\"}) for a specific ticket.",
     ],
     description:
       "Spawn subagents in parallel. Call with an empty tasks array for full help.",
     parameters: Type.Object({
+      async: Type.Optional(Type.Boolean({
+        description: "Return immediately with a ticket ID. Poll with action='poll'.",
+      })),
+      ticket: Type.Optional(Type.String({
+        description: "Ticket ID for poll/cancel actions.",
+      })),
       tasks: Type.Array(
         Type.Object({
           prompt: Type.Optional(Type.String({ description: "The task for this subagent to perform. Required unless action is 'close'/'list' or resumeFrom is set." })),
@@ -1190,8 +1432,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             description: "Name for a persistent subagent session. First use creates it, subsequent uses reuse the same agent. Use action='close' to tear down.",
           })),
           action: Type.Optional(Type.String({
-            enum: ["prompt", "close", "list"],
-            description: "'prompt' (default) runs a task, 'close' tears down a pooled session, 'list' shows active sessions.",
+            enum: ["prompt", "close", "list", "poll", "cancel"],
+            description: "'prompt' (default) runs a task, 'close' tears down a pooled session, 'list' shows sessions, 'poll' checks async tickets, 'cancel' aborts async ticket.",
           })),
           resumeFrom: Type.Optional(Type.String({
             description: "Absolute path to a previous subagent session .jsonl to continue from. Agent resumes with full context.",
@@ -1201,9 +1443,21 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       ),
     }),
 
-    async execute(_id, params: { tasks: TaskDef[] }, signal, onUpdate, ctx) {
+    async execute(_id, params: { tasks: TaskDef[]; async?: boolean; ticket?: string }, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
       const agents = discoverAgents(ctx.cwd);
+
+      // ── Poll action ───────────────────────────────────────────────────
+      // Check if ANY task has action='poll' — route to poll handler
+      if (params.tasks.some(t => t.action === "poll")) {
+        return handlePoll(params, ctx);
+      }
+
+      // ── Cancel action ─────────────────────────────────────────────────
+      // Check if ANY task has action='cancel' — route to cancel handler
+      if (params.tasks.some(t => t.action === "cancel")) {
+        return handleCancel(params);
+      }
 
       // ── Help mode ─────────────────────────────────────────────────
       if (!params.tasks.length) {
@@ -1293,6 +1547,21 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "  \"resumeFrom\": \"/path/to/session.jsonl\",",
             "  \"sessionId\": \"my-resumed-agent\" }",
             "```",
+            "",
+            "## Async Mode",
+            "",
+            "Set `async: true` on the top-level call to fire tasks in the background:",
+            "",
+            "```json",
+            "delegate({ async: true, tasks: [{ agent: \"scout\", prompt: \"Investigate auth\" }] })",
+            "```",
+            "→ Returns ticket ID immediately. Parent keeps working.",
+            "",
+            "- `delegate({ action: \"poll\" })` — list all tickets",
+            "- `delegate({ action: \"poll\", ticket: \"abc123\" })` — check one ticket",
+            "- `delegate({ action: \"cancel\", ticket: \"abc123\" })` — abort a running ticket",
+            "",
+            "Max 5 concurrent async tickets. Completed tickets auto-deliver results.",
           ].join("\n") }],
           details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
         };
@@ -1448,7 +1717,298 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       });
       fire();
 
-      // ── Run parallel (with concurrency limiter) ───────────────────
+      // ── Async mode ───────────────────────────────────────────────────
+      if (params.async) {
+        sweepTickets();
+        const runningCount = [...ticketRegistry.values()].filter(t => t.status === "running").length;
+        if (runningCount >= MAX_ASYNC_TICKETS) {
+          return {
+            content: [{ type: "text", text: `Too many async tickets running (${runningCount}/${MAX_ASYNC_TICKETS}). Poll existing tickets or cancel one first.` }],
+            details: { tasks: params.tasks, results: [], progress: [], parentModel: parentModelId },
+          };
+        }
+
+        const ticketId = generateTicketId();
+        const controller = new AbortController();
+        const ticket: AsyncTicket = {
+          id: ticketId,
+          created: Date.now(),
+          tasks: params.tasks,
+          resolved,
+          status: "running",
+          results: new Array(resolved.length),
+          progress: [...progress],
+          controller,
+          parentModelId,
+        };
+        ticketRegistry.set(ticketId, ticket);
+
+        // Capture values for the closure — do NOT use `signal` from execute()
+        // The parent turn's signal dies when execute() returns.
+        const ticketSignal = controller.signal;
+        const modelRegistry = ctx.modelRegistry;
+
+        // Fire and forget — runs on the event loop
+        mapConcurrent(resolved, MAX_CONCURRENCY, async (t, i) => {
+          // IMPORTANT: wrap each task in try/catch so one failure
+          // doesn't reject the entire mapConcurrent promise.
+          const p = ticket.progress[i]!;
+          try {
+            // Check if parent signal already aborted
+            if (signal?.aborted) {
+              p.status = "failed"; p.error = "Aborted";
+              ticket.results[i] = { agent: t.agentName, output: "", error: "Aborted", durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+              return ticket.results[i]!;
+            }
+
+            // ── Session busy guard (async) ───────────────────────────
+            if (t.sessionId) {
+              const busyTicketId = isSessionBusy(t.sessionId);
+              if (busyTicketId && busyTicketId !== ticketId) {
+                p.status = "failed";
+                p.error = `Session '${t.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`;
+                ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+                return ticket.results[i]!;
+              }
+            }
+
+            p.status = "running"; p.model = t.model?.id;
+
+            // ── Session action handling (async) ─────────────────────
+            if (t.action === "close") {
+              if (!t.sessionId) {
+                p.status = "failed"; p.error = "action='close' requires sessionId.";
+                ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+                return ticket.results[i]!;
+              }
+              const closed = closePooledAgent(t.sessionId);
+              p.status = "done"; p.durationMs = Date.now() - ticket.created;
+              ticket.results[i] = { agent: t.agentName, output: closed ? `Session '${t.sessionId}' closed.` : `Session '${t.sessionId}' not found.`, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+              return ticket.results[i]!;
+            }
+
+            if (t.action === "list") {
+              const listing = listPooledAgents();
+              p.status = "done"; p.durationMs = Date.now() - ticket.created;
+              ticket.results[i] = { agent: t.agentName, output: `Active sessions:\n${listing.join("\n")}`, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+              return ticket.results[i]!;
+            }
+
+            // ── Pooled agent resolution (async) ───────────────────
+            let existingAgent: Agent | undefined;
+            let poolSessionManager: SessionManagerLike | undefined;
+            let poolSessionFile: string | undefined;
+            let pendingPoolInsert = false;
+
+            if (t.sessionId) {
+              const pooled = agentPool.get(t.sessionId);
+              if (pooled) {
+                // Pool hit — validate config compatibility
+                const frozen = pooled.config;
+                const mismatches: string[] = [];
+                if (frozen.cwd !== t.cwd) mismatches.push(`cwd: '${frozen.cwd}' vs '${t.cwd}'`);
+                if (frozen.thinking !== t.thinking) mismatches.push(`thinking: '${frozen.thinking}' vs '${t.thinking}'`);
+                const frozenToolSet = [...frozen.tools].sort().join(",");
+                const newToolSet = [...t.tools].sort().join(",");
+                if (frozenToolSet !== newToolSet) mismatches.push(`tools: [${frozenToolSet}] vs [${newToolSet}]`);
+                if (mismatches.length) {
+                  p.status = "failed"; p.error = `Session '${t.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`;
+                  ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+                  return ticket.results[i]!;
+                }
+                existingAgent = pooled.agent;
+                poolSessionManager = pooled.sessionManager;
+                poolSessionFile = pooled.sessionFile;
+                pooled.lastUsed = Date.now();
+                p.model = frozen.model.id;
+              } else {
+                // Pool miss
+                if (t.resumeFrom) {
+                  pendingPoolInsert = true;
+                } else {
+                  const session = createSubagentSessionManager(ctx.sessionManager, t.cwd);
+                  poolSessionManager = session?.manager;
+                  poolSessionFile = session?.file;
+
+                  const tools = t.tools.map((name) => TOOL_FACTORIES[name]?.(t.cwd)).filter(Boolean) as AgentTool[];
+                  const agentConfig = { systemPrompt: t.systemPrompt, model: t.model, thinkingLevel: t.thinking, tools };
+
+                  let agent: Agent | undefined;
+                  if (poolSessionFile) {
+                    const rehydrated = rehydrateAgent(
+                      poolSessionFile,
+                      { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
+                      modelRegistry,
+                    );
+                    if (rehydrated) {
+                      agent = rehydrated.agent;
+                      poolSessionManager = rehydrated.sessionManager;
+                    }
+                  }
+                  if (!agent) {
+                    const streamFn = async (m: any, context: any, options: any) => {
+                      const auth = await modelRegistry.getApiKeyAndHeaders(m);
+                      if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+                      return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+                    };
+                    agent = new Agent({ initialState: agentConfig, convertToLlm, streamFn });
+                  }
+                  existingAgent = agent;
+                  pendingPoolInsert = true;
+
+                  // Synchronous pool insertion — prevent race conditions
+                  if (t.sessionId && existingAgent && poolSessionManager && poolSessionFile) {
+                    agentPool.set(t.sessionId, {
+                      agent: existingAgent,
+                      sessionManager: poolSessionManager,
+                      sessionFile: poolSessionFile,
+                      config: { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
+                      lastUsed: Date.now(),
+                      createdAt: Date.now(),
+                      totalTokens: 0,
+                      promptCount: 0,
+                    });
+                    pendingPoolInsert = false;
+                  }
+                }
+              }
+            }
+
+            // ── Resume from previous session (async) ────────────────
+            let resumedSessionManager: SessionManagerLike | undefined;
+            let resumedSessionFile: string | undefined;
+            const isPoolHit = t.sessionId && !pendingPoolInsert && agentPool.has(t.sessionId!);
+
+            if (t.resumeFrom) {
+              if (isPoolHit) {
+                const msg = `resumeFrom conflicts with active sessionId '${t.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`;
+                p.status = "failed"; p.error = msg;
+                ticket.results[i] = { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: poolSessionFile, touchedFiles: [] };
+                return ticket.results[i]!;
+              } else {
+                const resolvedPath = path.resolve(t.resumeFrom);
+                if (!fs.existsSync(resolvedPath)) {
+                  p.status = "failed"; p.error = `resumeFrom: file not found: ${resolvedPath}`;
+                  ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
+                  return ticket.results[i]!;
+                }
+                const resumeConfig = { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd };
+                const rehydrated = rehydrateAgent(resolvedPath, resumeConfig, modelRegistry);
+                if (!rehydrated) {
+                  p.status = "failed"; p.error = `resumeFrom: empty or corrupt session: ${resolvedPath}`;
+                  ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
+                  return ticket.results[i]!;
+                }
+                existingAgent = rehydrated.agent;
+                resumedSessionManager = rehydrated.sessionManager;
+                resumedSessionFile = resolvedPath;
+              }
+            }
+
+            const session = resumedSessionManager
+              ? { manager: resumedSessionManager, file: resumedSessionFile }
+              : t.sessionId
+                ? { manager: poolSessionManager, file: poolSessionFile }
+                : createSubagentSessionManager(ctx.sessionManager, t.cwd);
+
+            if (session?.manager && !isPoolHit && !resumedSessionManager) {
+              const label = `⎇ delegate · ${t.agentName}`;
+              session.manager.appendSessionInfo(label);
+            }
+
+            // ── Run agent (async) ──────────────────────────────────
+            const config = { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd };
+            const r = await runAgent(
+              config,
+              t.prompt,
+              modelRegistry,
+              ticketSignal,  // Fresh controller, NOT parent signal
+              (u) => {
+                // Update ticket progress directly — NO fire()/onUpdate
+                p.tokens = u.tokens;
+                p.toolUses = u.toolUses;
+                p.durationMs = u.durationMs;
+                p.lastActivityAt = u.lastActivityAt;
+                p.activities = u.activities;
+              },
+              session?.manager,
+              undefined,  // maxRetries
+              2000,       // retryBaseMs
+              existingAgent,
+              !isPoolHit, // allowRetry
+            );
+
+            // Pool insertion on success (only if not already inserted synchronously)
+            if (t.sessionId && pendingPoolInsert && !r.error && session?.manager && session?.file) {
+              agentPool.set(t.sessionId, {
+                agent: existingAgent!,
+                sessionManager: session.manager,
+                sessionFile: session.file,
+                config: { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
+                lastUsed: Date.now(),
+                createdAt: Date.now(),
+                totalTokens: r.tokens,
+                promptCount: 1,
+              });
+            }
+
+            // Update pool stats on subsequent successful runs
+            if (t.sessionId && !pendingPoolInsert) {
+              const pooled = agentPool.get(t.sessionId);
+              if (pooled) {
+                pooled.lastUsed = Date.now();
+                pooled.totalTokens += r.tokens;
+                pooled.promptCount++;
+              }
+            }
+
+            p.status = r.error ? "failed" : "done";
+            p.durationMs = r.durationMs;
+            p.tokens = r.tokens;
+            p.error = r.error;
+            ticket.results[i] = { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens, sessionFile: session?.file ?? poolSessionFile, touchedFiles: r.touchedFiles };
+            return ticket.results[i]!;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            p.status = "failed";
+            p.error = msg;
+            ticket.results[i] = { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+            return ticket.results[i]!;
+          }
+        }, ticketSignal).then(() => {
+          // All tasks settled — determine final ticket status
+          const anyFailed = ticket.results.some(r => r && "error" in r && r.error);
+          const allSettled = ticket.results.every(r => r !== undefined);
+          if (ticket.status === "running") {
+            ticket.status = allSettled && !anyFailed ? "done" : anyFailed && !ticket.results.some(r => r && !r.error) ? "failed" : anyFailed ? "failed" : "done";
+            ticket.completedAt = Date.now();
+          }
+          deliverTicketResults(pi, ticket);
+        }).catch((err) => {
+          // Defense-in-depth — should not happen if individual tasks catch properly
+          ticket.status = "failed";
+          ticket.error = err instanceof Error ? err.message : String(err);
+          ticket.completedAt = Date.now();
+          deliverTicketResults(pi, ticket);
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `Async ticket: ${ticketId}`,
+              `${resolved.length} task(s) dispatched · ${runningCount + 1}/${MAX_ASYNC_TICKETS} async slots in use`,
+              "",
+              "Results will be delivered when all tasks complete.",
+              `Poll anytime: delegate({ action: "poll", ticket: "${ticketId}" })`,
+              `Cancel if needed: delegate({ action: "cancel", ticket: "${ticketId}" })`,
+            ].join("\n"),
+          }],
+          details: { tasks: params.tasks, results: [], progress: [...progress], parentModel: parentModelId, ticketId },
+        };
+      }
+
+      // ── Sync mode (existing path) ──────────────────────────────────
       // Sweep stale pooled agents before dispatching.
       sweepPool();
 
@@ -1460,6 +2020,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           return { agent: t.agentName, output: "", error: "Aborted", durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
         }
         p.status = "running"; p.model = t.model?.id; fire();
+
+        // ── Session busy guard (sync) ───────────────────────────
+        if (t.sessionId) {
+          const busyTicketId = isSessionBusy(t.sessionId);
+          if (busyTicketId) {
+            p.status = "failed"; p.error = `Session '${t.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`; fire();
+            return { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+          }
+        }
 
         // ── Session action handling ────────────────────────────────
         if (t.action === "close") {
@@ -1910,5 +2479,18 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       text.setText(lines.join("\n"));
       return text;
     },
+  });
+
+  // ── Session shutdown: abort all running async tickets ───────────────
+  pi.on("session_shutdown", () => {
+    for (const ticket of ticketRegistry.values()) {
+      if (ticket.status === "running") {
+        ticket.controller.abort();
+        ticket.status = "cancelled";
+        ticket.completedAt = Date.now();
+      }
+    }
+    // Do NOT clear the entire registry here — only abort running tickets.
+    // Cleared tickets are cleaned up by sweepTickets() TTL.
   });
 }

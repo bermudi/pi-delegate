@@ -43,6 +43,12 @@ import {
 	readDelegateSettingsFile,
 	loadDelegateSettings,
 	type AgentConfig,
+	ticketRegistry,
+	type AsyncTicket,
+	sweepTickets,
+	isSessionBusy,
+	handlePoll,
+	handleCancel,
 } from "./delegate.ts";
 
 // ── Integration test imports ──────────────────────────────────────────────
@@ -2157,5 +2163,262 @@ describe("delegate pool", () => {
 			{} as any,
 		);
 		expect(result).toBeNull();
+	});
+});
+
+// ── Async Ticket Tests ────────────────────────────────────────────────────
+
+describe("async ticket registry", () => {
+	let ts: TestSession | undefined;
+
+	afterEach(() => {
+		ticketRegistry.clear();
+		agentPool.clear();
+		ts?.dispose();
+		ts = undefined;
+	});
+
+	test("sweepTickets aborts tickets exceeding max runtime", () => {
+		const controller = new AbortController();
+		const now = Date.now();
+		const ticket: AsyncTicket = {
+			id: "timeout1",
+			created: now - 31 * 60 * 1000, // 31 minutes ago
+			tasks: [],
+			resolved: [],
+			status: "running",
+			results: [],
+			progress: [],
+			controller,
+			parentModelId: undefined,
+		};
+		ticketRegistry.set("timeout1", ticket);
+		sweepTickets();
+		expect(ticket.status).toBe("failed");
+		expect(ticket.error).toBe("Exceeded maximum runtime");
+		expect(ticket.completedAt).toBeDefined();
+		expect(controller.signal.aborted).toBe(true);
+	});
+
+	test("sweepTickets cleans up completed tickets after TTL", () => {
+		const ticket: AsyncTicket = {
+			id: "expired",
+			created: Date.now() - 60 * 60 * 1000,
+			completedAt: Date.now() - 31 * 60 * 1000, // completed 31 min ago
+			tasks: [],
+			resolved: [],
+			status: "done",
+			results: [],
+			progress: [],
+			controller: new AbortController(),
+			parentModelId: undefined,
+		};
+		ticketRegistry.set("expired", ticket);
+		sweepTickets();
+		expect(ticketRegistry.has("expired")).toBe(false);
+	});
+
+	test("sweepTickets keeps recent completed tickets", () => {
+		const ticket: AsyncTicket = {
+			id: "recent",
+			created: Date.now() - 5000,
+			completedAt: Date.now() - 1000,
+			tasks: [],
+			resolved: [],
+			status: "done",
+			results: [],
+			progress: [],
+			controller: new AbortController(),
+			parentModelId: undefined,
+		};
+		ticketRegistry.set("recent", ticket);
+		sweepTickets();
+		expect(ticketRegistry.has("recent")).toBe(true);
+	});
+
+	test("isSessionBusy returns null when no tickets running", () => {
+		expect(isSessionBusy("auth")).toBeNull();
+	});
+
+	test("isSessionBusy returns ticket id when session is in use", () => {
+		const ticket: AsyncTicket = {
+			id: "tkt1",
+			created: Date.now(),
+			tasks: [],
+			resolved: [{ prompt: "test", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "inline", warnings: [], sessionId: "auth" }],
+			status: "running",
+			results: [],
+			progress: [],
+			controller: new AbortController(),
+			parentModelId: undefined,
+		};
+		ticketRegistry.set("tkt1", ticket);
+		expect(isSessionBusy("auth")).toBe("tkt1");
+		expect(isSessionBusy("other")).toBeNull();
+	});
+
+	test("isSessionBusy ignores non-running tickets", () => {
+		const ticket: AsyncTicket = {
+			id: "tkt1",
+			created: Date.now(),
+			tasks: [],
+			resolved: [{ prompt: "test", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "inline", warnings: [], sessionId: "auth" }],
+			status: "done",
+			completedAt: Date.now(),
+			results: [],
+			progress: [],
+			controller: new AbortController(),
+			parentModelId: undefined,
+		};
+		ticketRegistry.set("tkt1", ticket);
+		expect(isSessionBusy("auth")).toBeNull();
+	});
+});
+
+describe("async delegate integration", () => {
+	let ts: TestSession | undefined;
+
+	afterEach(() => {
+		ticketRegistry.clear();
+		agentPool.clear();
+		ts?.dispose();
+		ts = undefined;
+	});
+
+	test("poll with no tickets returns empty message", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const result = await toolDef!.execute(
+			"tc-poll-1",
+			{ tasks: [{ action: "poll", prompt: "list all tickets" }], async: undefined, ticket: undefined },
+			undefined,
+			undefined,
+			ts.session.extensionRunner as any,
+		);
+		expect(result.content[0].text).toContain("No async tickets");
+	});
+
+	test("poll lists running tickets", () => {
+		const ticket: AsyncTicket = {
+			id: "abc12345",
+			created: Date.now(),
+			tasks: [{ prompt: "investigate" }],
+			resolved: [{ prompt: "investigate", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] }],
+			status: "running",
+			results: [undefined],
+			progress: [{ index: 0, agent: "scout", task: "investigate", status: "running", durationMs: 0, tokens: 0, toolUses: 0, activities: [] }],
+			controller: new AbortController(),
+			parentModelId: "test-model",
+		};
+		ticketRegistry.set("abc12345", ticket);
+		const result = handlePoll({ tasks: [], ticket: undefined }, {} as any);
+		expect(result.content[0].text).toContain("abc12345");
+		expect(result.content[0].text).toContain("running");
+	});
+
+	test("poll with specific ticket returns progress", () => {
+		const ticket: AsyncTicket = {
+			id: "xyz98765",
+			created: Date.now(),
+			tasks: [{ prompt: "check auth" }],
+			resolved: [{ prompt: "check auth", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] }],
+			status: "running",
+			results: [undefined],
+			progress: [{ index: 0, agent: "scout", task: "check auth", status: "running", durationMs: 1000, tokens: 500, toolUses: 2, activities: [] }],
+			controller: new AbortController(),
+			parentModelId: "test-model",
+		};
+		ticketRegistry.set("xyz98765", ticket);
+		const result = handlePoll({ tasks: [], ticket: "xyz98765" }, {} as any);
+		expect(result.content[0].text).toContain("xyz98765");
+		expect(result.content[0].text).toContain("RUNNING");
+	});
+
+	test("poll with unknown ticket returns not found", () => {
+		const result = handlePoll({ tasks: [], ticket: "nonexistent" }, {} as any);
+		expect(result.content[0].text).toContain("not found");
+	});
+
+	test("cancel aborts a running ticket", () => {
+		const controller = new AbortController();
+		const ticket: AsyncTicket = {
+			id: "cancel1",
+			created: Date.now(),
+			tasks: [],
+			resolved: [],
+			status: "running",
+			results: [],
+			progress: [],
+			controller,
+			parentModelId: undefined,
+		};
+		ticketRegistry.set("cancel1", ticket);
+		const result = handleCancel({ tasks: [], ticket: "cancel1" });
+		expect(result.content[0].text).toContain("cancelled");
+		expect(ticket.status).toBe("cancelled");
+		expect(ticket.completedAt).toBeDefined();
+		expect(controller.signal.aborted).toBe(true);
+	});
+
+	test("cancel requires ticket ID", () => {
+		const result = handleCancel({ tasks: [], ticket: undefined });
+		expect(result.content[0].text).toContain("requires a ticket ID");
+	});
+
+	test("cancel on already completed ticket returns status", () => {
+		const ticket: AsyncTicket = {
+			id: "done1",
+			created: Date.now(),
+			completedAt: Date.now(),
+			tasks: [],
+			resolved: [],
+			status: "done",
+			results: [],
+			progress: [],
+			controller: new AbortController(),
+			parentModelId: undefined,
+		};
+		ticketRegistry.set("done1", ticket);
+		const result = handleCancel({ tasks: [], ticket: "done1" });
+		expect(result.content[0].text).toContain("already done");
+	});
+
+	test("help text includes async mode section", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const result = await toolDef!.execute(
+			"tc-help-async",
+			{ tasks: [], async: undefined, ticket: undefined },
+			undefined,
+			undefined,
+			ts.session.extensionRunner as any,
+		);
+		expect(result.content[0].text).toContain("Async Mode");
+		expect(result.content[0].text).toContain("async: true");
+		expect(result.content[0].text).toContain("poll");
+		expect(result.content[0].text).toContain("cancel");
+	});
+
+	test("promptGuidelines includes async mode guideline", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		expect(toolDef!.promptGuidelines.some(g => g.includes("async"))).toBe(true);
+	});
+
+	test("action enum includes poll and cancel", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
+		const actionEnum = taskSchema.properties.action.enum;
+		expect(actionEnum).toContain("poll");
+		expect(actionEnum).toContain("cancel");
+	});
+
+	test("parameter schema includes async and ticket fields", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		const schema = toolDef!.parameters as any;
+		expect(schema.properties.async).toBeDefined();
+		expect(schema.properties.ticket).toBeDefined();
 	});
 });
