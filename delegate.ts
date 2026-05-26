@@ -1161,6 +1161,12 @@ export function hasMutationActivity(activities: ToolActivity[]): boolean {
   );
 }
 
+/** Resolve a cwd string: expand ~ and make absolute. */
+export function resolveCwd(cwd: string): string {
+  const expanded = cwd.startsWith("~") ? path.join(os.homedir(), cwd.slice(1)) : cwd;
+  return path.resolve(expanded);
+}
+
 export function extractOutput(messages: AgentMessage[]): string {
   const parts: string[] = [];
   for (const msg of messages) {
@@ -1603,7 +1609,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       const resolved = params.tasks.map((t, i) => {
         const agent = t.agent ? agents.get(t.agent) : undefined;
-        const cwd = t.cwd ?? ctx.cwd;
+        const cwd = resolveCwd(t.cwd ?? ctx.cwd);
 
         // Load settings-based overrides for this agent
         const settings = loadDelegateSettings(cwd);
@@ -1886,7 +1892,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 ticket.results[i] = { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: poolSessionFile, touchedFiles: [] };
                 return ticket.results[i]!;
               } else {
-                const resolvedPath = path.resolve(t.resumeFrom);
+                const resolvedPath = resolveCwd(t.resumeFrom);
                 if (!fs.existsSync(resolvedPath)) {
                   p.status = "failed"; p.error = `resumeFrom: file not found: ${resolvedPath}`;
                   ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
@@ -2129,7 +2135,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             p.status = "failed"; p.error = msg; fire();
             return { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: poolSessionFile, touchedFiles: [] };
           } else {
-            const resolvedPath = path.resolve(t.resumeFrom);
+            const resolvedPath = resolveCwd(t.resumeFrom);
             if (!fs.existsSync(resolvedPath)) {
               p.status = "failed"; p.error = `resumeFrom: file not found: ${resolvedPath}`; fire();
               return { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
