@@ -49,6 +49,7 @@ import {
 	isSessionBusy,
 	handlePoll,
 	handleCancel,
+	resolveCwd,
 } from "./delegate.ts";
 
 // ── Integration test imports ──────────────────────────────────────────────
@@ -938,6 +939,35 @@ describe("shortenPath", () => {
 });
 
 // ── getActivityAge ───────────────────────────────────────────────────────
+
+describe("resolveCwd", () => {
+	test("passes through absolute paths", () => {
+		expect(resolveCwd("/home/daniel/build/litespec")).toBe("/home/daniel/build/litespec");
+	});
+
+	test("resolves relative paths against process.cwd", () => {
+		const result = resolveCwd("../build/litespec");
+		expect(path.isAbsolute(result)).toBe(true);
+		expect(result).toBe(path.resolve("../build/litespec"));
+	});
+
+	test("expands tilde to homedir", () => {
+		const home = os.homedir();
+		expect(resolveCwd("~/build/litespec")).toBe(path.join(home, "build/litespec"));
+	});
+
+	test("bare tilde resolves to homedir", () => {
+		expect(resolveCwd("~")).toBe(os.homedir());
+	});
+
+	test("tilde with trailing slash", () => {
+		expect(resolveCwd("~/")).toBe(os.homedir());
+	});
+
+	test("dot resolves to process.cwd", () => {
+		expect(resolveCwd(".")).toBe(process.cwd());
+	});
+});
 
 describe("getActivityAge", () => {
 	test("returns empty for undefined", () => {
