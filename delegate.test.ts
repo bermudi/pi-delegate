@@ -38,6 +38,10 @@ import {
 	RETRYABLE_PATTERNS,
 	RETRYABLE_PATTERN,
 	isRetryableError,
+	isRateLimitError,
+	computeRetryDelay,
+	runAgent,
+	runAgentOnce,
 	taskImpliesEdits,
 	hasMutationActivity,
 	readDelegateSettingsFile,
@@ -1160,6 +1164,242 @@ describe("isRetryableError", () => {
 		expect(RETRYABLE_PATTERN.test("rate limit exceeded")).toBe(true);
 		expect(RETRYABLE_PATTERN.test("HTTP 500 internal error")).toBe(true);
 		expect(RETRYABLE_PATTERN.test("file not found")).toBe(false);
+	});
+});
+
+// ── Rate-Limit Classification ─────────────────────────────────────────────
+
+describe("isRateLimitError", () => {
+	test("matches 429 errors", () => {
+		expect(isRateLimitError("HTTP 429")).toBe(true);
+		expect(isRateLimitError("429 too many requests")).toBe(true);
+	});
+	test("matches rate limit strings", () => {
+		expect(isRateLimitError("rate limit exceeded")).toBe(true);
+		expect(isRateLimitError("RateLimit")).toBe(true);
+	});
+	test("matches too many requests", () => {
+		expect(isRateLimitError("too many requests")).toBe(true);
+	});
+	test("returns false for non-rate-limit errors", () => {
+		expect(isRateLimitError("network error")).toBe(false);
+		expect(isRateLimitError("HTTP 500")).toBe(false);
+		expect(isRateLimitError("")).toBe(false);
+	});
+});
+
+// ── Retry Delay Math ──────────────────────────────────────────────────────
+
+describe("computeRetryDelay", () => {
+	test("rate-limit backoff doubles and caps at 5min", () => {
+		const orig = Math.random;
+		Math.random = () => 0;
+		expect(computeRetryDelay(0, 2000, 0, true)).toMatchObject({ baseDelay: 30_000, jitter: 0, stagger: 0, delay: 30_000 });
+		expect(computeRetryDelay(1, 2000, 0, true)).toMatchObject({ baseDelay: 60_000, jitter: 0, stagger: 0, delay: 60_000 });
+		expect(computeRetryDelay(2, 2000, 0, true)).toMatchObject({ baseDelay: 120_000, jitter: 0, stagger: 0, delay: 120_000 });
+		expect(computeRetryDelay(3, 2000, 0, true)).toMatchObject({ baseDelay: 240_000, jitter: 0, stagger: 0, delay: 240_000 });
+		expect(computeRetryDelay(4, 2000, 0, true)).toMatchObject({ baseDelay: 300_000, jitter: 0, stagger: 0, delay: 300_000 });
+		expect(computeRetryDelay(10, 2000, 0, true)).toMatchObject({ baseDelay: 300_000, jitter: 0, stagger: 0, delay: 300_000 });
+		Math.random = orig;
+	});
+
+	test("generic backoff doubles uncapped", () => {
+		const orig = Math.random;
+		Math.random = () => 0;
+		expect(computeRetryDelay(0, 2000, 0, false)).toMatchObject({ baseDelay: 2000, jitter: 0, stagger: 0, delay: 2000 });
+		expect(computeRetryDelay(1, 2000, 0, false)).toMatchObject({ baseDelay: 4000, jitter: 0, stagger: 0, delay: 4000 });
+		expect(computeRetryDelay(2, 2000, 0, false)).toMatchObject({ baseDelay: 8000, jitter: 0, stagger: 0, delay: 8000 });
+		Math.random = orig;
+	});
+
+	test("stagger scales with error type", () => {
+		const orig = Math.random;
+		Math.random = () => 0;
+		expect(computeRetryDelay(0, 2000, 2, true)).toMatchObject({ baseDelay: 30_000, jitter: 0, stagger: 30_000, delay: 60_000 });
+		expect(computeRetryDelay(0, 2000, 2, false)).toMatchObject({ baseDelay: 2000, jitter: 0, stagger: 4000, delay: 6000 });
+		Math.random = orig;
+	});
+
+	test("jitter respects bounds", () => {
+		const orig = Math.random;
+		Math.random = () => 0.5;
+		const rateLimit = computeRetryDelay(0, 2000, 0, true);
+		expect(rateLimit.jitter).toBe(5000);
+		expect(rateLimit.delay).toBe(35_000);
+		const generic = computeRetryDelay(0, 2000, 0, false);
+		expect(generic.jitter).toBe(1000);
+		expect(generic.delay).toBe(3000);
+		Math.random = orig;
+	});
+});
+
+// ── Session Pollution Fix ─────────────────────────────────────────────────
+
+describe("runAgentOnce suppressSessionAppend", () => {
+	test("does not append messages when suppressed", async () => {
+		const appended: unknown[] = [];
+		const sessionManager = {
+			appendMessage: (msg: unknown) => { appended.push(msg); return "id"; },
+			getSessionFile: () => "test.jsonl",
+			appendSessionInfo: () => "id",
+		};
+
+		const agent = {
+			state: { messages: [{ role: "user", content: "hi" }] as any[] },
+			async prompt() {
+				this.state.messages.push({ role: "assistant", content: [{ type: "text", text: "hello" }] });
+			},
+			async waitForIdle() {},
+			abort() {},
+			subscribe() { return () => {}; },
+		};
+
+		await runAgentOnce(
+			agent as any,
+			"test",
+			{ systemPrompt: "", model: {} as any, thinking: "off", tools: [], cwd: "/tmp" },
+			{} as any,
+			undefined,
+			undefined,
+			sessionManager as any,
+			new Set(),
+			Date.now(),
+			true,
+		);
+
+		expect(appended).toEqual([]);
+	});
+
+	test("appends messages when not suppressed", async () => {
+		const appended: unknown[] = [];
+		const sessionManager = {
+			appendMessage: (msg: unknown) => { appended.push(msg); return "id"; },
+			getSessionFile: () => "test.jsonl",
+			appendSessionInfo: () => "id",
+		};
+
+		const agent = {
+			state: { messages: [{ role: "user", content: "hi" }] as any[] },
+			async prompt() {
+				this.state.messages.push({ role: "assistant", content: [{ type: "text", text: "hello" }] });
+			},
+			async waitForIdle() {},
+			abort() {},
+			subscribe() { return () => {}; },
+		};
+
+		await runAgentOnce(
+			agent as any,
+			"test",
+			{ systemPrompt: "", model: {} as any, thinking: "off", tools: [], cwd: "/tmp" },
+			{} as any,
+			undefined,
+			undefined,
+			sessionManager as any,
+			new Set(),
+			Date.now(),
+			false,
+		);
+
+		expect(appended.length).toBe(1);
+		expect((appended[0] as any).role).toBe("assistant");
+	});
+});
+
+describe("runAgent retry loop", () => {
+	test("flushes messages only on final success after retries", async () => {
+		const appended: any[] = [];
+		const sessionManager = {
+			appendMessage: (msg: any) => { appended.push(msg); return "id"; },
+			getSessionFile: () => "test.jsonl",
+			appendSessionInfo: () => "id",
+		};
+
+		let callCount = 0;
+		const agent = {
+			state: { messages: [] as any[] },
+			async prompt() {
+				callCount++;
+				if (callCount === 1) {
+					throw new Error("network error");
+				}
+				this.state.messages.push({ role: "assistant", content: [{ type: "text", text: "success" }] });
+			},
+			async waitForIdle() {},
+			abort() {},
+			subscribe() { return () => {}; },
+		};
+
+		const origRandom = Math.random;
+		Math.random = () => 0;
+
+		const result = await runAgent(
+			{ systemPrompt: "", model: {} as any, thinking: "off", tools: [], cwd: "/tmp" },
+			"test",
+			{} as any,
+			undefined,
+			undefined,
+			sessionManager as any,
+			1,
+			1,
+			agent as any,
+			true,
+			0,
+		);
+
+		Math.random = origRandom;
+
+		expect(callCount).toBe(2);
+		expect(result.error).toBeUndefined();
+		expect(result.output).toBe("success");
+		expect(appended.length).toBe(1);
+		expect(appended[0].role).toBe("assistant");
+		expect(appended[0].content[0].text).toBe("success");
+	});
+
+	test("does not flush any messages when all retries are exhausted", async () => {
+		const appended: any[] = [];
+		const sessionManager = {
+			appendMessage: (msg: any) => { appended.push(msg); return "id"; },
+			getSessionFile: () => "test.jsonl",
+			appendSessionInfo: () => "id",
+		};
+
+		let callCount = 0;
+		const agent = {
+			state: { messages: [] as any[] },
+			async prompt() {
+				callCount++;
+				this.state.messages.push({ role: "assistant", content: [{ type: "text", text: `attempt ${callCount}` }] });
+				this.state.errorMessage = "network error";
+			},
+			async waitForIdle() {},
+			abort() {},
+			subscribe() { return () => {}; },
+		};
+
+		const origRandom = Math.random;
+		Math.random = () => 0;
+
+		const result = await runAgent(
+			{ systemPrompt: "", model: {} as any, thinking: "off", tools: [], cwd: "/tmp" },
+			"test",
+			{} as any,
+			undefined,
+			undefined,
+			sessionManager as any,
+			1,
+			1,
+			agent as any,
+			true,
+			0,
+		);
+
+		Math.random = origRandom;
+
+		expect(callCount).toBe(2);
+		expect(result.error).toBe("network error");
+		expect(appended).toEqual([]);
 	});
 });
 
