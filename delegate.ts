@@ -870,6 +870,29 @@ export function isRetryableError(error: string): boolean {
   return RETRYABLE_PATTERNS.some((p) => p.test(error));
 }
 
+/** Check if an error is specifically a rate limit (429 / quota) error.
+ *  Rate limits need much longer backoff than transient network errors. */
+export function isRateLimitError(error: string): boolean {
+  if (!error) return false;
+  return /\b429\b/i.test(error) || /too many requests/i.test(error) || /rate\s*limit/i.test(error);
+}
+
+/** Pure helper for retry backoff math. Exported for testing. */
+export function computeRetryDelay(
+  attempt: number,
+  retryBaseMs: number,
+  taskIndex: number,
+  isRateLimit: boolean,
+): { baseDelay: number; jitter: number; stagger: number; delay: number } {
+  const baseDelay = isRateLimit
+    ? Math.min(30_000 * Math.pow(2, attempt), 300_000)
+    : retryBaseMs * Math.pow(2, attempt);
+  const jitterMax = isRateLimit ? 10_000 : retryBaseMs;
+  const jitter = Math.random() * jitterMax;
+  const stagger = taskIndex * (isRateLimit ? 15_000 : 2_000);
+  return { baseDelay, jitter, stagger, delay: baseDelay + jitter + stagger };
+}
+
 /**
  * Custom error for abort signals — avoids brittle string-matching on
  * error messages when distinguishing between expected aborts and real failures.
@@ -925,7 +948,7 @@ async function mapConcurrent<T, R>(
 }
 
 /** Run a single prompt on an Agent instance. Shared by both fresh and pooled paths. */
-async function runAgentOnce(
+export async function runAgentOnce(
   agent: Agent,
   prompt: string,
   config: { systemPrompt: string; model: Model<Api>; thinking: ThinkingLevel; tools: string[]; cwd: string },
@@ -935,6 +958,7 @@ async function runAgentOnce(
   sessionManager?: SessionManagerLike,
   gitBaseline?: Set<string>,
   start?: number,
+  suppressSessionAppend = false,
 ): Promise<{ output: string; error?: string; durationMs: number; tokens: number; touchedFiles: string[] }> {
   const startTime = start ?? Date.now();
   const baseline = gitBaseline ?? new Set<string>();
@@ -998,7 +1022,8 @@ async function runAgentOnce(
     const tokensThisCall = usageAfter.total - usageBeforeTotal;
 
     // Persist only the new messages added by this prompt (avoids duplication on pool reuse).
-    if (sessionManager) {
+    // When retrying, we defer this flush so failed attempts don't pollute the session file.
+    if (sessionManager && !suppressSessionAppend) {
       try {
         for (let mi = messagesBefore; mi < state.messages.length; mi++) {
           const msg = state.messages[mi]!;
@@ -1035,7 +1060,7 @@ interface AgentProgressUpdate {
   activities: ToolActivity[];
 }
 
-async function runAgent(
+export async function runAgent(
   config: {
     systemPrompt: string;
     model: Model<Api>;
@@ -1054,6 +1079,8 @@ async function runAgent(
   existingAgent?: Agent,
   /** When true, existingAgent is a resumed session — safe to retry on transient errors. */
   allowRetry = false,
+  /** Task index within a concurrent delegate batch. Used to stagger retries across tasks. */
+  taskIndex = 0,
 ): Promise<{ output: string; error?: string; durationMs: number; tokens: number; touchedFiles: string[] }> {
   const start = Date.now();
 
@@ -1066,49 +1093,64 @@ async function runAgent(
     return runAgentOnce(existingAgent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start);
   }
 
-  // Snapshot initial message count for resumed agents — on retry, trim back to avoid duplicates.
-  // Fresh agents create a new instance per attempt so this is only needed for existingAgent.
-  const initialMessageCount = existingAgent ? existingAgent.state.messages.length : 0;
+  // Create agent once — reuse across retries to preserve prior work (tool results, reasoning).
+  // Fresh agents start empty; resumed/pooled agents start with loaded state.
+  const agent = existingAgent ?? new Agent({
+    initialState: {
+      systemPrompt: config.systemPrompt,
+      model: config.model,
+      thinkingLevel: config.thinking,
+      tools: config.tools
+        .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
+        .filter(Boolean) as AgentTool[],
+    },
+    convertToLlm,
+    streamFn: async (m, context, options) => {
+      const auth = await modelRegistry.getApiKeyAndHeaders(m);
+      if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+      return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+    },
+  });
+
+  // Snapshot message count before first prompt — trim back to here on retry.
+  const initialMessageCount = agent.state.messages.length;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal?.aborted) {
       return { output: "", error: "Aborted", durationMs: Date.now() - start, tokens: 0, touchedFiles: [] };
     }
 
-    // Resumed agents reuse the rehydrated instance; fresh agents create a new one per attempt.
-    const agent = existingAgent ?? new Agent({
-      initialState: {
-        systemPrompt: config.systemPrompt,
-        model: config.model,
-        thinkingLevel: config.thinking,
-        tools: config.tools
-          .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
-          .filter(Boolean) as AgentTool[],
-      },
-      convertToLlm,
-      streamFn: async (m, context, options) => {
-        const auth = await modelRegistry.getApiKeyAndHeaders(m);
-        if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-        return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
-      },
-    });
-
     // Signal retry to the progress UI.
     if (attempt > 0 && onProgress) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start, activities: [] });
 
-    const result = await runAgentOnce(agent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start);
+    const result = await runAgentOnce(agent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start, true);
     if (result.error && attempt < maxRetries && isRetryableError(result.error)) {
       // Trim partial state from the failed attempt before retrying.
-      // Only needed for resumed agents — fresh agents create a new instance per attempt.
-      if (existingAgent) {
-        existingAgent.state.messages.length = initialMessageCount;
-      }
-      const delay = retryBaseMs * Math.pow(2, attempt) + Math.random() * retryBaseMs;
+      // This removes the failed prompt/response so the retry starts from a clean state.
+      agent.state.messages.length = initialMessageCount;
+
+      const isRateLimit = isRateLimitError(result.error);
+      const { delay } = computeRetryDelay(attempt, retryBaseMs, taskIndex, isRateLimit);
+
       try { await sleepWithAbort(delay, signal); } catch (sleepErr) {
         if (!(sleepErr instanceof AbortError)) throw sleepErr;
       }
       continue;
     }
+
+    // Flush pending messages only on success. Failed attempts (even the final
+    // exhausted retry) should not pollute the session file.
+    if (sessionManager && !result.error) {
+      try {
+        for (let mi = initialMessageCount; mi < agent.state.messages.length; mi++) {
+          const msg = agent.state.messages[mi]!;
+          if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult" || msg.role === "custom") {
+            sessionManager.appendMessage(msg);
+          }
+        }
+      } catch { /* best effort */ }
+    }
+
     return result;
   }
 
@@ -1942,6 +1984,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               2000,       // retryBaseMs
               existingAgent,
               !isPoolHit, // allowRetry
+              i,
             );
 
             // Pool insertion on success (only if not already inserted synchronously)
@@ -2187,6 +2230,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               2000,      // retryBaseMs
               existingAgent, // pre-existing agent for pooled, resumed, or pool-miss sessions
               !isPoolHit,    // allowRetry: safe unless pool hit (accumulated multi-turn state)
+              i,
             );
 
             // Insert into pool only after successful first run.
