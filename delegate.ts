@@ -870,11 +870,20 @@ export function isRetryableError(error: string): boolean {
   return RETRYABLE_PATTERNS.some((p) => p.test(error));
 }
 
+/** Patterns that indicate a rate-limit (429 / quota) error. */
+export const RATE_LIMIT_PATTERNS: RegExp[] = [
+  /rate\s*limit/i,
+  /too many requests/i,
+  /\b429\b/,
+  /overloaded/i,
+  /retry delay/i,
+];
+
 /** Check if an error is specifically a rate limit (429 / quota) error.
  *  Rate limits need much longer backoff than transient network errors. */
 export function isRateLimitError(error: string): boolean {
   if (!error) return false;
-  return /\b429\b/i.test(error) || /too many requests/i.test(error) || /rate\s*limit/i.test(error);
+  return RATE_LIMIT_PATTERNS.some((p) => p.test(error));
 }
 
 /** Pure helper for retry backoff math. Exported for testing. */
@@ -884,13 +893,12 @@ export function computeRetryDelay(
   taskIndex: number,
   isRateLimit: boolean,
 ): { baseDelay: number; jitter: number; stagger: number; delay: number } {
-  const baseDelay = isRateLimit
-    ? Math.min(30_000 * Math.pow(2, attempt), 300_000)
-    : retryBaseMs * Math.pow(2, attempt);
-  const jitterMax = isRateLimit ? 10_000 : retryBaseMs;
-  const jitter = Math.random() * jitterMax;
-  const stagger = taskIndex * (isRateLimit ? 15_000 : 2_000);
-  return { baseDelay, jitter, stagger, delay: baseDelay + jitter + stagger };
+  const rawBase = isRateLimit ? 30_000 : retryBaseMs;
+  const baseDelay = rawBase * Math.pow(2, attempt);
+  const jitter = Math.random() * rawBase;
+  const stagger = taskIndex * 10_000;
+  const delay = Math.min(baseDelay + jitter + stagger, isRateLimit ? 300_000 : 60_000);
+  return { baseDelay, jitter, stagger, delay };
 }
 
 /**
@@ -1095,22 +1103,30 @@ export async function runAgent(
 
   // Create agent once — reuse across retries to preserve prior work (tool results, reasoning).
   // Fresh agents start empty; resumed/pooled agents start with loaded state.
-  const agent = existingAgent ?? new Agent({
-    initialState: {
-      systemPrompt: config.systemPrompt,
-      model: config.model,
-      thinkingLevel: config.thinking,
-      tools: config.tools
-        .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
-        .filter(Boolean) as AgentTool[],
-    },
-    convertToLlm,
-    streamFn: async (m, context, options) => {
-      const auth = await modelRegistry.getApiKeyAndHeaders(m);
-      if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-      return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
-    },
-  });
+  let agent: Agent;
+  if (existingAgent) {
+    agent = existingAgent;
+  } else {
+    agent = new Agent({
+      initialState: {
+        systemPrompt: config.systemPrompt,
+        model: config.model,
+        thinkingLevel: config.thinking,
+        tools: config.tools
+          .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
+          .filter(Boolean) as AgentTool[],
+      },
+      convertToLlm,
+      streamFn: async (m, context, options) => {
+        const auth = await modelRegistry.getApiKeyAndHeaders(m);
+        if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+        return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+      },
+    });
+  }
+
+  // Track sessionManager — may be replaced on rehydration.
+  let currentSessionManager = sessionManager;
 
   // Snapshot message count before first prompt — trim back to here on retry.
   const initialMessageCount = agent.state.messages.length;
@@ -1123,12 +1139,43 @@ export async function runAgent(
     // Signal retry to the progress UI.
     if (attempt > 0 && onProgress) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start, activities: [] });
 
-    const result = await runAgentOnce(agent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start, true);
-    if (result.error && attempt < maxRetries && isRetryableError(result.error)) {
-      // Trim partial state from the failed attempt before retrying.
-      // This removes the failed prompt/response so the retry starts from a clean state.
-      agent.state.messages.length = initialMessageCount;
+    if (attempt > 0) {
+      if (existingAgent) {
+        existingAgent.state.messages.length = initialMessageCount;
+      } else if (currentSessionManager) {
+        const sessionFile = currentSessionManager.getSessionFile();
+        if (sessionFile) {
+          const rehydrated = rehydrateAgent(sessionFile, config, modelRegistry);
+          if (rehydrated) {
+            agent = rehydrated.agent;
+            currentSessionManager = rehydrated.sessionManager;
+          } else {
+            // Fallback: fresh agent.
+            agent = new Agent({
+              initialState: {
+                systemPrompt: config.systemPrompt,
+                model: config.model,
+                thinkingLevel: config.thinking,
+                tools: config.tools
+                  .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
+                  .filter(Boolean) as AgentTool[],
+              },
+              convertToLlm,
+              streamFn: async (m, context, options) => {
+                const auth = await modelRegistry.getApiKeyAndHeaders(m);
+                if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+                return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+              },
+            });
+            currentSessionManager = sessionManager;
+          }
+        }
+      }
+    }
 
+    const messagesBeforeAttempt = agent.state.messages.length;
+    const result = await runAgentOnce(agent, prompt, config, modelRegistry, signal, onProgress, currentSessionManager, gitBaseline, start, true);
+    if (result.error && attempt < maxRetries && isRetryableError(result.error)) {
       const isRateLimit = isRateLimitError(result.error);
       const { delay } = computeRetryDelay(attempt, retryBaseMs, taskIndex, isRateLimit);
 
@@ -1140,12 +1187,12 @@ export async function runAgent(
 
     // Flush pending messages only on success. Failed attempts (even the final
     // exhausted retry) should not pollute the session file.
-    if (sessionManager && !result.error) {
+    if (currentSessionManager && !result.error) {
       try {
-        for (let mi = initialMessageCount; mi < agent.state.messages.length; mi++) {
+        for (let mi = messagesBeforeAttempt; mi < agent.state.messages.length; mi++) {
           const msg = agent.state.messages[mi]!;
           if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult" || msg.role === "custom") {
-            sessionManager.appendMessage(msg);
+            currentSessionManager.appendMessage(msg);
           }
         }
       } catch { /* best effort */ }
