@@ -36,6 +36,7 @@ import {
 	withSessionLock,
 	rehydrateAgent,
 	RETRYABLE_PATTERNS,
+	RATE_LIMIT_PATTERNS,
 	RETRYABLE_PATTERN,
 	isRetryableError,
 	isRateLimitError,
@@ -1181,10 +1182,25 @@ describe("isRateLimitError", () => {
 	test("matches too many requests", () => {
 		expect(isRateLimitError("too many requests")).toBe(true);
 	});
+	test("matches overloaded and retry delay", () => {
+		expect(isRateLimitError("server overloaded")).toBe(true);
+		expect(isRateLimitError("retry delay of 30s")).toBe(true);
+	});
 	test("returns false for non-rate-limit errors", () => {
 		expect(isRateLimitError("network error")).toBe(false);
 		expect(isRateLimitError("HTTP 500")).toBe(false);
 		expect(isRateLimitError("")).toBe(false);
+	});
+});
+
+describe("RATE_LIMIT_PATTERNS", () => {
+	test("contains expected patterns", () => {
+		expect(RATE_LIMIT_PATTERNS.length).toBe(5);
+		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "rate\\s*limit")).toBe(true);
+		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "too many requests")).toBe(true);
+		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "\\b429\\b")).toBe(true);
+		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "overloaded")).toBe(true);
+		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "retry delay")).toBe(true);
 	});
 });
 
@@ -1198,34 +1214,35 @@ describe("computeRetryDelay", () => {
 		expect(computeRetryDelay(1, 2000, 0, true)).toMatchObject({ baseDelay: 60_000, jitter: 0, stagger: 0, delay: 60_000 });
 		expect(computeRetryDelay(2, 2000, 0, true)).toMatchObject({ baseDelay: 120_000, jitter: 0, stagger: 0, delay: 120_000 });
 		expect(computeRetryDelay(3, 2000, 0, true)).toMatchObject({ baseDelay: 240_000, jitter: 0, stagger: 0, delay: 240_000 });
-		expect(computeRetryDelay(4, 2000, 0, true)).toMatchObject({ baseDelay: 300_000, jitter: 0, stagger: 0, delay: 300_000 });
-		expect(computeRetryDelay(10, 2000, 0, true)).toMatchObject({ baseDelay: 300_000, jitter: 0, stagger: 0, delay: 300_000 });
+		expect(computeRetryDelay(4, 2000, 0, true)).toMatchObject({ baseDelay: 480_000, jitter: 0, stagger: 0, delay: 300_000 });
+		expect(computeRetryDelay(10, 2000, 0, true)).toMatchObject({ baseDelay: 30_720_000, jitter: 0, stagger: 0, delay: 300_000 });
 		Math.random = orig;
 	});
 
-	test("generic backoff doubles uncapped", () => {
+	test("generic backoff doubles and caps at 1min", () => {
 		const orig = Math.random;
 		Math.random = () => 0;
 		expect(computeRetryDelay(0, 2000, 0, false)).toMatchObject({ baseDelay: 2000, jitter: 0, stagger: 0, delay: 2000 });
 		expect(computeRetryDelay(1, 2000, 0, false)).toMatchObject({ baseDelay: 4000, jitter: 0, stagger: 0, delay: 4000 });
 		expect(computeRetryDelay(2, 2000, 0, false)).toMatchObject({ baseDelay: 8000, jitter: 0, stagger: 0, delay: 8000 });
+		expect(computeRetryDelay(5, 2000, 0, false)).toMatchObject({ baseDelay: 64_000, jitter: 0, stagger: 0, delay: 60_000 });
 		Math.random = orig;
 	});
 
-	test("stagger scales with error type", () => {
+	test("stagger is always taskIndex * 10_000", () => {
 		const orig = Math.random;
 		Math.random = () => 0;
-		expect(computeRetryDelay(0, 2000, 2, true)).toMatchObject({ baseDelay: 30_000, jitter: 0, stagger: 30_000, delay: 60_000 });
-		expect(computeRetryDelay(0, 2000, 2, false)).toMatchObject({ baseDelay: 2000, jitter: 0, stagger: 4000, delay: 6000 });
+		expect(computeRetryDelay(0, 2000, 2, true)).toMatchObject({ baseDelay: 30_000, jitter: 0, stagger: 20_000, delay: 50_000 });
+		expect(computeRetryDelay(0, 2000, 2, false)).toMatchObject({ baseDelay: 2000, jitter: 0, stagger: 20_000, delay: 22_000 });
 		Math.random = orig;
 	});
 
-	test("jitter respects bounds", () => {
+	test("jitter equals Math.random() * rawBase", () => {
 		const orig = Math.random;
 		Math.random = () => 0.5;
 		const rateLimit = computeRetryDelay(0, 2000, 0, true);
-		expect(rateLimit.jitter).toBe(5000);
-		expect(rateLimit.delay).toBe(35_000);
+		expect(rateLimit.jitter).toBe(15_000);
+		expect(rateLimit.delay).toBe(45_000);
 		const generic = computeRetryDelay(0, 2000, 0, false);
 		expect(generic.jitter).toBe(1000);
 		expect(generic.delay).toBe(3000);
