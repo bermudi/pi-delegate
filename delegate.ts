@@ -198,16 +198,23 @@ export const agentPool = new Map<string, PooledAgent>();
 const sessionLocks = new Map<string, Promise<void>>();
 
 export async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
-  const existing = sessionLocks.get(sessionId);
-  if (existing) await existing;
+  const prev = sessionLocks.get(sessionId);
   let resolve!: () => void;
   const promise = new Promise<void>((r) => { resolve = r; });
+  // Install ourselves BEFORE awaiting — so the next waiter queues behind us,
+  // not behind the same predecessor we're waiting on.
   sessionLocks.set(sessionId, promise);
   try {
+    if (prev) await prev;
     return await fn();
   } finally {
-    sessionLocks.delete(sessionId);
     resolve();
+    // Only clean up if no one queued behind us (our promise is still current).
+    // If a waiter installed their own promise, leave it — deleting would
+    // clobber their map entry and break the chain.
+    if (sessionLocks.get(sessionId) === promise) {
+      sessionLocks.delete(sessionId);
+    }
   }
 }
 
