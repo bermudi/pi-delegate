@@ -45,6 +45,14 @@ export interface AgentConfig {
 }
 
 export type SessionAction = "prompt" | "close" | "list" | "poll" | "cancel";
+export type DelegateAction = "poll" | "cancel";
+
+export interface DelegateParams {
+  action?: DelegateAction;
+  async?: boolean;
+  ticket?: string;
+  tasks?: TaskDef[];
+}
 
 export interface TaskDef {
   prompt: string;
@@ -319,19 +327,20 @@ function formatCompletedTicket(ticket: AsyncTicket): AgentToolResult<DelegateDet
 }
 
 /** Push results into parent session via sendMessage when background ticket completes. */
-function deliverTicketResults(pi: ExtensionAPI, ticket: AsyncTicket): void {
+export function deliverTicketResults(pi: ExtensionAPI, ticket: AsyncTicket): void {
   if (!ticket.completedAt) return;
 
-  const status = ticket.status === "done" ? "completed" : ticket.status;
-  const succeeded = ticket.results.filter(r => r && !("error" in r && r.error)).length;
-  const total = ticket.results.length;
-  const summary = `Async delegate ${ticket.id} ${status}: ${succeeded}/${total} tasks`;
+  const formatted = formatCompletedTicket(ticket);
+  const text = formatted.content
+    .filter((c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
+    .map((c) => c.text)
+    .join("\n");
 
   pi.sendMessage({
     customType: "async_delegate_result",
-    content: summary,
+    content: text,
     display: true,
-    details: { ticketId: ticket.id, status: ticket.status },
+    details: { ...formatted.details, ticketId: ticket.id, status: ticket.status },
   }, {
     deliverAs: "followUp",
     triggerTurn: true,
@@ -1388,7 +1397,7 @@ function formatToolCallShort(name: string, args: Record<string, unknown>): strin
 
 // ── Async Poll/Cancel Handlers ────────────────────────────────────────────
 
-export function handlePoll(params: { tasks: TaskDef[]; ticket?: string }, ctx: ExtensionContext): AgentToolResult<DelegateDetails> {
+export function handlePoll(params: { ticket?: string }, ctx: ExtensionContext): AgentToolResult<DelegateDetails> {
   sweepTickets();
   const parentModelId = ctx.model?.id;
 
@@ -1443,7 +1452,7 @@ export function handlePoll(params: { tasks: TaskDef[]; ticket?: string }, ctx: E
   return formatCompletedTicket(ticket);
 }
 
-export function handleCancel(params: { tasks: TaskDef[]; ticket?: string }): AgentToolResult<DelegateDetails> {
+export function handleCancel(params: { ticket?: string }): AgentToolResult<DelegateDetails> {
   sweepTickets();
   const ticketId = params.ticket;
 
@@ -1481,7 +1490,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     label: "Delegate",
     promptSnippet: "Spawn subagents in parallel — each with independent context, model, tools, and skills.",
     promptGuidelines: [
-      "Use delegate to parallelize independent work across subagents. Each task must include \"prompt\"; specify \"agent\" (name from .pi/agents/*.md) and/or \"systemPrompt\". All other fields (model, tools, skills, thinking, cwd, context) are optional and fall back to agent defaults or parent session values.",
+      "Use delegate to parallelize independent work across subagents. For prompt tasks, each task must include \"prompt\"; specify \"agent\" (name from .pi/agents/*.md) and/or \"systemPrompt\". All other fields (model, tools, skills, thinking, cwd, context) are optional and fall back to agent defaults or parent session values.",
       "Subagents only have pi core tools: read, write, edit, bash.",
       "Call delegate with an empty tasks array to see how to use the delegate tool.",
       "For async mode: set async:true to fire tasks in the background. Results are automatically delivered when complete. Use delegate({action:\"poll\"}) to check status or delegate({action:\"poll\",ticket:\"id\"}) for a specific ticket.",
@@ -1489,13 +1498,17 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     description:
       "Spawn subagents in parallel. Call with an empty tasks array for full help.",
     parameters: Type.Object({
+      action: Type.Optional(Type.String({
+        enum: ["poll", "cancel"],
+        description: "Top-level async ticket action. Use 'poll' to list/check tickets or 'cancel' to abort one.",
+      })),
       async: Type.Optional(Type.Boolean({
         description: "Return immediately with a ticket ID. Poll with action='poll'.",
       })),
       ticket: Type.Optional(Type.String({
         description: "Ticket ID for poll/cancel actions.",
       })),
-      tasks: Type.Array(
+      tasks: Type.Optional(Type.Array(
         Type.Object({
           prompt: Type.Optional(Type.String({ description: "The task for this subagent to perform. Required unless action is 'close'/'list' or resumeFrom is set." })),
           agent: Type.Optional(Type.String({
@@ -1535,27 +1548,31 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           })),
         }),
         { minItems: 0, description: "Tasks to run in parallel. Pass an empty array to see available agents and usage docs." },
-      ),
+      )),
     }),
 
-    async execute(_id, params: { tasks: TaskDef[]; async?: boolean; ticket?: string }, signal, onUpdate, ctx) {
+    async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
-      const agents = discoverAgents(ctx.cwd);
+      const tasks = params.tasks ?? [];
 
       // ── Poll action ───────────────────────────────────────────────────
-      // Check if ANY task has action='poll' — route to poll handler
-      if (params.tasks.some(t => t.action === "poll")) {
+      // Top-level action is the public API. Per-task action is accepted for
+      // backward compatibility with early async builds.
+      if (params.action === "poll" || tasks.some(t => t.action === "poll")) {
         return handlePoll(params, ctx);
       }
 
       // ── Cancel action ─────────────────────────────────────────────────
-      // Check if ANY task has action='cancel' — route to cancel handler
-      if (params.tasks.some(t => t.action === "cancel")) {
+      // Top-level action is the public API. Per-task action is accepted for
+      // backward compatibility with early async builds.
+      if (params.action === "cancel" || tasks.some(t => t.action === "cancel")) {
         return handleCancel(params);
       }
 
+      const agents = discoverAgents(ctx.cwd);
+
       // ── Help mode ─────────────────────────────────────────────────
-      if (!params.tasks.length) {
+      if (!tasks.length) {
         const names = [...agents.keys()];
         const agentList = names.length
           ? names.map((n) => {
@@ -1603,7 +1620,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "- `cwd` — Working directory. Default: parent session cwd.",
             "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
             "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
-            "- `action` — 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
+            "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
+            "- top-level `action` — Async ticket action: 'poll' or 'cancel'. Does not require `tasks`.",
             "",
             "## Session Reuse",
             "",
@@ -1664,31 +1682,31 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // ── Validate ──────────────────────────────────────────────────
       // Disallow same sessionId across multiple parallel tasks (one agent can't serve two prompts concurrently).
-      const sessionIds = params.tasks.map((t) => t.sessionId).filter(Boolean);
+      const sessionIds = tasks.map((t) => t.sessionId).filter(Boolean);
       const duplicateSessions = sessionIds.filter((id, i) => sessionIds.indexOf(id) !== i);
       if (duplicateSessions.length) {
         return {
           content: [{ type: "text", text: `Duplicate sessionId(s) across tasks: ${[...new Set(duplicateSessions)].join(", ")}. A pooled agent can only handle one prompt at a time.` }],
-          details: { tasks: params.tasks, results: [], progress: [], parentModel: parentModelId },
+          details: { tasks, results: [], progress: [], parentModel: parentModelId },
         };
       }
 
       const unknown: string[] = [];
-      for (const t of params.tasks) {
+      for (const t of tasks) {
         if (t.agent && !agents.has(t.agent)) unknown.push(t.agent);
       }
       if (unknown.length) {
         const names = [...agents.keys()];
         return {
           content: [{ type: "text", text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with an empty tasks array for help.` }],
-          details: { tasks: params.tasks, results: [], progress: [], parentModel: parentModelId },
+          details: { tasks, results: [], progress: [], parentModel: parentModelId },
         };
       }
 
       // ── Resolve tasks ─────────────────────────────────────────────
       // Build parent transcript lazily — only computed once if any task uses with-parent-transcript
       let parentTranscript: string | null = null;
-      const needsParentContext = params.tasks.some((t) => t.context === "with-parent-transcript");
+      const needsParentContext = tasks.some((t) => t.context === "with-parent-transcript");
       if (needsParentContext) {
         if (!ctx.sessionManager) {
           throw new Error("context: 'with-parent-transcript' requires a persisted parent session.");
@@ -1696,7 +1714,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         parentTranscript = buildParentTranscript(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId());
       }
 
-      const resolved = params.tasks.map((t, i) => {
+      const resolved = tasks.map((t, i) => {
         const agent = t.agent ? agents.get(t.agent) : undefined;
         const cwd = resolveCwd(t.cwd ?? ctx.cwd);
 
@@ -1808,7 +1826,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       }));
       const fire = () => onUpdate?.({
         content: [{ type: "text", text: `Running ${resolved.length} subagent${resolved.length > 1 ? "s" : ""}…` }],
-        details: { tasks: params.tasks, results: [], progress: [...progress], parentModel: parentModelId },
+        details: { tasks, results: [], progress: [...progress], parentModel: parentModelId },
       });
       fire();
 
@@ -1819,7 +1837,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         if (runningCount >= MAX_ASYNC_TICKETS) {
           return {
             content: [{ type: "text", text: `Too many async tickets running (${runningCount}/${MAX_ASYNC_TICKETS}). Poll existing tickets or cancel one first.` }],
-            details: { tasks: params.tasks, results: [], progress: [], parentModel: parentModelId },
+            details: { tasks, results: [], progress: [], parentModel: parentModelId },
           };
         }
 
@@ -1828,7 +1846,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const ticket: AsyncTicket = {
           id: ticketId,
           created: Date.now(),
-          tasks: params.tasks,
+          tasks,
           resolved,
           status: "running",
           results: new Array(resolved.length),
@@ -2100,7 +2118,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               `Cancel if needed: delegate({ action: "cancel", ticket: "${ticketId}" })`,
             ].join("\n"),
           }],
-          details: { tasks: params.tasks, results: [], progress: [...progress], parentModel: parentModelId, ticketId },
+          details: { tasks, results: [], progress: [...progress], parentModel: parentModelId, ticketId },
         };
       }
 
@@ -2374,7 +2392,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       return {
         content: [{ type: "text", text: parts.join("\n\n") }],
-        details: { tasks: params.tasks, results: finalResults, progress, parentModel: parentModelId },
+        details: { tasks, results: finalResults, progress, parentModel: parentModelId },
       };
     },
 

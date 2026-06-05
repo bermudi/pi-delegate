@@ -54,6 +54,7 @@ import {
 	isSessionBusy,
 	handlePoll,
 	handleCancel,
+	deliverTicketResults,
 	resolveCwd,
 } from "./delegate.ts";
 
@@ -2577,7 +2578,7 @@ describe("async delegate integration", () => {
 		const toolDef = getToolDef(ts, "delegate");
 		const result = await toolDef!.execute(
 			"tc-poll-1",
-			{ tasks: [{ action: "poll", prompt: "list all tickets" }], async: undefined, ticket: undefined },
+			{ action: "poll", async: undefined, ticket: undefined },
 			undefined,
 			undefined,
 			ts.session.extensionRunner as any,
@@ -2670,6 +2671,48 @@ describe("async delegate integration", () => {
 		expect(result.content[0].text).toContain("already done");
 	});
 
+	test("execute routes top-level cancel without tasks", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+
+		const result = await toolDef!.execute(
+			"tc-cancel-frontdoor",
+			{ action: "cancel" },
+			undefined,
+			undefined,
+			ts.session.extensionRunner as any,
+		);
+
+		expect(result.content[0].text).toContain("requires a ticket ID");
+	});
+
+	test("deliverTicketResults sends formatted task output", () => {
+		const sent: any[] = [];
+		const ticket: AsyncTicket = {
+			id: "done2",
+			created: Date.now() - 1000,
+			completedAt: Date.now(),
+			tasks: [{ prompt: "find the bug" }],
+			resolved: [{ prompt: "find the bug", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] }],
+			status: "done",
+			results: [{ agent: "scout", output: "found the bug", durationMs: 1234, tokens: 42, touchedFiles: [] }],
+			progress: [{ index: 0, agent: "scout", task: "find the bug", status: "done", durationMs: 1234, tokens: 42, toolUses: 0, activities: [] }],
+			controller: new AbortController(),
+			parentModelId: "test-model",
+		};
+
+		deliverTicketResults({
+			sendMessage: (message: any, options: any) => sent.push({ message, options }),
+		} as any, ticket);
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0].message.content).toContain("1/1 tasks completed");
+		expect(sent[0].message.content).toContain("found the bug");
+		expect(sent[0].message.details.ticketId).toBe("done2");
+		expect(sent[0].message.details.status).toBe("done");
+		expect(sent[0].options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+	});
+
 	test("help text includes async mode section", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
@@ -2701,11 +2744,13 @@ describe("async delegate integration", () => {
 		expect(actionEnum).toContain("cancel");
 	});
 
-	test("parameter schema includes async and ticket fields", async () => {
+	test("parameter schema includes top-level async ticket controls", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const schema = toolDef!.parameters as any;
+		expect(schema.properties.action.enum).toEqual(["poll", "cancel"]);
 		expect(schema.properties.async).toBeDefined();
 		expect(schema.properties.ticket).toBeDefined();
+		expect(schema.required ?? []).not.toContain("tasks");
 	});
 });
