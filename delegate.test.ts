@@ -2444,6 +2444,41 @@ describe("delegate pool", () => {
 		expect(order.indexOf("a-end")).toBeLessThan(order.indexOf("b-start"));
 	});
 
+	test("withSessionLock queues multiple waiters without thundering herd", async () => {
+		const order: string[] = [];
+		const p1 = withSessionLock("herd-test", async () => {
+			order.push("a-start");
+			await new Promise((r) => setTimeout(r, 50));
+			order.push("a-end");
+			return "a";
+		});
+		const p2 = withSessionLock("herd-test", async () => {
+			order.push("b-start");
+			await new Promise((r) => setTimeout(r, 10));
+			order.push("b-end");
+			return "b";
+		});
+		const p3 = withSessionLock("herd-test", async () => {
+			order.push("c-start");
+			await new Promise((r) => setTimeout(r, 10));
+			order.push("c-end");
+			return "c";
+		});
+		const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
+		expect(r1).toBe("a");
+		expect(r2).toBe("b");
+		expect(r3).toBe("c");
+		// Only one task should ever be running at a time
+		let running = 0;
+		let maxConcurrent = 0;
+		for (const entry of order) {
+			if (entry.endsWith("-start")) running++;
+			else if (entry.endsWith("-end")) running--;
+			maxConcurrent = Math.max(maxConcurrent, running);
+		}
+		expect(maxConcurrent).toBe(1);
+	});
+
 	test("rehydrateAgent returns null for non-existent file", () => {
 		const result = rehydrateAgent(
 			"/nonexistent/path/session.jsonl",
