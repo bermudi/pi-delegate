@@ -13,7 +13,13 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, type AgentMessage, type AgentTool, type AgentToolResult, type ThinkingLevel } from "@mariozechner/pi-agent-core";
+import {
+  Agent,
+  type AgentMessage,
+  type AgentTool,
+  type AgentToolResult,
+  type ThinkingLevel,
+} from "@mariozechner/pi-agent-core";
 import { type Api, type Model, streamSimple } from "@mariozechner/pi-ai";
 import {
   buildSessionContext,
@@ -197,10 +203,15 @@ export const agentPool = new Map<string, PooledAgent>();
  *  delegate calls with the same sessionId queue instead of interleaving. */
 const sessionLocks = new Map<string, Promise<void>>();
 
-export async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+export async function withSessionLock<T>(
+  sessionId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
   const prev = sessionLocks.get(sessionId);
   let resolve!: () => void;
-  const promise = new Promise<void>((r) => { resolve = r; });
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
   // Install ourselves BEFORE awaiting — so the next waiter queues behind us,
   // not behind the same predecessor we're waiting on.
   sessionLocks.set(sessionId, promise);
@@ -222,7 +233,11 @@ export async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>
 export function closePooledAgent(sessionId: string): boolean {
   const pooled = agentPool.get(sessionId);
   if (!pooled) return false;
-  try { pooled.agent.abort(); } catch { /* best effort */ }
+  try {
+    pooled.agent.abort();
+  } catch {
+    /* best effort */
+  }
   agentPool.delete(sessionId);
   return true;
 }
@@ -245,7 +260,9 @@ export function listPooledAgents(): string[] {
   for (const [id, pooled] of agentPool) {
     const idle = fmtDuration(Date.now() - pooled.lastUsed);
     const age = fmtDuration(Date.now() - pooled.createdAt);
-    lines.push(`- **${id}** · ${pooled.promptCount} prompts · ${fmtTokens(pooled.totalTokens)} tokens · idle ${idle} · age ${age} · ${shortenPath(pooled.sessionFile)}`);
+    lines.push(
+      `- **${id}** · ${pooled.promptCount} prompts · ${fmtTokens(pooled.totalTokens)} tokens · idle ${idle} · age ${age} · ${shortenPath(pooled.sessionFile)}`,
+    );
   }
   return lines;
 }
@@ -265,14 +282,21 @@ export function sweepTickets(): void {
   const now = Date.now();
   for (const [id, ticket] of ticketRegistry) {
     // Hard runtime timeout
-    if (ticket.status === "running" && now - ticket.created > ASYNC_MAX_RUNTIME_MS) {
+    if (
+      ticket.status === "running" &&
+      now - ticket.created > ASYNC_MAX_RUNTIME_MS
+    ) {
       ticket.controller.abort();
       ticket.status = "failed";
       ticket.error = "Exceeded maximum runtime";
       ticket.completedAt = now;
     }
     // TTL cleanup for completed/failed/cancelled
-    if (ticket.status !== "running" && ticket.completedAt && now - ticket.completedAt > ASYNC_TICKET_TTL_MS) {
+    if (
+      ticket.status !== "running" &&
+      ticket.completedAt &&
+      now - ticket.completedAt > ASYNC_TICKET_TTL_MS
+    ) {
       ticketRegistry.delete(id);
     }
   }
@@ -282,7 +306,7 @@ export function sweepTickets(): void {
 export function isSessionBusy(sessionId: string): string | null {
   for (const ticket of ticketRegistry.values()) {
     if (ticket.status !== "running") continue;
-    if (ticket.resolved.some(t => t.sessionId === sessionId)) {
+    if (ticket.resolved.some((t) => t.sessionId === sessionId)) {
       return ticket.id;
     }
   }
@@ -290,11 +314,19 @@ export function isSessionBusy(sessionId: string): string | null {
 }
 
 /** Format a completed ticket for LLM consumption. Reuses sync result formatting. */
-function formatCompletedTicket(ticket: AsyncTicket): AgentToolResult<DelegateDetails> {
+function formatCompletedTicket(
+  ticket: AsyncTicket,
+): AgentToolResult<DelegateDetails> {
   const parts: string[] = [];
-  const succeeded = ticket.results.filter(r => r && !("error" in r && r.error)).length;
-  const elapsedTotal = ticket.completedAt ? ticket.completedAt - ticket.created : 0;
-  parts.push(`${succeeded}/${ticket.results.length} tasks completed · ${fmtDuration(elapsedTotal)} wall time\n`);
+  const succeeded = ticket.results.filter(
+    (r) => r && !("error" in r && r.error),
+  ).length;
+  const elapsedTotal = ticket.completedAt
+    ? ticket.completedAt - ticket.created
+    : 0;
+  parts.push(
+    `${succeeded}/${ticket.results.length} tasks completed · ${fmtDuration(elapsedTotal)} wall time\n`,
+  );
 
   for (let i = 0; i < ticket.results.length; i++) {
     const r = ticket.results[i];
@@ -310,17 +342,24 @@ function formatCompletedTicket(ticket: AsyncTicket): AgentToolResult<DelegateDet
     }
     if ("error" in r && r.error) {
       const failParts = [r.error];
-      if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
+      if (r.sessionFile)
+        failParts.push(`session: ${shortenPath(r.sessionFile)}`);
       parts.push(`[FAILED: ${failParts.join(" · ")}]`);
       if (r.sessionFile && fs.existsSync(r.sessionFile)) {
         const safePath = JSON.stringify(r.sessionFile);
-        parts.push(`→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`);
+        parts.push(
+          `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
+        );
       }
     } else {
-      const meta = [`OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`];
+      const meta = [
+        `OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`,
+      ];
       if (r.sessionFile) meta.push(shortenPath(r.sessionFile));
       if (r.touchedFiles.length > 0) {
-        const rel = r.touchedFiles.map((f) => path.relative(t.cwd, f)).filter((f) => f && !f.startsWith(".."));
+        const rel = r.touchedFiles
+          .map((f) => path.relative(t.cwd, f))
+          .filter((f) => f && !f.startsWith(".."));
         if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
       }
       parts.push(`[${meta.join(" · ")}]\n\n${r.output}`);
@@ -329,29 +368,49 @@ function formatCompletedTicket(ticket: AsyncTicket): AgentToolResult<DelegateDet
 
   return {
     content: [{ type: "text", text: parts.join("\n\n") }],
-    details: { tasks: ticket.tasks, results: ticket.results.filter((r): r is TaskResult => r !== undefined), progress: [...ticket.progress], parentModel: ticket.parentModelId },
+    details: {
+      tasks: ticket.tasks,
+      results: [...ticket.results].map(
+        (r) => r ?? { error: "PENDING — result not available" },
+      ),
+      progress: [...ticket.progress],
+      parentModel: ticket.parentModelId,
+    },
   };
 }
 
 /** Push results into parent session via sendMessage when background ticket completes. */
-export function deliverTicketResults(pi: ExtensionAPI, ticket: AsyncTicket): void {
+export function deliverTicketResults(
+  pi: ExtensionAPI,
+  ticket: AsyncTicket,
+): void {
   if (!ticket.completedAt) return;
 
   const formatted = formatCompletedTicket(ticket);
   const text = formatted.content
-    .filter((c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
+    .filter(
+      (c): c is { type: "text"; text: string } =>
+        c.type === "text" && typeof c.text === "string",
+    )
     .map((c) => c.text)
     .join("\n");
 
-  pi.sendMessage({
-    customType: "async_delegate_result",
-    content: text,
-    display: true,
-    details: { ...formatted.details, ticketId: ticket.id, status: ticket.status },
-  }, {
-    deliverAs: "followUp",
-    triggerTurn: true,
-  });
+  pi.sendMessage(
+    {
+      customType: "async_delegate_result",
+      content: text,
+      display: true,
+      details: {
+        ...formatted.details,
+        ticketId: ticket.id,
+        status: ticket.status,
+      },
+    },
+    {
+      deliverAs: "steer",
+      triggerTurn: true,
+    },
+  );
 }
 
 /**
@@ -371,7 +430,9 @@ export function rehydrateAgent(
   modelRegistry: ModelRegistry,
 ): { agent: Agent; sessionManager: SessionManagerLike } | null {
   try {
-    const sm = (SessionManager as unknown as { open(p: string): SessionManager }).open(sessionFile);
+    const sm = (
+      SessionManager as unknown as { open(p: string): SessionManager }
+    ).open(sessionFile);
     const ctx = sm.buildSessionContext();
     if (!ctx.messages.length) return null;
 
@@ -391,7 +452,11 @@ export function rehydrateAgent(
       streamFn: async (m, context, options) => {
         const auth = await modelRegistry.getApiKeyAndHeaders(m);
         if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-        return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+        return streamSimple(m, context, {
+          ...options,
+          apiKey: auth.apiKey,
+          headers: auth.headers ?? undefined,
+        });
       },
     });
 
@@ -418,7 +483,8 @@ function getTermWidth(): number {
 const _segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const _wideCharRe = /[\u{1100}-\u{10FFFF}]/u;
 // Combining marks (NFD decomposition) — force slow path since length != display width
-const _combiningRe = /[\u0300-\u036F\u1AB0-\u1AFF\u1DC0-\u1DFF\u20D0-\u20FF\uFE20-\uFE2F]/u;
+const _combiningRe =
+  /[\u0300-\u036F\u1AB0-\u1AFF\u1DC0-\u1DFF\u20D0-\u20FF\uFE20-\uFE2F]/u;
 
 /** Return the display width of a single grapheme cluster. */
 function charWidth(seg: string): number {
@@ -450,7 +516,11 @@ export function truncLine(text: string, maxWidth: number): string {
   if (maxWidth <= 0) return "";
 
   // Fast path: plain ASCII (no ANSI, no wide chars, no combining marks)
-  if (!/\x1b\[[0-9;]*m/.test(text) && !_wideCharRe.test(text) && !_combiningRe.test(text)) {
+  if (
+    !/\x1b\[[0-9;]*m/.test(text) &&
+    !_wideCharRe.test(text) &&
+    !_combiningRe.test(text)
+  ) {
     if (text.length <= maxWidth) return text;
     return text.slice(0, maxWidth - 1) + "…";
   }
@@ -484,7 +554,11 @@ export function truncLine(text: string, maxWidth: number): string {
     }
 
     // Fast path: ASCII-only part that fits entirely (no combining marks)
-    if (!_wideCharRe.test(part) && !_combiningRe.test(part) && vis + part.length <= target) {
+    if (
+      !_wideCharRe.test(part) &&
+      !_combiningRe.test(part) &&
+      vis + part.length <= target
+    ) {
       result += part;
       vis += part.length;
       continue;
@@ -512,7 +586,10 @@ function applyLineBudget(lines: string[], expanded: boolean): string[] {
   const budget = Math.max(10, Math.min(18, Math.floor(rows * 0.4)));
   if (lines.length <= budget) return [...lines];
   const hidden = lines.length - budget + 1;
-  return [...lines.slice(0, budget - 1), truncLine(`… ${hidden} lines hidden · Ctrl+O expands`, getTermWidth())];
+  return [
+    ...lines.slice(0, budget - 1),
+    truncLine(`… ${hidden} lines hidden · Ctrl+O expands`, getTermWidth()),
+  ];
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool registry needs generic param to avoid contravariance on execute()
@@ -523,11 +600,21 @@ export const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<any>> = {
   bash: createBashTool,
 };
 
-export const VALID_THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+export const VALID_THINKING = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
 
 // ── Frontmatter ───────────────────────────────────────────────────────────
 
-export function parseFrontmatter(content: string): { data: Record<string, string>; body: string } {
+export function parseFrontmatter(content: string): {
+  data: Record<string, string>;
+  body: string;
+} {
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!m) return { data: {}, body: content.trim() };
   const data: Record<string, string> = {};
@@ -553,16 +640,32 @@ export function findProjectRoot(cwd: string): string | null {
 
 export function loadAgentFile(filePath: string): AgentConfig | null {
   let content: string;
-  try { content = fs.readFileSync(filePath, "utf-8"); } catch { return null; }
+  try {
+    content = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
   const { data, body } = parseFrontmatter(content);
   if (!data.name || !data.description) return null;
   return {
     name: data.name,
     description: data.description,
     model: data.model,
-    thinking: VALID_THINKING.has(data.thinking ?? "") ? (data.thinking as ThinkingLevel) : "off",
-    tools: data.tools ? data.tools.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_TOOLS,
-    skills: data.skills ? data.skills.split(",").map((s) => s.trim()).filter(Boolean) : [],
+    thinking: VALID_THINKING.has(data.thinking ?? "")
+      ? (data.thinking as ThinkingLevel)
+      : "off",
+    tools: data.tools
+      ? data.tools
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : DEFAULT_TOOLS,
+    skills: data.skills
+      ? data.skills
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [],
     systemPrompt: body,
   };
 }
@@ -578,7 +681,11 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
   const agents = new Map<string, AgentConfig>();
   for (const dir of dirs) {
     let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
     for (const e of entries) {
       if (!e.name.endsWith(".md") || e.name.endsWith(".chain.md")) continue;
       const cfg = loadAgentFile(path.join(dir, e.name));
@@ -590,7 +697,10 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
 
 // ── Parent Context ────────────────────────────────────────────────────────
 
-export function buildParentTranscript(entries: SessionEntry[], leafId: string | null): string | null {
+export function buildParentTranscript(
+  entries: SessionEntry[],
+  leafId: string | null,
+): string | null {
   try {
     const ctx = buildSessionContext(entries, leafId);
     const lines: string[] = [];
@@ -609,11 +719,16 @@ export function buildParentTranscript(entries: SessionEntry[], leafId: string | 
   }
 }
 
-export function extractTextContent(content: string | Array<{ type: string; text?: string }>): string {
+export function extractTextContent(
+  content: string | Array<{ type: string; text?: string }>,
+): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string")
+    .filter(
+      (b): b is { type: "text"; text: string } =>
+        b.type === "text" && typeof b.text === "string",
+    )
     .map((b) => b.text)
     .join("");
 }
@@ -623,18 +738,26 @@ export function extractTextContent(content: string | Array<{ type: string; text?
 async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
   try {
     const result = await new Promise<string>((resolve, reject) => {
-      execFile("git", ["status", "--porcelain", "--untracked-files=all"], { cwd, timeout: 5000 }, (err, stdout) => {
-        if (err) reject(err);
-        else resolve(stdout);
-      });
+      execFile(
+        "git",
+        ["status", "--porcelain", "--untracked-files=all"],
+        { cwd, timeout: 5000 },
+        (err, stdout) => {
+          if (err) reject(err);
+          else resolve(stdout);
+        },
+      );
     });
     const files = new Set<string>();
     for (const line of result.split("\n")) {
       if (line.length < 4) continue;
       const rawPath = line.slice(3).trim();
       if (!rawPath) continue;
-      const targetPath = rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1) : rawPath;
-      if (targetPath) files.add(path.resolve(cwd, targetPath.replace(/^"|"$/g, "")));
+      const targetPath = rawPath.includes(" -> ")
+        ? rawPath.split(" -> ").at(-1)
+        : rawPath;
+      if (targetPath)
+        files.add(path.resolve(cwd, targetPath.replace(/^"|"$/g, "")));
     }
     return files;
   } catch {
@@ -643,7 +766,10 @@ async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
 }
 
 /** Extract file paths mutated by edit/write from the activity log. */
-export function extractTouchedFromActivities(activities: ToolActivity[], cwd: string): string[] {
+export function extractTouchedFromActivities(
+  activities: ToolActivity[],
+  cwd: string,
+): string[] {
   const files = new Set<string>();
   for (const a of activities) {
     if (a.name !== "edit" && a.name !== "write") continue;
@@ -668,8 +794,10 @@ interface SessionManagerLike {
  * The header may be in memory only (deferred flush) or already on disk.
  */
 function setParentSession(sm: SessionManager, parentPath: string): void {
-  // @ts-expect-error — accessing private fileEntries to mutate header's parentSession
-  const header = (sm as { fileEntries: Array<{ type: string; parentSession?: string }> }).fileEntries[0];
+  const header = (
+    // @ts-expect-error — accessing private fileEntries to mutate header's parentSession
+    sm as { fileEntries: Array<{ type: string; parentSession?: string }> }
+  ).fileEntries[0];
   if (header && header.type === "session") {
     header.parentSession = parentPath;
   }
@@ -687,7 +815,11 @@ function createSubagentSessionManager(
   cwd: string,
 ): { manager: SessionManagerLike; file: string } | undefined {
   // Resolve parent session file path for linking.
-  const parentFile = (parentSessionManager as { getSessionFile?(): string | undefined } | undefined)?.getSessionFile?.();
+  const parentFile = (
+    parentSessionManager as
+      | { getSessionFile?(): string | undefined }
+      | undefined
+  )?.getSessionFile?.();
 
   // Always persist subagent work so the main agent can search it later.
   const sm = SessionManager.create(cwd);
@@ -714,7 +846,11 @@ export function loadSkill(name: string, cwd: string): string | null {
     path.join(os.homedir(), ".pi", "agent", "skills", name, "SKILL.md"),
   ];
   for (const p of candidates) {
-    try { return fs.readFileSync(p, "utf-8"); } catch { /* skip */ }
+    try {
+      return fs.readFileSync(p, "utf-8");
+    } catch {
+      /* skip */
+    }
   }
   return null;
 }
@@ -741,7 +877,9 @@ export function loadAgentsMdFiles(cwd: string): string[] {
           return; // found valid content, stop trying other candidates in this dir
         }
         // empty/whitespace-only file — treat as not found, fall through to next candidate
-      } catch { /* skip */ }
+      } catch {
+        /* skip */
+      }
     }
   };
 
@@ -770,7 +908,11 @@ export function loadAgentsMdFiles(cwd: string): string[] {
 
 // ── Model Resolution ──────────────────────────────────────────────────────
 
-export function resolveModel(spec: string | undefined, registry: ModelRegistry, parentModel: Model<Api> | undefined): Model<Api> | undefined {
+export function resolveModel(
+  spec: string | undefined,
+  registry: ModelRegistry,
+  parentModel: Model<Api> | undefined,
+): Model<Api> | undefined {
   if (!spec) return parentModel;
   const idx = spec.indexOf("/");
   if (idx === -1) {
@@ -784,21 +926,34 @@ export function resolveModel(spec: string | undefined, registry: ModelRegistry, 
 // ── Settings Overrides ────────────────────────────────────────────────────
 
 interface DelegateSettings {
-  agentOverrides?: Record<string, { model?: string; thinking?: string; tools?: string[]; skills?: string[] }>;
+  agentOverrides?: Record<
+    string,
+    { model?: string; thinking?: string; tools?: string[]; skills?: string[] }
+  >;
 }
 
-export function readDelegateSettingsFile(filePath: string): Record<string, unknown> | null {
+export function readDelegateSettingsFile(
+  filePath: string,
+): Record<string, unknown> | null {
   try {
     const raw = fs.readFileSync(filePath, "utf-8");
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return null;
     return parsed as Record<string, unknown>;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 function getDelegateSettings(filePath: string): DelegateSettings | null {
   const settings = readDelegateSettingsFile(filePath);
-  if (!settings?.delegate || typeof settings.delegate !== "object" || Array.isArray(settings.delegate)) return null;
+  if (
+    !settings?.delegate ||
+    typeof settings.delegate !== "object" ||
+    Array.isArray(settings.delegate)
+  )
+    return null;
   return settings.delegate as DelegateSettings;
 }
 
@@ -816,7 +971,10 @@ export function loadDelegateSettings(cwd: string): DelegateSettings | null {
   let dir = key;
   const root = path.resolve("/");
   while (true) {
-    if (fs.existsSync(path.join(dir, ".pi"))) { projectPath = path.join(dir, ".pi", "settings.json"); break; }
+    if (fs.existsSync(path.join(dir, ".pi"))) {
+      projectPath = path.join(dir, ".pi", "settings.json");
+      break;
+    }
     if (dir === root) break;
     const parent = path.dirname(dir);
     if (parent === dir) break;
@@ -826,7 +984,10 @@ export function loadDelegateSettings(cwd: string): DelegateSettings | null {
   const user = getDelegateSettings(userPath);
   const project = projectPath ? getDelegateSettings(projectPath) : null;
 
-  if (!user && !project) { delegateSettingsCache.set(key, null); return null; }
+  if (!user && !project) {
+    delegateSettingsCache.set(key, null);
+    return null;
+  }
   const result: DelegateSettings = {
     agentOverrides: {
       ...(user?.agentOverrides ?? {}),
@@ -913,7 +1074,10 @@ export function computeRetryDelay(
   const baseDelay = rawBase * Math.pow(2, attempt);
   const jitter = Math.random() * rawBase;
   const stagger = taskIndex * 10_000;
-  const delay = Math.min(baseDelay + jitter + stagger, isRateLimit ? 300_000 : 60_000);
+  const delay = Math.min(
+    baseDelay + jitter + stagger,
+    isRateLimit ? 300_000 : 60_000,
+  );
   return { baseDelay, jitter, stagger, delay };
 }
 
@@ -923,7 +1087,9 @@ export function computeRetryDelay(
  */
 class AbortError extends Error {
   override name = "AbortError";
-  constructor() { super("Aborted"); }
+  constructor() {
+    super("Aborted");
+  }
 }
 
 /** Sleep for ms, aborting early if signal fires. */
@@ -932,7 +1098,10 @@ async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
     if (signal) {
-      const onAbort = () => { clearTimeout(timer); reject(new AbortError()); };
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new AbortError());
+      };
       signal.addEventListener("abort", onAbort, { once: true });
       // Close TOCTOU window: signal could have fired between our early
       // aborted check above and addEventListener here.
@@ -975,7 +1144,13 @@ async function mapConcurrent<T, R>(
 export async function runAgentOnce(
   agent: Agent,
   prompt: string,
-  config: { systemPrompt: string; model: Model<Api>; thinking: ThinkingLevel; tools: string[]; cwd: string },
+  config: {
+    systemPrompt: string;
+    model: Model<Api>;
+    thinking: ThinkingLevel;
+    tools: string[];
+    cwd: string;
+  },
   modelRegistry: ModelRegistry,
   signal?: AbortSignal,
   onProgress?: (update: AgentProgressUpdate) => void,
@@ -983,7 +1158,13 @@ export async function runAgentOnce(
   gitBaseline?: Set<string>,
   start?: number,
   suppressSessionAppend = false,
-): Promise<{ output: string; error?: string; durationMs: number; tokens: number; touchedFiles: string[] }> {
+): Promise<{
+  output: string;
+  error?: string;
+  durationMs: number;
+  tokens: number;
+  touchedFiles: string[];
+}> {
   const startTime = start ?? Date.now();
   const baseline = gitBaseline ?? new Set<string>();
   let toolUses = 0;
@@ -996,14 +1177,25 @@ export async function runAgentOnce(
     if (!onProgress) return;
     const usage = extractUsage(agent.state.messages);
     const delta = Math.max(0, usage.total - usageBeforeTotal);
-    onProgress({ tokens: delta, toolUses, durationMs: Date.now() - startTime, lastActivityAt, activities: [...activities] });
+    onProgress({
+      tokens: delta,
+      toolUses,
+      durationMs: Date.now() - startTime,
+      lastActivityAt,
+      activities: [...activities],
+    });
   };
 
   const unsubscribe = agent.subscribe((event) => {
     if (event.type === "tool_execution_start") {
       const now = Date.now();
       lastActivityAt = now;
-      const activity: ToolActivity = { id: event.toolCallId, name: event.toolName, args: event.args, startTime: now };
+      const activity: ToolActivity = {
+        id: event.toolCallId,
+        name: event.toolName,
+        args: event.args,
+        startTime: now,
+      };
       pendingById.set(event.toolCallId, activity);
       activities.push(activity);
       fireProgress();
@@ -1011,7 +1203,10 @@ export async function runAgentOnce(
       lastActivityAt = Date.now();
       const activity = pendingById.get(event.toolCallId);
       if (activity) {
-        activity.result = { content: event.result?.content ?? [], isError: event.isError };
+        activity.result = {
+          content: event.result?.content ?? [],
+          isError: event.isError,
+        };
         activity.endTime = lastActivityAt;
         pendingById.delete(event.toolCallId);
       }
@@ -1025,7 +1220,13 @@ export async function runAgentOnce(
 
   let abortHandler: (() => void) | undefined;
   if (signal) {
-    abortHandler = () => { try { agent.abort(); } catch { /* */ } };
+    abortHandler = () => {
+      try {
+        agent.abort();
+      } catch {
+        /* */
+      }
+    };
     signal.addEventListener("abort", abortHandler, { once: true });
   }
 
@@ -1038,7 +1239,10 @@ export async function runAgentOnce(
     await agent.prompt(prompt);
     await agent.waitForIdle();
 
-    const state = agent.state as { messages: AgentMessage[]; errorMessage?: string };
+    const state = agent.state as {
+      messages: AgentMessage[];
+      errorMessage?: string;
+    };
     const errorMessage = state.errorMessage;
     // Extract only the new output from this prompt (not cumulative history).
     const output = extractOutput(state.messages.slice(messagesBefore));
@@ -1051,11 +1255,18 @@ export async function runAgentOnce(
       try {
         for (let mi = messagesBefore; mi < state.messages.length; mi++) {
           const msg = state.messages[mi]!;
-          if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult" || msg.role === "custom") {
+          if (
+            msg.role === "user" ||
+            msg.role === "assistant" ||
+            msg.role === "toolResult" ||
+            msg.role === "custom"
+          ) {
             sessionManager.appendMessage(msg);
           }
         }
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
 
     // Compute touched files: union of activity-based (edit/write) and git diff.
@@ -1064,12 +1275,25 @@ export async function runAgentOnce(
     const fromGit = [...gitAfter].filter((f) => !baseline.has(f));
     const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
 
-    return { output: output || "(no output)", error: errorMessage, durationMs: Date.now() - startTime, tokens: tokensThisCall, touchedFiles };
+    return {
+      output: output || "(no output)",
+      error: errorMessage,
+      durationMs: Date.now() - startTime,
+      tokens: tokensThisCall,
+      touchedFiles,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { output: "", error: msg, durationMs: Date.now() - startTime, tokens: 0, touchedFiles: [] };
+    return {
+      output: "",
+      error: msg,
+      durationMs: Date.now() - startTime,
+      tokens: 0,
+      touchedFiles: [],
+    };
   } finally {
-    if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
+    if (signal && abortHandler)
+      signal.removeEventListener("abort", abortHandler);
     unsubscribe();
   }
 }
@@ -1105,7 +1329,13 @@ export async function runAgent(
   allowRetry = false,
   /** Task index within a concurrent delegate batch. Used to stagger retries across tasks. */
   taskIndex = 0,
-): Promise<{ output: string; error?: string; durationMs: number; tokens: number; touchedFiles: string[] }> {
+): Promise<{
+  output: string;
+  error?: string;
+  durationMs: number;
+  tokens: number;
+  touchedFiles: string[];
+}> {
   const start = Date.now();
 
   // Snapshot git status before the agent starts so we can diff after.
@@ -1114,7 +1344,17 @@ export async function runAgent(
   // Pool hits: single attempt, no retry loop (stateful agent with accumulated context).
   // Resumed agents (allowRetry=true) fall through to the retry loop.
   if (existingAgent && !allowRetry) {
-    return runAgentOnce(existingAgent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start);
+    return runAgentOnce(
+      existingAgent,
+      prompt,
+      config,
+      modelRegistry,
+      signal,
+      onProgress,
+      sessionManager,
+      gitBaseline,
+      start,
+    );
   }
 
   // Create agent once — reuse across retries to preserve prior work (tool results, reasoning).
@@ -1136,7 +1376,11 @@ export async function runAgent(
       streamFn: async (m, context, options) => {
         const auth = await modelRegistry.getApiKeyAndHeaders(m);
         if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-        return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+        return streamSimple(m, context, {
+          ...options,
+          apiKey: auth.apiKey,
+          headers: auth.headers ?? undefined,
+        });
       },
     });
   }
@@ -1149,11 +1393,23 @@ export async function runAgent(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal?.aborted) {
-      return { output: "", error: "Aborted", durationMs: Date.now() - start, tokens: 0, touchedFiles: [] };
+      return {
+        output: "",
+        error: "Aborted",
+        durationMs: Date.now() - start,
+        tokens: 0,
+        touchedFiles: [],
+      };
     }
 
     // Signal retry to the progress UI.
-    if (attempt > 0 && onProgress) onProgress({ tokens: 0, toolUses: 0, durationMs: Date.now() - start, activities: [] });
+    if (attempt > 0 && onProgress)
+      onProgress({
+        tokens: 0,
+        toolUses: 0,
+        durationMs: Date.now() - start,
+        activities: [],
+      });
 
     if (attempt > 0) {
       if (existingAgent) {
@@ -1180,7 +1436,11 @@ export async function runAgent(
               streamFn: async (m, context, options) => {
                 const auth = await modelRegistry.getApiKeyAndHeaders(m);
                 if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-                return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+                return streamSimple(m, context, {
+                  ...options,
+                  apiKey: auth.apiKey,
+                  headers: auth.headers ?? undefined,
+                });
               },
             });
             currentSessionManager = sessionManager;
@@ -1190,12 +1450,34 @@ export async function runAgent(
     }
 
     const messagesBeforeAttempt = agent.state.messages.length;
-    const result = await runAgentOnce(agent, prompt, config, modelRegistry, signal, onProgress, currentSessionManager, gitBaseline, start, true);
-    if (result.error && attempt < maxRetries && isRetryableError(result.error)) {
+    const result = await runAgentOnce(
+      agent,
+      prompt,
+      config,
+      modelRegistry,
+      signal,
+      onProgress,
+      currentSessionManager,
+      gitBaseline,
+      start,
+      true,
+    );
+    if (
+      result.error &&
+      attempt < maxRetries &&
+      isRetryableError(result.error)
+    ) {
       const isRateLimit = isRateLimitError(result.error);
-      const { delay } = computeRetryDelay(attempt, retryBaseMs, taskIndex, isRateLimit);
+      const { delay } = computeRetryDelay(
+        attempt,
+        retryBaseMs,
+        taskIndex,
+        isRateLimit,
+      );
 
-      try { await sleepWithAbort(delay, signal); } catch (sleepErr) {
+      try {
+        await sleepWithAbort(delay, signal);
+      } catch (sleepErr) {
         if (!(sleepErr instanceof AbortError)) throw sleepErr;
       }
       continue;
@@ -1205,13 +1487,24 @@ export async function runAgent(
     // exhausted retry) should not pollute the session file.
     if (currentSessionManager && !result.error) {
       try {
-        for (let mi = messagesBeforeAttempt; mi < agent.state.messages.length; mi++) {
+        for (
+          let mi = messagesBeforeAttempt;
+          mi < agent.state.messages.length;
+          mi++
+        ) {
           const msg = agent.state.messages[mi]!;
-          if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult" || msg.role === "custom") {
+          if (
+            msg.role === "user" ||
+            msg.role === "assistant" ||
+            msg.role === "toolResult" ||
+            msg.role === "custom"
+          ) {
             currentSessionManager.appendMessage(msg);
           }
         }
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
 
     return result;
@@ -1259,16 +1552,23 @@ export function taskImpliesEdits(task: string): boolean {
 
 /** Check if the agent's tool activities include any mutations (edit/write/mutating bash). */
 export function hasMutationActivity(activities: ToolActivity[]): boolean {
-  return activities.some((a) =>
-    a.name === "edit" || a.name === "write" ||
-    (a.name === "bash" && typeof a.args?.command === "string" &&
-     /\b(?:sed|awk|perl|python\d*|tee|dd|mv|cp|rm|truncate|sponge|git\s+(?:commit|add|rm|mv|cherry-pick|rebase|merge|am|apply|stash\s+pop))\b/i.test(a.args.command))
+  return activities.some(
+    (a) =>
+      a.name === "edit" ||
+      a.name === "write" ||
+      (a.name === "bash" &&
+        typeof a.args?.command === "string" &&
+        /\b(?:sed|awk|perl|python\d*|tee|dd|mv|cp|rm|truncate|sponge|git\s+(?:commit|add|rm|mv|cherry-pick|rebase|merge|am|apply|stash\s+pop))\b/i.test(
+          a.args.command,
+        )),
   );
 }
 
 /** Resolve a cwd string: expand ~ and make absolute. */
 export function resolveCwd(cwd: string): string {
-  const expanded = cwd.startsWith("~") ? path.join(os.homedir(), cwd.slice(1)) : cwd;
+  const expanded = cwd.startsWith("~")
+    ? path.join(os.homedir(), cwd.slice(1))
+    : cwd;
   return path.resolve(expanded);
 }
 
@@ -1287,7 +1587,7 @@ export function extractUsage(messages: AgentMessage[]) {
   const usage = { input: 0, output: 0, cacheRead: 0, total: 0 };
   for (const msg of messages) {
     if (msg.role !== "assistant" || !msg.usage) continue;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const u = msg.usage as any;
     usage.input += u.input ?? 0;
     usage.output += u.output ?? 0;
@@ -1330,20 +1630,28 @@ export function fmtDuration(ms: number): string {
 }
 
 export function fmtTokens(n: number): string {
-  return n < 1000 ? `${n}` : n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
+  return n < 1000
+    ? `${n}`
+    : n < 10000
+      ? `${(n / 1000).toFixed(1)}k`
+      : `${Math.round(n / 1000)}k`;
 }
 
 export function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
 
-export const tree = (i: number, n: number) => i === n - 1 ? "└─" : "├─";
-export const indent = (i: number, n: number) => i === n - 1 ? "   " : "│  ";
+export const tree = (i: number, n: number) => (i === n - 1 ? "└─" : "├─");
+export const indent = (i: number, n: number) => (i === n - 1 ? "   " : "│  ");
 
 // ── Tool Activity Formatting ─────────────────────────────────────────────
 
 /** Pick the first non-empty arg value for display, preferring the named key then common fallbacks. */
-function firstArg(args: Record<string, unknown>, primary: string, fallbacks: string[] = []): string | undefined {
+function firstArg(
+  args: Record<string, unknown>,
+  primary: string,
+  fallbacks: string[] = [],
+): string | undefined {
   for (const key of [primary, ...fallbacks]) {
     const val = args[key];
     if (typeof val === "string" && val.trim()) return val;
@@ -1351,7 +1659,10 @@ function firstArg(args: Record<string, unknown>, primary: string, fallbacks: str
   return undefined;
 }
 
-function formatToolCallShort(name: string, args: Record<string, unknown>): string {
+function formatToolCallShort(
+  name: string,
+  args: Record<string, unknown>,
+): string {
   if (!args || typeof args !== "object") return name;
   switch (name) {
     case "bash": {
@@ -1382,7 +1693,16 @@ function formatToolCallShort(name: string, args: Record<string, unknown>): strin
     }
     default: {
       // Try to pick a meaningful first arg before falling back to JSON
-      for (const key of ["command", "path", "file_path", "pattern", "query", "url", "task", "prompt"]) {
+      for (const key of [
+        "command",
+        "path",
+        "file_path",
+        "pattern",
+        "query",
+        "url",
+        "task",
+        "prompt",
+      ]) {
         const val = args[key];
         if (typeof val === "string" && val.trim()) {
           const preview = val.length > 50 ? val.slice(0, 50) + "…" : val;
@@ -1399,12 +1719,14 @@ function formatToolCallShort(name: string, args: Record<string, unknown>): strin
   }
 }
 
-
 // ── Extension ─────────────────────────────────────────────────────────────
 
 // ── Async Poll/Cancel Handlers ────────────────────────────────────────────
 
-export function handlePoll(params: { ticket?: string }, ctx: ExtensionContext): AgentToolResult<DelegateDetails> {
+export function handlePoll(
+  params: { ticket?: string },
+  ctx: ExtensionContext,
+): AgentToolResult<DelegateDetails> {
   sweepTickets();
   const parentModelId = ctx.model?.id;
 
@@ -1417,18 +1739,29 @@ export function handlePoll(params: { ticket?: string }, ctx: ExtensionContext): 
     if (!tickets.length) {
       return {
         content: [{ type: "text", text: "No async tickets." }],
-        details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
+        details: {
+          tasks: [],
+          results: [],
+          progress: [],
+          parentModel: parentModelId,
+        },
       };
     }
-    const lines = tickets.map(t => {
-      const icon = t.status === "running" ? "⏳" : t.status === "done" ? "✓" : "✗";
-      const done = t.progress.filter(p => p.status === "done").length;
+    const lines = tickets.map((t) => {
+      const icon =
+        t.status === "running" ? "⏳" : t.status === "done" ? "✓" : "✗";
+      const done = t.progress.filter((p) => p.status === "done").length;
       const age = fmtDuration(Date.now() - t.created);
       return `${icon} ${t.id} · ${done}/${t.progress.length} tasks · ${t.status} · ${age}`;
     });
     return {
       content: [{ type: "text", text: `Async tickets:\n${lines.join("\n")}` }],
-      details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
+      details: {
+        tasks: [],
+        results: [],
+        progress: [],
+        parentModel: parentModelId,
+      },
     };
   }
 
@@ -1436,22 +1769,96 @@ export function handlePoll(params: { ticket?: string }, ctx: ExtensionContext): 
   const ticket = ticketRegistry.get(ticketId);
   if (!ticket) {
     return {
-      content: [{ type: "text", text: `Ticket '${ticketId}' not found. It may have expired or never existed.` }],
-      details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
+      content: [
+        {
+          type: "text",
+          text: `Ticket '${ticketId}' not found. It may have expired or never existed.`,
+        },
+      ],
+      details: {
+        tasks: [],
+        results: [],
+        progress: [],
+        parentModel: parentModelId,
+      },
     };
   }
 
   if (ticket.status === "running") {
-    const lines = ticket.progress.map(p => {
-      const icon = p.status === "done" ? "✓" : p.status === "running" ? "⏳" : p.status === "failed" ? "✗" : "○";
-      const activity = p.activities.findLast(a => !a.result);
-      const currentTool = activity ? ` · ${formatToolCallShort(activity.name, activity.args)}` : "";
-      const duration = fmtDuration(Date.now() - ticket.created);
-      return `${icon} ${p.agent} · ${p.status}${currentTool} · ${duration}`;
-    });
+    const doneCount = ticket.progress.filter(
+      (p) => p.status === "done" || p.status === "failed",
+    ).length;
+    const totalCount = ticket.progress.length;
+    const lines: string[] = [];
+    // Index-aligned sparse array — same shape as ticket.results, so consumers
+    // can correlate results[i] with progress[i] and tasks[i].
+    const completedResults: (TaskResult | undefined)[] = new Array(
+      ticket.progress.length,
+    ).fill(undefined);
+
+    for (let i = 0; i < ticket.progress.length; i++) {
+      const p = ticket.progress[i]!;
+      const r = ticket.results[i];
+
+      if (p.status === "done" && r) {
+        const meta = [
+          fmtDuration(r.durationMs),
+          `${fmtTokens(r.tokens)} tokens`,
+        ];
+        if (r.touchedFiles.length > 0) {
+          const t = ticket.resolved[i]!;
+          const rel = r.touchedFiles
+            .map((f) => path.relative(t.cwd, f))
+            .filter((f) => f && !f.startsWith(".."));
+          if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
+        }
+        lines.push(`✓ ${r.agent} · ${meta.join(" · ")}`);
+        if (r.output && r.output !== "(no output)") {
+          lines.push(r.output);
+        }
+        completedResults[i] = r;
+      } else if (p.status === "failed" && r) {
+        lines.push(`✗ ${r.agent} · ${r.error ?? "unknown error"}`);
+        if (r.sessionFile)
+          lines.push(`  session: ${shortenPath(r.sessionFile)}`);
+        if (r.output) lines.push(r.output);
+        completedResults[i] = r;
+      } else if (p.status === "running") {
+        const activity = p.activities.findLast((a) => !a.result);
+        const currentTool = activity
+          ? ` · ${formatToolCallShort(activity.name, activity.args)}`
+          : "";
+        lines.push(
+          `⏳ ${p.agent}${currentTool} · ${fmtDuration(Date.now() - ticket.created)}`,
+        );
+      } else {
+        lines.push(`○ ${p.agent} · waiting…`);
+      }
+    }
+
+    const header = `Ticket ${ticket.id}: RUNNING · ${doneCount}/${totalCount} done (${fmtDuration(Date.now() - ticket.created)})`;
+    const guidance =
+      doneCount === totalCount
+        ? ""
+        : doneCount > 0
+          ? "Tasks are progressing. Do other work while remaining tasks finish — results will be delivered automatically when all complete."
+          : "Tasks are still running. Do other work while you wait — polling again immediately will not speed them up. Results are delivered automatically when all tasks complete.";
+
     return {
-      content: [{ type: "text", text: `Ticket ${ticket.id}: RUNNING (${fmtDuration(Date.now() - ticket.created)})\n${lines.join("\n")}` }],
-      details: { tasks: ticket.tasks, results: [], progress: [...ticket.progress], parentModel: ticket.parentModelId },
+      content: [
+        {
+          type: "text",
+          text: `${header}\n${lines.join("\n")}${guidance ? `\n\n${guidance}` : ""}`,
+        },
+      ],
+      details: {
+        tasks: ticket.tasks,
+        results: completedResults.map(
+          (r) => r ?? { error: "PENDING — result not available" },
+        ),
+        progress: [...ticket.progress],
+        parentModel: ticket.parentModelId,
+      },
     };
   }
 
@@ -1459,13 +1866,17 @@ export function handlePoll(params: { ticket?: string }, ctx: ExtensionContext): 
   return formatCompletedTicket(ticket);
 }
 
-export function handleCancel(params: { ticket?: string }): AgentToolResult<DelegateDetails> {
+export function handleCancel(params: {
+  ticket?: string;
+}): AgentToolResult<DelegateDetails> {
   sweepTickets();
   const ticketId = params.ticket;
 
   if (!ticketId) {
     return {
-      content: [{ type: "text", text: "action='cancel' requires a ticket ID." }],
+      content: [
+        { type: "text", text: "action='cancel' requires a ticket ID." },
+      ],
       details: { tasks: [], results: [], progress: [] },
     };
   }
@@ -1478,7 +1889,12 @@ export function handleCancel(params: { ticket?: string }): AgentToolResult<Deleg
   }
   if (ticket.status !== "running") {
     return {
-      content: [{ type: "text", text: `Ticket '${ticketId}' is already ${ticket.status}.` }],
+      content: [
+        {
+          type: "text",
+          text: `Ticket '${ticketId}' is already ${ticket.status}.`,
+        },
+      ],
       details: { tasks: [], results: [], progress: [] },
     };
   }
@@ -1495,67 +1911,72 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "delegate",
     label: "Delegate",
-    promptSnippet: "Spawn subagents in parallel — each with independent context, model, tools, and skills.",
+    promptSnippet: "Spawn subagents in parallel.",
     promptGuidelines: [
-      "Use delegate to parallelize independent work across subagents. For prompt tasks, each task must include \"prompt\"; specify \"agent\" (name from .pi/agents/*.md) and/or \"systemPrompt\". All other fields (model, tools, skills, thinking, cwd, context) are optional and fall back to agent defaults or parent session values.",
-      "Subagents only have pi core tools: read, write, edit, bash.",
-      "Call delegate with an empty tasks array to see how to use the delegate tool.",
-      "For async mode: set async:true to fire tasks in the background. Results are automatically delivered when complete. Use delegate({action:\"poll\"}) to check status or delegate({action:\"poll\",ticket:\"id\"}) for a specific ticket.",
+      "Call delegate with an empty tasks array to see available agents and full usage docs.",
+      'For async: set async:true to fire in background. Poll with delegate({action:"poll"}). Avoid polling in a tight loop.',
     ],
     description:
       "Spawn subagents in parallel. Call with an empty tasks array for full help.",
     parameters: Type.Object({
-      action: Type.Optional(Type.String({
-        enum: ["poll", "cancel"],
-        description: "Top-level async ticket action. Use 'poll' to list/check tickets or 'cancel' to abort one.",
-      })),
-      async: Type.Optional(Type.Boolean({
-        description: "Return immediately with a ticket ID. Poll with action='poll'.",
-      })),
-      ticket: Type.Optional(Type.String({
-        description: "Ticket ID for poll/cancel actions.",
-      })),
-      tasks: Type.Optional(Type.Array(
-        Type.Object({
-          prompt: Type.Optional(Type.String({ description: "The task for this subagent to perform. Required unless action is 'close'/'list' or resumeFrom is set." })),
-          agent: Type.Optional(Type.String({
-            description: "Named agent from .pi/agents/*.md (project-local). Inline fields override agent defaults.",
-          })),
-          model: Type.Optional(Type.String({
-            description: "Model (e.g. 'anthropic/claude-sonnet-4'). Falls back to agent default, then parent model.",
-          })),
-          skills: Type.Optional(Type.Array(Type.String(), {
-            description: "Skill names to inject into the system prompt.",
-          })),
-          tools: Type.Optional(Type.Array(Type.String(), {
-            description: "Tools the subagent may use: read, write, edit, bash.",
-          })),
-          thinking: Type.Optional(Type.String({
-            description: "Thinking level: off, minimal, low, medium, high, xhigh. Defaults to agent or off.",
-          })),
-          systemPrompt: Type.Optional(Type.String({
-            description: "System prompt. Replaces agent system prompt entirely if set.",
-          })),
-          cwd: Type.Optional(Type.String({
-            description: "Working directory. Defaults to parent session cwd.",
-          })),
-          context: Type.Optional(Type.String({
-            enum: ["fresh", "with-parent-transcript"],
-            description: "'fresh' (default) for clean context, 'with-parent-transcript' to include the full parent session transcript in the subagent's prompt (expensive — use deliberately)."
-          })),
-          sessionId: Type.Optional(Type.String({
-            description: "Name for a persistent subagent session. First use creates it, subsequent uses reuse the same agent. Use action='close' to tear down.",
-          })),
-          action: Type.Optional(Type.String({
-            enum: ["prompt", "close", "list", "poll", "cancel"],
-            description: "'prompt' (default) runs a task, 'close' tears down a pooled session, 'list' shows sessions, 'poll' checks async tickets, 'cancel' aborts async ticket.",
-          })),
-          resumeFrom: Type.Optional(Type.String({
-            description: "Absolute path to a previous subagent session .jsonl to continue from. Agent resumes with full context.",
-          })),
+      action: Type.Optional(
+        Type.String({
+          enum: ["poll", "cancel"],
+          description: "Poll for async results or cancel a ticket.",
         }),
-        { minItems: 0, description: "Tasks to run in parallel. Pass an empty array to see available agents and usage docs." },
-      )),
+      ),
+      async: Type.Optional(
+        Type.Boolean({
+          description: "Return immediately with a ticket ID. Poll with action='poll'.",
+        }),
+      ),
+      ticket: Type.Optional(
+        Type.String({
+          description: "Ticket ID for poll/cancel.",
+        }),
+      ),
+      tasks: Type.Optional(
+        Type.Array(
+          Type.Object({
+            prompt: Type.Optional(
+              Type.String({
+                description: "The task for this subagent to perform.",
+              }),
+            ),
+            agent: Type.Optional(
+              Type.String({
+                description:
+                  "Named agent (project-local or global). Omit to inherit from parent session.",
+              }),
+            ),
+            cwd: Type.Optional(
+              Type.String({
+                description: "Working directory. Defaults to parent cwd.",
+              }),
+            ),
+            // ── Undocumented overrides — accepted but not advertised in schema.
+            // Discovered via empty-tasks help text.
+            systemPrompt: Type.Optional(Type.String()),
+            context: Type.Optional(
+              Type.String({ enum: ["fresh", "with-parent-transcript"] }),
+            ),
+            model: Type.Optional(Type.String()),
+            skills: Type.Optional(Type.Array(Type.String())),
+            tools: Type.Optional(Type.Array(Type.String())),
+            thinking: Type.Optional(Type.String()),
+            sessionId: Type.Optional(Type.String()),
+            action: Type.Optional(
+              Type.String({ enum: ["prompt", "close", "list", "poll", "cancel"] }),
+            ),
+            resumeFrom: Type.Optional(Type.String()),
+          }),
+          {
+            minItems: 0,
+            description:
+              "Tasks to run in parallel. Pass an empty array for help.",
+          },
+        ),
+      ),
     }),
 
     async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
@@ -1565,14 +1986,17 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // ── Poll action ───────────────────────────────────────────────────
       // Top-level action is the public API. Per-task action is accepted for
       // backward compatibility with early async builds.
-      if (params.action === "poll" || tasks.some(t => t.action === "poll")) {
+      if (params.action === "poll" || tasks.some((t) => t.action === "poll")) {
         return handlePoll(params, ctx);
       }
 
       // ── Cancel action ─────────────────────────────────────────────────
       // Top-level action is the public API. Per-task action is accepted for
       // backward compatibility with early async builds.
-      if (params.action === "cancel" || tasks.some(t => t.action === "cancel")) {
+      if (
+        params.action === "cancel" ||
+        tasks.some((t) => t.action === "cancel")
+      ) {
         return handleCancel(params);
       }
 
@@ -1582,119 +2006,147 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       if (!tasks.length) {
         const names = [...agents.keys()];
         const agentList = names.length
-          ? names.map((n) => {
-              const a = agents.get(n)!;
-              const model = a.model ? ` (model: ${a.model})` : "";
-              const thinking = a.thinking !== "off" ? ` [thinking: ${a.thinking}]` : "";
-              const tools = a.tools.length !== DEFAULT_TOOLS.length || a.tools.some((t, i) => t !== DEFAULT_TOOLS[i])
-                ? ` tools: ${a.tools.join(", ")}` : "";
-              return `- **${n}**${model}${thinking}${tools}: ${a.description}`;
-            }).join("\n")
+          ? names
+              .map((n) => {
+                const a = agents.get(n)!;
+                const model = a.model ? ` (model: ${a.model})` : "";
+                const thinking =
+                  a.thinking !== "off" ? ` [thinking: ${a.thinking}]` : "";
+                const tools =
+                  a.tools.length !== DEFAULT_TOOLS.length ||
+                  a.tools.some((t, i) => t !== DEFAULT_TOOLS[i])
+                    ? ` tools: ${a.tools.join(", ")}`
+                    : "";
+                return `- **${n}**${model}${thinking}${tools}: ${a.description}`;
+              })
+              .join("\n")
           : "_(none defined)_";
         return {
-          content: [{ type: "text", text: [
-            "# Delegate Help",
-            "",
-            "Spawn subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, skills, and thinking level.",
-            "",
-            "## Available Agents",
-            "",
-            agentList,
-            "",
-            "Agents live in `.pi/agents/*.md` (project-local). Each agent file is Markdown with YAML-ish frontmatter:",
-            "",
-            "```markdown",
-            "---",
-            "name: my-agent",
-            "description: What it does",
-            "model: anthropic/claude-haiku-4-5  # optional",
-            "thinking: low                     # off/minimal/low/medium/high/xhigh",
-            "tools: read, bash                 # default: all 4 core tools",
-            "skills: web-content               # comma-separated skill names",
-            "---",
-            "You are a helpful agent...",
-            "```",
-            "",
-            "## Task Fields",
-            "",
-            "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to 'continue').",
-            "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
-            "- `systemPrompt` — System prompt. Required if no `agent` specified.",
-            "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
-            "- `tools` — Array of tool names. Default: read, write, edit, bash.",
-            "- `skills` — Skill names injected into the system prompt.",
-            "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
-            "- `cwd` — Working directory. Default: parent session cwd.",
-            "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
-            "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
-            "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
-            "- top-level `action` — Async ticket action: 'poll' or 'cancel'. Does not require `tasks`.",
-            "",
-            "## Session Reuse",
-            "",
-            "When `sessionId` is set, the subagent is kept alive in a pool for the duration of the pi session.",
-            "Subsequent calls with the same `sessionId` continue the conversation — the agent remembers prior context.",
-            "",
-            "```json",
-            "// First call — creates and runs",
-            "{ \"prompt\": \"Investigate the auth module\", \"agent\": \"scout\", \"sessionId\": \"auth-research\" }",
-            "",
-            "// Second call — continues the same agent",
-            "{ \"prompt\": \"Now check the tests for that module\", \"sessionId\": \"auth-research\" }",
-            "",
-            "// Clean up when done",
-            "{ \"prompt\": \"\", \"sessionId\": \"auth-research\", \"action\": \"close\" }",
-            "```",
-            "",
-            "Pooled agents are automatically closed after 10 minutes of inactivity.",
-            "",
-            "## Resuming Previous Sessions",
-            "",
-            "Use `resumeFrom` to continue a failed or interrupted subagent from where it left off.",
-            "Pass the absolute path to the session `.jsonl` file (shown in delegate output).",
-            "The agent gets the full conversation history and the new `prompt` continues naturally.",
-            "",
-            "```json",
-            "// Resume a failed browser test — agent remembers everything it already did",
-            "{ \"prompt\": \"Continue testing — the server is already running on :3000\",",
-            "  \"resumeFrom\": \"/home/user/.pi/agent/sessions/project/2026-01-01T12-00-00Z_abc123.jsonl\" }",
-            "```",
-            "",
-            "Combine with `sessionId` to resume AND pool the agent for further multi-turn use:",
-            "",
-            "```json",
-            "{ \"prompt\": \"Continue the investigation\",",
-            "  \"resumeFrom\": \"/path/to/session.jsonl\",",
-            "  \"sessionId\": \"my-resumed-agent\" }",
-            "```",
-            "",
-            "## Async Mode",
-            "",
-            "Set `async: true` on the top-level call to fire tasks in the background:",
-            "",
-            "```json",
-            "delegate({ async: true, tasks: [{ agent: \"scout\", prompt: \"Investigate auth\" }] })",
-            "```",
-            "→ Returns ticket ID immediately. Parent keeps working.",
-            "",
-            "- `delegate({ action: \"poll\" })` — list all tickets",
-            "- `delegate({ action: \"poll\", ticket: \"abc123\" })` — check one ticket",
-            "- `delegate({ action: \"cancel\", ticket: \"abc123\" })` — abort a running ticket",
-            "",
-            "Max 5 concurrent async tickets. Completed tickets auto-deliver results.",
-          ].join("\n") }],
-          details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
+          content: [
+            {
+              type: "text",
+              text: [
+                "# Delegate Help",
+                "",
+                "Spawn subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, skills, and thinking level.",
+                "",
+                "## Available Agents",
+                "",
+                agentList,
+                "",
+                "Agents live in `.pi/agents/*.md` (project-local). Each agent file is Markdown with YAML-ish frontmatter:",
+                "",
+                "```markdown",
+                "---",
+                "name: my-agent",
+                "description: What it does",
+                "model: anthropic/claude-haiku-4-5  # optional",
+                "thinking: low                     # off/minimal/low/medium/high/xhigh",
+                "tools: read, bash                 # default: all 4 core tools",
+                "skills: web-content               # comma-separated skill names",
+                "---",
+                "You are a helpful agent...",
+                "```",
+                "",
+                "## Task Fields",
+                "",
+                "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to 'continue').",
+                "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
+                "- `systemPrompt` — System prompt. Required if no `agent` specified.",
+                "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
+                "- `tools` — Array of tool names. Default: read, write, edit, bash.",
+                "- `skills` — Skill names injected into the system prompt.",
+                "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
+                "- `cwd` — Working directory. Default: parent session cwd.",
+                "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
+                "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
+                "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
+                "- top-level `action` — Async ticket action: 'poll' or 'cancel'. Does not require `tasks`.",
+                "",
+                "## Session Reuse",
+                "",
+                "When `sessionId` is set, the subagent is kept alive in a pool for the duration of the pi session.",
+                "Subsequent calls with the same `sessionId` continue the conversation — the agent remembers prior context.",
+                "",
+                "```json",
+                "// First call — creates and runs",
+                '{ "prompt": "Investigate the auth module", "agent": "scout", "sessionId": "auth-research" }',
+                "",
+                "// Second call — continues the same agent",
+                '{ "prompt": "Now check the tests for that module", "sessionId": "auth-research" }',
+                "",
+                "// Clean up when done",
+                '{ "prompt": "", "sessionId": "auth-research", "action": "close" }',
+                "```",
+                "",
+                "Pooled agents are automatically closed after 10 minutes of inactivity.",
+                "",
+                "## Resuming Previous Sessions",
+                "",
+                "Use `resumeFrom` to continue a failed or interrupted subagent from where it left off.",
+                "Pass the absolute path to the session `.jsonl` file (shown in delegate output).",
+                "The agent gets the full conversation history and the new `prompt` continues naturally.",
+                "",
+                "```json",
+                "// Resume a failed browser test — agent remembers everything it already did",
+                '{ "prompt": "Continue testing — the server is already running on :3000",',
+                '  "resumeFrom": "/home/user/.pi/agent/sessions/project/2026-01-01T12-00-00Z_abc123.jsonl" }',
+                "```",
+                "",
+                "Combine with `sessionId` to resume AND pool the agent for further multi-turn use:",
+                "",
+                "```json",
+                '{ "prompt": "Continue the investigation",',
+                '  "resumeFrom": "/path/to/session.jsonl",',
+                '  "sessionId": "my-resumed-agent" }',
+                "```",
+                "",
+                "## Async Mode",
+                "",
+                "Set `async: true` on the top-level call to fire tasks in the background:",
+                "",
+                "```json",
+                'delegate({ async: true, tasks: [{ agent: "scout", prompt: "Investigate auth" }] })',
+                "```",
+                "→ Returns ticket ID immediately. Parent keeps working.",
+                "",
+                '- `delegate({ action: "poll" })` — list all tickets',
+                '- `delegate({ action: "poll", ticket: "abc123" })` — check one ticket',
+                '- `delegate({ action: "cancel", ticket: "abc123" })` — abort a running ticket',
+                "",
+                "Max 5 concurrent async tickets. Results are delivered automatically when all tasks finish. Poll for progress while running, but avoid polling in a tight loop — do other work while waiting.",
+              ].join("\n"),
+            },
+          ],
+          details: {
+            tasks: [],
+            results: [],
+            progress: [],
+            parentModel: parentModelId,
+          },
         };
       }
 
       // ── Validate ──────────────────────────────────────────────────
       // Disallow same sessionId across multiple parallel tasks (one agent can't serve two prompts concurrently).
       const sessionIds = tasks.map((t) => t.sessionId).filter(Boolean);
-      const duplicateSessions = sessionIds.filter((id, i) => sessionIds.indexOf(id) !== i);
+      const duplicateSessions = sessionIds.filter(
+        (id, i) => sessionIds.indexOf(id) !== i,
+      );
       if (duplicateSessions.length) {
         return {
-          content: [{ type: "text", text: `Duplicate sessionId(s) across tasks: ${[...new Set(duplicateSessions)].join(", ")}. A pooled agent can only handle one prompt at a time.` }],
-          details: { tasks, results: [], progress: [], parentModel: parentModelId },
+          content: [
+            {
+              type: "text",
+              text: `Duplicate sessionId(s) across tasks: ${[...new Set(duplicateSessions)].join(", ")}. A pooled agent can only handle one prompt at a time.`,
+            },
+          ],
+          details: {
+            tasks,
+            results: [],
+            progress: [],
+            parentModel: parentModelId,
+          },
         };
       }
 
@@ -1705,20 +2157,37 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       if (unknown.length) {
         const names = [...agents.keys()];
         return {
-          content: [{ type: "text", text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with an empty tasks array for help.` }],
-          details: { tasks, results: [], progress: [], parentModel: parentModelId },
+          content: [
+            {
+              type: "text",
+              text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with an empty tasks array for help.`,
+            },
+          ],
+          details: {
+            tasks,
+            results: [],
+            progress: [],
+            parentModel: parentModelId,
+          },
         };
       }
 
       // ── Resolve tasks ─────────────────────────────────────────────
       // Build parent transcript lazily — only computed once if any task uses with-parent-transcript
       let parentTranscript: string | null = null;
-      const needsParentContext = tasks.some((t) => t.context === "with-parent-transcript");
+      const needsParentContext = tasks.some(
+        (t) => t.context === "with-parent-transcript",
+      );
       if (needsParentContext) {
         if (!ctx.sessionManager) {
-          throw new Error("context: 'with-parent-transcript' requires a persisted parent session.");
+          throw new Error(
+            "context: 'with-parent-transcript' requires a persisted parent session.",
+          );
         }
-        parentTranscript = buildParentTranscript(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId());
+        parentTranscript = buildParentTranscript(
+          ctx.sessionManager.getEntries(),
+          ctx.sessionManager.getLeafId(),
+        );
       }
 
       const resolved = tasks.map((t, i) => {
@@ -1727,18 +2196,37 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
         // Load settings-based overrides for this agent
         const settings = loadDelegateSettings(cwd);
-        const agentOverride = (t.agent && settings?.agentOverrides?.[t.agent]) ? settings.agentOverrides[t.agent] : undefined;
+        const agentOverride =
+          t.agent && settings?.agentOverrides?.[t.agent]
+            ? settings.agentOverrides[t.agent]
+            : undefined;
 
         // Build system prompt (pooled agents already have one baked in)
-        const pooledConfig = t.sessionId ? agentPool.get(t.sessionId)?.config : undefined;
-        let systemPrompt = t.systemPrompt ?? agent?.systemPrompt ?? pooledConfig?.systemPrompt ?? "";
+        const pooledConfig = t.sessionId
+          ? agentPool.get(t.sessionId)?.config
+          : undefined;
+        let systemPrompt =
+          t.systemPrompt ??
+          agent?.systemPrompt ??
+          pooledConfig?.systemPrompt ??
+          "";
         if (!systemPrompt.trim()) {
-          systemPrompt = (typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : "") || "You are a helpful coding assistant.";
+          systemPrompt =
+            (typeof ctx.getSystemPrompt === "function"
+              ? ctx.getSystemPrompt()
+              : "") || "You are a helpful coding assistant.";
         }
 
         // Prompt is required for fresh tasks. ResumeFrom provides context already.
-        if (t.action !== "close" && t.action !== "list" && !t.resumeFrom && !t.prompt?.trim()) {
-          throw new Error(`Task ${i}: prompt is required unless action is 'close'/'list' or resumeFrom is set.`);
+        if (
+          t.action !== "close" &&
+          t.action !== "list" &&
+          !t.resumeFrom &&
+          !t.prompt?.trim()
+        ) {
+          throw new Error(
+            `Task ${i}: prompt is required unless action is 'close'/'list' or resumeFrom is set.`,
+          );
         }
 
         // Inject skills
@@ -1749,18 +2237,27 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           if (content) skillBodies.push(content);
         }
         if (skillBodies.length) {
-          systemPrompt = systemPrompt.trimEnd() + "\n\n" + skillBodies.join("\n\n");
+          systemPrompt =
+            systemPrompt.trimEnd() + "\n\n" + skillBodies.join("\n\n");
         }
 
         // Inject AGENTS.md context files (global + cwd ancestors)
         const agentsMdFiles = loadAgentsMdFiles(cwd);
         if (agentsMdFiles.length) {
-          systemPrompt = systemPrompt.trimEnd() + "\n\n" + agentsMdFiles.join("\n\n");
+          systemPrompt =
+            systemPrompt.trimEnd() + "\n\n" + agentsMdFiles.join("\n\n");
         }
 
         // Build prompt — wrap with parent context if using with-parent-transcript
-        let prompt = t.prompt || (t.resumeFrom ? "Continue from where you left off. Pick up the task and keep going." : t.prompt);
-        const parentCtx = t.context === "with-parent-transcript" && parentTranscript ? parentTranscript : null;
+        let prompt =
+          t.prompt ||
+          (t.resumeFrom
+            ? "Continue from where you left off. Pick up the task and keep going."
+            : t.prompt);
+        const parentCtx =
+          t.context === "with-parent-transcript" && parentTranscript
+            ? parentTranscript
+            : null;
         if (parentCtx) {
           prompt = [
             "<parent-session>",
@@ -1787,35 +2284,60 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           if (t.sessionId && agentPool.has(t.sessionId)) {
             model = agentPool.get(t.sessionId)!.config.model;
           } else {
-            const explicitModelSpec = t.model ?? agentOverride?.model ?? agent?.model;
+            const explicitModelSpec =
+              t.model ?? agentOverride?.model ?? agent?.model;
             const modelSpec = explicitModelSpec ?? pooledConfig?.model?.id;
-            const resolvedModel = resolveModel(modelSpec, ctx.modelRegistry, ctx.model);
+            const resolvedModel = resolveModel(
+              modelSpec,
+              ctx.modelRegistry,
+              ctx.model,
+            );
 
             if (explicitModelSpec && !resolvedModel) {
               // Caller explicitly requested a specific model that couldn't be resolved.
               // Fail loudly — silent fallback defeats the purpose of specifying a model.
-              throw new Error(`Task ${i}: requested model '${explicitModelSpec}' is not available. Check provider config or remove the model field to use the parent model.`);
+              throw new Error(
+                `Task ${i}: requested model '${explicitModelSpec}' is not available. Check provider config or remove the model field to use the parent model.`,
+              );
             }
 
             model = resolvedModel ?? ctx.model;
           }
 
           if (!model) {
-            throw new Error(`Task ${i}: no model available — parent session has no model set.`);
+            throw new Error(
+              `Task ${i}: no model available — parent session has no model set.`,
+            );
           }
 
           // Resolve tools — warn about unknown tool names
           tools = t.tools ?? agent?.tools ?? DEFAULT_TOOLS;
-          const unknownTools = tools.filter((name) => !(name in TOOL_FACTORIES));
+          const unknownTools = tools.filter(
+            (name) => !(name in TOOL_FACTORIES),
+          );
           if (unknownTools.length) {
-            warnings.push(`Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`);
+            warnings.push(
+              `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`,
+            );
           }
 
           // Resolve thinking
           const thinkingRaw = t.thinking ?? agent?.thinking ?? "off";
-          thinking = VALID_THINKING.has(thinkingRaw) ? (thinkingRaw as ThinkingLevel) : "off";
+          thinking = VALID_THINKING.has(thinkingRaw)
+            ? (thinkingRaw as ThinkingLevel)
+            : "off";
         }
-        return { ...t, cwd, systemPrompt, model: model!, tools, thinking, prompt, agentName: agent?.name ?? "inline", warnings };
+        return {
+          ...t,
+          cwd,
+          systemPrompt,
+          model: model!,
+          tools,
+          thinking,
+          prompt,
+          agentName: agent?.name ?? "inline",
+          warnings,
+        };
       });
 
       // ── Progress tracking ─────────────────────────────────────────
@@ -1831,20 +2353,43 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         activities: [],
         model: t.model?.id,
       }));
-      const fire = () => onUpdate?.({
-        content: [{ type: "text", text: `Running ${resolved.length} subagent${resolved.length > 1 ? "s" : ""}…` }],
-        details: { tasks, results: [], progress: [...progress], parentModel: parentModelId },
-      });
+      const fire = () =>
+        onUpdate?.({
+          content: [
+            {
+              type: "text",
+              text: `Running ${resolved.length} subagent${resolved.length > 1 ? "s" : ""}…`,
+            },
+          ],
+          details: {
+            tasks,
+            results: [],
+            progress: [...progress],
+            parentModel: parentModelId,
+          },
+        });
       fire();
 
       // ── Async mode ───────────────────────────────────────────────────
       if (params.async) {
         sweepTickets();
-        const runningCount = [...ticketRegistry.values()].filter(t => t.status === "running").length;
+        const runningCount = [...ticketRegistry.values()].filter(
+          (t) => t.status === "running",
+        ).length;
         if (runningCount >= MAX_ASYNC_TICKETS) {
           return {
-            content: [{ type: "text", text: `Too many async tickets running (${runningCount}/${MAX_ASYNC_TICKETS}). Poll existing tickets or cancel one first.` }],
-            details: { tasks, results: [], progress: [], parentModel: parentModelId },
+            content: [
+              {
+                type: "text",
+                text: `Too many async tickets running (${runningCount}/${MAX_ASYNC_TICKETS}). Poll existing tickets or cancel one first.`,
+              },
+            ],
+            details: {
+              tasks,
+              results: [],
+              progress: [],
+              parentModel: parentModelId,
+            },
           };
         }
 
@@ -1869,263 +2414,462 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const modelRegistry = ctx.modelRegistry;
 
         // Fire and forget — runs on the event loop
-        mapConcurrent(resolved, MAX_CONCURRENCY, async (t, i) => {
-          // IMPORTANT: wrap each task in try/catch so one failure
-          // doesn't reject the entire mapConcurrent promise.
-          const p = ticket.progress[i]!;
-          try {
-            // Check if parent signal already aborted
-            if (signal?.aborted) {
-              p.status = "failed"; p.error = "Aborted";
-              ticket.results[i] = { agent: t.agentName, output: "", error: "Aborted", durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
-              return ticket.results[i]!;
-            }
-
-            // ── Session busy guard (async) ───────────────────────────
-            if (t.sessionId) {
-              const busyTicketId = isSessionBusy(t.sessionId);
-              if (busyTicketId && busyTicketId !== ticketId) {
+        mapConcurrent(
+          resolved,
+          MAX_CONCURRENCY,
+          async (t, i) => {
+            // IMPORTANT: wrap each task in try/catch so one failure
+            // doesn't reject the entire mapConcurrent promise.
+            const p = ticket.progress[i]!;
+            try {
+              // Check if parent signal already aborted
+              if (signal?.aborted) {
                 p.status = "failed";
-                p.error = `Session '${t.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`;
-                ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+                p.error = "Aborted";
+                ticket.results[i] = {
+                  agent: t.agentName,
+                  output: "",
+                  error: "Aborted",
+                  durationMs: 0,
+                  tokens: 0,
+                  sessionFile: undefined,
+                  touchedFiles: [],
+                };
                 return ticket.results[i]!;
               }
-            }
 
-            p.status = "running"; p.model = t.model?.id;
-
-            // ── Session action handling (async) ─────────────────────
-            if (t.action === "close") {
-              if (!t.sessionId) {
-                p.status = "failed"; p.error = "action='close' requires sessionId.";
-                ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
-                return ticket.results[i]!;
-              }
-              const closed = closePooledAgent(t.sessionId);
-              p.status = "done"; p.durationMs = Date.now() - ticket.created;
-              ticket.results[i] = { agent: t.agentName, output: closed ? `Session '${t.sessionId}' closed.` : `Session '${t.sessionId}' not found.`, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
-              return ticket.results[i]!;
-            }
-
-            if (t.action === "list") {
-              const listing = listPooledAgents();
-              p.status = "done"; p.durationMs = Date.now() - ticket.created;
-              ticket.results[i] = { agent: t.agentName, output: `Active sessions:\n${listing.join("\n")}`, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
-              return ticket.results[i]!;
-            }
-
-            // ── Pooled agent resolution (async) ───────────────────
-            let existingAgent: Agent | undefined;
-            let poolSessionManager: SessionManagerLike | undefined;
-            let poolSessionFile: string | undefined;
-            let pendingPoolInsert = false;
-
-            if (t.sessionId) {
-              const pooled = agentPool.get(t.sessionId);
-              if (pooled) {
-                // Pool hit — validate config compatibility
-                const frozen = pooled.config;
-                const mismatches: string[] = [];
-                if (frozen.cwd !== t.cwd) mismatches.push(`cwd: '${frozen.cwd}' vs '${t.cwd}'`);
-                if (frozen.thinking !== t.thinking) mismatches.push(`thinking: '${frozen.thinking}' vs '${t.thinking}'`);
-                const frozenToolSet = [...frozen.tools].sort().join(",");
-                const newToolSet = [...t.tools].sort().join(",");
-                if (frozenToolSet !== newToolSet) mismatches.push(`tools: [${frozenToolSet}] vs [${newToolSet}]`);
-                if (mismatches.length) {
-                  p.status = "failed"; p.error = `Session '${t.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`;
-                  ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+              // ── Session busy guard (async) ───────────────────────────
+              if (t.sessionId) {
+                const busyTicketId = isSessionBusy(t.sessionId);
+                if (busyTicketId && busyTicketId !== ticketId) {
+                  p.status = "failed";
+                  p.error = `Session '${t.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`;
+                  ticket.results[i] = {
+                    agent: t.agentName,
+                    output: "",
+                    error: p.error,
+                    durationMs: 0,
+                    tokens: 0,
+                    sessionFile: undefined,
+                    touchedFiles: [],
+                  };
                   return ticket.results[i]!;
                 }
-                existingAgent = pooled.agent;
-                poolSessionManager = pooled.sessionManager;
-                poolSessionFile = pooled.sessionFile;
-                pooled.lastUsed = Date.now();
-                p.model = frozen.model.id;
-              } else {
-                // Pool miss
-                if (t.resumeFrom) {
-                  pendingPoolInsert = true;
-                } else {
-                  const session = createSubagentSessionManager(ctx.sessionManager, t.cwd);
-                  poolSessionManager = session?.manager;
-                  poolSessionFile = session?.file;
+              }
 
-                  const tools = t.tools.map((name) => TOOL_FACTORIES[name]?.(t.cwd)).filter(Boolean) as AgentTool[];
-                  const agentConfig = { systemPrompt: t.systemPrompt, model: t.model, thinkingLevel: t.thinking, tools };
+              p.status = "running";
+              p.model = t.model?.id;
 
-                  let agent: Agent | undefined;
-                  if (poolSessionFile) {
-                    const rehydrated = rehydrateAgent(
-                      poolSessionFile,
-                      { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
-                      modelRegistry,
+              // ── Session action handling (async) ─────────────────────
+              if (t.action === "close") {
+                if (!t.sessionId) {
+                  p.status = "failed";
+                  p.error = "action='close' requires sessionId.";
+                  ticket.results[i] = {
+                    agent: t.agentName,
+                    output: "",
+                    error: p.error,
+                    durationMs: 0,
+                    tokens: 0,
+                    sessionFile: undefined,
+                    touchedFiles: [],
+                  };
+                  return ticket.results[i]!;
+                }
+                const closed = closePooledAgent(t.sessionId);
+                p.status = "done";
+                p.durationMs = Date.now() - ticket.created;
+                ticket.results[i] = {
+                  agent: t.agentName,
+                  output: closed
+                    ? `Session '${t.sessionId}' closed.`
+                    : `Session '${t.sessionId}' not found.`,
+                  durationMs: 0,
+                  tokens: 0,
+                  sessionFile: undefined,
+                  touchedFiles: [],
+                };
+                return ticket.results[i]!;
+              }
+
+              if (t.action === "list") {
+                const listing = listPooledAgents();
+                p.status = "done";
+                p.durationMs = Date.now() - ticket.created;
+                ticket.results[i] = {
+                  agent: t.agentName,
+                  output: `Active sessions:\n${listing.join("\n")}`,
+                  durationMs: 0,
+                  tokens: 0,
+                  sessionFile: undefined,
+                  touchedFiles: [],
+                };
+                return ticket.results[i]!;
+              }
+
+              // ── Pooled agent resolution (async) ───────────────────
+              let existingAgent: Agent | undefined;
+              let poolSessionManager: SessionManagerLike | undefined;
+              let poolSessionFile: string | undefined;
+              let pendingPoolInsert = false;
+
+              if (t.sessionId) {
+                const pooled = agentPool.get(t.sessionId);
+                if (pooled) {
+                  // Pool hit — validate config compatibility
+                  const frozen = pooled.config;
+                  const mismatches: string[] = [];
+                  if (frozen.cwd !== t.cwd)
+                    mismatches.push(`cwd: '${frozen.cwd}' vs '${t.cwd}'`);
+                  if (frozen.thinking !== t.thinking)
+                    mismatches.push(
+                      `thinking: '${frozen.thinking}' vs '${t.thinking}'`,
                     );
-                    if (rehydrated) {
-                      agent = rehydrated.agent;
-                      poolSessionManager = rehydrated.sessionManager;
+                  const frozenToolSet = [...frozen.tools].sort().join(",");
+                  const newToolSet = [...t.tools].sort().join(",");
+                  if (frozenToolSet !== newToolSet)
+                    mismatches.push(
+                      `tools: [${frozenToolSet}] vs [${newToolSet}]`,
+                    );
+                  if (mismatches.length) {
+                    p.status = "failed";
+                    p.error = `Session '${t.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`;
+                    ticket.results[i] = {
+                      agent: t.agentName,
+                      output: "",
+                      error: p.error,
+                      durationMs: 0,
+                      tokens: 0,
+                      sessionFile: undefined,
+                      touchedFiles: [],
+                    };
+                    return ticket.results[i]!;
+                  }
+                  existingAgent = pooled.agent;
+                  poolSessionManager = pooled.sessionManager;
+                  poolSessionFile = pooled.sessionFile;
+                  pooled.lastUsed = Date.now();
+                  p.model = frozen.model.id;
+                } else {
+                  // Pool miss
+                  if (t.resumeFrom) {
+                    pendingPoolInsert = true;
+                  } else {
+                    const session = createSubagentSessionManager(
+                      ctx.sessionManager,
+                      t.cwd,
+                    );
+                    poolSessionManager = session?.manager;
+                    poolSessionFile = session?.file;
+
+                    const tools = t.tools
+                      .map((name) => TOOL_FACTORIES[name]?.(t.cwd))
+                      .filter(Boolean) as AgentTool[];
+                    const agentConfig = {
+                      systemPrompt: t.systemPrompt,
+                      model: t.model,
+                      thinkingLevel: t.thinking,
+                      tools,
+                    };
+
+                    let agent: Agent | undefined;
+                    if (poolSessionFile) {
+                      const rehydrated = rehydrateAgent(
+                        poolSessionFile,
+                        {
+                          systemPrompt: t.systemPrompt,
+                          model: t.model,
+                          thinking: t.thinking,
+                          tools: t.tools,
+                          cwd: t.cwd,
+                        },
+                        modelRegistry,
+                      );
+                      if (rehydrated) {
+                        agent = rehydrated.agent;
+                        poolSessionManager = rehydrated.sessionManager;
+                      }
+                    }
+                    if (!agent) {
+                      const streamFn = async (
+                        m: any,
+                        context: any,
+                        options: any,
+                      ) => {
+                        const auth = await modelRegistry.getApiKeyAndHeaders(m);
+                        if (!auth.ok)
+                          throw new Error(`Auth failed: ${auth.error}`);
+                        return streamSimple(m, context, {
+                          ...options,
+                          apiKey: auth.apiKey,
+                          headers: auth.headers ?? undefined,
+                        });
+                      };
+                      agent = new Agent({
+                        initialState: agentConfig,
+                        convertToLlm,
+                        streamFn,
+                      });
+                    }
+                    existingAgent = agent;
+                    pendingPoolInsert = true;
+
+                    // Synchronous pool insertion — prevent race conditions
+                    if (
+                      t.sessionId &&
+                      existingAgent &&
+                      poolSessionManager &&
+                      poolSessionFile
+                    ) {
+                      agentPool.set(t.sessionId, {
+                        agent: existingAgent,
+                        sessionManager: poolSessionManager,
+                        sessionFile: poolSessionFile,
+                        config: {
+                          systemPrompt: t.systemPrompt,
+                          model: t.model,
+                          thinking: t.thinking,
+                          tools: t.tools,
+                          cwd: t.cwd,
+                        },
+                        lastUsed: Date.now(),
+                        createdAt: Date.now(),
+                        totalTokens: 0,
+                        promptCount: 0,
+                      });
+                      pendingPoolInsert = false;
                     }
                   }
-                  if (!agent) {
-                    const streamFn = async (m: any, context: any, options: any) => {
-                      const auth = await modelRegistry.getApiKeyAndHeaders(m);
-                      if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-                      return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+                }
+              }
+
+              // ── Resume from previous session (async) ────────────────
+              let resumedSessionManager: SessionManagerLike | undefined;
+              let resumedSessionFile: string | undefined;
+              const isPoolHit =
+                t.sessionId &&
+                !pendingPoolInsert &&
+                agentPool.has(t.sessionId!);
+
+              if (t.resumeFrom) {
+                if (isPoolHit) {
+                  const msg = `resumeFrom conflicts with active sessionId '${t.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`;
+                  p.status = "failed";
+                  p.error = msg;
+                  ticket.results[i] = {
+                    agent: t.agentName,
+                    output: "",
+                    error: msg,
+                    durationMs: 0,
+                    tokens: 0,
+                    sessionFile: poolSessionFile,
+                    touchedFiles: [],
+                  };
+                  return ticket.results[i]!;
+                } else {
+                  const resolvedPath = resolveCwd(t.resumeFrom);
+                  if (!fs.existsSync(resolvedPath)) {
+                    p.status = "failed";
+                    p.error = `resumeFrom: file not found: ${resolvedPath}`;
+                    ticket.results[i] = {
+                      agent: t.agentName,
+                      output: "",
+                      error: p.error,
+                      durationMs: 0,
+                      tokens: 0,
+                      sessionFile: resolvedPath,
+                      touchedFiles: [],
                     };
-                    agent = new Agent({ initialState: agentConfig, convertToLlm, streamFn });
+                    return ticket.results[i]!;
                   }
-                  existingAgent = agent;
-                  pendingPoolInsert = true;
-
-                  // Synchronous pool insertion — prevent race conditions
-                  if (t.sessionId && existingAgent && poolSessionManager && poolSessionFile) {
-                    agentPool.set(t.sessionId, {
-                      agent: existingAgent,
-                      sessionManager: poolSessionManager,
-                      sessionFile: poolSessionFile,
-                      config: { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
-                      lastUsed: Date.now(),
-                      createdAt: Date.now(),
-                      totalTokens: 0,
-                      promptCount: 0,
-                    });
-                    pendingPoolInsert = false;
+                  const resumeConfig = {
+                    systemPrompt: t.systemPrompt,
+                    model: t.model,
+                    thinking: t.thinking,
+                    tools: t.tools,
+                    cwd: t.cwd,
+                  };
+                  const rehydrated = rehydrateAgent(
+                    resolvedPath,
+                    resumeConfig,
+                    modelRegistry,
+                  );
+                  if (!rehydrated) {
+                    p.status = "failed";
+                    p.error = `resumeFrom: empty or corrupt session: ${resolvedPath}`;
+                    ticket.results[i] = {
+                      agent: t.agentName,
+                      output: "",
+                      error: p.error,
+                      durationMs: 0,
+                      tokens: 0,
+                      sessionFile: resolvedPath,
+                      touchedFiles: [],
+                    };
+                    return ticket.results[i]!;
                   }
+                  existingAgent = rehydrated.agent;
+                  resumedSessionManager = rehydrated.sessionManager;
+                  resumedSessionFile = resolvedPath;
                 }
               }
-            }
 
-            // ── Resume from previous session (async) ────────────────
-            let resumedSessionManager: SessionManagerLike | undefined;
-            let resumedSessionFile: string | undefined;
-            const isPoolHit = t.sessionId && !pendingPoolInsert && agentPool.has(t.sessionId!);
+              const session = resumedSessionManager
+                ? { manager: resumedSessionManager, file: resumedSessionFile }
+                : t.sessionId
+                  ? { manager: poolSessionManager, file: poolSessionFile }
+                  : createSubagentSessionManager(ctx.sessionManager, t.cwd);
 
-            if (t.resumeFrom) {
-              if (isPoolHit) {
-                const msg = `resumeFrom conflicts with active sessionId '${t.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`;
-                p.status = "failed"; p.error = msg;
-                ticket.results[i] = { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: poolSessionFile, touchedFiles: [] };
-                return ticket.results[i]!;
-              } else {
-                const resolvedPath = resolveCwd(t.resumeFrom);
-                if (!fs.existsSync(resolvedPath)) {
-                  p.status = "failed"; p.error = `resumeFrom: file not found: ${resolvedPath}`;
-                  ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
-                  return ticket.results[i]!;
-                }
-                const resumeConfig = { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd };
-                const rehydrated = rehydrateAgent(resolvedPath, resumeConfig, modelRegistry);
-                if (!rehydrated) {
-                  p.status = "failed"; p.error = `resumeFrom: empty or corrupt session: ${resolvedPath}`;
-                  ticket.results[i] = { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
-                  return ticket.results[i]!;
-                }
-                existingAgent = rehydrated.agent;
-                resumedSessionManager = rehydrated.sessionManager;
-                resumedSessionFile = resolvedPath;
+              if (session?.manager && !isPoolHit && !resumedSessionManager) {
+                const label = `⎇ delegate · ${t.agentName}`;
+                session.manager.appendSessionInfo(label);
               }
+
+              // ── Run agent (async) ──────────────────────────────────
+              const config = {
+                systemPrompt: t.systemPrompt,
+                model: t.model,
+                thinking: t.thinking,
+                tools: t.tools,
+                cwd: t.cwd,
+              };
+              const r = await runAgent(
+                config,
+                t.prompt,
+                modelRegistry,
+                ticketSignal, // Fresh controller, NOT parent signal
+                (u) => {
+                  // Update ticket progress directly — NO fire()/onUpdate
+                  p.tokens = u.tokens;
+                  p.toolUses = u.toolUses;
+                  p.durationMs = u.durationMs;
+                  p.lastActivityAt = u.lastActivityAt;
+                  p.activities = u.activities;
+                },
+                session?.manager,
+                undefined, // maxRetries
+                2000, // retryBaseMs
+                existingAgent,
+                !isPoolHit, // allowRetry
+                i,
+              );
+
+              // Pool insertion on success (only if not already inserted synchronously)
+              if (
+                t.sessionId &&
+                pendingPoolInsert &&
+                !r.error &&
+                session?.manager &&
+                session?.file
+              ) {
+                agentPool.set(t.sessionId, {
+                  agent: existingAgent!,
+                  sessionManager: session.manager,
+                  sessionFile: session.file,
+                  config: {
+                    systemPrompt: t.systemPrompt,
+                    model: t.model,
+                    thinking: t.thinking,
+                    tools: t.tools,
+                    cwd: t.cwd,
+                  },
+                  lastUsed: Date.now(),
+                  createdAt: Date.now(),
+                  totalTokens: r.tokens,
+                  promptCount: 1,
+                });
+              }
+
+              // Update pool stats on subsequent successful runs
+              if (t.sessionId && !pendingPoolInsert) {
+                const pooled = agentPool.get(t.sessionId);
+                if (pooled) {
+                  pooled.lastUsed = Date.now();
+                  pooled.totalTokens += r.tokens;
+                  pooled.promptCount++;
+                }
+              }
+
+              p.status = r.error ? "failed" : "done";
+              p.durationMs = r.durationMs;
+              p.tokens = r.tokens;
+              p.error = r.error;
+              ticket.results[i] = {
+                agent: t.agentName,
+                output: r.output,
+                error: r.error,
+                durationMs: r.durationMs,
+                tokens: r.tokens,
+                sessionFile: session?.file ?? poolSessionFile,
+                touchedFiles: r.touchedFiles,
+              };
+              return ticket.results[i]!;
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              p.status = "failed";
+              p.error = msg;
+              ticket.results[i] = {
+                agent: t.agentName,
+                output: "",
+                error: msg,
+                durationMs: 0,
+                tokens: 0,
+                sessionFile: undefined,
+                touchedFiles: [],
+              };
+              return ticket.results[i]!;
             }
-
-            const session = resumedSessionManager
-              ? { manager: resumedSessionManager, file: resumedSessionFile }
-              : t.sessionId
-                ? { manager: poolSessionManager, file: poolSessionFile }
-                : createSubagentSessionManager(ctx.sessionManager, t.cwd);
-
-            if (session?.manager && !isPoolHit && !resumedSessionManager) {
-              const label = `⎇ delegate · ${t.agentName}`;
-              session.manager.appendSessionInfo(label);
-            }
-
-            // ── Run agent (async) ──────────────────────────────────
-            const config = { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd };
-            const r = await runAgent(
-              config,
-              t.prompt,
-              modelRegistry,
-              ticketSignal,  // Fresh controller, NOT parent signal
-              (u) => {
-                // Update ticket progress directly — NO fire()/onUpdate
-                p.tokens = u.tokens;
-                p.toolUses = u.toolUses;
-                p.durationMs = u.durationMs;
-                p.lastActivityAt = u.lastActivityAt;
-                p.activities = u.activities;
-              },
-              session?.manager,
-              undefined,  // maxRetries
-              2000,       // retryBaseMs
-              existingAgent,
-              !isPoolHit, // allowRetry
-              i,
+          },
+          ticketSignal,
+        )
+          .then(() => {
+            // All tasks settled — determine final ticket status
+            const anyFailed = ticket.results.some(
+              (r) => r && "error" in r && r.error,
             );
-
-            // Pool insertion on success (only if not already inserted synchronously)
-            if (t.sessionId && pendingPoolInsert && !r.error && session?.manager && session?.file) {
-              agentPool.set(t.sessionId, {
-                agent: existingAgent!,
-                sessionManager: session.manager,
-                sessionFile: session.file,
-                config: { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
-                lastUsed: Date.now(),
-                createdAt: Date.now(),
-                totalTokens: r.tokens,
-                promptCount: 1,
-              });
+            const allSettled = ticket.results.every((r) => r !== undefined);
+            if (ticket.status === "running") {
+              ticket.status =
+                allSettled && !anyFailed
+                  ? "done"
+                  : anyFailed && !ticket.results.some((r) => r && !r.error)
+                    ? "failed"
+                    : anyFailed
+                      ? "failed"
+                      : "done";
+              ticket.completedAt = Date.now();
             }
-
-            // Update pool stats on subsequent successful runs
-            if (t.sessionId && !pendingPoolInsert) {
-              const pooled = agentPool.get(t.sessionId);
-              if (pooled) {
-                pooled.lastUsed = Date.now();
-                pooled.totalTokens += r.tokens;
-                pooled.promptCount++;
-              }
-            }
-
-            p.status = r.error ? "failed" : "done";
-            p.durationMs = r.durationMs;
-            p.tokens = r.tokens;
-            p.error = r.error;
-            ticket.results[i] = { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens, sessionFile: session?.file ?? poolSessionFile, touchedFiles: r.touchedFiles };
-            return ticket.results[i]!;
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            p.status = "failed";
-            p.error = msg;
-            ticket.results[i] = { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
-            return ticket.results[i]!;
-          }
-        }, ticketSignal).then(() => {
-          // All tasks settled — determine final ticket status
-          const anyFailed = ticket.results.some(r => r && "error" in r && r.error);
-          const allSettled = ticket.results.every(r => r !== undefined);
-          if (ticket.status === "running") {
-            ticket.status = allSettled && !anyFailed ? "done" : anyFailed && !ticket.results.some(r => r && !r.error) ? "failed" : anyFailed ? "failed" : "done";
+            deliverTicketResults(pi, ticket);
+          })
+          .catch((err) => {
+            // Defense-in-depth — should not happen if individual tasks catch properly
+            ticket.status = "failed";
+            ticket.error = err instanceof Error ? err.message : String(err);
             ticket.completedAt = Date.now();
-          }
-          deliverTicketResults(pi, ticket);
-        }).catch((err) => {
-          // Defense-in-depth — should not happen if individual tasks catch properly
-          ticket.status = "failed";
-          ticket.error = err instanceof Error ? err.message : String(err);
-          ticket.completedAt = Date.now();
-          deliverTicketResults(pi, ticket);
-        });
+            deliverTicketResults(pi, ticket);
+          });
 
         return {
-          content: [{
-            type: "text",
-            text: [
-              `Async ticket: ${ticketId}`,
-              `${resolved.length} task(s) dispatched · ${runningCount + 1}/${MAX_ASYNC_TICKETS} async slots in use`,
-              "",
-              "Results will be delivered when all tasks complete.",
-              `Poll anytime: delegate({ action: "poll", ticket: "${ticketId}" })`,
-              `Cancel if needed: delegate({ action: "cancel", ticket: "${ticketId}" })`,
-            ].join("\n"),
-          }],
-          details: { tasks, results: [], progress: [...progress], parentModel: parentModelId, ticketId },
+          content: [
+            {
+              type: "text",
+              text: [
+                `Async ticket: ${ticketId}`,
+                `${resolved.length} task(s) dispatched · ${runningCount + 1}/${MAX_ASYNC_TICKETS} async slots in use`,
+                "",
+                "Completed task results are available via poll. Final results delivered automatically when all tasks complete.",
+                `Check progress: delegate({ action: "poll", ticket: "${ticketId}" }) — avoid polling in a tight loop`,
+                `Cancel if needed: delegate({ action: "cancel", ticket: "${ticketId}" })`,
+              ].join("\n"),
+            },
+          ],
+          details: {
+            tasks,
+            results: [],
+            progress: [...progress],
+            parentModel: parentModelId,
+            ticketId,
+          },
         };
       }
 
@@ -2133,222 +2877,411 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // Sweep stale pooled agents before dispatching.
       sweepPool();
 
-      const results = await mapConcurrent(resolved, MAX_CONCURRENCY, async (t, i) => {
-        const p = progress[i]!;
-        // Skip the "running" flash if we're already aborted.
-        if (signal?.aborted) {
-          p.status = "failed"; p.error = "Aborted"; fire();
-          return { agent: t.agentName, output: "", error: "Aborted", durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
-        }
-        p.status = "running"; p.model = t.model?.id; fire();
-
-        // ── Session busy guard (sync) ───────────────────────────
-        if (t.sessionId) {
-          const busyTicketId = isSessionBusy(t.sessionId);
-          if (busyTicketId) {
-            p.status = "failed"; p.error = `Session '${t.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`; fire();
-            return { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+      const results = await mapConcurrent(
+        resolved,
+        MAX_CONCURRENCY,
+        async (t, i) => {
+          const p = progress[i]!;
+          // Skip the "running" flash if we're already aborted.
+          if (signal?.aborted) {
+            p.status = "failed";
+            p.error = "Aborted";
+            fire();
+            return {
+              agent: t.agentName,
+              output: "",
+              error: "Aborted",
+              durationMs: 0,
+              tokens: 0,
+              sessionFile: undefined,
+              touchedFiles: [],
+            };
           }
-        }
+          p.status = "running";
+          p.model = t.model?.id;
+          fire();
 
-        // ── Session action handling ────────────────────────────────
-        if (t.action === "close") {
-          if (!t.sessionId) {
-            p.status = "failed"; p.error = "action='close' requires sessionId."; fire();
-            return { agent: t.agentName, output: "", error: "action='close' requires sessionId.", durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
-          }
-          const closed = closePooledAgent(t.sessionId);
-          p.status = "done"; p.durationMs = Date.now() - startedAt; fire();
-          return { agent: t.agentName, output: closed ? `Session '${t.sessionId}' closed.` : `Session '${t.sessionId}' not found.`, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
-        }
-
-        if (t.action === "list") {
-          const listing = listPooledAgents();
-          p.status = "done"; p.durationMs = Date.now() - startedAt; fire();
-          return { agent: t.agentName, output: `Active sessions:\n${listing.join("\n")}`, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
-        }
-
-        // ── Pooled agent resolution ────────────────────────────────
-        let existingAgent: Agent | undefined;
-        let poolSessionManager: SessionManagerLike | undefined;
-        let poolSessionFile: string | undefined;
-        let pendingPoolInsert = false; // Set true when we create a new agent that should be pooled on success.
-
-        if (t.sessionId) {
-          const pooled = agentPool.get(t.sessionId);
-          if (pooled) {
-            // Pool hit — validate config compatibility.
-            const frozen = pooled.config;
-            const mismatches: string[] = [];
-            if (frozen.cwd !== t.cwd) mismatches.push(`cwd: '${frozen.cwd}' vs '${t.cwd}'`);
-            if (frozen.thinking !== t.thinking) mismatches.push(`thinking: '${frozen.thinking}' vs '${t.thinking}'`);
-            const frozenToolSet = [...frozen.tools].sort().join(",");
-            const newToolSet = [...t.tools].sort().join(",");
-            if (frozenToolSet !== newToolSet) mismatches.push(`tools: [${frozenToolSet}] vs [${newToolSet}]`);
-            if (mismatches.length) {
-              p.status = "failed"; p.error = `Session '${t.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`; fire();
-              return { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: undefined, touchedFiles: [] };
+          // ── Session busy guard (sync) ───────────────────────────
+          if (t.sessionId) {
+            const busyTicketId = isSessionBusy(t.sessionId);
+            if (busyTicketId) {
+              p.status = "failed";
+              p.error = `Session '${t.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`;
+              fire();
+              return {
+                agent: t.agentName,
+                output: "",
+                error: p.error,
+                durationMs: 0,
+                tokens: 0,
+                sessionFile: undefined,
+                touchedFiles: [],
+              };
             }
-            existingAgent = pooled.agent;
-            poolSessionManager = pooled.sessionManager;
-            poolSessionFile = pooled.sessionFile;
-            pooled.lastUsed = Date.now();
-            // Model was already resolved from frozen config at task resolution time.
-            // Sync progress display to match.
-            p.model = frozen.model.id;
-          } else {
-            // Pool miss — when resumeFrom is specified, defer to the resume block
-            // which will rehydrate from the target session file. Creating a session
-            // here would orphan an empty .jsonl on disk.
-            if (t.resumeFrom) {
-              pendingPoolInsert = true;
-            } else {
-              // Try to rehydrate from disk, or create fresh.
-              const session = createSubagentSessionManager(ctx.sessionManager, t.cwd);
-              poolSessionManager = session?.manager;
-              poolSessionFile = session?.file;
+          }
 
-              const tools = t.tools.map((name) => TOOL_FACTORIES[name]?.(t.cwd)).filter(Boolean) as AgentTool[];
-              const agentConfig = { systemPrompt: t.systemPrompt, model: t.model, thinkingLevel: t.thinking, tools };
+          // ── Session action handling ────────────────────────────────
+          if (t.action === "close") {
+            if (!t.sessionId) {
+              p.status = "failed";
+              p.error = "action='close' requires sessionId.";
+              fire();
+              return {
+                agent: t.agentName,
+                output: "",
+                error: "action='close' requires sessionId.",
+                durationMs: 0,
+                tokens: 0,
+                sessionFile: undefined,
+                touchedFiles: [],
+              };
+            }
+            const closed = closePooledAgent(t.sessionId);
+            p.status = "done";
+            p.durationMs = Date.now() - startedAt;
+            fire();
+            return {
+              agent: t.agentName,
+              output: closed
+                ? `Session '${t.sessionId}' closed.`
+                : `Session '${t.sessionId}' not found.`,
+              durationMs: 0,
+              tokens: 0,
+              sessionFile: undefined,
+              touchedFiles: [],
+            };
+          }
 
-              let agent: Agent | undefined;
-              if (poolSessionFile) {
-                const rehydrated = rehydrateAgent(
-                  poolSessionFile,
-                  { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
-                  ctx.modelRegistry,
+          if (t.action === "list") {
+            const listing = listPooledAgents();
+            p.status = "done";
+            p.durationMs = Date.now() - startedAt;
+            fire();
+            return {
+              agent: t.agentName,
+              output: `Active sessions:\n${listing.join("\n")}`,
+              durationMs: 0,
+              tokens: 0,
+              sessionFile: undefined,
+              touchedFiles: [],
+            };
+          }
+
+          // ── Pooled agent resolution ────────────────────────────────
+          let existingAgent: Agent | undefined;
+          let poolSessionManager: SessionManagerLike | undefined;
+          let poolSessionFile: string | undefined;
+          let pendingPoolInsert = false; // Set true when we create a new agent that should be pooled on success.
+
+          if (t.sessionId) {
+            const pooled = agentPool.get(t.sessionId);
+            if (pooled) {
+              // Pool hit — validate config compatibility.
+              const frozen = pooled.config;
+              const mismatches: string[] = [];
+              if (frozen.cwd !== t.cwd)
+                mismatches.push(`cwd: '${frozen.cwd}' vs '${t.cwd}'`);
+              if (frozen.thinking !== t.thinking)
+                mismatches.push(
+                  `thinking: '${frozen.thinking}' vs '${t.thinking}'`,
                 );
-                if (rehydrated) {
-                  agent = rehydrated.agent;
-                  poolSessionManager = rehydrated.sessionManager;
+              const frozenToolSet = [...frozen.tools].sort().join(",");
+              const newToolSet = [...t.tools].sort().join(",");
+              if (frozenToolSet !== newToolSet)
+                mismatches.push(`tools: [${frozenToolSet}] vs [${newToolSet}]`);
+              if (mismatches.length) {
+                p.status = "failed";
+                p.error = `Session '${t.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`;
+                fire();
+                return {
+                  agent: t.agentName,
+                  output: "",
+                  error: p.error,
+                  durationMs: 0,
+                  tokens: 0,
+                  sessionFile: undefined,
+                  touchedFiles: [],
+                };
+              }
+              existingAgent = pooled.agent;
+              poolSessionManager = pooled.sessionManager;
+              poolSessionFile = pooled.sessionFile;
+              pooled.lastUsed = Date.now();
+              // Model was already resolved from frozen config at task resolution time.
+              // Sync progress display to match.
+              p.model = frozen.model.id;
+            } else {
+              // Pool miss — when resumeFrom is specified, defer to the resume block
+              // which will rehydrate from the target session file. Creating a session
+              // here would orphan an empty .jsonl on disk.
+              if (t.resumeFrom) {
+                pendingPoolInsert = true;
+              } else {
+                // Try to rehydrate from disk, or create fresh.
+                const session = createSubagentSessionManager(
+                  ctx.sessionManager,
+                  t.cwd,
+                );
+                poolSessionManager = session?.manager;
+                poolSessionFile = session?.file;
+
+                const tools = t.tools
+                  .map((name) => TOOL_FACTORIES[name]?.(t.cwd))
+                  .filter(Boolean) as AgentTool[];
+                const agentConfig = {
+                  systemPrompt: t.systemPrompt,
+                  model: t.model,
+                  thinkingLevel: t.thinking,
+                  tools,
+                };
+
+                let agent: Agent | undefined;
+                if (poolSessionFile) {
+                  const rehydrated = rehydrateAgent(
+                    poolSessionFile,
+                    {
+                      systemPrompt: t.systemPrompt,
+                      model: t.model,
+                      thinking: t.thinking,
+                      tools: t.tools,
+                      cwd: t.cwd,
+                    },
+                    ctx.modelRegistry,
+                  );
+                  if (rehydrated) {
+                    agent = rehydrated.agent;
+                    poolSessionManager = rehydrated.sessionManager;
+                  }
+                }
+                if (!agent) {
+                  const streamFn = async (
+                    m: any,
+                    context: any,
+                    options: any,
+                  ) => {
+                    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
+                    if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+                    return streamSimple(m, context, {
+                      ...options,
+                      apiKey: auth.apiKey,
+                      headers: auth.headers ?? undefined,
+                    });
+                  };
+                  agent = new Agent({
+                    initialState: agentConfig,
+                    convertToLlm,
+                    streamFn,
+                  });
+                }
+                pendingPoolInsert = true;
+                existingAgent = agent;
+              }
+            }
+          }
+
+          // ── Resume from previous session ────────────────────────────
+          let resumedSessionManager: SessionManagerLike | undefined;
+          let resumedSessionFile: string | undefined;
+          // isPoolHit: sessionId exists AND agent was found in pool (not a fresh pool miss).
+          const isPoolHit = t.sessionId && !pendingPoolInsert;
+
+          if (t.resumeFrom) {
+            if (isPoolHit) {
+              // Pool has accumulated state — resumeFrom can't override it. Hard error.
+              const msg = `resumeFrom conflicts with active sessionId '${t.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`;
+              p.status = "failed";
+              p.error = msg;
+              fire();
+              return {
+                agent: t.agentName,
+                output: "",
+                error: msg,
+                durationMs: 0,
+                tokens: 0,
+                sessionFile: poolSessionFile,
+                touchedFiles: [],
+              };
+            } else {
+              const resolvedPath = resolveCwd(t.resumeFrom);
+              if (!fs.existsSync(resolvedPath)) {
+                p.status = "failed";
+                p.error = `resumeFrom: file not found: ${resolvedPath}`;
+                fire();
+                return {
+                  agent: t.agentName,
+                  output: "",
+                  error: p.error,
+                  durationMs: 0,
+                  tokens: 0,
+                  sessionFile: resolvedPath,
+                  touchedFiles: [],
+                };
+              }
+              const resumeConfig = {
+                systemPrompt: t.systemPrompt,
+                model: t.model,
+                thinking: t.thinking,
+                tools: t.tools,
+                cwd: t.cwd,
+              };
+              const rehydrated = rehydrateAgent(
+                resolvedPath,
+                resumeConfig,
+                ctx.modelRegistry,
+              );
+              if (!rehydrated) {
+                p.status = "failed";
+                p.error = `resumeFrom: empty or corrupt session: ${resolvedPath}`;
+                fire();
+                return {
+                  agent: t.agentName,
+                  output: "",
+                  error: p.error,
+                  durationMs: 0,
+                  tokens: 0,
+                  sessionFile: resolvedPath,
+                  touchedFiles: [],
+                };
+              }
+              existingAgent = rehydrated.agent;
+              resumedSessionManager = rehydrated.sessionManager;
+              resumedSessionFile = resolvedPath;
+
+              // Link resumed session to parent for /resume discoverability.
+              const parentFile = (
+                ctx.sessionManager as
+                  | { getSessionFile?(): string | undefined }
+                  | undefined
+              )?.getSessionFile?.();
+              if (parentFile) {
+                setParentSession(
+                  rehydrated.sessionManager as unknown as SessionManager,
+                  parentFile,
+                );
+              }
+            }
+          }
+
+          // Create a session manager — prefer resumed, then pool, then fresh.
+          // When resumeFrom is active, skip pool-miss session creation to avoid orphaned empty files.
+          const session = resumedSessionManager
+            ? { manager: resumedSessionManager, file: resumedSessionFile }
+            : t.sessionId
+              ? { manager: poolSessionManager, file: poolSessionFile }
+              : createSubagentSessionManager(ctx.sessionManager, t.cwd);
+
+          // Label subagent sessions so they're identifiable in /resume.
+          // Skip pool hits (already labeled) and resumed sessions (keep original label).
+          if (session?.manager && !isPoolHit && !resumedSessionManager) {
+            const label = `⎇ delegate · ${t.agentName}`;
+            session.manager.appendSessionInfo(label);
+          }
+
+          const doRun = async (): Promise<TaskResult> => {
+            try {
+              const config = {
+                systemPrompt: t.systemPrompt,
+                model: t.model,
+                thinking: t.thinking,
+                tools: t.tools,
+                cwd: t.cwd,
+              };
+              const r = await runAgent(
+                config,
+                t.prompt,
+                ctx.modelRegistry,
+                signal,
+                (u) => {
+                  p.tokens = u.tokens;
+                  p.toolUses = u.toolUses;
+                  p.durationMs = u.durationMs;
+                  p.lastActivityAt = u.lastActivityAt;
+                  p.activities = u.activities;
+                  fire();
+                },
+                session?.manager,
+                undefined, // maxRetries (default)
+                2000, // retryBaseMs
+                existingAgent, // pre-existing agent for pooled, resumed, or pool-miss sessions
+                !isPoolHit, // allowRetry: safe unless pool hit (accumulated multi-turn state)
+                i,
+              );
+
+              // Insert into pool only after successful first run.
+              if (
+                t.sessionId &&
+                pendingPoolInsert &&
+                !r.error &&
+                session?.manager &&
+                session?.file
+              ) {
+                agentPool.set(t.sessionId, {
+                  agent: existingAgent!,
+                  sessionManager: session.manager,
+                  sessionFile: session.file,
+                  config: {
+                    systemPrompt: t.systemPrompt,
+                    model: t.model,
+                    thinking: t.thinking,
+                    tools: t.tools,
+                    cwd: t.cwd,
+                  },
+                  lastUsed: Date.now(),
+                  createdAt: Date.now(),
+                  totalTokens: r.tokens,
+                  promptCount: 1,
+                });
+              }
+
+              // Update pool stats on subsequent successful runs.
+              if (t.sessionId && !pendingPoolInsert) {
+                const pooled = agentPool.get(t.sessionId);
+                if (pooled) {
+                  pooled.lastUsed = Date.now();
+                  pooled.totalTokens += r.tokens;
+                  pooled.promptCount++;
                 }
               }
-              if (!agent) {
-                const streamFn = async (m: any, context: any, options: any) => {
-                  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
-                  if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-                  return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
-                };
-                agent = new Agent({ initialState: agentConfig, convertToLlm, streamFn });
-              }
-              pendingPoolInsert = true;
-              existingAgent = agent;
+
+              p.status = r.error ? "failed" : "done";
+              p.durationMs = r.durationMs;
+              p.tokens = r.tokens;
+              p.error = r.error;
+              fire();
+              return {
+                agent: t.agentName,
+                output: r.output,
+                error: r.error,
+                durationMs: r.durationMs,
+                tokens: r.tokens,
+                sessionFile: session?.file ?? poolSessionFile,
+                touchedFiles: r.touchedFiles,
+              };
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              p.status = "failed";
+              p.error = msg;
+              fire();
+              return {
+                agent: t.agentName,
+                output: "",
+                error: msg,
+                durationMs: 0,
+                tokens: 0,
+                sessionFile:
+                  session?.file ?? poolSessionFile ?? resumedSessionFile,
+                touchedFiles: [],
+              };
             }
+          };
+
+          if (isPoolHit && t.sessionId) {
+            return withSessionLock(t.sessionId, doRun);
           }
-        }
-
-        // ── Resume from previous session ────────────────────────────
-        let resumedSessionManager: SessionManagerLike | undefined;
-        let resumedSessionFile: string | undefined;
-        // isPoolHit: sessionId exists AND agent was found in pool (not a fresh pool miss).
-        const isPoolHit = t.sessionId && !pendingPoolInsert;
-
-        if (t.resumeFrom) {
-          if (isPoolHit) {
-            // Pool has accumulated state — resumeFrom can't override it. Hard error.
-            const msg = `resumeFrom conflicts with active sessionId '${t.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`;
-            p.status = "failed"; p.error = msg; fire();
-            return { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: poolSessionFile, touchedFiles: [] };
-          } else {
-            const resolvedPath = resolveCwd(t.resumeFrom);
-            if (!fs.existsSync(resolvedPath)) {
-              p.status = "failed"; p.error = `resumeFrom: file not found: ${resolvedPath}`; fire();
-              return { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
-            }
-            const resumeConfig = { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd };
-            const rehydrated = rehydrateAgent(resolvedPath, resumeConfig, ctx.modelRegistry);
-            if (!rehydrated) {
-              p.status = "failed"; p.error = `resumeFrom: empty or corrupt session: ${resolvedPath}`; fire();
-              return { agent: t.agentName, output: "", error: p.error, durationMs: 0, tokens: 0, sessionFile: resolvedPath, touchedFiles: [] };
-            }
-            existingAgent = rehydrated.agent;
-            resumedSessionManager = rehydrated.sessionManager;
-            resumedSessionFile = resolvedPath;
-
-            // Link resumed session to parent for /resume discoverability.
-            const parentFile = (ctx.sessionManager as { getSessionFile?(): string | undefined } | undefined)?.getSessionFile?.();
-            if (parentFile) {
-              setParentSession(rehydrated.sessionManager as unknown as SessionManager, parentFile);
-            }
-          }
-        }
-
-        // Create a session manager — prefer resumed, then pool, then fresh.
-        // When resumeFrom is active, skip pool-miss session creation to avoid orphaned empty files.
-        const session = resumedSessionManager
-          ? { manager: resumedSessionManager, file: resumedSessionFile }
-          : t.sessionId
-            ? { manager: poolSessionManager, file: poolSessionFile }
-            : createSubagentSessionManager(ctx.sessionManager, t.cwd);
-
-        // Label subagent sessions so they're identifiable in /resume.
-        // Skip pool hits (already labeled) and resumed sessions (keep original label).
-        if (session?.manager && !isPoolHit && !resumedSessionManager) {
-          const label = `⎇ delegate · ${t.agentName}`;
-          session.manager.appendSessionInfo(label);
-        }
-
-        const doRun = async (): Promise<TaskResult> => {
-          try {
-            const config = { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd };
-            const r = await runAgent(
-              config,
-              t.prompt,
-              ctx.modelRegistry,
-              signal,
-              (u) => { p.tokens = u.tokens; p.toolUses = u.toolUses; p.durationMs = u.durationMs; p.lastActivityAt = u.lastActivityAt; p.activities = u.activities; fire(); },
-              session?.manager,
-              undefined, // maxRetries (default)
-              2000,      // retryBaseMs
-              existingAgent, // pre-existing agent for pooled, resumed, or pool-miss sessions
-              !isPoolHit,    // allowRetry: safe unless pool hit (accumulated multi-turn state)
-              i,
-            );
-
-            // Insert into pool only after successful first run.
-            if (t.sessionId && pendingPoolInsert && !r.error && session?.manager && session?.file) {
-              agentPool.set(t.sessionId, {
-                agent: existingAgent!,
-                sessionManager: session.manager,
-                sessionFile: session.file,
-                config: { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
-                lastUsed: Date.now(),
-                createdAt: Date.now(),
-                totalTokens: r.tokens,
-                promptCount: 1,
-              });
-            }
-
-            // Update pool stats on subsequent successful runs.
-            if (t.sessionId && !pendingPoolInsert) {
-              const pooled = agentPool.get(t.sessionId);
-              if (pooled) {
-                pooled.lastUsed = Date.now();
-                pooled.totalTokens += r.tokens;
-                pooled.promptCount++;
-              }
-            }
-
-            p.status = r.error ? "failed" : "done";
-            p.durationMs = r.durationMs;
-            p.tokens = r.tokens;
-            p.error = r.error;
-            fire();
-            return { agent: t.agentName, output: r.output, error: r.error, durationMs: r.durationMs, tokens: r.tokens, sessionFile: session?.file ?? poolSessionFile, touchedFiles: r.touchedFiles };
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            p.status = "failed";
-            p.error = msg;
-            fire();
-            return { agent: t.agentName, output: "", error: msg, durationMs: 0, tokens: 0, sessionFile: session?.file ?? poolSessionFile ?? resumedSessionFile, touchedFiles: [] };
-          }
-        };
-
-        if (isPoolHit && t.sessionId) {
-          return withSessionLock(t.sessionId, doRun);
-        }
-        return doRun();
-      }, signal);
+          return doRun();
+        },
+        signal,
+      );
 
       // ── Format for LLM ────────────────────────────────────────────
       const finalResults = results;
@@ -2362,35 +3295,51 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const t = resolved[i]!;
         if (t.action === "close" || t.action === "list") continue;
         const p = progress[i]!;
-        if (taskImpliesEdits(t.prompt || "") && !hasMutationActivity(p.activities)) {
-          mutationWarnings.push(`[GUARD] ${r.agent}: task implies edits but no mutation tools ran (edit/write/mutating bash). Did the agent only produce text below?`);
+        if (
+          taskImpliesEdits(t.prompt || "") &&
+          !hasMutationActivity(p.activities)
+        ) {
+          mutationWarnings.push(
+            `[GUARD] ${r.agent}: task implies edits but no mutation tools ran (edit/write/mutating bash). Did the agent only produce text below?`,
+          );
         }
       }
 
       const parts: string[] = [];
       const succeeded = finalResults.filter((r) => !r.error).length;
-      parts.push(`${succeeded}/${finalResults.length} tasks completed successfully · ${fmtDuration(elapsedTotal)} wall time\n`);
+      parts.push(
+        `${succeeded}/${finalResults.length} tasks completed successfully · ${fmtDuration(elapsedTotal)} wall time\n`,
+      );
       for (const w of mutationWarnings) parts.push(w);
       for (let i = 0; i < finalResults.length; i++) {
         const r = finalResults[i]!;
         const t = resolved[i]!;
-        parts.push(`=== ${r.agent}: ${trunc(t.prompt || t.action || "", 80)} ===`);
+        parts.push(
+          `=== ${r.agent}: ${trunc(t.prompt || t.action || "", 80)} ===`,
+        );
         if (t.warnings?.length) {
           for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
         }
         if (r.error) {
           const failParts = [r.error];
-          if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
+          if (r.sessionFile)
+            failParts.push(`session: ${shortenPath(r.sessionFile)}`);
           parts.push(`[FAILED: ${failParts.join(" · ")}]`);
           if (r.sessionFile && fs.existsSync(r.sessionFile)) {
             const safePath = JSON.stringify(r.sessionFile);
-            parts.push(`→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`);
+            parts.push(
+              `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
+            );
           }
         } else {
-          const meta = [`OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`];
+          const meta = [
+            `OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`,
+          ];
           if (r.sessionFile) meta.push(shortenPath(r.sessionFile));
           if (r.touchedFiles.length > 0) {
-            const rel = r.touchedFiles.map((f) => path.relative(t.cwd, f)).filter((f) => f && !f.startsWith(".."));
+            const rel = r.touchedFiles
+              .map((f) => path.relative(t.cwd, f))
+              .filter((f) => f && !f.startsWith(".."));
             if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
           }
           parts.push(`[${meta.join(" · ")}]\n\n${r.output}`);
@@ -2399,14 +3348,23 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       return {
         content: [{ type: "text", text: parts.join("\n\n") }],
-        details: { tasks, results: finalResults, progress, parentModel: parentModelId },
+        details: {
+          tasks,
+          results: finalResults,
+          progress,
+          parentModel: parentModelId,
+        },
       };
     },
 
     renderCall(args, theme, ctx) {
-      const state = ctx.state as { startedAt?: number; interval?: ReturnType<typeof setInterval> };
+      const state = ctx.state as {
+        startedAt?: number;
+        interval?: ReturnType<typeof setInterval>;
+      };
       const tasks = (args as { tasks?: TaskDef[] }).tasks ?? [];
-      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       if (!tasks.length) {
         text.setText(theme.fg("toolTitle", theme.bold("delegate")));
         return text;
@@ -2418,27 +3376,50 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       if (ctx.executionStarted && ctx.isPartial) {
         if (state.startedAt === undefined) state.startedAt = Date.now();
         const elapsed = fmtDuration(Date.now() - state.startedAt);
-        text.setText(theme.fg("toolTitle", theme.bold(`${spinnerFrame()} delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`)));
+        text.setText(
+          theme.fg(
+            "toolTitle",
+            theme.bold(
+              `${spinnerFrame()} delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`,
+            ),
+          ),
+        );
         return text;
       }
-      text.setText(theme.fg("toolTitle", theme.bold(`delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""}`)));
+      text.setText(
+        theme.fg(
+          "toolTitle",
+          theme.bold(
+            `delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""}`,
+          ),
+        ),
+      );
       return text;
     },
 
     renderResult(result, options, theme, ctx) {
-      const state = ctx.state as Record<string, unknown> & { startedAt?: number; interval?: ReturnType<typeof setInterval> };
+      const state = ctx.state as Record<string, unknown> & {
+        startedAt?: number;
+        interval?: ReturnType<typeof setInterval>;
+      };
       // Use a faster animation cadence for spinner (80ms) vs the old 1s
       const tickMs = 80;
-      if (options.isPartial && !state.interval) state.interval = setInterval(() => ctx.invalidate(), tickMs);
-      if (!options.isPartial && state.interval) { clearInterval(state.interval); state.interval = undefined; }
-      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      if (options.isPartial && !state.interval)
+        state.interval = setInterval(() => ctx.invalidate(), tickMs);
+      if (!options.isPartial && state.interval) {
+        clearInterval(state.interval);
+        state.interval = undefined;
+      }
+      const text =
+        (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 
       const details = result.details as DelegateDetails | undefined;
       if (!details?.progress?.length) {
-        const content = (result.content as Array<{ type: string; text: string }>)
-          ?.filter((c) => c.type === "text")
-          .map((c) => c.text)
-          .join("\n") ?? "";
+        const content =
+          (result.content as Array<{ type: string; text: string }>)
+            ?.filter((c) => c.type === "text")
+            .map((c) => c.text)
+            .join("\n") ?? "";
         text.setText(content ? `\n${content}` : "");
         return text;
       }
@@ -2448,7 +3429,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       const w = getTermWidth() - 4;
       const lines: string[] = [""];
 
-      const statJoin = (parts: string[]) => parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
+      const statJoin = (parts: string[]) =>
+        parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
       const modelLabel = (p: TaskProgress) =>
         p.model ? ` ${theme.fg("accent", p.model)}` : "";
 
@@ -2470,104 +3452,202 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       };
 
       if (options.isPartial) {
-        const done = progress.filter((p) => p.status === "done" || p.status === "failed").length;
+        const done = progress.filter(
+          (p) => p.status === "done" || p.status === "failed",
+        ).length;
         const running = progress.filter((p) => p.status === "running").length;
-        const elapsed = state.startedAt ? ` · ${fmtDuration(Date.now() - state.startedAt)}` : "";
+        const elapsed = state.startedAt
+          ? ` · ${fmtDuration(Date.now() - state.startedAt)}`
+          : "";
 
         // Richer header: agent counts + wall time
         const headerParts: string[] = [];
         if (running > 0) headerParts.push(`${running} running`);
         headerParts.push(`${done}/${total} done`);
-        lines.push(theme.fg("muted", `${headerParts.join(" · ")}${elapsed}`), "");
+        lines.push(
+          theme.fg("muted", `${headerParts.join(" · ")}${elapsed}`),
+          "",
+        );
 
         for (let i = 0; i < total; i++) {
           const p = progress[i]!;
           const ind = indent(i, total);
           const runParts: string[] = [];
-          if (p.toolUses > 0) runParts.push(`${p.toolUses} tool${p.toolUses > 1 ? "s" : ""}`);
+          if (p.toolUses > 0)
+            runParts.push(`${p.toolUses} tool${p.toolUses > 1 ? "s" : ""}`);
           if (p.tokens > 0) runParts.push(`${fmtTokens(p.tokens)} tokens`);
 
           switch (p.status) {
             case "done":
-              lines.push(truncLine(`${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`, w));
+              lines.push(
+                truncLine(
+                  `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
+                  w,
+                ),
+              );
               if (options.expanded) {
                 for (const activity of p.activities.slice(-3)) {
-                  const call = formatToolCallShort(activity.name, activity.args);
-                  const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                  lines.push(truncLine(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`, w));
+                  const call = formatToolCallShort(
+                    activity.name,
+                    activity.args,
+                  );
+                  const icon = activity.result?.isError
+                    ? theme.fg("error", "✗")
+                    : theme.fg("success", "✓");
+                  lines.push(
+                    truncLine(
+                      `${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`,
+                      w,
+                    ),
+                  );
                 }
               }
               break;
             case "failed":
-              lines.push(truncLine(`${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${modelLabel(p)}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`, w));
+              lines.push(
+                truncLine(
+                  `${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${modelLabel(p)}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`,
+                  w,
+                ),
+              );
               if (options.expanded) {
                 for (const activity of p.activities.slice(-3)) {
-                  const call = formatToolCallShort(activity.name, activity.args);
-                  const icon = activity.result?.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-                  lines.push(truncLine(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`, w));
+                  const call = formatToolCallShort(
+                    activity.name,
+                    activity.args,
+                  );
+                  const icon = activity.result?.isError
+                    ? theme.fg("error", "✗")
+                    : theme.fg("success", "✓");
+                  lines.push(
+                    truncLine(
+                      `${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`,
+                      w,
+                    ),
+                  );
                 }
               }
               break;
-            case "running": {
-              const activityAge = getActivityAge(p.lastActivityAt);
-              const ageTag = activityAge ? ` · ${activityAge}` : "";
-              const glyph = theme.fg("warning", spinnerFrame());
-              lines.push(truncLine(`${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin(runParts)}${theme.fg("muted", ageTag)}`, w));
+            case "running":
+              {
+                const activityAge = getActivityAge(p.lastActivityAt);
+                const ageTag = activityAge ? ` · ${activityAge}` : "";
+                const glyph = theme.fg("warning", spinnerFrame());
+                lines.push(
+                  truncLine(
+                    `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin(runParts)}${theme.fg("muted", ageTag)}`,
+                    w,
+                  ),
+                );
 
-              // Current in-flight tool
-              const current = p.activities.findLast((a) => !a.result);
+                // Current in-flight tool
+                const current = p.activities.findLast((a) => !a.result);
 
-              if (options.expanded) {
-                // ── Expanded: current activity (or last completed if none in-flight) ──
-                const call = current
-                  ? formatToolCallShort(current.name, current.args)
-                  : compactActivity(p);
-                const elapsedTool = current
-                  ? ` | ${fmtDuration(Date.now() - current.startTime)}`
-                  : "";
-                const prefix = current ? "> " : "  ";
-                lines.push(truncLine(`${ind}${theme.fg("warning", `${prefix}${call}${elapsedTool}`)}`, w));
-              } else {
-                // ── Collapsed: compact tool line with duration ─────
-                lines.push(truncLine(`${ind}${theme.fg("muted", `⎿  ${compactActivity(p)}`)}`, w));
-                lines.push(truncLine(`${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`, w));
+                if (options.expanded) {
+                  // ── Expanded: current activity (or last completed if none in-flight) ──
+                  const call = current
+                    ? formatToolCallShort(current.name, current.args)
+                    : compactActivity(p);
+                  const elapsedTool = current
+                    ? ` | ${fmtDuration(Date.now() - current.startTime)}`
+                    : "";
+                  const prefix = current ? "> " : "  ";
+                  lines.push(
+                    truncLine(
+                      `${ind}${theme.fg("warning", `${prefix}${call}${elapsedTool}`)}`,
+                      w,
+                    ),
+                  );
+                } else {
+                  // ── Collapsed: compact tool line with duration ─────
+                  lines.push(
+                    truncLine(
+                      `${ind}${theme.fg("muted", `⎿  ${compactActivity(p)}`)}`,
+                      w,
+                    ),
+                  );
+                  lines.push(
+                    truncLine(
+                      `${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`,
+                      w,
+                    ),
+                  );
+                }
               }
-            }
-            break;
+              break;
             default:
               // Pending / waiting
-              lines.push(truncLine(`${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelLabel(p)} ${theme.fg("muted", "waiting…")}`, w));
+              lines.push(
+                truncLine(
+                  `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelLabel(p)} ${theme.fg("muted", "waiting…")}`,
+                  w,
+                ),
+              );
           }
         }
-        const budgeted = applyLineBudget(lines.filter(Boolean), options.expanded ?? false);
+        const budgeted = applyLineBudget(
+          lines.filter(Boolean),
+          options.expanded ?? false,
+        );
         lines.length = 0;
         lines.push(...budgeted);
       } else {
         // ── Final result ─────────────────────────────────────────────
         const succeeded = progress.filter((p) => p.status === "done").length;
         const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
-        const elapsed = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
-        lines.push(theme.fg("muted", `${succeeded}/${total} completed · ${elapsed} wall · ${fmtTokens(totalTokens)} tokens`), "");
+        const elapsed = state.startedAt
+          ? fmtDuration(Date.now() - state.startedAt)
+          : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
+        lines.push(
+          theme.fg(
+            "muted",
+            `${succeeded}/${total} completed · ${elapsed} wall · ${fmtTokens(totalTokens)} tokens`,
+          ),
+          "",
+        );
 
         for (let i = 0; i < total; i++) {
           const p = progress[i]!;
           const r = taskResults[i];
           const ind = indent(i, total);
-          const icon = p.status === "done" ? theme.fg("success", "✓") : theme.fg("error", "✗");
+          const icon =
+            p.status === "done"
+              ? theme.fg("success", "✓")
+              : theme.fg("error", "✗");
           const taskPreview = theme.fg("muted", trunc(p.task, w - 30));
-          lines.push(truncLine(`${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`, w));
+          lines.push(
+            truncLine(
+              `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
+              w,
+            ),
+          );
 
           // Tool activities: compact summary only in expanded mode.
           if (p.activities.length > 0 && options.expanded) {
-            const names = p.activities.map((a) => a.name).filter((n, i, arr) => arr.indexOf(n) === i);
-            const nameList = names.slice(0, 4).join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
-            const okCount = p.activities.filter((a) => a.result && !a.result.isError).length;
-            const errCount = p.activities.filter((a) => a.result?.isError).length;
+            const names = p.activities
+              .map((a) => a.name)
+              .filter((n, i, arr) => arr.indexOf(n) === i);
+            const nameList =
+              names.slice(0, 4).join(", ") +
+              (names.length > 4 ? ` +${names.length - 4}` : "");
+            const okCount = p.activities.filter(
+              (a) => a.result && !a.result.isError,
+            ).length;
+            const errCount = p.activities.filter(
+              (a) => a.result?.isError,
+            ).length;
             const statusParts: string[] = [];
             if (okCount > 0) statusParts.push(`${okCount} ✓`);
             if (errCount > 0) statusParts.push(`${errCount} ✗`);
-            const status = statusParts.length ? ` · ${statusParts.join(", ")}` : "";
-            lines.push(truncLine(`${ind}${theme.fg("muted", `${p.activities.length} tool${p.activities.length > 1 ? "s" : ""}: ${nameList}${status}`)}`, w));
+            const status = statusParts.length
+              ? ` · ${statusParts.join(", ")}`
+              : "";
+            lines.push(
+              truncLine(
+                `${ind}${theme.fg("muted", `${p.activities.length} tool${p.activities.length > 1 ? "s" : ""}: ${nameList}${status}`)}`,
+                w,
+              ),
+            );
           }
 
           // Surface errors even when output exists (agent may have emitted text before failing).
@@ -2575,11 +3655,24 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
           }
           // Output: render markdown only in expanded mode.
-          if (r && "output" in r && r.output?.trim() && r.output !== "(no output)" && options.expanded) {
+          if (
+            r &&
+            "output" in r &&
+            r.output?.trim() &&
+            r.output !== "(no output)" &&
+            options.expanded
+          ) {
             const cacheKey = `md_${i}_${options.expanded ? "exp" : "col"}_${w - ind.length}`;
-            let mdLines: string[] | undefined = state[cacheKey] as string[] | undefined;
+            let mdLines: string[] | undefined = state[cacheKey] as
+              | string[]
+              | undefined;
             if (!mdLines || state[`${cacheKey}_src`] !== r.output) {
-              const md = new Markdown(r.output.trim(), 0, 0, getMarkdownTheme());
+              const md = new Markdown(
+                r.output.trim(),
+                0,
+                0,
+                getMarkdownTheme(),
+              );
               mdLines = md.render(Math.max(20, w - ind.length));
               state[`${cacheKey}_src`] = r.output;
               state[cacheKey] = mdLines;
