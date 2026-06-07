@@ -1963,7 +1963,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             model: Type.Optional(Type.String()),
             skills: Type.Optional(Type.Array(Type.String())),
             tools: Type.Optional(Type.Array(Type.String())),
-            thinking: Type.Optional(Type.String()),
+            thinking: Type.Optional(
+              Type.String({
+                enum: [...VALID_THINKING],
+              }),
+            ),
             sessionId: Type.Optional(Type.String()),
             action: Type.Optional(
               Type.String({ enum: ["prompt", "close", "list", "poll", "cancel"] }),
@@ -2052,7 +2056,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 "",
                 "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to 'continue').",
                 "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
-                "- `systemPrompt` — System prompt. Required if no `agent` specified.",
+                "- `systemPrompt` — System prompt. Falls back to agent definition, then parent session system prompt.",
                 "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
                 "- `tools` — Array of tool names. Default: read, write, edit, bash.",
                 "- `skills` — Skill names injected into the system prompt.",
@@ -2230,7 +2234,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         }
 
         // Inject skills
-        const skillNames = t.skills ?? agent?.skills ?? [];
+        const skillNames = t.skills ?? agentOverride?.skills ?? agent?.skills ?? [];
         const skillBodies: string[] = [];
         for (const name of skillNames) {
           const content = loadSkill(name, cwd);
@@ -2311,7 +2315,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           }
 
           // Resolve tools — warn about unknown tool names
-          tools = t.tools ?? agent?.tools ?? DEFAULT_TOOLS;
+          tools = t.tools ?? agentOverride?.tools ?? agent?.tools ?? DEFAULT_TOOLS;
           const unknownTools = tools.filter(
             (name) => !(name in TOOL_FACTORIES),
           );
@@ -2321,8 +2325,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             );
           }
 
-          // Resolve thinking
-          const thinkingRaw = t.thinking ?? agent?.thinking ?? "off";
+          // Resolve thinking — agentOverride, agent file, then 'off'
+          const thinkingRaw = t.thinking ?? agentOverride?.thinking ?? agent?.thinking ?? "off";
           thinking = VALID_THINKING.has(thinkingRaw)
             ? (thinkingRaw as ThinkingLevel)
             : "off";
