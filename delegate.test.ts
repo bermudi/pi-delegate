@@ -2657,6 +2657,52 @@ describe("async delegate integration", () => {
 		expect(result.content[0].text).toContain("RUNNING");
 	});
 
+	test("poll returns completed results for running ticket", () => {
+		const ticket: AsyncTicket = {
+			id: "partial1",
+			created: Date.now(),
+			tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+			resolved: [
+				{ prompt: "task-a", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] },
+				{ prompt: "task-b", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "worker", warnings: [] },
+				{ prompt: "task-c", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "runner", warnings: [] },
+			],
+			status: "running",
+			results: [
+				{ agent: "scout", output: "found it", durationMs: 1000, tokens: 50, touchedFiles: [] },
+				undefined,
+				{ agent: "runner", output: "", error: "timeout", durationMs: 2000, tokens: 0, touchedFiles: [] },
+			],
+			progress: [
+				{ index: 0, agent: "scout", task: "task-a", status: "done", durationMs: 1000, tokens: 50, toolUses: 1, activities: [] },
+				{ index: 1, agent: "worker", task: "task-b", status: "running", durationMs: 0, tokens: 100, toolUses: 3, activities: [] },
+				{ index: 2, agent: "runner", task: "task-c", status: "failed", durationMs: 2000, tokens: 0, toolUses: 0, activities: [] },
+			],
+			controller: new AbortController(),
+			parentModelId: "test-model",
+		};
+		ticketRegistry.set("partial1", ticket);
+
+		const result = handlePoll({ ticket: "partial1" }, {} as any);
+		const text = result.content[0].text;
+
+		// Header shows partial completion
+		expect(text).toContain("2/3 done");
+		// Completed task output is present
+		expect(text).toContain("found it");
+		// Failed task error is present
+		expect(text).toContain("timeout");
+		// Running task still shows as running
+		expect(text).toContain("worker");
+
+		// details.results is index-aligned — same length as progress
+		// Undefined results are filled with error objects to match DelegateDetails type
+		expect(result.details.results).toHaveLength(3);
+		expect(result.details.results![0]!.agent).toBe("scout");
+		expect(result.details.results![1]).toEqual({ error: "PENDING — result not available" });
+		expect(result.details.results![2]!.agent).toBe("runner");
+	});
+
 	test("poll with unknown ticket returns not found", () => {
 		const result = handlePoll({ tasks: [], ticket: "nonexistent" }, {} as any);
 		expect(result.content[0].text).toContain("not found");
@@ -2706,6 +2752,49 @@ describe("async delegate integration", () => {
 		expect(result.content[0].text).toContain("already done");
 	});
 
+	test("formatCompletedTicket preserves index alignment for cancelled ticket with partial results", () => {
+		const ticket: AsyncTicket = {
+			id: "cancelled-partial",
+			created: Date.now() - 2000,
+			completedAt: Date.now(),
+			tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+			resolved: [
+				{ prompt: "task-a", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] },
+				{ prompt: "task-b", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "worker", warnings: [] },
+				{ prompt: "task-c", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "runner", warnings: [] },
+			],
+			status: "cancelled",
+			results: [
+				{ agent: "scout", output: "done early", durationMs: 500, tokens: 10, touchedFiles: [] },
+				undefined, // task-b never started
+				undefined, // task-c never started
+			],
+			progress: [
+				{ index: 0, agent: "scout", task: "task-a", status: "done", durationMs: 500, tokens: 10, toolUses: 0, activities: [] },
+				{ index: 1, agent: "worker", task: "task-b", status: "pending", durationMs: 0, tokens: 0, toolUses: 0, activities: [] },
+				{ index: 2, agent: "runner", task: "task-c", status: "pending", durationMs: 0, tokens: 0, toolUses: 0, activities: [] },
+			],
+			controller: new AbortController(),
+			parentModelId: "test-model",
+		};
+		ticketRegistry.set("cancelled-partial", ticket);
+
+		// Simulate poll after cancellation
+		const result = handlePoll({ ticket: "cancelled-partial" }, {} as any);
+		const text = result.content[0].text;
+
+		// Text output handles undefined results gracefully
+		expect(text).toContain("done early");
+		expect(text).toContain("PENDING — result not available");
+
+		// details.results is index-aligned — same length as tasks
+		// Undefined results are filled with error objects to match DelegateDetails type
+		expect(result.details.results).toHaveLength(3);
+		expect(result.details.results![0]!.agent).toBe("scout");
+		expect(result.details.results![1]).toEqual({ error: "PENDING — result not available" });
+		expect(result.details.results![2]).toEqual({ error: "PENDING — result not available" });
+	});
+
 	test("execute routes top-level cancel without tasks", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
@@ -2745,7 +2834,7 @@ describe("async delegate integration", () => {
 		expect(sent[0].message.content).toContain("found the bug");
 		expect(sent[0].message.details.ticketId).toBe("done2");
 		expect(sent[0].message.details.status).toBe("done");
-		expect(sent[0].options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+		expect(sent[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 	});
 
 	test("help text includes async mode section", async () => {
