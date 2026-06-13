@@ -269,13 +269,11 @@ async function acquireAgentSession(
     );
   }
 
-  // At this point sessionManager/sessionFile are set for all paths except
-  // pool-miss-with-resumeFrom (which defers session creation). The agent
-  // is guaranteed to exist. Label new sessions.
-  if (sessionManager && !isPoolHit && !task.resumeFrom) {
-    const label = `⎇ delegate · ${task.agentName}`;
-    sessionManager.appendSessionInfo?.(label);
-  }
+  // parentSession linking (set above / in createSubagentSessionManager) makes
+  // subagent sessions discoverable as children in /resume without polluting the
+  // named-session filter. Do NOT call appendSessionInfo() here — naming a
+  // subagent session causes it to show up in Ctrl+N "named only" view, burying
+  // the user's actual named sessions.
 
   if (!agent) {
     // Defensive: acquireAgentSession should always produce an agent for run tasks.
