@@ -1,4 +1,4 @@
-// pi/delegate/extension.ts
+// extension.ts
 import * as fs6 from "node:fs";
 import * as path8 from "node:path";
 import { Type } from "@sinclair/typebox";
@@ -7,7 +7,7 @@ import {
   getMarkdownTheme
 } from "@mariozechner/pi-coding-agent";
 
-// pi/delegate/constants.ts
+// constants.ts
 var DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
 var MAX_CONCURRENCY = 3;
 var POOL_TTL_MS = 10 * 60 * 1e3;
@@ -23,8 +23,13 @@ var VALID_THINKING = /* @__PURE__ */ new Set([
   "xhigh"
 ]);
 
-// pi/delegate/tools.ts
-import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@mariozechner/pi-coding-agent";
+// tools.ts
+import {
+  createBashTool,
+  createEditTool,
+  createReadTool,
+  createWriteTool
+} from "@mariozechner/pi-coding-agent";
 var TOOL_FACTORIES = {
   read: createReadTool,
   write: createWriteTool,
@@ -37,7 +42,7 @@ function expandToolsStar(tools) {
   return [.../* @__PURE__ */ new Set([...allNames, ...tools.filter((t) => t !== "*")])];
 }
 
-// pi/delegate/format.ts
+// format.ts
 import * as path from "node:path";
 var SPINNER = ["\u280B", "\u2819", "\u2839", "\u2838", "\u283C", "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"];
 function spinnerFrame() {
@@ -214,7 +219,7 @@ function formatToolCallShort(name, args) {
   }
 }
 
-// pi/delegate/pool.ts
+// pool.ts
 var agentPool = /* @__PURE__ */ new Map();
 var sessionLocks = /* @__PURE__ */ new Map();
 async function withSessionLock(sessionId, fn) {
@@ -267,7 +272,7 @@ function listPooledAgents() {
   return lines;
 }
 
-// pi/delegate/tickets.ts
+// tickets.ts
 import * as fs from "node:fs";
 import * as path2 from "node:path";
 var ticketRegistry = /* @__PURE__ */ new Map();
@@ -535,7 +540,7 @@ function handleCancel(params) {
   };
 }
 
-// pi/delegate/config.ts
+// config.ts
 import * as fs2 from "node:fs";
 import * as os from "node:os";
 import * as path3 from "node:path";
@@ -565,7 +570,10 @@ function loadDelegateConfig() {
       ...DEFAULT_DELEGATE_CONFIG,
       ...parsed,
       agent: { ...DEFAULT_DELEGATE_CONFIG.agent, ...parsed.agent ?? {} },
-      concurrency: { ...DEFAULT_DELEGATE_CONFIG.concurrency, ...parsed.concurrency ?? {} }
+      concurrency: {
+        ...DEFAULT_DELEGATE_CONFIG.concurrency,
+        ...parsed.concurrency ?? {}
+      }
     };
   } catch {
     return structuredClone(DEFAULT_DELEGATE_CONFIG);
@@ -607,7 +615,10 @@ function setConcurrencyDefault(n) {
 }
 function setConcurrencyProvider(key, n) {
   const current = __delegateConfig.concurrency.providers ?? {};
-  __delegateConfig.concurrency.providers = { ...current, [key]: Math.max(1, n) };
+  __delegateConfig.concurrency.providers = {
+    ...current,
+    [key]: Math.max(1, n)
+  };
   saveDelegateConfigAtomic(__delegateConfig);
 }
 function setConcurrencyModel(key, n) {
@@ -670,7 +681,7 @@ function resolveModelSpec(options) {
   );
 }
 
-// pi/delegate/agents.ts
+// agents.ts
 import * as fs3 from "node:fs";
 import * as os2 from "node:os";
 import * as path4 from "node:path";
@@ -803,7 +814,9 @@ function loadAgentsMdFiles(cwd) {
 }
 var DEFAULT_SUBAGENT_SYSTEM_PROMPT = "You are a helpful coding assistant.";
 function firstNonBlank(...values) {
-  return values.find((v) => typeof v === "string" && v.trim().length > 0);
+  return values.find(
+    (v) => typeof v === "string" && v.trim().length > 0
+  );
 }
 function appendPromptSections(systemPrompt, sections) {
   let result = systemPrompt.trimEnd();
@@ -826,8 +839,10 @@ function buildSubagentSystemPrompt(options) {
   ]);
 }
 
-// pi/delegate/parent-context.ts
-import { buildSessionContext } from "@mariozechner/pi-coding-agent";
+// parent-context.ts
+import {
+  buildSessionContext
+} from "@mariozechner/pi-coding-agent";
 function buildParentTranscript(entries, leafId) {
   try {
     const ctx = buildSessionContext(entries, leafId);
@@ -854,7 +869,7 @@ function extractTextContent(content) {
   ).map((b) => b.text).join("");
 }
 
-// pi/delegate/model.ts
+// model.ts
 function resolveModel(spec, registry, parentModel) {
   if (!spec) return parentModel;
   const idx = spec.indexOf("/");
@@ -867,12 +882,10 @@ function resolveModel(spec, registry, parentModel) {
 function findAvailableAlternative(model, registry) {
   if (!model) return void 0;
   if (registry.hasConfiguredAuth(model)) return model;
-  return registry.getAvailable().find(
-    (m) => m.id === model.id && m.provider !== model.provider
-  );
+  return registry.getAvailable().find((m) => m.id === model.id && m.provider !== model.provider);
 }
 
-// pi/delegate/settings.ts
+// settings.ts
 import * as fs4 from "node:fs";
 import * as os3 from "node:os";
 import * as path5 from "node:path";
@@ -928,7 +941,7 @@ function loadDelegateSettings(cwd) {
   return result;
 }
 
-// pi/delegate/concurrency.ts
+// concurrency.ts
 async function mapConcurrent(items, concurrency, fn, signal) {
   if (items.length === 0) return [];
   const limit = Math.max(1, Math.min(concurrency, items.length));
@@ -999,18 +1012,24 @@ async function mapConcurrentByModel(items, getModelKey2, getConcurrency, fn, sig
   return results;
 }
 
-// pi/delegate/lifecycle.ts
+// lifecycle.ts
 import * as fs5 from "node:fs";
 
-// pi/delegate/sessions.ts
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+// sessions.ts
+import {
+  SessionManager
+} from "@mariozechner/pi-coding-agent";
 
-// pi/delegate/runner.ts
-import { Agent } from "@mariozechner/pi-agent-core";
+// runner.ts
+import {
+  Agent
+} from "@mariozechner/pi-agent-core";
 import { streamSimple } from "@mariozechner/pi-ai";
-import { convertToLlm } from "@mariozechner/pi-coding-agent";
+import {
+  convertToLlm
+} from "@mariozechner/pi-coding-agent";
 
-// pi/delegate/file-tracking.ts
+// file-tracking.ts
 import { execFile } from "node:child_process";
 import * as path6 from "node:path";
 async function getGitChangedFiles(cwd) {
@@ -1051,7 +1070,7 @@ function extractTouchedFromActivities(activities, cwd) {
   return [...files];
 }
 
-// pi/delegate/retry.ts
+// retry.ts
 var RETRYABLE_PATTERNS = [
   /rate\s*limit/i,
   /too many requests/i,
@@ -1137,7 +1156,7 @@ async function sleepWithAbort(ms, signal) {
   });
 }
 
-// pi/delegate/utils.ts
+// utils.ts
 import * as os4 from "node:os";
 import * as path7 from "node:path";
 function resolveCwd(cwd) {
@@ -1186,7 +1205,7 @@ function extractUsage(messages) {
   return usage;
 }
 
-// pi/delegate/runner.ts
+// runner.ts
 function createAgent(config, modelRegistry, messages) {
   const tools = config.tools.map((name) => TOOL_FACTORIES[name]?.(config.cwd)).filter(Boolean);
   return new Agent({
@@ -1419,7 +1438,7 @@ async function runAgent(config, prompt, modelRegistry, signal, onProgress, sessi
   };
 }
 
-// pi/delegate/sessions.ts
+// sessions.ts
 function rehydrateAgent(sessionFile, config, modelRegistry) {
   try {
     const sm = SessionManager.open(sessionFile);
@@ -1451,7 +1470,7 @@ function createSubagentSessionManager(parentSessionManager, cwd) {
   return { manager: sm, file: sessionFile };
 }
 
-// pi/delegate/lifecycle.ts
+// lifecycle.ts
 function failTask(task, error, sessionFile) {
   return {
     agent: task.agentName,
@@ -1640,7 +1659,10 @@ async function acquireAgentSession(env, task, p) {
     }
   }
   if (!agent) {
-    const fresh = createSubagentSessionManager(env.parentSessionManager, task.cwd);
+    const fresh = createSubagentSessionManager(
+      env.parentSessionManager,
+      task.cwd
+    );
     sessionManager = fresh?.manager;
     sessionFile = fresh?.file;
     agent = createAgent(
@@ -1723,7 +1745,11 @@ async function runResolvedTaskUnlocked(env, task, p, taskIndex) {
     p.model = task.model?.id;
     if (task.action === "close") {
       if (!task.sessionId) {
-        return finishTask(env, p, failTask(task, "action='close' requires sessionId."));
+        return finishTask(
+          env,
+          p,
+          failTask(task, "action='close' requires sessionId.")
+        );
       }
       const closed = closePooledAgent(task.sessionId);
       return finishTask(
@@ -1816,7 +1842,7 @@ ${listPooledAgents().join("\n")}`,
   }
 }
 
-// pi/delegate/extension.ts
+// extension.ts
 var delegateParameters = Type.Object({
   action: Type.Optional(
     Type.String({
