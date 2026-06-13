@@ -4,22 +4,65 @@ import { Type } from "@sinclair/typebox";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { Text, Markdown } from "@mariozechner/pi-tui";
-import { getMarkdownTheme, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import {
+  getMarkdownTheme,
+  type ExtensionAPI,
+} from "@mariozechner/pi-coding-agent";
 import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
 import { TOOL_FACTORIES, expandToolsStar } from "./tools.ts";
 import { agentPool, sweepPool } from "./pool.ts";
-import { ticketRegistry, generateTicketId, handleCancel, handlePoll, deliverTicketResults, sweepTickets, isSessionBusy } from "./tickets.ts";
-import { getConcurrencyLimit, getMaxAsyncTickets, getMaxConcurrent } from "./config.ts";
-import { discoverAgents, buildSubagentSystemPrompt, loadAgentsMdFiles, loadSkill } from "./agents.ts";
+import {
+  ticketRegistry,
+  generateTicketId,
+  handleCancel,
+  handlePoll,
+  deliverTicketResults,
+  sweepTickets,
+  isSessionBusy,
+} from "./tickets.ts";
+import {
+  getConcurrencyLimit,
+  getMaxAsyncTickets,
+  getMaxConcurrent,
+} from "./config.ts";
+import {
+  discoverAgents,
+  buildSubagentSystemPrompt,
+  loadAgentsMdFiles,
+  loadSkill,
+} from "./agents.ts";
 import { buildParentTranscript } from "./parent-context.ts";
 import { findAvailableAlternative, resolveModel } from "./model.ts";
 import { resolveModelSpec } from "./config.ts";
 import { loadDelegateSettings } from "./settings.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
-import { fmtDuration, fmtTokens, getActivityAge, indent, tree, trunc, truncLine, spinnerFrame, applyLineBudget, formatToolCallShort, shortenPath, getTermWidth } from "./format.ts";
+import {
+  fmtDuration,
+  fmtTokens,
+  getActivityAge,
+  indent,
+  tree,
+  trunc,
+  truncLine,
+  spinnerFrame,
+  applyLineBudget,
+  formatToolCallShort,
+  shortenPath,
+  getTermWidth,
+} from "./format.ts";
 import { resolveCwd, stripAnsi, resolveCarriageReturn } from "./utils.ts";
-import type { AgentConfig, AsyncTicket, DelegateDetails, DelegateParams, ResolvedTask, TaskDef, TaskProgress, TaskResult, TaskRunEnv } from "./types.ts";
+import type {
+  AgentConfig,
+  AsyncTicket,
+  DelegateDetails,
+  DelegateParams,
+  ResolvedTask,
+  TaskDef,
+  TaskProgress,
+  TaskResult,
+  TaskRunEnv,
+} from "./types.ts";
 
 // ── Extracted schema constant ───────────────────────────────────────────
 // Avoids inline `this` context issues and lets TypeScript infer params safely.
@@ -187,7 +230,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "delegate",
     label: "Delegate to Subagents",
-    description: ".",
+    description: "Run the delegate tool with an empty task array for help text",
     parameters: delegateParameters,
 
     async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
@@ -228,7 +271,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // ── Validate ──────────────────────────────────────────────────
       // Disallow same sessionId across multiple parallel tasks (one agent can't serve two prompts concurrently).
-      const sessionIds = tasks.map((t) => t.sessionId).filter(Boolean) as string[];
+      const sessionIds = tasks
+        .map((t) => t.sessionId)
+        .filter(Boolean) as string[];
       const duplicateSessions = sessionIds.filter(
         (id, i) => sessionIds.indexOf(id) !== i,
       );
@@ -427,7 +472,10 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               );
             }
 
-            model = resolvedModel ?? findAvailableAlternative(ctx.model, ctx.modelRegistry) ?? ctx.model;
+            model =
+              resolvedModel ??
+              findAvailableAlternative(ctx.model, ctx.modelRegistry) ??
+              ctx.model;
           }
 
           if (!model) {
@@ -950,10 +998,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                     }
                   } else {
                     lines.push(
-                      truncLine(
-                        `${ind}${theme.fg("muted", "  thinking…")}`,
-                        w,
-                      ),
+                      truncLine(`${ind}${theme.fg("muted", "  thinking…")}`, w),
                     );
                   }
                 } else {
