@@ -88,7 +88,10 @@ export class AbortError extends Error {
 }
 
 /** Sleep for ms, aborting early if signal fires. */
-export async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+export async function sleepWithAbort(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
   if (signal?.aborted) return;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);

@@ -1,4 +1,7 @@
-import { buildSessionContext, type SessionEntry } from "@mariozechner/pi-coding-agent";
+import {
+  buildSessionContext,
+  type SessionEntry,
+} from "@mariozechner/pi-coding-agent";
 
 export function buildParentTranscript(
   entries: SessionEntry[],

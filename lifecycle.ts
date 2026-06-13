@@ -1,11 +1,32 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { SessionManager, type ModelRegistry } from "@mariozechner/pi-coding-agent";
+import {
+  SessionManager,
+  type ModelRegistry,
+} from "@mariozechner/pi-coding-agent";
 import type { Agent } from "@mariozechner/pi-agent-core";
-import type { AgentProgressUpdate, AgentRunConfig, AcquiredSession, ResolvedTask, TaskProgress, TaskResult, TaskRunEnv, SessionManagerLike } from "./types.ts";
-import { agentPool, closePooledAgent, listPooledAgents, withSessionLock } from "./pool.ts";
+import type {
+  AgentProgressUpdate,
+  AgentRunConfig,
+  AcquiredSession,
+  ResolvedTask,
+  TaskProgress,
+  TaskResult,
+  TaskRunEnv,
+  SessionManagerLike,
+} from "./types.ts";
+import {
+  agentPool,
+  closePooledAgent,
+  listPooledAgents,
+  withSessionLock,
+} from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
-import { rehydrateAgent, createSubagentSessionManager, setParentSession } from "./sessions.ts";
+import {
+  rehydrateAgent,
+  createSubagentSessionManager,
+  setParentSession,
+} from "./sessions.ts";
 import { createAgent, runAgent } from "./runner.ts";
 import { fmtDuration } from "./format.ts";
 import { resolveCwd } from "./utils.ts";
@@ -254,7 +275,10 @@ async function acquireAgentSession(
 
   // Fresh task (no sessionId, no resumeFrom) — create session + agent.
   if (!agent) {
-    const fresh = createSubagentSessionManager(env.parentSessionManager, task.cwd);
+    const fresh = createSubagentSessionManager(
+      env.parentSessionManager,
+      task.cwd,
+    );
     sessionManager = fresh?.manager;
     sessionFile = fresh?.file;
     agent = createAgent(
@@ -317,10 +341,7 @@ function commitPoolInsert(
 }
 
 /** Update pool stats for a subsequent prompt on an existing pooled session. */
-function commitPoolStats(
-  sessionId: string,
-  result: { tokens: number },
-): void {
+function commitPoolStats(sessionId: string, result: { tokens: number }): void {
   const pooled = agentPool.get(sessionId);
   if (!pooled) return;
   pooled.lastUsed = Date.now();
@@ -333,7 +354,10 @@ function commitPoolStats(
  *  to close the race window, but the run failed, so the empty entry is dead weight.
  *  If another task already claimed the slot (pool entry is now a different agent),
  *  leave it alone. */
-export function commitPoolCleanup(sessionId: string, acquiredAgent: Agent): void {
+export function commitPoolCleanup(
+  sessionId: string,
+  acquiredAgent: Agent,
+): void {
   const pooled = agentPool.get(sessionId);
   if (!pooled) return;
   if (pooled.agent !== acquiredAgent) return; // Another task already claimed/replaced it.
@@ -388,7 +412,11 @@ async function runResolvedTaskUnlocked(
     // ── Session action handling ───────────────────────────────────────
     if (task.action === "close") {
       if (!task.sessionId) {
-        return finishTask(env, p, failTask(task, "action='close' requires sessionId."));
+        return finishTask(
+          env,
+          p,
+          failTask(task, "action='close' requires sessionId."),
+        );
       }
       const closed = closePooledAgent(task.sessionId);
       return finishTask(

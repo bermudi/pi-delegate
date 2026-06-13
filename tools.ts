@@ -1,5 +1,10 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@mariozechner/pi-coding-agent";
+import {
+  createBashTool,
+  createEditTool,
+  createReadTool,
+  createWriteTool,
+} from "@mariozechner/pi-coding-agent";
 
 export const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<any>> = {
   read: createReadTool,
