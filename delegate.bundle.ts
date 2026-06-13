@@ -3,7 +3,9 @@ import * as fs6 from "node:fs";
 import * as path8 from "node:path";
 import { Type } from "@sinclair/typebox";
 import { Text, Markdown } from "@mariozechner/pi-tui";
-import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
+import {
+  getMarkdownTheme
+} from "@mariozechner/pi-coding-agent";
 
 // pi/delegate/constants.ts
 var DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
@@ -1962,7 +1964,7 @@ function delegateExtension(pi) {
   pi.registerTool({
     name: "delegate",
     label: "Delegate to Subagents",
-    description: ".",
+    description: "Run the delegate tool with an empty task array for help text",
     parameters: delegateParameters,
     async execute(_id, params, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
@@ -2554,10 +2556,7 @@ ${content}` : "");
                     }
                   } else {
                     lines.push(
-                      truncLine(
-                        `${ind}${theme.fg("muted", "  thinking\u2026")}`,
-                        w
-                      )
+                      truncLine(`${ind}${theme.fg("muted", "  thinking\u2026")}`, w)
                     );
                   }
                 } else {
