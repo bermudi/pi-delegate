@@ -39,16 +39,52 @@ export {
   setMaxConcurrent,
   resolveModelSpec,
 } from "./config.ts";
-export { agentPool, withSessionLock, closePooledAgent, sweepPool, listPooledAgents } from "./pool.ts";
-export { ticketRegistry, sweepTickets, isSessionBusy, handlePoll, handleCancel, deliverTicketResults } from "./tickets.ts";
+export {
+  agentPool,
+  withSessionLock,
+  closePooledAgent,
+  sweepPool,
+  listPooledAgents,
+} from "./pool.ts";
+export {
+  ticketRegistry,
+  sweepTickets,
+  isSessionBusy,
+  handlePoll,
+  handleCancel,
+  deliverTicketResults,
+} from "./tickets.ts";
 export { rehydrateAgent } from "./sessions.ts";
-export { truncLine, shortenPath, getActivityAge, fmtDuration, fmtTokens, trunc, tree, indent } from "./format.ts";
-export { parseFrontmatter, findProjectRoot, loadAgentFile, discoverAgents, loadSkill, loadAgentsMdFiles } from "./agents.ts";
+export {
+  truncLine,
+  shortenPath,
+  getActivityAge,
+  fmtDuration,
+  fmtTokens,
+  trunc,
+  tree,
+  indent,
+} from "./format.ts";
+export {
+  parseFrontmatter,
+  findProjectRoot,
+  loadAgentFile,
+  discoverAgents,
+  loadSkill,
+  loadAgentsMdFiles,
+} from "./agents.ts";
 export { buildParentTranscript, extractTextContent } from "./parent-context.ts";
 export { extractTouchedFromActivities } from "./file-tracking.ts";
 export { resolveModel, findAvailableAlternative } from "./model.ts";
 export { readDelegateSettingsFile, loadDelegateSettings } from "./settings.ts";
-export { RETRYABLE_PATTERNS, RETRYABLE_PATTERN, RATE_LIMIT_PATTERNS, isRetryableError, isRateLimitError, computeRetryDelay } from "./retry.ts";
+export {
+  RETRYABLE_PATTERNS,
+  RETRYABLE_PATTERN,
+  RATE_LIMIT_PATTERNS,
+  isRetryableError,
+  isRateLimitError,
+  computeRetryDelay,
+} from "./retry.ts";
 export { runAgentOnce, runAgent } from "./runner.ts";
 export { commitPoolCleanup } from "./lifecycle.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";

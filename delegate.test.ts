@@ -6,78 +6,83 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 import {
-	parseFrontmatter,
-	findProjectRoot,
-	loadAgentFile,
-	discoverAgents,
-	buildParentTranscript,
-	extractTextContent,
-	loadSkill,
-	loadAgentsMdFiles,
-	resolveModel,
-	findAvailableAlternative,
-	resolveModelSpec,
-	extractOutput,
-	extractUsage,
-	fmtDuration,
-	fmtTokens,
-	trunc,
-	truncLine,
-	tree,
-	indent,
-	shortenPath,
-	getActivityAge,
-	DEFAULT_TOOLS,
-	VALID_THINKING,
-	TOOL_FACTORIES,
-	expandToolsStar,
-	extractTouchedFromActivities,
-	agentPool,
-	closePooledAgent,
-	commitPoolCleanup,
-	sweepPool,
-	listPooledAgents,
-	withSessionLock,
-	rehydrateAgent,
-	RETRYABLE_PATTERNS,
-	RATE_LIMIT_PATTERNS,
-	RETRYABLE_PATTERN,
-	isRetryableError,
-	isRateLimitError,
-	computeRetryDelay,
-	runAgent,
-	runAgentOnce,
-	readDelegateSettingsFile,
-	loadDelegateSettings,
-	setModelOverride,
-	setDefaultModel,
-	clearModelOverride,
-	clearAllModelOverrides,
-	setConcurrencyDefault,
-	setConcurrencyProvider,
-	setConcurrencyModel,
-	removeConcurrencyProvider,
-	removeConcurrencyModel,
-	resetConcurrency,
-	getConcurrencyLimit,
-	getMaxAsyncTickets,
-	resetSessionOverrides,
-	type AgentConfig,
-	type DelegateConfig,
-	type SessionModelOverrides,
-	ticketRegistry,
-	type AsyncTicket,
-	sweepTickets,
-	isSessionBusy,
-	handlePoll,
-	handleCancel,
-	deliverTicketResults,
-	resolveCwd,
+  parseFrontmatter,
+  findProjectRoot,
+  loadAgentFile,
+  discoverAgents,
+  buildParentTranscript,
+  extractTextContent,
+  loadSkill,
+  loadAgentsMdFiles,
+  resolveModel,
+  findAvailableAlternative,
+  resolveModelSpec,
+  extractOutput,
+  extractUsage,
+  fmtDuration,
+  fmtTokens,
+  trunc,
+  truncLine,
+  tree,
+  indent,
+  shortenPath,
+  getActivityAge,
+  DEFAULT_TOOLS,
+  VALID_THINKING,
+  TOOL_FACTORIES,
+  expandToolsStar,
+  extractTouchedFromActivities,
+  agentPool,
+  closePooledAgent,
+  commitPoolCleanup,
+  sweepPool,
+  listPooledAgents,
+  withSessionLock,
+  rehydrateAgent,
+  RETRYABLE_PATTERNS,
+  RATE_LIMIT_PATTERNS,
+  RETRYABLE_PATTERN,
+  isRetryableError,
+  isRateLimitError,
+  computeRetryDelay,
+  runAgent,
+  runAgentOnce,
+  readDelegateSettingsFile,
+  loadDelegateSettings,
+  setModelOverride,
+  setDefaultModel,
+  clearModelOverride,
+  clearAllModelOverrides,
+  setConcurrencyDefault,
+  setConcurrencyProvider,
+  setConcurrencyModel,
+  removeConcurrencyProvider,
+  removeConcurrencyModel,
+  resetConcurrency,
+  getConcurrencyLimit,
+  getMaxAsyncTickets,
+  resetSessionOverrides,
+  type AgentConfig,
+  type DelegateConfig,
+  type SessionModelOverrides,
+  ticketRegistry,
+  type AsyncTicket,
+  sweepTickets,
+  isSessionBusy,
+  handlePoll,
+  handleCancel,
+  deliverTicketResults,
+  resolveCwd,
 } from "./delegate.ts";
 
 // ── Integration test imports ──────────────────────────────────────────────
 
-import { createTestSession, when, calls, says } from "@marcfargas/pi-test-harness";
+import {
+  createTestSession,
+  when,
+  calls,
+  says,
+} from "@marcfargas/pi-test-harness";
 import { resolve } from "node:path";
 
 const EXTENSION = resolve(import.meta.dirname, "./delegate.ts");
@@ -85,158 +90,164 @@ const EXTENSION = resolve(import.meta.dirname, "./delegate.ts");
 type TestSession = Awaited<ReturnType<typeof createTestSession>>;
 
 function getToolDef(ts: TestSession, name: string) {
-	const runner = ts.session.extensionRunner;
-	if (!runner) throw new Error("No extensionRunner on session");
-	return runner.getToolDefinition(name);
+  const runner = ts.session.extensionRunner;
+  if (!runner) throw new Error("No extensionRunner on session");
+  return runner.getToolDefinition(name);
 }
 
 function collectSchemaDescriptions(schema: unknown): string[] {
-	const descriptions: string[] = [];
-	const visit = (value: unknown) => {
-		if (!value || typeof value !== "object") return;
-		const record = value as Record<string, unknown>;
-		if (typeof record.description === "string") {
-			descriptions.push(record.description);
-		}
-		for (const child of Object.values(record)) visit(child);
-	};
-	visit(schema);
-	return descriptions;
+  const descriptions: string[] = [];
+  const visit = (value: unknown) => {
+    if (!value || typeof value !== "object") return;
+    const record = value as Record<string, unknown>;
+    if (typeof record.description === "string") {
+      descriptions.push(record.description);
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(schema);
+  return descriptions;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function makeTempDir(prefix = "delegate-test-"): string {
-	return mkdtempSync(path.join(tmpdir(), prefix));
+  return mkdtempSync(path.join(tmpdir(), prefix));
 }
 
 function cleanup(dir: string) {
-	try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
 }
 
 function writeAgent(dir: string, filename: string, content: string): void {
-	mkdirSync(dir, { recursive: true });
-	writeFileSync(path.join(dir, filename), content, "utf-8");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, filename), content, "utf-8");
 }
 
 // ── parseFrontmatter ──────────────────────────────────────────────────────
 
 describe("parseFrontmatter", () => {
-	test("parses YAML-ish frontmatter", () => {
-		const content = `---
+  test("parses YAML-ish frontmatter", () => {
+    const content = `---
 name: scout
 description: A scout agent
 ---
 You are a scout.
 `;
-		const result = parseFrontmatter(content);
-		expect(result.data.name).toBe("scout");
-		expect(result.data.description).toBe("A scout agent");
-		expect(result.body).toBe("You are a scout.");
-	});
+    const result = parseFrontmatter(content);
+    expect(result.data.name).toBe("scout");
+    expect(result.data.description).toBe("A scout agent");
+    expect(result.body).toBe("You are a scout.");
+  });
 
-	test("handles CRLF line endings", () => {
-		const content = `---\r\nname: worker\r\ndescription: A worker\r\n---\r\nDo work.\r\n`;
-		const result = parseFrontmatter(content);
-		expect(result.data.name).toBe("worker");
-		expect(result.body).toBe("Do work.");
-	});
+  test("handles CRLF line endings", () => {
+    const content = `---\r\nname: worker\r\ndescription: A worker\r\n---\r\nDo work.\r\n`;
+    const result = parseFrontmatter(content);
+    expect(result.data.name).toBe("worker");
+    expect(result.body).toBe("Do work.");
+  });
 
-	test("returns empty data when no frontmatter", () => {
-		const result = parseFrontmatter("Just body text.");
-		expect(Object.keys(result.data)).toHaveLength(0);
-		expect(result.body).toBe("Just body text.");
-	});
+  test("returns empty data when no frontmatter", () => {
+    const result = parseFrontmatter("Just body text.");
+    expect(Object.keys(result.data)).toHaveLength(0);
+    expect(result.body).toBe("Just body text.");
+  });
 
-	test("ignores lines without colon", () => {
-		const content = `---
+  test("ignores lines without colon", () => {
+    const content = `---
 name: agent
 bad line without colon
 ---
 Body.
 `;
-		const result = parseFrontmatter(content);
-		expect(result.data.name).toBe("agent");
-		expect(result.data["bad line without colon"]).toBeUndefined();
-	});
+    const result = parseFrontmatter(content);
+    expect(result.data.name).toBe("agent");
+    expect(result.data["bad line without colon"]).toBeUndefined();
+  });
 
-	test("trims keys and values", () => {
-		const content = `---
+  test("trims keys and values", () => {
+    const content = `---
   name  :   spaced agent  
 ---
 Body.
 `;
-		const result = parseFrontmatter(content);
-		expect(result.data.name).toBe("spaced agent");
-	});
+    const result = parseFrontmatter(content);
+    expect(result.data.name).toBe("spaced agent");
+  });
 
-	test("handles empty body", () => {
-		const content = `---
+  test("handles empty body", () => {
+    const content = `---
 name: agent
 description: desc
 ---
 `;
-		const result = parseFrontmatter(content);
-		expect(result.body).toBe("");
-	});
+    const result = parseFrontmatter(content);
+    expect(result.body).toBe("");
+  });
 });
 
 // ── findProjectRoot ───────────────────────────────────────────────────────
 
 describe("findProjectRoot", () => {
-	let tmpDir: string;
+  let tmpDir: string;
 
-	beforeEach(() => {
-		tmpDir = makeTempDir();
-	});
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+  });
 
-	afterEach(() => {
-		cleanup(tmpDir);
-	});
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
 
-	test("finds .pi/agents directory", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(path.join(projectDir, ".pi", "agents"), { recursive: true });
-		expect(findProjectRoot(projectDir)).toBe(projectDir);
-	});
+  test("finds .pi/agents directory", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(path.join(projectDir, ".pi", "agents"), { recursive: true });
+    expect(findProjectRoot(projectDir)).toBe(projectDir);
+  });
 
-	test("walks up the directory tree", () => {
-		const projectDir = path.join(tmpDir, "project");
-		const nested = path.join(projectDir, "src", "deep");
-		mkdirSync(path.join(projectDir, ".pi", "agents"), { recursive: true });
-		mkdirSync(nested, { recursive: true });
-		expect(findProjectRoot(nested)).toBe(projectDir);
-	});
+  test("walks up the directory tree", () => {
+    const projectDir = path.join(tmpDir, "project");
+    const nested = path.join(projectDir, "src", "deep");
+    mkdirSync(path.join(projectDir, ".pi", "agents"), { recursive: true });
+    mkdirSync(nested, { recursive: true });
+    expect(findProjectRoot(nested)).toBe(projectDir);
+  });
 
-	test("returns null when not found", () => {
-		expect(findProjectRoot(tmpDir)).toBeNull();
-	});
+  test("returns null when not found", () => {
+    expect(findProjectRoot(tmpDir)).toBeNull();
+  });
 
-	test("stops at filesystem root", () => {
-		expect(findProjectRoot("/")).toBeNull();
-	});
+  test("stops at filesystem root", () => {
+    expect(findProjectRoot("/")).toBeNull();
+  });
 });
 
 // ── loadAgentFile ─────────────────────────────────────────────────────────
 
 describe("loadAgentFile", () => {
-	let tmpDir: string;
+  let tmpDir: string;
 
-	beforeEach(() => {
-		tmpDir = makeTempDir();
-	});
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+  });
 
-	afterEach(() => {
-		cleanup(tmpDir);
-	});
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
 
-	test("returns null for non-existent file", () => {
-		expect(loadAgentFile(path.join(tmpDir, "nonexistent.md"))).toBeNull();
-	});
+  test("returns null for non-existent file", () => {
+    expect(loadAgentFile(path.join(tmpDir, "nonexistent.md"))).toBeNull();
+  });
 
-	test("parses a complete agent file", () => {
-		const filePath = path.join(tmpDir, "scout.md");
-		writeFileSync(filePath, `---
+  test("parses a complete agent file", () => {
+    const filePath = path.join(tmpDir, "scout.md");
+    writeFileSync(
+      filePath,
+      `---
 name: scout
 description: Fast reconnaissance agent
 model: anthropic/claude-haiku-4-5
@@ -245,671 +256,779 @@ tools: read, grep
 skills: web-content
 ---
 You are a scout. Be concise.
-`);
-		const cfg = loadAgentFile(filePath)!;
-		expect(cfg.name).toBe("scout");
-		expect(cfg.description).toBe("Fast reconnaissance agent");
-		expect(cfg.model).toBe("anthropic/claude-haiku-4-5");
-		expect(cfg.thinking).toBe("low");
-		expect(cfg.tools).toEqual(["read", "grep"]);
-		expect(cfg.skills).toEqual(["web-content"]);
-		expect(cfg.systemPrompt).toBe("You are a scout. Be concise.");
-	});
+`,
+    );
+    const cfg = loadAgentFile(filePath)!;
+    expect(cfg.name).toBe("scout");
+    expect(cfg.description).toBe("Fast reconnaissance agent");
+    expect(cfg.model).toBe("anthropic/claude-haiku-4-5");
+    expect(cfg.thinking).toBe("low");
+    expect(cfg.tools).toEqual(["read", "grep"]);
+    expect(cfg.skills).toEqual(["web-content"]);
+    expect(cfg.systemPrompt).toBe("You are a scout. Be concise.");
+  });
 
-	test("defaults tools to DEFAULT_TOOLS when not specified", () => {
-		const filePath = path.join(tmpDir, "minimal.md");
-		writeFileSync(filePath, `---
+  test("defaults tools to DEFAULT_TOOLS when not specified", () => {
+    const filePath = path.join(tmpDir, "minimal.md");
+    writeFileSync(
+      filePath,
+      `---
 name: minimal
 description: Minimal agent
 ---
 Prompt.
-`);
-		const cfg = loadAgentFile(filePath)!;
-		expect(cfg.tools).toEqual(DEFAULT_TOOLS);
-	});
+`,
+    );
+    const cfg = loadAgentFile(filePath)!;
+    expect(cfg.tools).toEqual(DEFAULT_TOOLS);
+  });
 
-	test("defaults thinking to off when invalid", () => {
-		const filePath = path.join(tmpDir, "bad-thinking.md");
-		writeFileSync(filePath, `---
+  test("defaults thinking to off when invalid", () => {
+    const filePath = path.join(tmpDir, "bad-thinking.md");
+    writeFileSync(
+      filePath,
+      `---
 name: bad-thinking
 description: Bad thinking
 thinking: super-duper-high
 ---
 Prompt.
-`);
-		const cfg = loadAgentFile(filePath)!;
-		expect(cfg.thinking).toBe("off");
-	});
+`,
+    );
+    const cfg = loadAgentFile(filePath)!;
+    expect(cfg.thinking).toBe("off");
+  });
 
-	test("returns null when name is missing", () => {
-		const filePath = path.join(tmpDir, "no-name.md");
-		writeFileSync(filePath, `---
+  test("returns null when name is missing", () => {
+    const filePath = path.join(tmpDir, "no-name.md");
+    writeFileSync(
+      filePath,
+      `---
 description: No name here
 ---
 Prompt.
-`);
-		expect(loadAgentFile(filePath)).toBeNull();
-	});
+`,
+    );
+    expect(loadAgentFile(filePath)).toBeNull();
+  });
 
-	test("returns null when description is missing", () => {
-		const filePath = path.join(tmpDir, "no-desc.md");
-		writeFileSync(filePath, `---
+  test("returns null when description is missing", () => {
+    const filePath = path.join(tmpDir, "no-desc.md");
+    writeFileSync(
+      filePath,
+      `---
 name: no-desc
 ---
 Prompt.
-`);
-		expect(loadAgentFile(filePath)).toBeNull();
-	});
+`,
+    );
+    expect(loadAgentFile(filePath)).toBeNull();
+  });
 
-	test("trims and filters empty tools", () => {
-		const filePath = path.join(tmpDir, "spaced-tools.md");
-		writeFileSync(filePath, `---
+  test("trims and filters empty tools", () => {
+    const filePath = path.join(tmpDir, "spaced-tools.md");
+    writeFileSync(
+      filePath,
+      `---
 name: spaced
 description: Spaced tools
 tools: read, , write , , grep
 ---
 Prompt.
-`);
-		const cfg = loadAgentFile(filePath)!;
-		expect(cfg.tools).toEqual(["read", "write", "grep"]);
-	});
+`,
+    );
+    const cfg = loadAgentFile(filePath)!;
+    expect(cfg.tools).toEqual(["read", "write", "grep"]);
+  });
 
-	test("expands * to all registered tools", () => {
-		const filePath = path.join(tmpDir, "star-tools.md");
-		writeFileSync(filePath, `---
+  test("expands * to all registered tools", () => {
+    const filePath = path.join(tmpDir, "star-tools.md");
+    writeFileSync(
+      filePath,
+      `---
 name: star-agent
 description: All tools agent
 tools: *
 ---
 Prompt.
-`);
-		const cfg = loadAgentFile(filePath)!;
-		expect(cfg.tools).toEqual(Object.keys(TOOL_FACTORIES));
-	});
+`,
+    );
+    const cfg = loadAgentFile(filePath)!;
+    expect(cfg.tools).toEqual(Object.keys(TOOL_FACTORIES));
+  });
 });
 
 // ── expandToolsStar ──────────────────────────────────────────────────────
 
 describe("expandToolsStar", () => {
-	test("passes through arrays without *", () => {
-		expect(expandToolsStar(["read", "bash"])).toEqual(["read", "bash"]);
-	});
+  test("passes through arrays without *", () => {
+    expect(expandToolsStar(["read", "bash"])).toEqual(["read", "bash"]);
+  });
 
-	test("expands * to all TOOL_FACTORIES keys", () => {
-		const result = expandToolsStar(["*"]);
-		expect(result).toEqual(Object.keys(TOOL_FACTORIES));
-	});
+  test("expands * to all TOOL_FACTORIES keys", () => {
+    const result = expandToolsStar(["*"]);
+    expect(result).toEqual(Object.keys(TOOL_FACTORIES));
+  });
 
-	test("expands * and keeps additional tools (deduped)", () => {
-		const result = expandToolsStar(["*", "read"]);
-		const allKeys = Object.keys(TOOL_FACTORIES);
-		expect(result.sort()).toEqual([...new Set([...allKeys, "read"])].sort());
-	});
+  test("expands * and keeps additional tools (deduped)", () => {
+    const result = expandToolsStar(["*", "read"]);
+    const allKeys = Object.keys(TOOL_FACTORIES);
+    expect(result.sort()).toEqual([...new Set([...allKeys, "read"])].sort());
+  });
 
-	test("returns empty array as-is", () => {
-		expect(expandToolsStar([])).toEqual([]);
-	});
+  test("returns empty array as-is", () => {
+    expect(expandToolsStar([])).toEqual([]);
+  });
 });
 
 // ── discoverAgents ────────────────────────────────────────────────────────
 
 describe("discoverAgents", () => {
-	let tmpDir: string;
-	let originalHomedir: () => string;
+  let tmpDir: string;
+  let originalHomedir: () => string;
 
-	beforeEach(() => {
-		tmpDir = makeTempDir();
-		originalHomedir = os.homedir;
-		mock.module("node:os", () => ({
-			...os,
-			homedir: () => tmpDir,
-		}));
-	});
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+    originalHomedir = os.homedir;
+    mock.module("node:os", () => ({
+      ...os,
+      homedir: () => tmpDir,
+    }));
+  });
 
-	afterEach(() => {
-		mock.module("node:os", () => os);
-		cleanup(tmpDir);
-	});
+  afterEach(() => {
+    mock.module("node:os", () => os);
+    cleanup(tmpDir);
+  });
 
-	test("discovers agents from project dir", () => {
-		const projectDir = path.join(tmpDir, "project");
-		writeAgent(path.join(projectDir, ".pi", "agents"), "project.md", `---
+  test("discovers agents from project dir", () => {
+    const projectDir = path.join(tmpDir, "project");
+    writeAgent(
+      path.join(projectDir, ".pi", "agents"),
+      "project.md",
+      `---
 name: project-agent
 description: Project agent
 ---
 Prompt.
-`);
-		const agents = discoverAgents(projectDir);
-		expect(agents.has("project-agent")).toBe(true);
-	});
+`,
+    );
+    const agents = discoverAgents(projectDir);
+    expect(agents.has("project-agent")).toBe(true);
+  });
 
-	test("discovers agents from global ~/.pi/agent/agents/", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		writeAgent(path.join(tmpDir, ".pi", "agent", "agents"), "global.md", `---
+  test("discovers agents from global ~/.pi/agent/agents/", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    writeAgent(
+      path.join(tmpDir, ".pi", "agent", "agents"),
+      "global.md",
+      `---
 name: global-agent
 description: Global agent
 ---
 Prompt.
-`);
-		const agents = discoverAgents(projectDir);
-		expect(agents.has("global-agent")).toBe(true);
-		expect(agents.get("global-agent")!.scope).toBe("global");
-	});
+`,
+    );
+    const agents = discoverAgents(projectDir);
+    expect(agents.has("global-agent")).toBe(true);
+    expect(agents.get("global-agent")!.scope).toBe("global");
+  });
 
-	test("discovers agents from legacy ~/.agents/", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		writeAgent(path.join(tmpDir, ".agents"), "legacy.md", `---
+  test("discovers agents from legacy ~/.agents/", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    writeAgent(
+      path.join(tmpDir, ".agents"),
+      "legacy.md",
+      `---
 name: legacy-agent
 description: Legacy agent
 ---
 Prompt.
-`);
-		const agents = discoverAgents(projectDir);
-		expect(agents.has("legacy-agent")).toBe(true);
-		expect(agents.get("legacy-agent")!.scope).toBe("global");
-	});
+`,
+    );
+    const agents = discoverAgents(projectDir);
+    expect(agents.has("legacy-agent")).toBe(true);
+    expect(agents.get("legacy-agent")!.scope).toBe("global");
+  });
 
-	test("project agents override global on name collision", () => {
-		const projectDir = path.join(tmpDir, "project");
-		writeAgent(path.join(projectDir, ".pi", "agents"), "shared.md", `---
+  test("project agents override global on name collision", () => {
+    const projectDir = path.join(tmpDir, "project");
+    writeAgent(
+      path.join(projectDir, ".pi", "agents"),
+      "shared.md",
+      `---
 name: shared-agent
 description: Project wins
 ---
 Project prompt.
-`);
-		writeAgent(path.join(tmpDir, ".pi", "agent", "agents"), "shared.md", `---
+`,
+    );
+    writeAgent(
+      path.join(tmpDir, ".pi", "agent", "agents"),
+      "shared.md",
+      `---
 name: shared-agent
 description: Global loses
 ---
 Global prompt.
-`);
-		const agents = discoverAgents(projectDir);
-		expect(agents.has("shared-agent")).toBe(true);
-		expect(agents.get("shared-agent")!.systemPrompt).toBe("Project prompt.");
-		expect(agents.get("shared-agent")!.scope).toBe("project");
-	});
+`,
+    );
+    const agents = discoverAgents(projectDir);
+    expect(agents.has("shared-agent")).toBe(true);
+    expect(agents.get("shared-agent")!.systemPrompt).toBe("Project prompt.");
+    expect(agents.get("shared-agent")!.scope).toBe("project");
+  });
 
-	test("returns empty map when no .pi/agents directory exists", () => {
-		const agents = discoverAgents("/nonexistent");
-		expect(agents.size).toBe(0);
-	});
+  test("returns empty map when no .pi/agents directory exists", () => {
+    const agents = discoverAgents("/nonexistent");
+    expect(agents.size).toBe(0);
+  });
 
-	test("skips .chain.md files", () => {
-		writeAgent(path.join(tmpDir, ".pi", "agent", "agents"), "chain.chain.md", `---
+  test("skips .chain.md files", () => {
+    writeAgent(
+      path.join(tmpDir, ".pi", "agent", "agents"),
+      "chain.chain.md",
+      `---
 name: chain
 description: Chain agent
 ---
 Prompt.
-`);
-		const agents = discoverAgents("/nonexistent");
-		expect(agents.has("chain")).toBe(false);
-	});
+`,
+    );
+    const agents = discoverAgents("/nonexistent");
+    expect(agents.has("chain")).toBe(false);
+  });
 
-	test("skips non-markdown files", () => {
-		const dir = path.join(tmpDir, ".pi", "agent", "agents");
-		mkdirSync(dir, { recursive: true });
-		writeFileSync(path.join(dir, "readme.txt"), `---
+  test("skips non-markdown files", () => {
+    const dir = path.join(tmpDir, ".pi", "agent", "agents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, "readme.txt"),
+      `---
 name: txt
 description: TXT
 ---
 Prompt.
-`);
-		const agents = discoverAgents("/nonexistent");
-		expect(agents.has("txt")).toBe(false);
-	});
+`,
+    );
+    const agents = discoverAgents("/nonexistent");
+    expect(agents.has("txt")).toBe(false);
+  });
 
-	test("returns empty map when no agents found", () => {
-		const agents = discoverAgents(tmpDir);
-		expect(agents.size).toBe(0);
-	});
+  test("returns empty map when no agents found", () => {
+    const agents = discoverAgents(tmpDir);
+    expect(agents.size).toBe(0);
+  });
 });
 
 // ── buildParentTranscript ─────────────────────────────────────────────────
 
 describe("buildParentTranscript", () => {
-	test("returns null on empty entries", () => {
-		expect(buildParentTranscript([], null)).toBeNull();
-	});
+  test("returns null on empty entries", () => {
+    expect(buildParentTranscript([], null)).toBeNull();
+  });
 
-	test("formats user and assistant messages", () => {
-		const entries = [
-			{
-				type: "message",
-				id: "1",
-				parentId: null,
-				timestamp: "2026-01-01T00:00:00Z",
-				message: { role: "user", content: [{ type: "text", text: "Hello" }] },
-			},
-			{
-				type: "message",
-				id: "2",
-				parentId: "1",
-				timestamp: "2026-01-01T00:00:01Z",
-				message: { role: "assistant", content: [{ type: "text", text: "Hi there" }] },
-			},
-		] as any[];
-		const result = buildParentTranscript(entries, undefined);
-		expect(result).toContain("**User:** Hello");
-		expect(result).toContain("**Assistant:** Hi there");
-	});
+  test("formats user and assistant messages", () => {
+    const entries = [
+      {
+        type: "message",
+        id: "1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:00Z",
+        message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+      },
+      {
+        type: "message",
+        id: "2",
+        parentId: "1",
+        timestamp: "2026-01-01T00:00:01Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Hi there" }],
+        },
+      },
+    ] as any[];
+    const result = buildParentTranscript(entries, undefined);
+    expect(result).toContain("**User:** Hello");
+    expect(result).toContain("**Assistant:** Hi there");
+  });
 
-	test("filters out non-text content blocks", () => {
-		const entries = [
-			{
-				type: "message",
-				id: "1",
-				parentId: null,
-				timestamp: "2026-01-01T00:00:00Z",
-				message: {
-					role: "user",
-					content: [
-						{ type: "image", source: "data:image/png;base64,abc" },
-						{ type: "text", text: "Describe this image" },
-					],
-				},
-			},
-		] as any[];
-		const result = buildParentTranscript(entries, undefined);
-		expect(result).toBe("**User:** Describe this image");
-	});
+  test("filters out non-text content blocks", () => {
+    const entries = [
+      {
+        type: "message",
+        id: "1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:00Z",
+        message: {
+          role: "user",
+          content: [
+            { type: "image", source: "data:image/png;base64,abc" },
+            { type: "text", text: "Describe this image" },
+          ],
+        },
+      },
+    ] as any[];
+    const result = buildParentTranscript(entries, undefined);
+    expect(result).toBe("**User:** Describe this image");
+  });
 
-	test("returns null when buildSessionContext throws", () => {
-		// Invalid entries should cause buildSessionContext to throw
-		const result = buildParentTranscript(null as any, null);
-		expect(result).toBeNull();
-	});
+  test("returns null when buildSessionContext throws", () => {
+    // Invalid entries should cause buildSessionContext to throw
+    const result = buildParentTranscript(null as any, null);
+    expect(result).toBeNull();
+  });
 });
 
 // ── extractTextContent ────────────────────────────────────────────────────
 
 describe("extractTextContent", () => {
-	test("returns string content as-is", () => {
-		expect(extractTextContent("hello")).toBe("hello");
-	});
+  test("returns string content as-is", () => {
+    expect(extractTextContent("hello")).toBe("hello");
+  });
 
-	test("extracts text blocks from array", () => {
-		expect(
-			extractTextContent([
-				{ type: "text", text: "hello" },
-				{ type: "text", text: "world" },
-			]),
-		).toBe("helloworld");
-	});
+  test("extracts text blocks from array", () => {
+    expect(
+      extractTextContent([
+        { type: "text", text: "hello" },
+        { type: "text", text: "world" },
+      ]),
+    ).toBe("helloworld");
+  });
 
-	test("skips non-text blocks", () => {
-		expect(
-			extractTextContent([
-				{ type: "image", source: "base64" },
-				{ type: "text", text: "only text" },
-			]),
-		).toBe("only text");
-	});
+  test("skips non-text blocks", () => {
+    expect(
+      extractTextContent([
+        { type: "image", source: "base64" },
+        { type: "text", text: "only text" },
+      ]),
+    ).toBe("only text");
+  });
 
-	test("skips text blocks without string text", () => {
-		expect(
-			extractTextContent([
-				{ type: "text" },
-				{ type: "text", text: "valid" },
-				{ type: "text", text: 123 as any },
-			]),
-		).toBe("valid");
-	});
+  test("skips text blocks without string text", () => {
+    expect(
+      extractTextContent([
+        { type: "text" },
+        { type: "text", text: "valid" },
+        { type: "text", text: 123 as any },
+      ]),
+    ).toBe("valid");
+  });
 
-	test("returns empty string for non-array non-string", () => {
-		expect(extractTextContent(123 as any)).toBe("");
-		expect(extractTextContent(null as any)).toBe("");
-	});
+  test("returns empty string for non-array non-string", () => {
+    expect(extractTextContent(123 as any)).toBe("");
+    expect(extractTextContent(null as any)).toBe("");
+  });
 });
 
 // ── loadSkill ─────────────────────────────────────────────────────────────
 
 describe("loadSkill", () => {
-	let tmpDir: string;
+  let tmpDir: string;
 
-	beforeEach(() => {
-		tmpDir = makeTempDir();
-		mock.module("node:os", () => ({
-			...os,
-			homedir: () => tmpDir,
-		}));
-	});
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+    mock.module("node:os", () => ({
+      ...os,
+      homedir: () => tmpDir,
+    }));
+  });
 
-	afterEach(() => {
-		mock.module("node:os", () => os);
-		cleanup(tmpDir);
-	});
+  afterEach(() => {
+    mock.module("node:os", () => os);
+    cleanup(tmpDir);
+  });
 
-	test("loads skill from project .agents/skills/", () => {
-		const skillDir = path.join(tmpDir, ".agents", "skills", "web-content");
-		mkdirSync(skillDir, { recursive: true });
-		writeFileSync(path.join(skillDir, "SKILL.md"), "# Web Content\nSearch the web.", "utf-8");
-		expect(loadSkill("web-content", tmpDir)).toBe("# Web Content\nSearch the web.");
-	});
+  test("loads skill from project .agents/skills/", () => {
+    const skillDir = path.join(tmpDir, ".agents", "skills", "web-content");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      path.join(skillDir, "SKILL.md"),
+      "# Web Content\nSearch the web.",
+      "utf-8",
+    );
+    expect(loadSkill("web-content", tmpDir)).toBe(
+      "# Web Content\nSearch the web.",
+    );
+  });
 
-	test("loads skill from project .pi/skills/", () => {
-		const skillDir = path.join(tmpDir, ".pi", "skills", "custom");
-		mkdirSync(skillDir, { recursive: true });
-		writeFileSync(path.join(skillDir, "SKILL.md"), "Custom skill.", "utf-8");
-		expect(loadSkill("custom", tmpDir)).toBe("Custom skill.");
-	});
+  test("loads skill from project .pi/skills/", () => {
+    const skillDir = path.join(tmpDir, ".pi", "skills", "custom");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(path.join(skillDir, "SKILL.md"), "Custom skill.", "utf-8");
+    expect(loadSkill("custom", tmpDir)).toBe("Custom skill.");
+  });
 
-	test("returns null when skill not found", () => {
-		expect(loadSkill("nonexistent", tmpDir)).toBeNull();
-	});
+  test("returns null when skill not found", () => {
+    expect(loadSkill("nonexistent", tmpDir)).toBeNull();
+  });
 
-	test("searches user dirs after project dirs", () => {
-		// Project dir has no skill
-		// User dir has it
-		const userSkillDir = path.join(tmpDir, ".pi", "agent", "skills", "shared");
-		mkdirSync(userSkillDir, { recursive: true });
-		writeFileSync(path.join(userSkillDir, "SKILL.md"), "User skill.", "utf-8");
-		expect(loadSkill("shared", tmpDir)).toBe("User skill.");
-	});
+  test("searches user dirs after project dirs", () => {
+    // Project dir has no skill
+    // User dir has it
+    const userSkillDir = path.join(tmpDir, ".pi", "agent", "skills", "shared");
+    mkdirSync(userSkillDir, { recursive: true });
+    writeFileSync(path.join(userSkillDir, "SKILL.md"), "User skill.", "utf-8");
+    expect(loadSkill("shared", tmpDir)).toBe("User skill.");
+  });
 });
 
 // ── loadAgentsMdFiles ────────────────────────────────────────────────────
 
 describe("loadAgentsMdFiles", () => {
-	let tmpDir: string;
+  let tmpDir: string;
 
-	beforeEach(() => {
-		tmpDir = makeTempDir();
-		mock.module("node:os", () => ({
-			...os,
-			homedir: () => tmpDir,
-		}));
-	});
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+    mock.module("node:os", () => ({
+      ...os,
+      homedir: () => tmpDir,
+    }));
+  });
 
-	afterEach(() => {
-		mock.module("node:os", () => os);
-		cleanup(tmpDir);
-	});
+  afterEach(() => {
+    mock.module("node:os", () => os);
+    cleanup(tmpDir);
+  });
 
-	test("returns empty array when no AGENTS.md files exist", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		expect(loadAgentsMdFiles(projectDir)).toEqual([]);
-	});
+  test("returns empty array when no AGENTS.md files exist", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    expect(loadAgentsMdFiles(projectDir)).toEqual([]);
+  });
 
-	test("loads AGENTS.md from cwd", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		writeFileSync(path.join(projectDir, "AGENTS.md"), "Project instructions.", "utf-8");
-		expect(loadAgentsMdFiles(projectDir)).toEqual(["Project instructions."]);
-	});
+  test("loads AGENTS.md from cwd", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      path.join(projectDir, "AGENTS.md"),
+      "Project instructions.",
+      "utf-8",
+    );
+    expect(loadAgentsMdFiles(projectDir)).toEqual(["Project instructions."]);
+  });
 
-	test("loads global AGENTS.md from ~/.pi/agent/", () => {
-		const agentDir = path.join(tmpDir, ".pi", "agent");
-		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(path.join(agentDir, "AGENTS.md"), "Global instructions.", "utf-8");
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		const result = loadAgentsMdFiles(projectDir);
-		expect(result).toContain("Global instructions.");
-	});
+  test("loads global AGENTS.md from ~/.pi/agent/", () => {
+    const agentDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(
+      path.join(agentDir, "AGENTS.md"),
+      "Global instructions.",
+      "utf-8",
+    );
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const result = loadAgentsMdFiles(projectDir);
+    expect(result).toContain("Global instructions.");
+  });
 
-	test("loads both global and project AGENTS.md", () => {
-		const agentDir = path.join(tmpDir, ".pi", "agent");
-		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(path.join(agentDir, "AGENTS.md"), "Global instructions.", "utf-8");
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		writeFileSync(path.join(projectDir, "AGENTS.md"), "Project instructions.", "utf-8");
-		const result = loadAgentsMdFiles(projectDir);
-		expect(result).toEqual(["Global instructions.", "Project instructions."]);
-	});
+  test("loads both global and project AGENTS.md", () => {
+    const agentDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(
+      path.join(agentDir, "AGENTS.md"),
+      "Global instructions.",
+      "utf-8",
+    );
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      path.join(projectDir, "AGENTS.md"),
+      "Project instructions.",
+      "utf-8",
+    );
+    const result = loadAgentsMdFiles(projectDir);
+    expect(result).toEqual(["Global instructions.", "Project instructions."]);
+  });
 
-	test("walks ancestor directories", () => {
-		const parentDir = path.join(tmpDir, "parent");
-		const childDir = path.join(parentDir, "child");
-		mkdirSync(childDir, { recursive: true });
-		writeFileSync(path.join(parentDir, "AGENTS.md"), "Parent instructions.", "utf-8");
-		writeFileSync(path.join(childDir, "AGENTS.md"), "Child instructions.", "utf-8");
-		const result = loadAgentsMdFiles(childDir);
-		expect(result).toEqual(["Parent instructions.", "Child instructions."]);
-	});
+  test("walks ancestor directories", () => {
+    const parentDir = path.join(tmpDir, "parent");
+    const childDir = path.join(parentDir, "child");
+    mkdirSync(childDir, { recursive: true });
+    writeFileSync(
+      path.join(parentDir, "AGENTS.md"),
+      "Parent instructions.",
+      "utf-8",
+    );
+    writeFileSync(
+      path.join(childDir, "AGENTS.md"),
+      "Child instructions.",
+      "utf-8",
+    );
+    const result = loadAgentsMdFiles(childDir);
+    expect(result).toEqual(["Parent instructions.", "Child instructions."]);
+  });
 
-	test("falls back to CLAUDE.md when AGENTS.md is empty", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		writeFileSync(path.join(projectDir, "AGENTS.md"), "", "utf-8");
-		writeFileSync(path.join(projectDir, "CLAUDE.md"), "Claude instructions.", "utf-8");
-		expect(loadAgentsMdFiles(projectDir)).toEqual(["Claude instructions."]);
-	});
+  test("falls back to CLAUDE.md when AGENTS.md is empty", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(path.join(projectDir, "AGENTS.md"), "", "utf-8");
+    writeFileSync(
+      path.join(projectDir, "CLAUDE.md"),
+      "Claude instructions.",
+      "utf-8",
+    );
+    expect(loadAgentsMdFiles(projectDir)).toEqual(["Claude instructions."]);
+  });
 
-	test("falls back to CLAUDE.md when AGENTS.md is whitespace-only", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		writeFileSync(path.join(projectDir, "AGENTS.md"), "   \n\t\n  ", "utf-8");
-		writeFileSync(path.join(projectDir, "CLAUDE.md"), "Claude instructions.", "utf-8");
-		expect(loadAgentsMdFiles(projectDir)).toEqual(["Claude instructions."]);
-	});
+  test("falls back to CLAUDE.md when AGENTS.md is whitespace-only", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(path.join(projectDir, "AGENTS.md"), "   \n\t\n  ", "utf-8");
+    writeFileSync(
+      path.join(projectDir, "CLAUDE.md"),
+      "Claude instructions.",
+      "utf-8",
+    );
+    expect(loadAgentsMdFiles(projectDir)).toEqual(["Claude instructions."]);
+  });
 
-	test("prefers AGENTS.md over CLAUDE.md when both have content", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		writeFileSync(path.join(projectDir, "AGENTS.md"), "Agents win.", "utf-8");
-		writeFileSync(path.join(projectDir, "CLAUDE.md"), "Claude loses.", "utf-8");
-		expect(loadAgentsMdFiles(projectDir)).toEqual(["Agents win."]);
-	});
+  test("prefers AGENTS.md over CLAUDE.md when both have content", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(path.join(projectDir, "AGENTS.md"), "Agents win.", "utf-8");
+    writeFileSync(path.join(projectDir, "CLAUDE.md"), "Claude loses.", "utf-8");
+    expect(loadAgentsMdFiles(projectDir)).toEqual(["Agents win."]);
+  });
 
-	test("loads CLAUDE.md when AGENTS.md does not exist", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		writeFileSync(path.join(projectDir, "CLAUDE.md"), "Claude instructions.", "utf-8");
-		expect(loadAgentsMdFiles(projectDir)).toEqual(["Claude instructions."]);
-	});
+  test("loads CLAUDE.md when AGENTS.md does not exist", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      path.join(projectDir, "CLAUDE.md"),
+      "Claude instructions.",
+      "utf-8",
+    );
+    expect(loadAgentsMdFiles(projectDir)).toEqual(["Claude instructions."]);
+  });
 
-	test("skips filesystem root", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		// Intentionally write to root — should be ignored
-		try {
-			writeFileSync("/AGENTS.md", "Root instructions.", "utf-8");
-		} catch {
-			// skip if no permission
-		}
-		const result = loadAgentsMdFiles(projectDir);
-		expect(result).not.toContain("Root instructions.");
-		// cleanup
-		try { fs.unlinkSync("/AGENTS.md"); } catch { /* ignore */ }
-	});
+  test("skips filesystem root", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    // Intentionally write to root — should be ignored
+    try {
+      writeFileSync("/AGENTS.md", "Root instructions.", "utf-8");
+    } catch {
+      // skip if no permission
+    }
+    const result = loadAgentsMdFiles(projectDir);
+    expect(result).not.toContain("Root instructions.");
+    // cleanup
+    try {
+      fs.unlinkSync("/AGENTS.md");
+    } catch {
+      /* ignore */
+    }
+  });
 });
 
 // ── resolveModel ──────────────────────────────────────────────────────────
 
 describe("resolveModel", () => {
-	const parentModel = { provider: "anthropic", id: "claude-sonnet-4" } as any;
+  const parentModel = { provider: "anthropic", id: "claude-sonnet-4" } as any;
 
-	function makeRegistry(models: Array<{ provider: string; id: string }>) {
-		return {
-			getAvailable: () => models,
-			find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id) ?? null,
-		} as any;
-	}
+  function makeRegistry(models: Array<{ provider: string; id: string }>) {
+    return {
+      getAvailable: () => models,
+      find: (provider: string, id: string) =>
+        models.find((m) => m.provider === provider && m.id === id) ?? null,
+    } as any;
+  }
 
-	test("returns parent model when spec is undefined", () => {
-		expect(resolveModel(undefined, makeRegistry([]), parentModel)).toBe(parentModel);
-	});
+  test("returns parent model when spec is undefined", () => {
+    expect(resolveModel(undefined, makeRegistry([]), parentModel)).toBe(
+      parentModel,
+    );
+  });
 
-	test("finds bare id in available models", () => {
-		const registry = makeRegistry([
-			{ provider: "openai", id: "gpt-5" },
-			{ provider: "anthropic", id: "claude-haiku-4-5" },
-		]);
-		const result = resolveModel("gpt-5", registry, parentModel);
-		expect(result).toEqual({ provider: "openai", id: "gpt-5" });
-	});
+  test("finds bare id in available models", () => {
+    const registry = makeRegistry([
+      { provider: "openai", id: "gpt-5" },
+      { provider: "anthropic", id: "claude-haiku-4-5" },
+    ]);
+    const result = resolveModel("gpt-5", registry, parentModel);
+    expect(result).toEqual({ provider: "openai", id: "gpt-5" });
+  });
 
-	test("finds provider/id spec", () => {
-		const registry = makeRegistry([
-			{ provider: "openai", id: "gpt-5" },
-		]);
-		const result = resolveModel("openai/gpt-5", registry, parentModel);
-		expect(result).toEqual({ provider: "openai", id: "gpt-5" });
-	});
+  test("finds provider/id spec", () => {
+    const registry = makeRegistry([{ provider: "openai", id: "gpt-5" }]);
+    const result = resolveModel("openai/gpt-5", registry, parentModel);
+    expect(result).toEqual({ provider: "openai", id: "gpt-5" });
+  });
 
-	test("returns undefined when bare id not found", () => {
-		const registry = makeRegistry([{ provider: "openai", id: "gpt-5" }]);
-		expect(resolveModel("nonexistent", registry, parentModel)).toBeUndefined();
-	});
+  test("returns undefined when bare id not found", () => {
+    const registry = makeRegistry([{ provider: "openai", id: "gpt-5" }]);
+    expect(resolveModel("nonexistent", registry, parentModel)).toBeUndefined();
+  });
 
-	test("returns undefined when provider/id not found", () => {
-		const registry = makeRegistry([{ provider: "openai", id: "gpt-5" }]);
-		expect(resolveModel("anthropic/claude-sonnet-4", registry, parentModel)).toBeUndefined();
-	});
+  test("returns undefined when provider/id not found", () => {
+    const registry = makeRegistry([{ provider: "openai", id: "gpt-5" }]);
+    expect(
+      resolveModel("anthropic/claude-sonnet-4", registry, parentModel),
+    ).toBeUndefined();
+  });
 
-	test("handles spec with multiple slashes gracefully", () => {
-		const registry = makeRegistry([{ provider: "openrouter", id: "qwen/qwen3-coder" }]);
-		const result = resolveModel("openrouter/qwen/qwen3-coder", registry, parentModel);
-		expect(result).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder" });
-	});
+  test("handles spec with multiple slashes gracefully", () => {
+    const registry = makeRegistry([
+      { provider: "openrouter", id: "qwen/qwen3-coder" },
+    ]);
+    const result = resolveModel(
+      "openrouter/qwen/qwen3-coder",
+      registry,
+      parentModel,
+    );
+    expect(result).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder" });
+  });
 });
 
 describe("findAvailableAlternative", () => {
-	const brokenModel = { provider: "deepseek", id: "deepseek-v4-pro" } as any;
-	const workingAlt = { provider: "opencode-go", id: "deepseek-v4-pro" } as any;
+  const brokenModel = { provider: "deepseek", id: "deepseek-v4-pro" } as any;
+  const workingAlt = { provider: "opencode-go", id: "deepseek-v4-pro" } as any;
 
-	function makeRegistry(available: any[], authMap: Map<string, boolean>) {
-		return {
-			hasConfiguredAuth: (m: any) => authMap.get(`${m.provider}/${m.id}`) ?? false,
-			getAvailable: () => available,
-		} as any;
-	}
+  function makeRegistry(available: any[], authMap: Map<string, boolean>) {
+    return {
+      hasConfiguredAuth: (m: any) =>
+        authMap.get(`${m.provider}/${m.id}`) ?? false,
+      getAvailable: () => available,
+    } as any;
+  }
 
-	test("returns undefined when model is undefined", () => {
-		const registry = makeRegistry([], new Map());
-		expect(findAvailableAlternative(undefined, registry)).toBeUndefined();
-	});
+  test("returns undefined when model is undefined", () => {
+    const registry = makeRegistry([], new Map());
+    expect(findAvailableAlternative(undefined, registry)).toBeUndefined();
+  });
 
-	test("returns model as-is when it has configured auth", () => {
-		const authMap = new Map([["deepseek/deepseek-v4-pro", true]]);
-		const registry = makeRegistry([brokenModel], authMap);
-		expect(findAvailableAlternative(brokenModel, registry)).toBe(brokenModel);
-	});
+  test("returns model as-is when it has configured auth", () => {
+    const authMap = new Map([["deepseek/deepseek-v4-pro", true]]);
+    const registry = makeRegistry([brokenModel], authMap);
+    expect(findAvailableAlternative(brokenModel, registry)).toBe(brokenModel);
+  });
 
-	test("returns alternative with same id but different provider when original has no auth", () => {
-		const authMap = new Map([
-			["deepseek/deepseek-v4-pro", false],
-			["opencode-go/deepseek-v4-pro", true],
-		]);
-		const registry = makeRegistry([brokenModel, workingAlt], authMap);
-		expect(findAvailableAlternative(brokenModel, registry)).toBe(workingAlt);
-	});
+  test("returns alternative with same id but different provider when original has no auth", () => {
+    const authMap = new Map([
+      ["deepseek/deepseek-v4-pro", false],
+      ["opencode-go/deepseek-v4-pro", true],
+    ]);
+    const registry = makeRegistry([brokenModel, workingAlt], authMap);
+    expect(findAvailableAlternative(brokenModel, registry)).toBe(workingAlt);
+  });
 
-	test("returns undefined when no alternative is available", () => {
-		const authMap = new Map([["deepseek/deepseek-v4-pro", false]]);
-		const registry = makeRegistry([brokenModel], authMap);
-		expect(findAvailableAlternative(brokenModel, registry)).toBeUndefined();
-	});
+  test("returns undefined when no alternative is available", () => {
+    const authMap = new Map([["deepseek/deepseek-v4-pro", false]]);
+    const registry = makeRegistry([brokenModel], authMap);
+    expect(findAvailableAlternative(brokenModel, registry)).toBeUndefined();
+  });
 });
 
 // ── resolveModelSpec (precedence chain) ───────────────────────────────────
 
 describe("resolveModelSpec", () => {
-	const baseConfig: DelegateConfig = {
-		agent: { default: "config-default", coder: "config-coder" },
-		concurrency: { default: 3 },
-	};
-	const baseOverrides: SessionModelOverrides = {
-		default: "session-default",
-		coder: "session-coder",
-	};
+  const baseConfig: DelegateConfig = {
+    agent: { default: "config-default", coder: "config-coder" },
+    concurrency: { default: 3 },
+  };
+  const baseOverrides: SessionModelOverrides = {
+    default: "session-default",
+    coder: "session-coder",
+  };
 
-	test("task model takes highest precedence", () => {
-		const result = resolveModelSpec({
-			taskModel: "task-model",
-			agentType: "coder",
-			frontmatterModel: "frontmatter",
-			config: baseConfig,
-			overrides: baseOverrides,
-		});
-		expect(result).toBe("task-model");
-	});
+  test("task model takes highest precedence", () => {
+    const result = resolveModelSpec({
+      taskModel: "task-model",
+      agentType: "coder",
+      frontmatterModel: "frontmatter",
+      config: baseConfig,
+      overrides: baseOverrides,
+    });
+    expect(result).toBe("task-model");
+  });
 
-	test("session per-type override is second precedence", () => {
-		const result = resolveModelSpec({
-			agentType: "coder",
-			frontmatterModel: "frontmatter",
-			config: baseConfig,
-			overrides: baseOverrides,
-		});
-		expect(result).toBe("session-coder");
-	});
+  test("session per-type override is second precedence", () => {
+    const result = resolveModelSpec({
+      agentType: "coder",
+      frontmatterModel: "frontmatter",
+      config: baseConfig,
+      overrides: baseOverrides,
+    });
+    expect(result).toBe("session-coder");
+  });
 
-	test("session default is third precedence", () => {
-		const result = resolveModelSpec({
-			agentType: "unknown-type",
-			frontmatterModel: "frontmatter",
-			config: baseConfig,
-			overrides: baseOverrides,
-		});
-		expect(result).toBe("session-default");
-	});
+  test("session default is third precedence", () => {
+    const result = resolveModelSpec({
+      agentType: "unknown-type",
+      frontmatterModel: "frontmatter",
+      config: baseConfig,
+      overrides: baseOverrides,
+    });
+    expect(result).toBe("session-default");
+  });
 
-	test("config per-type is fourth precedence", () => {
-		const result = resolveModelSpec({
-			agentType: "coder",
-			frontmatterModel: "frontmatter",
-			config: baseConfig,
-			overrides: { default: null },
-		});
-		expect(result).toBe("config-coder");
-	});
+  test("config per-type is fourth precedence", () => {
+    const result = resolveModelSpec({
+      agentType: "coder",
+      frontmatterModel: "frontmatter",
+      config: baseConfig,
+      overrides: { default: null },
+    });
+    expect(result).toBe("config-coder");
+  });
 
-	test("config default is fifth precedence", () => {
-		const result = resolveModelSpec({
-			agentType: "unknown-type",
-			frontmatterModel: "frontmatter",
-			config: baseConfig,
-			overrides: { default: null },
-		});
-		expect(result).toBe("config-default");
-	});
+  test("config default is fifth precedence", () => {
+    const result = resolveModelSpec({
+      agentType: "unknown-type",
+      frontmatterModel: "frontmatter",
+      config: baseConfig,
+      overrides: { default: null },
+    });
+    expect(result).toBe("config-default");
+  });
 
-	test("frontmatter model is sixth precedence", () => {
-		const result = resolveModelSpec({
-			agentType: "unknown-type",
-			frontmatterModel: "frontmatter",
-			config: { agent: { default: null }, concurrency: { default: 3 } },
-			overrides: { default: null },
-		});
-		expect(result).toBe("frontmatter");
-	});
+  test("frontmatter model is sixth precedence", () => {
+    const result = resolveModelSpec({
+      agentType: "unknown-type",
+      frontmatterModel: "frontmatter",
+      config: { agent: { default: null }, concurrency: { default: 3 } },
+      overrides: { default: null },
+    });
+    expect(result).toBe("frontmatter");
+  });
 
-	test("no explicit spec returns undefined — parent inheritance is the caller's job", () => {
-		// resolveModelSpec no longer has a parent tier: when nothing explicit
-		// is set it returns undefined, and the caller uses ctx.model directly.
-		// This prevents re-resolving a composite parent id (e.g. OpenRouter's
-		// "deepseek/deepseek-v4-flash") through the registry, which would
-		// misroute auth to the upstream provider name.
-		const result = resolveModelSpec({
-			agentType: "unknown-type",
-			config: { agent: { default: null }, concurrency: { default: 3 } },
-			overrides: { default: null },
-		});
-		expect(result).toBeUndefined();
-	});
+  test("no explicit spec returns undefined — parent inheritance is the caller's job", () => {
+    // resolveModelSpec no longer has a parent tier: when nothing explicit
+    // is set it returns undefined, and the caller uses ctx.model directly.
+    // This prevents re-resolving a composite parent id (e.g. OpenRouter's
+    // "deepseek/deepseek-v4-flash") through the registry, which would
+    // misroute auth to the upstream provider name.
+    const result = resolveModelSpec({
+      agentType: "unknown-type",
+      config: { agent: { default: null }, concurrency: { default: 3 } },
+      overrides: { default: null },
+    });
+    expect(result).toBeUndefined();
+  });
 
-	test("returns undefined when all sources empty", () => {
-		const result = resolveModelSpec({
-			agentType: "unknown-type",
-			config: { agent: { default: null }, concurrency: { default: 3 } },
-			overrides: { default: null },
-		});
-		expect(result).toBeUndefined();
-	});
+  test("returns undefined when all sources empty", () => {
+    const result = resolveModelSpec({
+      agentType: "unknown-type",
+      config: { agent: { default: null }, concurrency: { default: 3 } },
+      overrides: { default: null },
+    });
+    expect(result).toBeUndefined();
+  });
 
-	test("skips empty string overrides — falls through to undefined", () => {
-		const result = resolveModelSpec({
-			agentType: "coder",
-			config: { agent: { default: "", coder: "" }, concurrency: { default: 3 } },
-			overrides: { default: "" },
-		});
-		expect(result).toBeUndefined();
-	});
+  test("skips empty string overrides — falls through to undefined", () => {
+    const result = resolveModelSpec({
+      agentType: "coder",
+      config: {
+        agent: { default: "", coder: "" },
+        concurrency: { default: 3 },
+      },
+      overrides: { default: "" },
+    });
+    expect(result).toBeUndefined();
+  });
 });
 
 // ── Delegate Config I/O ─────────────────────────────────────────────────────
@@ -917,2276 +1036,3344 @@ describe("resolveModelSpec", () => {
 // ── getConcurrencyLimit ──────────────────────────────────────────────────
 
 describe("getConcurrencyLimit", () => {
-	beforeEach(() => {
-		resetConcurrency();
-	});
+  beforeEach(() => {
+    resetConcurrency();
+  });
 
-	test("returns default when no per-model or per-provider config", () => {
-		expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
-	});
+  test("returns default when no per-model or per-provider config", () => {
+    expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
+  });
 
-	test("per-model limit takes precedence", () => {
-		setConcurrencyModel("llamacpp/4b", 1);
-		expect(getConcurrencyLimit("llamacpp/4b")).toBe(1);
-		// Other models still get default
-		expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
-	});
+  test("per-model limit takes precedence", () => {
+    setConcurrencyModel("llamacpp/4b", 1);
+    expect(getConcurrencyLimit("llamacpp/4b")).toBe(1);
+    // Other models still get default
+    expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
+  });
 
-	test("per-provider limit is second precedence", () => {
-		setConcurrencyProvider("llamacpp", 2);
-		expect(getConcurrencyLimit("llamacpp/4b")).toBe(2);
-		expect(getConcurrencyLimit("llamacpp/7b")).toBe(2);
-		// Other providers still get default
-		expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
-	});
+  test("per-provider limit is second precedence", () => {
+    setConcurrencyProvider("llamacpp", 2);
+    expect(getConcurrencyLimit("llamacpp/4b")).toBe(2);
+    expect(getConcurrencyLimit("llamacpp/7b")).toBe(2);
+    // Other providers still get default
+    expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
+  });
 
-	test("per-model overrides per-provider", () => {
-		setConcurrencyProvider("llamacpp", 2);
-		setConcurrencyModel("llamacpp/4b", 4);
-		expect(getConcurrencyLimit("llamacpp/4b")).toBe(4);
-		expect(getConcurrencyLimit("llamacpp/7b")).toBe(2);
-	});
+  test("per-model overrides per-provider", () => {
+    setConcurrencyProvider("llamacpp", 2);
+    setConcurrencyModel("llamacpp/4b", 4);
+    expect(getConcurrencyLimit("llamacpp/4b")).toBe(4);
+    expect(getConcurrencyLimit("llamacpp/7b")).toBe(2);
+  });
 
-	test("removeConcurrencyModel restores provider/default", () => {
-		setConcurrencyProvider("llamacpp", 2);
-		setConcurrencyModel("llamacpp/4b", 4);
-		removeConcurrencyModel("llamacpp/4b");
-		expect(getConcurrencyLimit("llamacpp/4b")).toBe(2);
-	});
+  test("removeConcurrencyModel restores provider/default", () => {
+    setConcurrencyProvider("llamacpp", 2);
+    setConcurrencyModel("llamacpp/4b", 4);
+    removeConcurrencyModel("llamacpp/4b");
+    expect(getConcurrencyLimit("llamacpp/4b")).toBe(2);
+  });
 
-	test("removeConcurrencyProvider restores default", () => {
-		setConcurrencyProvider("llamacpp", 2);
-		removeConcurrencyProvider("llamacpp");
-		expect(getConcurrencyLimit("llamacpp/4b")).toBe(3);
-	});
+  test("removeConcurrencyProvider restores default", () => {
+    setConcurrencyProvider("llamacpp", 2);
+    removeConcurrencyProvider("llamacpp");
+    expect(getConcurrencyLimit("llamacpp/4b")).toBe(3);
+  });
 
-	test("resetConcurrency restores all defaults", () => {
-		setConcurrencyModel("llamacpp/4b", 1);
-		setConcurrencyProvider("openai", 10);
-		setConcurrencyDefault(1);
-		resetConcurrency();
-		expect(getConcurrencyLimit("llamacpp/4b")).toBe(3);
-		expect(getConcurrencyLimit("openai/gpt-5")).toBe(3);
-	});
+  test("resetConcurrency restores all defaults", () => {
+    setConcurrencyModel("llamacpp/4b", 1);
+    setConcurrencyProvider("openai", 10);
+    setConcurrencyDefault(1);
+    resetConcurrency();
+    expect(getConcurrencyLimit("llamacpp/4b")).toBe(3);
+    expect(getConcurrencyLimit("openai/gpt-5")).toBe(3);
+  });
 });
 
 // ── extractOutput ─────────────────────────────────────────────────────────
 
 describe("extractOutput", () => {
-	test("extracts text from assistant messages", () => {
-		const messages = [
-			{ role: "user", content: [{ type: "text", text: "hi" }] },
-			{ role: "assistant", content: [{ type: "text", text: "hello" }, { type: "text", text: "world" }] },
-		] as any;
-		expect(extractOutput(messages)).toBe("hello\n\nworld");
-	});
+  test("extracts text from assistant messages", () => {
+    const messages = [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "hello" },
+          { type: "text", text: "world" },
+        ],
+      },
+    ] as any;
+    expect(extractOutput(messages)).toBe("hello\n\nworld");
+  });
 
-	test("ignores non-assistant messages", () => {
-		const messages = [
-			{ role: "user", content: [{ type: "text", text: "hi" }] },
-			{ role: "system", content: [{ type: "text", text: "sys" }] },
-		] as any;
-		expect(extractOutput(messages)).toBe("");
-	});
+  test("ignores non-assistant messages", () => {
+    const messages = [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "system", content: [{ type: "text", text: "sys" }] },
+    ] as any;
+    expect(extractOutput(messages)).toBe("");
+  });
 
-	test("ignores non-text blocks", () => {
-		const messages = [
-			{ role: "assistant", content: [{ type: "tool_use", name: "bash" }, { type: "text", text: "result" }] },
-		] as any;
-		expect(extractOutput(messages)).toBe("result");
-	});
+  test("ignores non-text blocks", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", name: "bash" },
+          { type: "text", text: "result" },
+        ],
+      },
+    ] as any;
+    expect(extractOutput(messages)).toBe("result");
+  });
 
-	test("handles string content", () => {
-		const messages = [{ role: "assistant", content: "plain string" }] as any;
-		expect(extractOutput(messages)).toBe("");
-	});
+  test("handles string content", () => {
+    const messages = [{ role: "assistant", content: "plain string" }] as any;
+    expect(extractOutput(messages)).toBe("");
+  });
 });
 
 // ── extractUsage ──────────────────────────────────────────────────────────
 
 describe("extractUsage", () => {
-	test("sums usage across assistant messages", () => {
-		const messages = [
-			{ role: "user", content: "hi" },
-			{ role: "assistant", content: [{ type: "text", text: "hello" }], usage: { input: 10, output: 5, total: 15 } },
-			{ role: "assistant", content: [{ type: "text", text: "world" }], usage: { input: 8, output: 4, total: 12 } },
-		] as any;
-		expect(extractUsage(messages)).toEqual({ input: 18, output: 9, cacheRead: 0, total: 27 });
-	});
+  test("sums usage across assistant messages", () => {
+    const messages = [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "hello" }],
+        usage: { input: 10, output: 5, total: 15 },
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "world" }],
+        usage: { input: 8, output: 4, total: 12 },
+      },
+    ] as any;
+    expect(extractUsage(messages)).toEqual({
+      input: 18,
+      output: 9,
+      cacheRead: 0,
+      total: 27,
+    });
+  });
 
-	test("falls back to input+output when total missing", () => {
-		const messages = [
-			{ role: "assistant", content: [{ type: "text", text: "hi" }], usage: { input: 3, output: 2 } },
-		] as any;
-		expect(extractUsage(messages)).toEqual({ input: 3, output: 2, cacheRead: 0, total: 5 });
-	});
+  test("falls back to input+output when total missing", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input: 3, output: 2 },
+      },
+    ] as any;
+    expect(extractUsage(messages)).toEqual({
+      input: 3,
+      output: 2,
+      cacheRead: 0,
+      total: 5,
+    });
+  });
 
-	test("includes cacheRead when present", () => {
-		const messages = [
-			{ role: "assistant", content: [{ type: "text", text: "hi" }], usage: { input: 10, output: 5, cacheRead: 20, total: 35 } },
-		] as any;
-		expect(extractUsage(messages)).toEqual({ input: 10, output: 5, cacheRead: 20, total: 35 });
-	});
+  test("includes cacheRead when present", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input: 10, output: 5, cacheRead: 20, total: 35 },
+      },
+    ] as any;
+    expect(extractUsage(messages)).toEqual({
+      input: 10,
+      output: 5,
+      cacheRead: 20,
+      total: 35,
+    });
+  });
 
-	test("returns zeros for no messages", () => {
-		expect(extractUsage([])).toEqual({ input: 0, output: 0, cacheRead: 0, total: 0 });
-	});
+  test("returns zeros for no messages", () => {
+    expect(extractUsage([])).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      total: 0,
+    });
+  });
 
-	test("ignores messages without usage", () => {
-		const messages = [
-			{ role: "assistant", content: [{ type: "text", text: "hi" }] },
-		] as any;
-		expect(extractUsage(messages)).toEqual({ input: 0, output: 0, cacheRead: 0, total: 0 });
-	});
+  test("ignores messages without usage", () => {
+    const messages = [
+      { role: "assistant", content: [{ type: "text", text: "hi" }] },
+    ] as any;
+    expect(extractUsage(messages)).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      total: 0,
+    });
+  });
 });
 
 // ── Formatting utilities ──────────────────────────────────────────────────
 
 describe("fmtDuration", () => {
-	test("formats milliseconds", () => {
-		expect(fmtDuration(500)).toBe("500ms");
-		expect(fmtDuration(999)).toBe("999ms");
-	});
+  test("formats milliseconds", () => {
+    expect(fmtDuration(500)).toBe("500ms");
+    expect(fmtDuration(999)).toBe("999ms");
+  });
 
-	test("formats seconds", () => {
-		expect(fmtDuration(1000)).toBe("1.0s");
-		expect(fmtDuration(5500)).toBe("5.5s");
-		expect(fmtDuration(59999)).toBe("60.0s");
-	});
+  test("formats seconds", () => {
+    expect(fmtDuration(1000)).toBe("1.0s");
+    expect(fmtDuration(5500)).toBe("5.5s");
+    expect(fmtDuration(59999)).toBe("60.0s");
+  });
 
-	test("formats minutes and seconds", () => {
-		expect(fmtDuration(60000)).toBe("1m0s");
-		expect(fmtDuration(125000)).toBe("2m5s");
-		expect(fmtDuration(3600000)).toBe("60m0s");
-	});
+  test("formats minutes and seconds", () => {
+    expect(fmtDuration(60000)).toBe("1m0s");
+    expect(fmtDuration(125000)).toBe("2m5s");
+    expect(fmtDuration(3600000)).toBe("60m0s");
+  });
 });
 
 describe("fmtTokens", () => {
-	test("returns raw number under 1000", () => {
-		expect(fmtTokens(0)).toBe("0");
-		expect(fmtTokens(999)).toBe("999");
-	});
+  test("returns raw number under 1000", () => {
+    expect(fmtTokens(0)).toBe("0");
+    expect(fmtTokens(999)).toBe("999");
+  });
 
-	test("formats with one decimal between 1k and 10k", () => {
-		expect(fmtTokens(1000)).toBe("1.0k");
-		expect(fmtTokens(5500)).toBe("5.5k");
-		expect(fmtTokens(9999)).toBe("10.0k");
-	});
+  test("formats with one decimal between 1k and 10k", () => {
+    expect(fmtTokens(1000)).toBe("1.0k");
+    expect(fmtTokens(5500)).toBe("5.5k");
+    expect(fmtTokens(9999)).toBe("10.0k");
+  });
 
-	test("rounds above 10k", () => {
-		expect(fmtTokens(10000)).toBe("10k");
-		expect(fmtTokens(15500)).toBe("16k");
-	});
+  test("rounds above 10k", () => {
+    expect(fmtTokens(10000)).toBe("10k");
+    expect(fmtTokens(15500)).toBe("16k");
+  });
 });
 
 describe("truncLine", () => {
-	test("returns short text unchanged", () => {
-		expect(truncLine("hello", 10)).toBe("hello");
-	});
+  test("returns short text unchanged", () => {
+    expect(truncLine("hello", 10)).toBe("hello");
+  });
 
-	test("truncates ASCII text", () => {
-		expect(truncLine("hello world", 8)).toBe("hello w…");
-	});
+  test("truncates ASCII text", () => {
+    expect(truncLine("hello world", 8)).toBe("hello w…");
+  });
 
-	test("preserves ANSI codes and applies them to ellipsis", () => {
-		const red = "\x1b[31mhello world\x1b[0m";
-		const result = truncLine(red, 8);
-		expect(result).toContain("\x1b[31m");
-		expect(result).toContain("…");
-		// The reset code is dropped when truncating; active style is re-applied to ellipsis
-		// Visible width should not exceed 8
-		const stripped = result.replace(/\x1b\[[0-9;]*m/g, "");
-		expect(stripped.length).toBeLessThanOrEqual(8);
-	});
+  test("preserves ANSI codes and applies them to ellipsis", () => {
+    const red = "\x1b[31mhello world\x1b[0m";
+    const result = truncLine(red, 8);
+    expect(result).toContain("\x1b[31m");
+    expect(result).toContain("…");
+    // The reset code is dropped when truncating; active style is re-applied to ellipsis
+    // Visible width should not exceed 8
+    const stripped = result.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(stripped.length).toBeLessThanOrEqual(8);
+  });
 
-	test("counts CJK characters as width 2", () => {
-		const text = "你好世界"; // 4 CJK chars = width 8
-		expect(truncLine(text, 8)).toBe("你好世界");
-		expect(truncLine(text, 7)).toBe("你好世…");
-		expect(truncLine(text, 5)).toBe("你好…");
-	});
+  test("counts CJK characters as width 2", () => {
+    const text = "你好世界"; // 4 CJK chars = width 8
+    expect(truncLine(text, 8)).toBe("你好世界");
+    expect(truncLine(text, 7)).toBe("你好世…");
+    expect(truncLine(text, 5)).toBe("你好…");
+  });
 
-	test("counts emoji as width 2", () => {
-		const text = "😀🎉👍"; // 3 emoji = width 6
-		expect(truncLine(text, 6)).toBe("😀🎉👍");
-		expect(truncLine(text, 5)).toBe("😀🎉…");
-	});
+  test("counts emoji as width 2", () => {
+    const text = "😀🎉👍"; // 3 emoji = width 6
+    expect(truncLine(text, 6)).toBe("😀🎉👍");
+    expect(truncLine(text, 5)).toBe("😀🎉…");
+  });
 
-	test("handles mixed ASCII, CJK, and emoji", () => {
-		const text = "a你好😀b"; // 1 + 4 + 2 + 1 = width 8
-		expect(truncLine(text, 8)).toBe("a你好😀b");
-		// "a你好😀…" would be width 8, exceeding maxWidth=7
-		expect(truncLine(text, 7)).toBe("a你好…");
-	});
+  test("handles mixed ASCII, CJK, and emoji", () => {
+    const text = "a你好😀b"; // 1 + 4 + 2 + 1 = width 8
+    expect(truncLine(text, 8)).toBe("a你好😀b");
+    // "a你好😀…" would be width 8, exceeding maxWidth=7
+    expect(truncLine(text, 7)).toBe("a你好…");
+  });
 
-	test("handles combining characters as one unit", () => {
-		const text = "café"; // e + combining acute = one grapheme
-		expect(truncLine(text, 4)).toBe("café");
-		expect(truncLine(text, 3)).toBe("ca…");
-	});
+  test("handles combining characters as one unit", () => {
+    const text = "café"; // e + combining acute = one grapheme
+    expect(truncLine(text, 4)).toBe("café");
+    expect(truncLine(text, 3)).toBe("ca…");
+  });
 
-	test("returns empty string for maxWidth <= 0", () => {
-		expect(truncLine("hello", 0)).toBe("");
-		expect(truncLine("hello", -1)).toBe("");
-	});
+  test("returns empty string for maxWidth <= 0", () => {
+    expect(truncLine("hello", 0)).toBe("");
+    expect(truncLine("hello", -1)).toBe("");
+  });
 
-	test("handles flag emoji (surrogate pairs + ZWJ)", () => {
-		const text = "🇺🇸🇬🇧"; // 2 flag emoji = width 4
-		expect(truncLine(text, 4)).toBe("🇺🇸🇬🇧");
-		expect(truncLine(text, 3)).toBe("🇺🇸…");
-	});
+  test("handles flag emoji (surrogate pairs + ZWJ)", () => {
+    const text = "🇺🇸🇬🇧"; // 2 flag emoji = width 4
+    expect(truncLine(text, 4)).toBe("🇺🇸🇬🇧");
+    expect(truncLine(text, 3)).toBe("🇺🇸…");
+  });
 
-	test("handles ANSI + CJK mix", () => {
-		const red = "\x1b[31m你好世界\x1b[0m";
-		const result = truncLine(red, 5);
-		const stripped = result.replace(/\x1b\[[0-9;]*m/g, "");
-		expect(stripped.length).toBeLessThanOrEqual(5);
-		expect(stripped).toContain("…");
-	});
+  test("handles ANSI + CJK mix", () => {
+    const red = "\x1b[31m你好世界\x1b[0m";
+    const result = truncLine(red, 5);
+    const stripped = result.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(stripped.length).toBeLessThanOrEqual(5);
+    expect(stripped).toContain("…");
+  });
 });
 
 describe("trunc", () => {
-	test("returns short strings unchanged", () => {
-		expect(trunc("hello", 10)).toBe("hello");
-	});
+  test("returns short strings unchanged", () => {
+    expect(trunc("hello", 10)).toBe("hello");
+  });
 
-	test("truncates long strings with ellipsis", () => {
-		expect(trunc("hello world", 8)).toBe("hello w…");
-	});
+  test("truncates long strings with ellipsis", () => {
+    expect(trunc("hello world", 8)).toBe("hello w…");
+  });
 
-	test("handles exact length", () => {
-		expect(trunc("hello", 5)).toBe("hello");
-	});
+  test("handles exact length", () => {
+    expect(trunc("hello", 5)).toBe("hello");
+  });
 });
 
 describe("tree", () => {
-	test("returns ├─ for non-last items", () => {
-		expect(tree(0, 3)).toBe("├─");
-		expect(tree(1, 3)).toBe("├─");
-	});
+  test("returns ├─ for non-last items", () => {
+    expect(tree(0, 3)).toBe("├─");
+    expect(tree(1, 3)).toBe("├─");
+  });
 
-	test("returns └─ for last item", () => {
-		expect(tree(2, 3)).toBe("└─");
-		expect(tree(0, 1)).toBe("└─");
-	});
+  test("returns └─ for last item", () => {
+    expect(tree(2, 3)).toBe("└─");
+    expect(tree(0, 1)).toBe("└─");
+  });
 });
 
 describe("indent", () => {
-	test("returns │   for non-last items", () => {
-		expect(indent(0, 3)).toBe("│  ");
-	});
+  test("returns │   for non-last items", () => {
+    expect(indent(0, 3)).toBe("│  ");
+  });
 
-	test("returns three spaces for last item", () => {
-		expect(indent(2, 3)).toBe("   ");
-	});
+  test("returns three spaces for last item", () => {
+    expect(indent(2, 3)).toBe("   ");
+  });
 });
 
 // ── shortenPath ──────────────────────────────────────────────────────────
 
 describe("shortenPath", () => {
-	test("replaces HOME with ~", () => {
-		const home = process.env.HOME;
-		if (home && home !== "/") {
-			expect(shortenPath(home)).toBe("~");
-			expect(shortenPath(home + "/projects/my-app")).toBe("~/projects/my-app");
-		}
-	});
+  test("replaces HOME with ~", () => {
+    const home = process.env.HOME;
+    if (home && home !== "/") {
+      expect(shortenPath(home)).toBe("~");
+      expect(shortenPath(home + "/projects/my-app")).toBe("~/projects/my-app");
+    }
+  });
 
-	test("does not match overlapping home prefixes", () => {
-		const home = process.env.HOME;
-		if (home && home !== "/") {
-			// /home/alice should not match /home/alice2/file
-			expect(shortenPath(home + "2/file")).toBe(home + "2/file");
-		}
-	});
+  test("does not match overlapping home prefixes", () => {
+    const home = process.env.HOME;
+    if (home && home !== "/") {
+      // /home/alice should not match /home/alice2/file
+      expect(shortenPath(home + "2/file")).toBe(home + "2/file");
+    }
+  });
 
-	test("handles trailing slash in HOME", () => {
-		const homeRaw = process.env.HOME;
-		if (homeRaw && homeRaw !== "/") {
-			const homeWithSlash = homeRaw.endsWith("/") ? homeRaw : homeRaw + "/";
-			// shortenPath reads from process.env.HOME, not the argument,
-			// so we test that HOME with or without trailing slash works
-			expect(shortenPath(homeRaw + "/project")).toContain("~/project");
-		}
-	});
+  test("handles trailing slash in HOME", () => {
+    const homeRaw = process.env.HOME;
+    if (homeRaw && homeRaw !== "/") {
+      const homeWithSlash = homeRaw.endsWith("/") ? homeRaw : homeRaw + "/";
+      // shortenPath reads from process.env.HOME, not the argument,
+      // so we test that HOME with or without trailing slash works
+      expect(shortenPath(homeRaw + "/project")).toContain("~/project");
+    }
+  });
 
-	test("returns non-home paths unchanged", () => {
-		expect(shortenPath("/usr/local/bin")).toBe("/usr/local/bin");
-		expect(shortenPath("/tmp/stuff")).toBe("/tmp/stuff");
-	});
+  test("returns non-home paths unchanged", () => {
+    expect(shortenPath("/usr/local/bin")).toBe("/usr/local/bin");
+    expect(shortenPath("/tmp/stuff")).toBe("/tmp/stuff");
+  });
 });
 
 // ── getActivityAge ───────────────────────────────────────────────────────
 
 describe("resolveCwd", () => {
-	test("passes through absolute paths", () => {
-		expect(resolveCwd("/home/daniel/build/litespec")).toBe("/home/daniel/build/litespec");
-	});
+  test("passes through absolute paths", () => {
+    expect(resolveCwd("/home/daniel/build/litespec")).toBe(
+      "/home/daniel/build/litespec",
+    );
+  });
 
-	test("resolves relative paths against process.cwd", () => {
-		const result = resolveCwd("../build/litespec");
-		expect(path.isAbsolute(result)).toBe(true);
-		expect(result).toBe(path.resolve("../build/litespec"));
-	});
+  test("resolves relative paths against process.cwd", () => {
+    const result = resolveCwd("../build/litespec");
+    expect(path.isAbsolute(result)).toBe(true);
+    expect(result).toBe(path.resolve("../build/litespec"));
+  });
 
-	test("expands tilde to homedir", () => {
-		const home = os.homedir();
-		expect(resolveCwd("~/build/litespec")).toBe(path.join(home, "build/litespec"));
-	});
+  test("expands tilde to homedir", () => {
+    const home = os.homedir();
+    expect(resolveCwd("~/build/litespec")).toBe(
+      path.join(home, "build/litespec"),
+    );
+  });
 
-	test("bare tilde resolves to homedir", () => {
-		expect(resolveCwd("~")).toBe(os.homedir());
-	});
+  test("bare tilde resolves to homedir", () => {
+    expect(resolveCwd("~")).toBe(os.homedir());
+  });
 
-	test("tilde with trailing slash", () => {
-		expect(resolveCwd("~/")).toBe(os.homedir());
-	});
+  test("tilde with trailing slash", () => {
+    expect(resolveCwd("~/")).toBe(os.homedir());
+  });
 
-	test("dot resolves to process.cwd", () => {
-		expect(resolveCwd(".")).toBe(process.cwd());
-	});
+  test("dot resolves to process.cwd", () => {
+    expect(resolveCwd(".")).toBe(process.cwd());
+  });
 });
 
 describe("getActivityAge", () => {
-	test("returns empty for undefined", () => {
-		expect(getActivityAge(undefined)).toBe("");
-	});
+  test("returns empty for undefined", () => {
+    expect(getActivityAge(undefined)).toBe("");
+  });
 
-	test("returns active now for recent activity", () => {
-		expect(getActivityAge(Date.now())).toBe("active now");
-		expect(getActivityAge(Date.now() - 500)).toBe("active now");
-	});
+  test("returns active now for recent activity", () => {
+    expect(getActivityAge(Date.now())).toBe("active now");
+    expect(getActivityAge(Date.now() - 500)).toBe("active now");
+  });
 
-	test("returns seconds ago", () => {
-		const result = getActivityAge(Date.now() - 5000);
-		expect(result).toMatch(/^active \d+s ago$/);
-	});
+  test("returns seconds ago", () => {
+    const result = getActivityAge(Date.now() - 5000);
+    expect(result).toMatch(/^active \d+s ago$/);
+  });
 
-	test("returns minutes ago", () => {
-		const result = getActivityAge(Date.now() - 120000);
-		expect(result).toMatch(/^active \d+m ago$/);
-	});
+  test("returns minutes ago", () => {
+    const result = getActivityAge(Date.now() - 120000);
+    expect(result).toMatch(/^active \d+m ago$/);
+  });
 
-	test("clamps future timestamps to active now", () => {
-		// Clock skew or backdated timers should not produce negative ages
-		expect(getActivityAge(Date.now() + 60_000)).toBe("active now");
-	});
+  test("clamps future timestamps to active now", () => {
+    // Clock skew or backdated timers should not produce negative ages
+    expect(getActivityAge(Date.now() + 60_000)).toBe("active now");
+  });
 
-	test("boundary: 999ms is active now, 1000ms is seconds", () => {
-		expect(getActivityAge(Date.now() - 999)).toBe("active now");
-		expect(getActivityAge(Date.now() - 1000)).toMatch(/^active \d+s ago$/);
-	});
+  test("boundary: 999ms is active now, 1000ms is seconds", () => {
+    expect(getActivityAge(Date.now() - 999)).toBe("active now");
+    expect(getActivityAge(Date.now() - 1000)).toMatch(/^active \d+s ago$/);
+  });
 });
 
 // ── File Tracking ───────────────────────────────────────────────────────
 
 describe("extractTouchedFromActivities", () => {
-	const cwd = "/home/user/project";
+  const cwd = "/home/user/project";
 
-	test("extracts paths from edit and write tool calls", () => {
-		const activities = [
-			{ id: "1", name: "edit", args: { path: "src/foo.ts" }, startTime: 0 },
-			{ id: "2", name: "write", args: { path: "src/bar.ts", content: "..." }, startTime: 0 },
-			{ id: "3", name: "read", args: { path: "src/baz.ts" }, startTime: 0 },
-		];
-		const result = extractTouchedFromActivities(activities as any, cwd);
-		expect(result).toEqual([
-			path.resolve(cwd, "src/foo.ts"),
-			path.resolve(cwd, "src/bar.ts"),
-		]);
-	});
+  test("extracts paths from edit and write tool calls", () => {
+    const activities = [
+      { id: "1", name: "edit", args: { path: "src/foo.ts" }, startTime: 0 },
+      {
+        id: "2",
+        name: "write",
+        args: { path: "src/bar.ts", content: "..." },
+        startTime: 0,
+      },
+      { id: "3", name: "read", args: { path: "src/baz.ts" }, startTime: 0 },
+    ];
+    const result = extractTouchedFromActivities(activities as any, cwd);
+    expect(result).toEqual([
+      path.resolve(cwd, "src/foo.ts"),
+      path.resolve(cwd, "src/bar.ts"),
+    ]);
+  });
 
-	test("returns empty array when no mutating tools", () => {
-		const activities = [
-			{ id: "1", name: "read", args: { path: "src/foo.ts" }, startTime: 0 },
-			{ id: "2", name: "bash", args: { command: "ls" }, startTime: 0 },
-		];
-		expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([]);
-	});
+  test("returns empty array when no mutating tools", () => {
+    const activities = [
+      { id: "1", name: "read", args: { path: "src/foo.ts" }, startTime: 0 },
+      { id: "2", name: "bash", args: { command: "ls" }, startTime: 0 },
+    ];
+    expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([]);
+  });
 
-	test("deduplicates paths", () => {
-		const activities = [
-			{ id: "1", name: "edit", args: { path: "src/foo.ts" }, startTime: 0 },
-			{ id: "2", name: "write", args: { path: "src/foo.ts" }, startTime: 0 },
-		];
-		expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
-			path.resolve(cwd, "src/foo.ts"),
-		]);
-	});
+  test("deduplicates paths", () => {
+    const activities = [
+      { id: "1", name: "edit", args: { path: "src/foo.ts" }, startTime: 0 },
+      { id: "2", name: "write", args: { path: "src/foo.ts" }, startTime: 0 },
+    ];
+    expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
+      path.resolve(cwd, "src/foo.ts"),
+    ]);
+  });
 
-	test("handles missing path gracefully", () => {
-		const activities = [
-			{ id: "1", name: "edit", args: {}, startTime: 0 },
-			{ id: "2", name: "write", args: { path: null }, startTime: 0 },
-			{ id: "3", name: "edit", args: { path: "" }, startTime: 0 },
-		];
-		expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([]);
-	});
+  test("handles missing path gracefully", () => {
+    const activities = [
+      { id: "1", name: "edit", args: {}, startTime: 0 },
+      { id: "2", name: "write", args: { path: null }, startTime: 0 },
+      { id: "3", name: "edit", args: { path: "" }, startTime: 0 },
+    ];
+    expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([]);
+  });
 
-	test("handles args with filePath key", () => {
-		const activities = [
-			{ id: "1", name: "edit", args: { filePath: "src/qux.ts" }, startTime: 0 },
-		];
-		expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
-			path.resolve(cwd, "src/qux.ts"),
-		]);
-	});
+  test("handles args with filePath key", () => {
+    const activities = [
+      { id: "1", name: "edit", args: { filePath: "src/qux.ts" }, startTime: 0 },
+    ];
+    expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
+      path.resolve(cwd, "src/qux.ts"),
+    ]);
+  });
 
-	test("returns empty for empty activities", () => {
-		expect(extractTouchedFromActivities([], cwd)).toEqual([]);
-	});
+  test("returns empty for empty activities", () => {
+    expect(extractTouchedFromActivities([], cwd)).toEqual([]);
+  });
 });
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
 describe("constants", () => {
-	test("DEFAULT_TOOLS has 4 core tools", () => {
-		expect(DEFAULT_TOOLS).toHaveLength(4);
-		expect(DEFAULT_TOOLS).toContain("read");
-		expect(DEFAULT_TOOLS).toContain("write");
-		expect(DEFAULT_TOOLS).toContain("edit");
-		expect(DEFAULT_TOOLS).toContain("bash");
-	});
+  test("DEFAULT_TOOLS has 4 core tools", () => {
+    expect(DEFAULT_TOOLS).toHaveLength(4);
+    expect(DEFAULT_TOOLS).toContain("read");
+    expect(DEFAULT_TOOLS).toContain("write");
+    expect(DEFAULT_TOOLS).toContain("edit");
+    expect(DEFAULT_TOOLS).toContain("bash");
+  });
 
-	test("VALID_THINKING contains all expected levels", () => {
-		expect(VALID_THINKING.has("off")).toBe(true);
-		expect(VALID_THINKING.has("minimal")).toBe(true);
-		expect(VALID_THINKING.has("low")).toBe(true);
-		expect(VALID_THINKING.has("medium")).toBe(true);
-		expect(VALID_THINKING.has("high")).toBe(true);
-		expect(VALID_THINKING.has("xhigh")).toBe(true);
-		expect(VALID_THINKING.has("invalid")).toBe(false);
-	});
+  test("VALID_THINKING contains all expected levels", () => {
+    expect(VALID_THINKING.has("off")).toBe(true);
+    expect(VALID_THINKING.has("minimal")).toBe(true);
+    expect(VALID_THINKING.has("low")).toBe(true);
+    expect(VALID_THINKING.has("medium")).toBe(true);
+    expect(VALID_THINKING.has("high")).toBe(true);
+    expect(VALID_THINKING.has("xhigh")).toBe(true);
+    expect(VALID_THINKING.has("invalid")).toBe(false);
+  });
 
-	test("TOOL_FACTORIES has factory for each DEFAULT_TOOL", () => {
-		for (const name of DEFAULT_TOOLS) {
-			expect(TOOL_FACTORIES[name]).toBeFunction();
-		}
-	});
+  test("TOOL_FACTORIES has factory for each DEFAULT_TOOL", () => {
+    for (const name of DEFAULT_TOOLS) {
+      expect(TOOL_FACTORIES[name]).toBeFunction();
+    }
+  });
 });
 
 // ── Retryable Error Patterns ───────────────────────────────────────────────
 
 describe("isRetryableError", () => {
-	test("matches rate limit errors", () => {
-		expect(isRetryableError("rate limit exceeded")).toBe(true);
-		expect(isRetryableError("too many requests")).toBe(true);
-		expect(isRetryableError("HTTP 429")).toBe(true);
-	});
+  test("matches rate limit errors", () => {
+    expect(isRetryableError("rate limit exceeded")).toBe(true);
+    expect(isRetryableError("too many requests")).toBe(true);
+    expect(isRetryableError("HTTP 429")).toBe(true);
+  });
 
-	test("does not match permanent errors (auth, billing, quota)", () => {
-		expect(isRetryableError("quota exceeded")).toBe(false);
-		expect(isRetryableError("billing issue")).toBe(false);
-		expect(isRetryableError("authentication failed")).toBe(false);
-		expect(isRetryableError("unauthorized")).toBe(false);
-		expect(isRetryableError("forbidden")).toBe(false);
-		expect(isRetryableError("api key invalid")).toBe(false);
-		expect(isRetryableError("token expired")).toBe(false);
-	});
+  test("does not match permanent errors (auth, billing, quota)", () => {
+    expect(isRetryableError("quota exceeded")).toBe(false);
+    expect(isRetryableError("billing issue")).toBe(false);
+    expect(isRetryableError("authentication failed")).toBe(false);
+    expect(isRetryableError("unauthorized")).toBe(false);
+    expect(isRetryableError("forbidden")).toBe(false);
+    expect(isRetryableError("api key invalid")).toBe(false);
+    expect(isRetryableError("token expired")).toBe(false);
+  });
 
-	test("matches model availability errors", () => {
-		expect(isRetryableError("model unavailable")).toBe(true);
-		expect(isRetryableError("model disabled")).toBe(true);
-		expect(isRetryableError("model not found")).toBe(true);
-		expect(isRetryableError("unknown model")).toBe(true);
-	});
+  test("matches model availability errors", () => {
+    expect(isRetryableError("model unavailable")).toBe(true);
+    expect(isRetryableError("model disabled")).toBe(true);
+    expect(isRetryableError("model not found")).toBe(true);
+    expect(isRetryableError("unknown model")).toBe(true);
+  });
 
-	test("matches server errors", () => {
-		expect(isRetryableError("HTTP 502")).toBe(true);
-		expect(isRetryableError("HTTP 503")).toBe(true);
-		expect(isRetryableError("HTTP 504")).toBe(true);
-		expect(isRetryableError("service unavailable")).toBe(true);
-		expect(isRetryableError("overloaded")).toBe(true);
-	});
+  test("matches server errors", () => {
+    expect(isRetryableError("HTTP 502")).toBe(true);
+    expect(isRetryableError("HTTP 503")).toBe(true);
+    expect(isRetryableError("HTTP 504")).toBe(true);
+    expect(isRetryableError("service unavailable")).toBe(true);
+    expect(isRetryableError("overloaded")).toBe(true);
+  });
 
-	test("matches network errors", () => {
-		expect(isRetryableError("connection refused")).toBe(true);
-		expect(isRetryableError("fetch failed")).toBe(true);
-		expect(isRetryableError("network error")).toBe(true);
-		expect(isRetryableError("socket hang up")).toBe(true);
-		expect(isRetryableError("timed out")).toBe(true);
-		expect(isRetryableError("timeout")).toBe(true);
-	});
+  test("matches network errors", () => {
+    expect(isRetryableError("connection refused")).toBe(true);
+    expect(isRetryableError("fetch failed")).toBe(true);
+    expect(isRetryableError("network error")).toBe(true);
+    expect(isRetryableError("socket hang up")).toBe(true);
+    expect(isRetryableError("timed out")).toBe(true);
+    expect(isRetryableError("timeout")).toBe(true);
+  });
 
-	test("returns false for non-retryable errors", () => {
-		expect(isRetryableError("file not found")).toBe(false);
-		expect(isRetryableError("syntax error")).toBe(false);
-		expect(isRetryableError("")).toBe(false);
-		expect(isRetryableError("unknown error")).toBe(false);
-	});
+  test("returns false for non-retryable errors", () => {
+    expect(isRetryableError("file not found")).toBe(false);
+    expect(isRetryableError("syntax error")).toBe(false);
+    expect(isRetryableError("")).toBe(false);
+    expect(isRetryableError("unknown error")).toBe(false);
+  });
 
-	test("all patterns are valid regexes", () => {
-		for (const p of RETRYABLE_PATTERNS) {
-			expect(p).toBeInstanceOf(RegExp);
-		}
-		expect(RETRYABLE_PATTERNS.length).toBeGreaterThan(15);
-	});
+  test("all patterns are valid regexes", () => {
+    for (const p of RETRYABLE_PATTERNS) {
+      expect(p).toBeInstanceOf(RegExp);
+    }
+    expect(RETRYABLE_PATTERNS.length).toBeGreaterThan(15);
+  });
 
-	test("matches recovered old-pattern coverage", () => {
-		expect(isRetryableError("HTTP 500")).toBe(true);
-		expect(isRetryableError("connection error")).toBe(true);
-		expect(isRetryableError("connection lost")).toBe(true);
-		expect(isRetryableError("other side closed")).toBe(true);
-		expect(isRetryableError("reset before headers")).toBe(true);
-		expect(isRetryableError("ended without response")).toBe(true);
-		expect(isRetryableError("http2 request did not get a response")).toBe(true);
-		expect(isRetryableError("retry delay")).toBe(true);
-	});
+  test("matches recovered old-pattern coverage", () => {
+    expect(isRetryableError("HTTP 500")).toBe(true);
+    expect(isRetryableError("connection error")).toBe(true);
+    expect(isRetryableError("connection lost")).toBe(true);
+    expect(isRetryableError("other side closed")).toBe(true);
+    expect(isRetryableError("reset before headers")).toBe(true);
+    expect(isRetryableError("ended without response")).toBe(true);
+    expect(isRetryableError("http2 request did not get a response")).toBe(true);
+    expect(isRetryableError("retry delay")).toBe(true);
+  });
 
-	test("RETRYABLE_PATTERN backward-compat export works", () => {
-		expect(RETRYABLE_PATTERN).toBeInstanceOf(RegExp);
-		expect(RETRYABLE_PATTERN.test("rate limit exceeded")).toBe(true);
-		expect(RETRYABLE_PATTERN.test("HTTP 500 internal error")).toBe(true);
-		expect(RETRYABLE_PATTERN.test("file not found")).toBe(false);
-	});
+  test("RETRYABLE_PATTERN backward-compat export works", () => {
+    expect(RETRYABLE_PATTERN).toBeInstanceOf(RegExp);
+    expect(RETRYABLE_PATTERN.test("rate limit exceeded")).toBe(true);
+    expect(RETRYABLE_PATTERN.test("HTTP 500 internal error")).toBe(true);
+    expect(RETRYABLE_PATTERN.test("file not found")).toBe(false);
+  });
 });
 
 // ── Rate-Limit Classification ─────────────────────────────────────────────
 
 describe("isRateLimitError", () => {
-	test("matches 429 errors", () => {
-		expect(isRateLimitError("HTTP 429")).toBe(true);
-		expect(isRateLimitError("429 too many requests")).toBe(true);
-	});
-	test("matches rate limit strings", () => {
-		expect(isRateLimitError("rate limit exceeded")).toBe(true);
-		expect(isRateLimitError("RateLimit")).toBe(true);
-	});
-	test("matches too many requests", () => {
-		expect(isRateLimitError("too many requests")).toBe(true);
-	});
-	test("matches overloaded and retry delay", () => {
-		expect(isRateLimitError("server overloaded")).toBe(true);
-		expect(isRateLimitError("retry delay of 30s")).toBe(true);
-	});
-	test("returns false for non-rate-limit errors", () => {
-		expect(isRateLimitError("network error")).toBe(false);
-		expect(isRateLimitError("HTTP 500")).toBe(false);
-		expect(isRateLimitError("")).toBe(false);
-	});
+  test("matches 429 errors", () => {
+    expect(isRateLimitError("HTTP 429")).toBe(true);
+    expect(isRateLimitError("429 too many requests")).toBe(true);
+  });
+  test("matches rate limit strings", () => {
+    expect(isRateLimitError("rate limit exceeded")).toBe(true);
+    expect(isRateLimitError("RateLimit")).toBe(true);
+  });
+  test("matches too many requests", () => {
+    expect(isRateLimitError("too many requests")).toBe(true);
+  });
+  test("matches overloaded and retry delay", () => {
+    expect(isRateLimitError("server overloaded")).toBe(true);
+    expect(isRateLimitError("retry delay of 30s")).toBe(true);
+  });
+  test("returns false for non-rate-limit errors", () => {
+    expect(isRateLimitError("network error")).toBe(false);
+    expect(isRateLimitError("HTTP 500")).toBe(false);
+    expect(isRateLimitError("")).toBe(false);
+  });
 });
 
 describe("RATE_LIMIT_PATTERNS", () => {
-	test("contains expected patterns", () => {
-		expect(RATE_LIMIT_PATTERNS.length).toBe(5);
-		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "rate\\s*limit")).toBe(true);
-		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "too many requests")).toBe(true);
-		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "\\b429\\b")).toBe(true);
-		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "overloaded")).toBe(true);
-		expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "retry delay")).toBe(true);
-	});
+  test("contains expected patterns", () => {
+    expect(RATE_LIMIT_PATTERNS.length).toBe(5);
+    expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "rate\\s*limit")).toBe(
+      true,
+    );
+    expect(
+      RATE_LIMIT_PATTERNS.some((p) => p.source === "too many requests"),
+    ).toBe(true);
+    expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "\\b429\\b")).toBe(
+      true,
+    );
+    expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "overloaded")).toBe(
+      true,
+    );
+    expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "retry delay")).toBe(
+      true,
+    );
+  });
 });
 
 // ── Retry Delay Math ──────────────────────────────────────────────────────
 
 describe("computeRetryDelay", () => {
-	test("rate-limit backoff doubles and caps at 5min", () => {
-		const orig = Math.random;
-		Math.random = () => 0;
-		expect(computeRetryDelay(0, 2000, 0, true)).toMatchObject({ baseDelay: 30_000, jitter: 0, stagger: 0, delay: 30_000 });
-		expect(computeRetryDelay(1, 2000, 0, true)).toMatchObject({ baseDelay: 60_000, jitter: 0, stagger: 0, delay: 60_000 });
-		expect(computeRetryDelay(2, 2000, 0, true)).toMatchObject({ baseDelay: 120_000, jitter: 0, stagger: 0, delay: 120_000 });
-		expect(computeRetryDelay(3, 2000, 0, true)).toMatchObject({ baseDelay: 240_000, jitter: 0, stagger: 0, delay: 240_000 });
-		expect(computeRetryDelay(4, 2000, 0, true)).toMatchObject({ baseDelay: 480_000, jitter: 0, stagger: 0, delay: 300_000 });
-		expect(computeRetryDelay(10, 2000, 0, true)).toMatchObject({ baseDelay: 30_720_000, jitter: 0, stagger: 0, delay: 300_000 });
-		Math.random = orig;
-	});
+  test("rate-limit backoff doubles and caps at 5min", () => {
+    const orig = Math.random;
+    Math.random = () => 0;
+    expect(computeRetryDelay(0, 2000, 0, true)).toMatchObject({
+      baseDelay: 30_000,
+      jitter: 0,
+      stagger: 0,
+      delay: 30_000,
+    });
+    expect(computeRetryDelay(1, 2000, 0, true)).toMatchObject({
+      baseDelay: 60_000,
+      jitter: 0,
+      stagger: 0,
+      delay: 60_000,
+    });
+    expect(computeRetryDelay(2, 2000, 0, true)).toMatchObject({
+      baseDelay: 120_000,
+      jitter: 0,
+      stagger: 0,
+      delay: 120_000,
+    });
+    expect(computeRetryDelay(3, 2000, 0, true)).toMatchObject({
+      baseDelay: 240_000,
+      jitter: 0,
+      stagger: 0,
+      delay: 240_000,
+    });
+    expect(computeRetryDelay(4, 2000, 0, true)).toMatchObject({
+      baseDelay: 480_000,
+      jitter: 0,
+      stagger: 0,
+      delay: 300_000,
+    });
+    expect(computeRetryDelay(10, 2000, 0, true)).toMatchObject({
+      baseDelay: 30_720_000,
+      jitter: 0,
+      stagger: 0,
+      delay: 300_000,
+    });
+    Math.random = orig;
+  });
 
-	test("generic backoff doubles and caps at 1min", () => {
-		const orig = Math.random;
-		Math.random = () => 0;
-		expect(computeRetryDelay(0, 2000, 0, false)).toMatchObject({ baseDelay: 2000, jitter: 0, stagger: 0, delay: 2000 });
-		expect(computeRetryDelay(1, 2000, 0, false)).toMatchObject({ baseDelay: 4000, jitter: 0, stagger: 0, delay: 4000 });
-		expect(computeRetryDelay(2, 2000, 0, false)).toMatchObject({ baseDelay: 8000, jitter: 0, stagger: 0, delay: 8000 });
-		expect(computeRetryDelay(5, 2000, 0, false)).toMatchObject({ baseDelay: 64_000, jitter: 0, stagger: 0, delay: 60_000 });
-		Math.random = orig;
-	});
+  test("generic backoff doubles and caps at 1min", () => {
+    const orig = Math.random;
+    Math.random = () => 0;
+    expect(computeRetryDelay(0, 2000, 0, false)).toMatchObject({
+      baseDelay: 2000,
+      jitter: 0,
+      stagger: 0,
+      delay: 2000,
+    });
+    expect(computeRetryDelay(1, 2000, 0, false)).toMatchObject({
+      baseDelay: 4000,
+      jitter: 0,
+      stagger: 0,
+      delay: 4000,
+    });
+    expect(computeRetryDelay(2, 2000, 0, false)).toMatchObject({
+      baseDelay: 8000,
+      jitter: 0,
+      stagger: 0,
+      delay: 8000,
+    });
+    expect(computeRetryDelay(5, 2000, 0, false)).toMatchObject({
+      baseDelay: 64_000,
+      jitter: 0,
+      stagger: 0,
+      delay: 60_000,
+    });
+    Math.random = orig;
+  });
 
-	test("stagger is always taskIndex * 10_000", () => {
-		const orig = Math.random;
-		Math.random = () => 0;
-		expect(computeRetryDelay(0, 2000, 2, true)).toMatchObject({ baseDelay: 30_000, jitter: 0, stagger: 20_000, delay: 50_000 });
-		expect(computeRetryDelay(0, 2000, 2, false)).toMatchObject({ baseDelay: 2000, jitter: 0, stagger: 20_000, delay: 22_000 });
-		Math.random = orig;
-	});
+  test("stagger is always taskIndex * 10_000", () => {
+    const orig = Math.random;
+    Math.random = () => 0;
+    expect(computeRetryDelay(0, 2000, 2, true)).toMatchObject({
+      baseDelay: 30_000,
+      jitter: 0,
+      stagger: 20_000,
+      delay: 50_000,
+    });
+    expect(computeRetryDelay(0, 2000, 2, false)).toMatchObject({
+      baseDelay: 2000,
+      jitter: 0,
+      stagger: 20_000,
+      delay: 22_000,
+    });
+    Math.random = orig;
+  });
 
-	test("jitter equals Math.random() * rawBase", () => {
-		const orig = Math.random;
-		Math.random = () => 0.5;
-		const rateLimit = computeRetryDelay(0, 2000, 0, true);
-		expect(rateLimit.jitter).toBe(15_000);
-		expect(rateLimit.delay).toBe(45_000);
-		const generic = computeRetryDelay(0, 2000, 0, false);
-		expect(generic.jitter).toBe(1000);
-		expect(generic.delay).toBe(3000);
-		Math.random = orig;
-	});
+  test("jitter equals Math.random() * rawBase", () => {
+    const orig = Math.random;
+    Math.random = () => 0.5;
+    const rateLimit = computeRetryDelay(0, 2000, 0, true);
+    expect(rateLimit.jitter).toBe(15_000);
+    expect(rateLimit.delay).toBe(45_000);
+    const generic = computeRetryDelay(0, 2000, 0, false);
+    expect(generic.jitter).toBe(1000);
+    expect(generic.delay).toBe(3000);
+    Math.random = orig;
+  });
 });
 
 // ── Session Pollution Fix ─────────────────────────────────────────────────
 
 describe("runAgentOnce suppressSessionAppend", () => {
-	test("does not append messages when suppressed", async () => {
-		const appended: unknown[] = [];
-		const sessionManager = {
-			appendMessage: (msg: unknown) => { appended.push(msg); return "id"; },
-			getSessionFile: () => "test.jsonl",
-			appendSessionInfo: () => "id",
-		};
+  test("does not append messages when suppressed", async () => {
+    const appended: unknown[] = [];
+    const sessionManager = {
+      appendMessage: (msg: unknown) => {
+        appended.push(msg);
+        return "id";
+      },
+      getSessionFile: () => "test.jsonl",
+      appendSessionInfo: () => "id",
+    };
 
-		const agent = {
-			state: { messages: [{ role: "user", content: "hi" }] as any[] },
-			async prompt() {
-				this.state.messages.push({ role: "assistant", content: [{ type: "text", text: "hello" }] });
-			},
-			async waitForIdle() {},
-			abort() {},
-			subscribe() { return () => {}; },
-		};
+    const agent = {
+      state: { messages: [{ role: "user", content: "hi" }] as any[] },
+      async prompt() {
+        this.state.messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: "hello" }],
+        });
+      },
+      async waitForIdle() {},
+      abort() {},
+      subscribe() {
+        return () => {};
+      },
+    };
 
-		await runAgentOnce(
-			agent as any,
-			"test",
-			{ systemPrompt: "", model: {} as any, thinking: "off", tools: [], cwd: "/tmp" },
-			{} as any,
-			undefined,
-			undefined,
-			sessionManager as any,
-			new Set(),
-			Date.now(),
-			true,
-		);
+    await runAgentOnce(
+      agent as any,
+      "test",
+      {
+        systemPrompt: "",
+        model: {} as any,
+        thinking: "off",
+        tools: [],
+        cwd: "/tmp",
+      },
+      {} as any,
+      undefined,
+      undefined,
+      sessionManager as any,
+      new Set(),
+      Date.now(),
+      true,
+    );
 
-		expect(appended).toEqual([]);
-	});
+    expect(appended).toEqual([]);
+  });
 
-	test("appends messages when not suppressed", async () => {
-		const appended: unknown[] = [];
-		const sessionManager = {
-			appendMessage: (msg: unknown) => { appended.push(msg); return "id"; },
-			getSessionFile: () => "test.jsonl",
-			appendSessionInfo: () => "id",
-		};
+  test("appends messages when not suppressed", async () => {
+    const appended: unknown[] = [];
+    const sessionManager = {
+      appendMessage: (msg: unknown) => {
+        appended.push(msg);
+        return "id";
+      },
+      getSessionFile: () => "test.jsonl",
+      appendSessionInfo: () => "id",
+    };
 
-		const agent = {
-			state: { messages: [{ role: "user", content: "hi" }] as any[] },
-			async prompt() {
-				this.state.messages.push({ role: "assistant", content: [{ type: "text", text: "hello" }] });
-			},
-			async waitForIdle() {},
-			abort() {},
-			subscribe() { return () => {}; },
-		};
+    const agent = {
+      state: { messages: [{ role: "user", content: "hi" }] as any[] },
+      async prompt() {
+        this.state.messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: "hello" }],
+        });
+      },
+      async waitForIdle() {},
+      abort() {},
+      subscribe() {
+        return () => {};
+      },
+    };
 
-		await runAgentOnce(
-			agent as any,
-			"test",
-			{ systemPrompt: "", model: {} as any, thinking: "off", tools: [], cwd: "/tmp" },
-			{} as any,
-			undefined,
-			undefined,
-			sessionManager as any,
-			new Set(),
-			Date.now(),
-			false,
-		);
+    await runAgentOnce(
+      agent as any,
+      "test",
+      {
+        systemPrompt: "",
+        model: {} as any,
+        thinking: "off",
+        tools: [],
+        cwd: "/tmp",
+      },
+      {} as any,
+      undefined,
+      undefined,
+      sessionManager as any,
+      new Set(),
+      Date.now(),
+      false,
+    );
 
-		expect(appended.length).toBe(1);
-		expect((appended[0] as any).role).toBe("assistant");
-	});
+    expect(appended.length).toBe(1);
+    expect((appended[0] as any).role).toBe("assistant");
+  });
 });
 
 describe("runAgent retry loop", () => {
-	test("flushes messages only on final success after retries", async () => {
-		const appended: any[] = [];
-		const sessionManager = {
-			appendMessage: (msg: any) => { appended.push(msg); return "id"; },
-			getSessionFile: () => "test.jsonl",
-			appendSessionInfo: () => "id",
-		};
+  test("flushes messages only on final success after retries", async () => {
+    const appended: any[] = [];
+    const sessionManager = {
+      appendMessage: (msg: any) => {
+        appended.push(msg);
+        return "id";
+      },
+      getSessionFile: () => "test.jsonl",
+      appendSessionInfo: () => "id",
+    };
 
-		let callCount = 0;
-		const agent = {
-			state: { messages: [] as any[] },
-			async prompt() {
-				callCount++;
-				if (callCount === 1) {
-					throw new Error("network error");
-				}
-				this.state.messages.push({ role: "assistant", content: [{ type: "text", text: "success" }] });
-			},
-			async waitForIdle() {},
-			abort() {},
-			subscribe() { return () => {}; },
-		};
+    let callCount = 0;
+    const agent = {
+      state: { messages: [] as any[] },
+      async prompt() {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error("network error");
+        }
+        this.state.messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: "success" }],
+        });
+      },
+      async waitForIdle() {},
+      abort() {},
+      subscribe() {
+        return () => {};
+      },
+    };
 
-		const origRandom = Math.random;
-		Math.random = () => 0;
+    const origRandom = Math.random;
+    Math.random = () => 0;
 
-		const result = await runAgent(
-			{ systemPrompt: "", model: {} as any, thinking: "off", tools: [], cwd: "/tmp" },
-			"test",
-			{} as any,
-			undefined,
-			undefined,
-			sessionManager as any,
-			1,
-			1,
-			agent as any,
-			true,
-			0,
-		);
+    const result = await runAgent(
+      {
+        systemPrompt: "",
+        model: {} as any,
+        thinking: "off",
+        tools: [],
+        cwd: "/tmp",
+      },
+      "test",
+      {} as any,
+      undefined,
+      undefined,
+      sessionManager as any,
+      1,
+      1,
+      agent as any,
+      true,
+      0,
+    );
 
-		Math.random = origRandom;
+    Math.random = origRandom;
 
-		expect(callCount).toBe(2);
-		expect(result.error).toBeUndefined();
-		expect(result.output).toBe("success");
-		expect(appended.length).toBe(1);
-		expect(appended[0].role).toBe("assistant");
-		expect(appended[0].content[0].text).toBe("success");
-	});
+    expect(callCount).toBe(2);
+    expect(result.error).toBeUndefined();
+    expect(result.output).toBe("success");
+    expect(appended.length).toBe(1);
+    expect(appended[0].role).toBe("assistant");
+    expect(appended[0].content[0].text).toBe("success");
+  });
 
-	test("does not flush any messages when all retries are exhausted", async () => {
-		const appended: any[] = [];
-		const sessionManager = {
-			appendMessage: (msg: any) => { appended.push(msg); return "id"; },
-			getSessionFile: () => "test.jsonl",
-			appendSessionInfo: () => "id",
-		};
+  test("does not flush any messages when all retries are exhausted", async () => {
+    const appended: any[] = [];
+    const sessionManager = {
+      appendMessage: (msg: any) => {
+        appended.push(msg);
+        return "id";
+      },
+      getSessionFile: () => "test.jsonl",
+      appendSessionInfo: () => "id",
+    };
 
-		let callCount = 0;
-		const agent = {
-			state: { messages: [] as any[] },
-			async prompt() {
-				callCount++;
-				this.state.messages.push({ role: "assistant", content: [{ type: "text", text: `attempt ${callCount}` }] });
-				this.state.errorMessage = "network error";
-			},
-			async waitForIdle() {},
-			abort() {},
-			subscribe() { return () => {}; },
-		};
+    let callCount = 0;
+    const agent = {
+      state: { messages: [] as any[] },
+      async prompt() {
+        callCount++;
+        this.state.messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: `attempt ${callCount}` }],
+        });
+        this.state.errorMessage = "network error";
+      },
+      async waitForIdle() {},
+      abort() {},
+      subscribe() {
+        return () => {};
+      },
+    };
 
-		const origRandom = Math.random;
-		Math.random = () => 0;
+    const origRandom = Math.random;
+    Math.random = () => 0;
 
-		const result = await runAgent(
-			{ systemPrompt: "", model: {} as any, thinking: "off", tools: [], cwd: "/tmp" },
-			"test",
-			{} as any,
-			undefined,
-			undefined,
-			sessionManager as any,
-			1,
-			1,
-			agent as any,
-			true,
-			0,
-		);
+    const result = await runAgent(
+      {
+        systemPrompt: "",
+        model: {} as any,
+        thinking: "off",
+        tools: [],
+        cwd: "/tmp",
+      },
+      "test",
+      {} as any,
+      undefined,
+      undefined,
+      sessionManager as any,
+      1,
+      1,
+      agent as any,
+      true,
+      0,
+    );
 
-		Math.random = origRandom;
+    Math.random = origRandom;
 
-		expect(callCount).toBe(2);
-		expect(result.error).toBe("network error");
-		expect(appended).toEqual([]);
-	});
+    expect(callCount).toBe(2);
+    expect(result.error).toBe("network error");
+    expect(appended).toEqual([]);
+  });
 });
 // ── Settings Overrides ──────────────────────────────────────────────────────
 
 describe("readDelegateSettingsFile", () => {
-	let tmpDir: string;
+  let tmpDir: string;
 
-	beforeEach(() => { tmpDir = makeTempDir(); });
-	afterEach(() => { cleanup(tmpDir); });
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+  });
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
 
-	test("returns null for nonexistent file", () => {
-		expect(readDelegateSettingsFile(path.join(tmpDir, "nonexistent.json"))).toBeNull();
-	});
+  test("returns null for nonexistent file", () => {
+    expect(
+      readDelegateSettingsFile(path.join(tmpDir, "nonexistent.json")),
+    ).toBeNull();
+  });
 
-	test("parses valid JSON settings", () => {
-		const file = path.join(tmpDir, "settings.json");
-		writeFileSync(file, JSON.stringify({ delegate: { agentOverrides: { reviewer: { model: "zai/glm-5-turbo" } } } }));
-		const result = readDelegateSettingsFile(file);
-		expect(result?.delegate).toBeDefined();
-	});
+  test("parses valid JSON settings", () => {
+    const file = path.join(tmpDir, "settings.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        delegate: {
+          agentOverrides: { reviewer: { model: "zai/glm-5-turbo" } },
+        },
+      }),
+    );
+    const result = readDelegateSettingsFile(file);
+    expect(result?.delegate).toBeDefined();
+  });
 
-	test("returns null for invalid JSON", () => {
-		const file = path.join(tmpDir, "bad.json");
-		writeFileSync(file, "not json");
-		expect(readDelegateSettingsFile(file)).toBeNull();
-	});
+  test("returns null for invalid JSON", () => {
+    const file = path.join(tmpDir, "bad.json");
+    writeFileSync(file, "not json");
+    expect(readDelegateSettingsFile(file)).toBeNull();
+  });
 });
 
 describe("loadDelegateSettings", () => {
-	let tmpDir: string;
+  let tmpDir: string;
 
-	beforeEach(() => {
-		tmpDir = makeTempDir();
-		mock.module("node:os", () => ({ ...os, homedir: () => tmpDir }));
-	});
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+    mock.module("node:os", () => ({ ...os, homedir: () => tmpDir }));
+  });
 
-	afterEach(() => {
-		mock.module("node:os", () => os);
-		cleanup(tmpDir);
-	});
+  afterEach(() => {
+    mock.module("node:os", () => os);
+    cleanup(tmpDir);
+  });
 
-	test("returns null when no settings files exist", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		expect(loadDelegateSettings(projectDir)).toBeNull();
-	});
+  test("returns null when no settings files exist", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    expect(loadDelegateSettings(projectDir)).toBeNull();
+  });
 
-	test("loads user settings from ~/.pi/agent/settings.json", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		const userSettingsDir = path.join(tmpDir, ".pi", "agent");
-		mkdirSync(userSettingsDir, { recursive: true });
-		writeFileSync(path.join(userSettingsDir, "settings.json"), JSON.stringify({
-			delegate: { agentOverrides: { reviewer: { model: "zai/glm-5-turbo" } } },
-		}));
-		const result = loadDelegateSettings(projectDir);
-		expect(result?.agentOverrides?.reviewer?.model).toBe("zai/glm-5-turbo");
-	});
+  test("loads user settings from ~/.pi/agent/settings.json", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const userSettingsDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(userSettingsDir, { recursive: true });
+    writeFileSync(
+      path.join(userSettingsDir, "settings.json"),
+      JSON.stringify({
+        delegate: {
+          agentOverrides: { reviewer: { model: "zai/glm-5-turbo" } },
+        },
+      }),
+    );
+    const result = loadDelegateSettings(projectDir);
+    expect(result?.agentOverrides?.reviewer?.model).toBe("zai/glm-5-turbo");
+  });
 
-	test("project settings override user settings", () => {
-		const projectDir = path.join(tmpDir, "project");
-		mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
-		writeFileSync(path.join(projectDir, ".pi", "settings.json"), JSON.stringify({
-			delegate: { agentOverrides: { reviewer: { model: "project/model" } } },
-		}));
+  test("project settings override user settings", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
+    writeFileSync(
+      path.join(projectDir, ".pi", "settings.json"),
+      JSON.stringify({
+        delegate: { agentOverrides: { reviewer: { model: "project/model" } } },
+      }),
+    );
 
-		const userDir = path.join(tmpDir, ".pi", "agent");
-		mkdirSync(userDir, { recursive: true });
-		writeFileSync(path.join(userDir, "settings.json"), JSON.stringify({
-			delegate: { agentOverrides: { reviewer: { model: "user/model" } } },
-		}));
+    const userDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(
+      path.join(userDir, "settings.json"),
+      JSON.stringify({
+        delegate: { agentOverrides: { reviewer: { model: "user/model" } } },
+      }),
+    );
 
-		const result = loadDelegateSettings(projectDir);
-		expect(result?.agentOverrides?.reviewer?.model).toBe("project/model");
-	});
+    const result = loadDelegateSettings(projectDir);
+    expect(result?.agentOverrides?.reviewer?.model).toBe("project/model");
+  });
 });
 
 // ── Integration: tool registration ────────────────────────────────────────
 
 describe("delegate extension integration", () => {
-	let ts: TestSession | undefined;
+  let ts: TestSession | undefined;
 
-	afterEach(() => {
-		ts?.dispose();
-		ts = undefined;
-	});
+  afterEach(() => {
+    ts?.dispose();
+    ts = undefined;
+  });
 
-	test("registers the delegate tool", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		expect(toolDef).toBeDefined();
-		expect(toolDef!.name).toBe("delegate");
-		expect(toolDef!.label).toBe("Delegate to Subagents");
-		expect(toolDef!.description).toBe(".");
-	});
+  test("registers the delegate tool", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    expect(toolDef).toBeDefined();
+    expect(toolDef!.name).toBe("delegate");
+    expect(toolDef!.label).toBe("Delegate to Subagents");
+    expect(toolDef!.description).toBe(".");
+  });
 
-	test("has tasks array parameter with minItems 0 (allows help mode)", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const schema = toolDef!.parameters as any;
-		expect(schema.type).toBe("object");
-		expect(schema.properties.tasks.type).toBe("array");
-		expect(schema.properties.tasks.minItems).toBe(0);
-	});
+  test("has tasks array parameter with minItems 0 (allows help mode)", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const schema = toolDef!.parameters as any;
+    expect(schema.type).toBe("object");
+    expect(schema.properties.tasks.type).toBe("array");
+    expect(schema.properties.tasks.minItems).toBe(0);
+  });
 
-	test("uses stealth registration metadata and schema", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		expect(toolDef!.promptSnippet).toBeUndefined();
-		expect(toolDef!.promptGuidelines ?? []).toEqual([]);
-		expect(collectSchemaDescriptions(toolDef!.parameters)).toEqual([]);
-	});
+  test("uses stealth registration metadata and schema", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    expect(toolDef!.promptSnippet).toBeUndefined();
+    expect(toolDef!.promptGuidelines ?? []).toEqual([]);
+    expect(collectSchemaDescriptions(toolDef!.parameters)).toEqual([]);
+  });
 
-	test("execute returns help when tasks is empty", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+  test("execute returns help when tasks is empty", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
 
-		const result = await toolDef!.execute(
-			"tc-help",
-			{ tasks: [] },
-			undefined,
-			undefined,
-			ts.session.extensionRunner as any,
-		);
+    const result = await toolDef!.execute(
+      "tc-help",
+      { tasks: [] },
+      undefined,
+      undefined,
+      ts.session.extensionRunner as any,
+    );
 
-		const text = result.content[0].text;
-		expect(text).toContain("Delegate Tool Manual");
-		expect(text).toContain("Available Agents");
-		expect(text).toContain("Task Fields");
-		expect(text).toContain("```markdown");
-	});
+    const text = result.content[0].text;
+    expect(text).toContain("Delegate Tool Manual");
+    expect(text).toContain("Available Agents");
+    expect(text).toContain("Task Fields");
+    expect(text).toContain("```markdown");
+  });
 
-	test("task schema has prompt as required string", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
-		expect(taskSchema.type).toBe("object");
-		expect(taskSchema.properties.prompt.type).toBe("string");
-		// prompt is optional — required only for non-close/list actions (enforced at runtime).
-		expect(taskSchema.required ?? []).not.toContain("prompt");
-	});
+  test("task schema has prompt as required string", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
+    expect(taskSchema.type).toBe("object");
+    expect(taskSchema.properties.prompt.type).toBe("string");
+    // prompt is optional — required only for non-close/list actions (enforced at runtime).
+    expect(taskSchema.required ?? []).not.toContain("prompt");
+  });
 
-	test("task schema has optional fields", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
-		const optionalFields = ["agent", "model", "skills", "tools", "thinking", "systemPrompt", "cwd", "context", "sessionId", "action"];
-		for (const field of optionalFields) {
-			expect(taskSchema.properties[field]).toBeDefined();
-		}
-		// No required fields at the TypeBox level; runtime validation enforces constraints.
-		expect(taskSchema.required).toBeUndefined();
-	});
+  test("task schema has optional fields", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
+    const optionalFields = [
+      "agent",
+      "model",
+      "skills",
+      "tools",
+      "thinking",
+      "systemPrompt",
+      "cwd",
+      "context",
+      "sessionId",
+      "action",
+    ];
+    for (const field of optionalFields) {
+      expect(taskSchema.properties[field]).toBeDefined();
+    }
+    // No required fields at the TypeBox level; runtime validation enforces constraints.
+    expect(taskSchema.required).toBeUndefined();
+  });
 
-	test("execute rejects unknown agents and suggests help", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+  test("execute rejects unknown agents and suggests help", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
 
-		const result = await toolDef!.execute(
-			"tc-1",
-			{ tasks: [{ prompt: "do something", agent: "nonexistent-agent-xyz" }] },
-			undefined,
-			undefined,
-			ts.session.extensionRunner as any,
-		);
+    const result = await toolDef!.execute(
+      "tc-1",
+      { tasks: [{ prompt: "do something", agent: "nonexistent-agent-xyz" }] },
+      undefined,
+      undefined,
+      ts.session.extensionRunner as any,
+    );
 
-		const text = result.content[0].text;
-		expect(text).toContain("Unknown agent");
-		expect(text).toContain("nonexistent-agent-xyz");
-		expect(text).toContain("Call delegate with an empty tasks array for help");
-	});
+    const text = result.content[0].text;
+    expect(text).toContain("Unknown agent");
+    expect(text).toContain("nonexistent-agent-xyz");
+    expect(text).toContain("Call delegate with an empty tasks array for help");
+  });
 
-	test("execute falls back to hardcoded prompt when no systemPrompt, no agent, no getSystemPrompt", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+  test("execute falls back to hardcoded prompt when no systemPrompt, no agent, no getSystemPrompt", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
 
-		// Test harness has no getSystemPrompt and no model — so we get past
-		// system prompt resolution (hardcoded fallback) and fail at model resolution.
-		try {
-			await toolDef!.execute(
-				"tc-2",
-				{ tasks: [{ prompt: "do something" }] },
-				undefined,
-				undefined,
-				ts.session.extensionRunner as any,
-			);
-		} catch (err: any) {
-			// Must NOT be the old "no system prompt" error — that means fallback failed.
-			expect(err.message).not.toContain("no system prompt");
-			// Must be the expected model resolution error — proves we got past system prompt.
-			expect(err.message).toContain("no model available");
-			return;
-		}
-		expect.unreachable("should have thrown at model resolution");
-	});
+    // Test harness has no getSystemPrompt and no model — so we get past
+    // system prompt resolution (hardcoded fallback) and fail at model resolution.
+    try {
+      await toolDef!.execute(
+        "tc-2",
+        { tasks: [{ prompt: "do something" }] },
+        undefined,
+        undefined,
+        ts.session.extensionRunner as any,
+      );
+    } catch (err: any) {
+      // Must NOT be the old "no system prompt" error — that means fallback failed.
+      expect(err.message).not.toContain("no system prompt");
+      // Must be the expected model resolution error — proves we got past system prompt.
+      expect(err.message).toContain("no model available");
+      return;
+    }
+    expect.unreachable("should have thrown at model resolution");
+  });
 
-	test("inherits parent model as-is when its id is a composite OpenRouter-style id (no re-resolution)", async () => {
-		// Regression for the bug where omitting a task model fell back to the
-		// parent's model *id string*, which resolveModel split on "/" and
-		// re-resolved through the registry. For OpenRouter ids like
-		// "deepseek/deepseek-v4-flash" that splits to provider="deepseek",
-		// misrouting auth to an upstream provider with no key.
-		//
-		// Fix: resolveModelSpec has no parent tier; when nothing explicit is
-		// set it returns undefined, and resolveModel's undefined-guard returns
-		// ctx.model directly (no registry lookup, no id splitting).
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+  test("inherits parent model as-is when its id is a composite OpenRouter-style id (no re-resolution)", async () => {
+    // Regression for the bug where omitting a task model fell back to the
+    // parent's model *id string*, which resolveModel split on "/" and
+    // re-resolved through the registry. For OpenRouter ids like
+    // "deepseek/deepseek-v4-flash" that splits to provider="deepseek",
+    // misrouting auth to an upstream provider with no key.
+    //
+    // Fix: resolveModelSpec has no parent tier; when nothing explicit is
+    // set it returns undefined, and resolveModel's undefined-guard returns
+    // ctx.model directly (no registry lookup, no id splitting).
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
 
-		const parentModel = { provider: "openrouter", id: "deepseek/deepseek-v4-flash" } as any;
-		// The trap: a deepseek-provider variant with the bare id exists in the
-		// registry. The OLD code would split the parent id and resolve to this
-		// (unauthenticated) model. The registry reports no auth for it so a
-		// regression surfaces as a fast auth failure rather than a network call.
-		const deepseekVariant = { provider: "deepseek", id: "deepseek-v4-flash" } as any;
-		const mockRegistry = {
-			getAvailable: () => [deepseekVariant],
-			find: (provider: string, id: string) =>
-				provider === "deepseek" && id === "deepseek-v4-flash" ? deepseekVariant : null,
-			hasConfiguredAuth: () => false,
-			getApiKeyAndHeaders: async () => ({ ok: false, error: "No API key for provider: deepseek" }),
-		} as any;
+    const parentModel = {
+      provider: "openrouter",
+      id: "deepseek/deepseek-v4-flash",
+    } as any;
+    // The trap: a deepseek-provider variant with the bare id exists in the
+    // registry. The OLD code would split the parent id and resolve to this
+    // (unauthenticated) model. The registry reports no auth for it so a
+    // regression surfaces as a fast auth failure rather than a network call.
+    const deepseekVariant = {
+      provider: "deepseek",
+      id: "deepseek-v4-flash",
+    } as any;
+    const mockRegistry = {
+      getAvailable: () => [deepseekVariant],
+      find: (provider: string, id: string) =>
+        provider === "deepseek" && id === "deepseek-v4-flash"
+          ? deepseekVariant
+          : null,
+      hasConfiguredAuth: () => false,
+      getApiKeyAndHeaders: async () => ({
+        ok: false,
+        error: "No API key for provider: deepseek",
+      }),
+    } as any;
 
-		const result = await toolDef!.execute(
-			"tc-parent-inherit",
-			{ tasks: [{ prompt: "hello", action: "prompt" }] },
-			undefined,
-			undefined,
-			// Custom ctx: composite-id parent + trap registry. No explicit task model.
-			{ model: parentModel, modelRegistry: mockRegistry, cwd: ts.cwd, sessionManager: undefined } as any,
-		);
+    const result = await toolDef!.execute(
+      "tc-parent-inherit",
+      { tasks: [{ prompt: "hello", action: "prompt" }] },
+      undefined,
+      undefined,
+      // Custom ctx: composite-id parent + trap registry. No explicit task model.
+      {
+        model: parentModel,
+        modelRegistry: mockRegistry,
+        cwd: ts.cwd,
+        sessionManager: undefined,
+      } as any,
+    );
 
-		const progress = (result.details as any).progress as Array<{ model?: string; status: string; error?: string }>;
-		// The resolved model must be the parent object as-is: its full composite id,
-		// NOT the split bare id "deepseek-v4-flash" the old code resolved to.
-		expect(progress[0].model).toBe("deepseek/deepseek-v4-flash");
-		expect(progress[0].model).not.toBe("deepseek-v4-flash");
-		// Runner reaches auth and fails fast (no network) — proves the model was
-		// wired through to execution rather than short-circuited.
-		expect(progress[0].error).toContain("No API key");
-	});
+    const progress = (result.details as any).progress as Array<{
+      model?: string;
+      status: string;
+      error?: string;
+    }>;
+    // The resolved model must be the parent object as-is: its full composite id,
+    // NOT the split bare id "deepseek-v4-flash" the old code resolved to.
+    expect(progress[0].model).toBe("deepseek/deepseek-v4-flash");
+    expect(progress[0].model).not.toBe("deepseek-v4-flash");
+    // Runner reaches auth and fails fast (no network) — proves the model was
+    // wired through to execution rather than short-circuited.
+    expect(progress[0].error).toContain("No API key");
+  });
 });
 
 // ── Integration: renderers ────────────────────────────────────────────────
 
 describe("delegate renderers", () => {
-	let ts: TestSession | undefined;
-
-	afterEach(() => {
-		ts?.dispose();
-		ts = undefined;
-	});
-
-	function mockTheme() {
-		return {
-			fg: (_key: string, text: string) => text,
-			bold: (text: string) => `**${text}**`,
-		} as any;
-	}
-
-	function createMockText() {
-		let captured = "";
-		return {
-			setText: (text: string) => { captured = text; },
-			getText: () => captured,
-			invalidate: () => {},
-		};
-	}
-
-	function mockRenderCtx(overrides: any = {}) {
-		return {
-			state: {},
-			executionStarted: false,
-			lastComponent: createMockText(),
-			invalidate: () => {},
-			...overrides,
-		} as any;
-	}
-
-	test("renderCall shows task count", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const text = toolDef!.renderCall({ tasks: [{ prompt: "task 1" }, { prompt: "task 2" }] }, theme, ctx);
-		expect((text as any).getText()).toContain("delegate 2 tasks");
-	});
-
-	test("renderCall shows task count for single task", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const text = toolDef!.renderCall({ tasks: [{ prompt: "do work", agent: "worker" }] }, theme, ctx);
-		const rendered = (text as any).getText();
-		// renderCall shows task count; agent name appears in renderResult.
-		expect(rendered).toContain("delegate 1 task");
-	});
-
-	test("renderCall does not bloat with long prompts", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const longPrompt = "a".repeat(100);
-		const text = toolDef!.renderCall({ tasks: [{ prompt: longPrompt }] }, theme, ctx);
-		const rendered = (text as any).getText();
-		// renderCall is minimal — just the task count. No prompt preview.
-		expect(rendered).toContain("delegate 1 task");
-		expect(rendered.length).toBeLessThan(longPrompt.length);
-	});
-
-	test("renderResult shows progress when partial", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{ index: 0, agent: "inline", task: "task", status: "running", durationMs: 0, tokens: 0, toolUses: 0, activities: [] }],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).toContain("0/1 done");
-		expect(rendered).toContain("thinking…");
-	});
-
-	test("renderResult shows done status when complete", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Done" }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [{ agent: "inline", output: "result", durationMs: 1200, tokens: 42 }],
-				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 1200, tokens: 42, toolUses: 1, activities: [] }],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).toContain("✓");
-		expect(rendered).toContain("1/1 completed");
-	});
-
-	test("renderResult hides output and tool summary in collapsed final mode", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const lines = Array.from({ length: 15 }, (_, i) => `line${i + 1}`).join("\n");
-		const result = {
-			content: [{ type: "text", text: "Done" }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [{ agent: "inline", output: lines, durationMs: 0, tokens: 0 }],
-				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 0, tokens: 0, toolUses: 0, activities: [] }],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		// Collapsed: header only, no output lines, no "more lines" hint.
-		expect(rendered).toContain("✓");
-		expect(rendered).not.toContain("line1");
-		expect(rendered).not.toContain("line15");
-		expect(rendered).not.toContain("more lines");
-	});
-
-	test("renderResult shows all lines when expanded", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Done" }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [{ agent: "inline", output: "line1\nline2\nline3\nline4\nline5", durationMs: 0, tokens: 0 }],
-				progress: [{ index: 0, agent: "inline", task: "task", status: "done", durationMs: 0, tokens: 0, toolUses: 0, activities: [] }],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).not.toContain("more lines");
-		expect(rendered).toContain("line5");
-	});
-
-	test("renderResult shows running tool activities in partial mode", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "running",
-					durationMs: 500, tokens: 120, toolUses: 2,
-					activities: [
-						{ id: "tc1", name: "read", args: { path: "src/config.ts" }, startTime: 0, endTime: 100, result: { content: [{ type: "text", text: "config" }], isError: false } },
-						{ id: "tc2", name: "bash", args: { command: "git status" }, startTime: 150 },
-					],
-				}],
-			},
-		};
-
-		// Collapsed: compact activity + Ctrl+O hint
-		const compact = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const compactText = (compact as any).getText();
-		expect(compactText).toContain("Press Ctrl+O for live detail");
-		// Current in-flight tool shown compactly
-		expect(compactText).toContain("$ git status");
-		expect(compactText).not.toContain("→ read src/config.ts");
-
-		// Expanded: recent activities including completed ones
-		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
-		const expandedText = (expanded as any).getText();
-		expect(expandedText).toContain("> $ git status |");
-		expect(expandedText).toContain("→ read src/config.ts");
-	});
-
-	test("renderResult hides tool summary and output in collapsed final mode", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Done" }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [{ agent: "inline", output: "all good", durationMs: 1000, tokens: 200 }],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "done",
-					durationMs: 1000, tokens: 200, toolUses: 1,
-					activities: [
-						{
-							id: "tc1", name: "read", args: { path: "src/config.ts" },
-							startTime: 0, endTime: 100,
-							result: { content: [{ type: "text", text: "line1\nline2\nline3" }], isError: false },
-						},
-					],
-				}],
-			},
-		};
-
-		// Collapsed: header only — tool summary and output hidden.
-		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).toContain("✓");
-		expect(rendered).not.toContain("1 tool: read");
-		expect(rendered).not.toContain("all good");
-
-		// Expanded: tool summary and output visible.
-		const expanded = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
-		const expandedRendered = (expanded as any).getText();
-		expect(expandedRendered).toContain("1 tool: read");
-		expect(expandedRendered).toContain("all good");
-	});
-
-	test("renderResult expands tool results when expanded is true", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Done" }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [{ agent: "inline", output: "done", durationMs: 1000, tokens: 200 }],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "done",
-					durationMs: 1000, tokens: 200, toolUses: 1,
-					activities: [
-						{
-							id: "tc1", name: "read", args: { path: "src/config.ts" },
-							startTime: 0, endTime: 100,
-							result: { content: [{ type: "text", text: "alpha\nbeta\ngamma" }], isError: false },
-						},
-					],
-				}],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
-		const rendered = (text as any).getText();
-		// Agent output is rendered as markdown; individual tool dumps are gone.
-		expect(rendered).toContain("done");
-		expect(rendered).toContain("1 tool: read");
-		expect(rendered).not.toContain("lines hidden");
-	});
-
-	test("renderResult shows error and hides tool summary in collapsed final mode", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Done" }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [{ agent: "inline", output: "", error: "bad cmd", durationMs: 500, tokens: 50 }],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "failed",
-					durationMs: 500, tokens: 50, toolUses: 1,
-					activities: [
-						{
-							id: "tc1", name: "bash", args: { command: "bad-cmd" },
-							startTime: 0, endTime: 50,
-							result: { content: [{ type: "text", text: "not found" }], isError: true },
-						},
-					],
-				}],
-			},
-		};
-
-		// Collapsed: error icon and error message shown; tool summary hidden.
-		const text = toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).toContain("✗");
-		expect(rendered).not.toContain("1 tool: bash");
-		expect(rendered).toContain("bad cmd");
-
-		// Expanded: tool summary and error visible.
-		const expanded = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
-		const expandedRendered = (expanded as any).getText();
-		expect(expandedRendered).toContain("1 tool: bash");
-		expect(expandedRendered).toContain("✗");
-	});
-
-	test("renderResult shows activities for completed subagent in partial mode", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }, { prompt: "task2" }],
-				results: [],
-				progress: [
-					{
-						index: 0, agent: "inline", task: "task", status: "done",
-						durationMs: 1000, tokens: 500, toolUses: 2,
-						activities: [
-							{ id: "tc1", name: "read", args: { path: "a.ts" }, startTime: 0, endTime: 50, result: { content: [{ type: "text", text: "ok" }], isError: false } },
-						],
-					},
-					{
-						index: 1, agent: "inline", task: "task2", status: "running",
-						durationMs: 500, tokens: 100, toolUses: 1,
-						activities: [
-							{ id: "tc2", name: "bash", args: { command: "ls" }, startTime: 0 },
-						],
-					},
-				],
-			},
-		};
-
-		// Collapsed: activities hidden, compact hints for running
-		const compact = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const compactText = (compact as any).getText();
-		expect(compactText).toContain("Press Ctrl+O for live detail");
-		expect(compactText).not.toContain("→ read a.ts");
-		expect(compactText).toContain("├─");
-
-		// Expanded: activities visible for both done and running
-		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
-		const expandedText = (expanded as any).getText();
-		expect(expandedText).toContain("→ read a.ts");
-		expect(expandedText).toContain("$ ls");
-	});
-
-	test("partial render shows last 5 activities in expanded mode", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const activities = [
-			{ id: "tc0", name: "read", args: { path: "0.ts" }, startTime: -10, endTime: 0, result: { content: [{ type: "text", text: "z" }], isError: false } },
-			{ id: "tc1", name: "read", args: { path: "1.ts" }, startTime: 0, endTime: 10, result: { content: [{ type: "text", text: "a" }], isError: false } },
-			{ id: "tc2", name: "read", args: { path: "2.ts" }, startTime: 20, endTime: 30, result: { content: [{ type: "text", text: "b" }], isError: false } },
-			{ id: "tc3", name: "read", args: { path: "3.ts" }, startTime: 40, endTime: 50, result: { content: [{ type: "text", text: "c" }], isError: false } },
-			{ id: "tc4", name: "read", args: { path: "4.ts" }, startTime: 60 },
-		];
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "running",
-					durationMs: 500, tokens: 100, toolUses: 4,
-					activities,
-				}],
-			},
-		};
-
-		// Collapsed: only the current in-flight tool (4.ts)
-		const compact = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const compactText = (compact as any).getText();
-		expect(compactText).toContain("Press Ctrl+O for live detail");
-		expect(compactText).toContain("read 4.ts");
-		expect(compactText).not.toContain("1.ts");
-
-		// Expanded: last 5 activities shown (all 5 in this case)
-		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
-		const expandedText = (expanded as any).getText();
-		expect(expandedText).toContain("4.ts");
-		expect(expandedText).toContain("0.ts");
-		expect(expandedText).toContain("1.ts");
-		expect(expandedText).toContain("2.ts");
-		expect(expandedText).toContain("3.ts");
-	});
-
-	test("formatToolCallShort: various tool types render correctly", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const activities = [
-			{ id: "t1", name: "read", args: { path: "src/file.ts", offset: 10, limit: 5 }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "x" }], isError: false } },
-			{ id: "t1b", name: "read", args: { file_path: "alt.ts" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "x" }], isError: false } },
-			{ id: "t2", name: "write", args: { path: "out.ts", content: "line1\nline2\nline3" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "ok" }], isError: false } },
-			{ id: "t3", name: "edit", args: { path: "fix.ts" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "done" }], isError: false } },
-			{ id: "t4", name: "bash", args: { command: "git status" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "clean" }], isError: false } },
-			{ id: "t5", name: "custom_tool", args: { query: "search term" }, startTime: 0, endTime: 1, result: { content: [{ type: "text", text: "custom" }], isError: false } },
-		];
-
-		const result = {
-			content: [{ type: "text", text: "Done" }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [{ agent: "inline", output: "ok", durationMs: 100, tokens: 50 }],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "done",
-					durationMs: 100, tokens: 50, toolUses: 6,
-					activities,
-				}],
-			},
-		};
-
-		// Expanded final now shows compact tool summary, not individual calls.
-		// Test formatToolCallShort indirectly via partial mode (current tool only).
-		const mkPartial = (activities: any[]) => ({
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "running",
-					durationMs: 100, tokens: 50, toolUses: activities.length,
-					activities,
-				}],
-			},
-		});
-		const renderPartial = (activities: any[]) =>
-			(toolDef!.renderResult(mkPartial(activities), { isPartial: true, expanded: true }, theme, ctx) as any).getText();
-
-		expect(renderPartial([{ id: "t1", name: "read", args: { path: "src/file.ts", offset: 10, limit: 5 }, startTime: 0 }])).toContain("read src/file.ts:10-14");
-		expect(renderPartial([{ id: "t1b", name: "read", args: { file_path: "alt.ts" }, startTime: 0 }])).toContain("read alt.ts");
-		expect(renderPartial([{ id: "t2", name: "write", args: { path: "out.ts", content: "line1\nline2\nline3" }, startTime: 0 }])).toContain("write out.ts (3 lines)");
-		expect(renderPartial([{ id: "t3", name: "edit", args: { path: "fix.ts" }, startTime: 0 }])).toContain("edit fix.ts");
-		expect(renderPartial([{ id: "t4", name: "bash", args: { command: "git status" }, startTime: 0 }])).toContain("$ git status");
-		expect(renderPartial([{ id: "t5", name: "custom_tool", args: { query: "search term" }, startTime: 0 }])).toContain("custom_tool search term");
-	});
-
-	test("renderResult shows activity age for running tasks", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "running",
-					durationMs: 5000, tokens: 200, toolUses: 3,
-					lastActivityAt: Date.now() - 3000,
-					activities: [
-						{ id: "tc1", name: "read", args: { path: "src/x.ts" }, startTime: Date.now() - 3000, endTime: Date.now() - 2500, result: { content: [{ type: "text", text: "ok" }], isError: false } },
-					],
-				}],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).toContain("active ");
-		expect(rendered).toContain("s ago");
-	});
-
-	test("collapsed running shows ⎿ with current tool and Ctrl+O hint", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "running",
-					durationMs: 500, tokens: 100, toolUses: 2,
-					activities: [
-						{ id: "tc1", name: "read", args: { path: "done.ts" }, startTime: 0, endTime: 100, result: { content: [{ type: "text", text: "ok" }], isError: false } },
-						{ id: "tc2", name: "bash", args: { command: "npm test" }, startTime: 150 },
-					],
-				}],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).toContain("Press Ctrl+O for live detail");
-		expect(rendered).toContain("⎿");
-		// Current in-flight tool shown compactly
-		expect(rendered).toContain("$ npm test");
-		// Completed tool NOT shown in collapsed mode
-		expect(rendered).not.toContain("done.ts");
-	});
-
-	test("collapsed running shows thinking… when no current tool", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "running",
-					durationMs: 500, tokens: 100, toolUses: 0,
-					activities: [],
-				}],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		const rendered = (text as any).getText();
-		expect(rendered).toContain("thinking…");
-		expect(rendered).toContain("Press Ctrl+O for live detail");
-	});
-
-	test("expanded running shows current tool with elapsed duration", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "running",
-					durationMs: 5000, tokens: 200, toolUses: 3,
-					activities: [
-						{ id: "tc1", name: "read", args: { path: "a.ts" }, startTime: Date.now() - 5000, endTime: Date.now() - 4500, result: { content: [{ type: "text", text: "file contents" }], isError: false } },
-						{ id: "tc2", name: "bash", args: { command: "npm test" }, startTime: Date.now() - 1000 },
-					],
-				}],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
-		const rendered = (text as any).getText();
-		// Current in-flight tool with elapsed indicator
-		expect(rendered).toContain("> $ npm test |");
-		// Completed tools also shown in expanded running
-		expect(rendered).toContain("→ read a.ts");
-		expect(rendered).toContain("✓");
-		// Ctrl+O hint only in collapsed running
-		expect(rendered).not.toContain("Press Ctrl+O for live detail");
-	});
-
-	test("expanded running shows live output from tool_execution_update", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "running",
-					durationMs: 5000, tokens: 200, toolUses: 2,
-					activities: [
-						{ id: "tc1", name: "read", args: { path: "a.ts" }, startTime: Date.now() - 5000, endTime: Date.now() - 4500, result: { content: [{ type: "text", text: "file contents" }], isError: false } },
-						{ id: "tc2", name: "bash", args: { command: "npm test" }, startTime: Date.now() - 1000, liveOutput: "Test suite running...\nPASS src/utils.test.ts\nFAIL src/broken.test.ts" },
-					],
-				}],
-			},
-		};
-
-		const text = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
-		const rendered = (text as any).getText();
-		// Live output lines shown indented under the in-flight bash tool
-		expect(rendered).toContain("PASS src/utils.test.ts");
-		expect(rendered).toContain("FAIL src/broken.test.ts");
-		// Carriage returns resolved (progress bars show final state)
-		expect(rendered).not.toContain("\r");
-		// Ctrl+O hint not shown in expanded
-		expect(rendered).not.toContain("Press Ctrl+O for live detail");
-	});
-
-	test("collapsed done hides activities, expanded shows them", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const theme = mockTheme();
-		const ctx = mockRenderCtx();
-
-		const result = {
-			content: [{ type: "text", text: "Running..." }],
-			details: {
-				tasks: [{ prompt: "task" }],
-				results: [],
-				progress: [{
-					index: 0, agent: "inline", task: "task", status: "done",
-					durationMs: 1000, tokens: 200, toolUses: 1,
-					activities: [
-						{ id: "tc1", name: "bash", args: { command: "cargo build" }, startTime: 0, endTime: 500, result: { content: [{ type: "text", text: "compiled" }], isError: false } },
-					],
-				}],
-			},
-		};
-
-		// Collapsed: no activity details
-		const compact = toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
-		expect((compact as any).getText()).not.toContain("cargo build");
-
-		// Expanded: activities visible
-		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
-		expect((expanded as any).getText()).toContain("cargo build");
-	});
+  let ts: TestSession | undefined;
+
+  afterEach(() => {
+    ts?.dispose();
+    ts = undefined;
+  });
+
+  function mockTheme() {
+    return {
+      fg: (_key: string, text: string) => text,
+      bold: (text: string) => `**${text}**`,
+    } as any;
+  }
+
+  function createMockText() {
+    let captured = "";
+    return {
+      setText: (text: string) => {
+        captured = text;
+      },
+      getText: () => captured,
+      invalidate: () => {},
+    };
+  }
+
+  function mockRenderCtx(overrides: any = {}) {
+    return {
+      state: {},
+      executionStarted: false,
+      lastComponent: createMockText(),
+      invalidate: () => {},
+      ...overrides,
+    } as any;
+  }
+
+  test("renderCall shows task count", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const text = toolDef!.renderCall(
+      { tasks: [{ prompt: "task 1" }, { prompt: "task 2" }] },
+      theme,
+      ctx,
+    );
+    expect((text as any).getText()).toContain("delegate 2 tasks");
+  });
+
+  test("renderCall shows task count for single task", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const text = toolDef!.renderCall(
+      { tasks: [{ prompt: "do work", agent: "worker" }] },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    // renderCall shows task count; agent name appears in renderResult.
+    expect(rendered).toContain("delegate 1 task");
+  });
+
+  test("renderCall does not bloat with long prompts", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const longPrompt = "a".repeat(100);
+    const text = toolDef!.renderCall(
+      { tasks: [{ prompt: longPrompt }] },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    // renderCall is minimal — just the task count. No prompt preview.
+    expect(rendered).toContain("delegate 1 task");
+    expect(rendered.length).toBeLessThan(longPrompt.length);
+  });
+
+  test("renderResult shows progress when partial", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "running",
+            durationMs: 0,
+            tokens: 0,
+            toolUses: 0,
+            activities: [],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    expect(rendered).toContain("0/1 done");
+    expect(rendered).toContain("thinking…");
+  });
+
+  test("renderResult shows done status when complete", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [
+          { agent: "inline", output: "result", durationMs: 1200, tokens: 42 },
+        ],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "done",
+            durationMs: 1200,
+            tokens: 42,
+            toolUses: 1,
+            activities: [],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: false },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    expect(rendered).toContain("✓");
+    expect(rendered).toContain("1/1 completed");
+  });
+
+  test("renderResult hides output and tool summary in collapsed final mode", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const lines = Array.from({ length: 15 }, (_, i) => `line${i + 1}`).join(
+      "\n",
+    );
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [{ agent: "inline", output: lines, durationMs: 0, tokens: 0 }],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "done",
+            durationMs: 0,
+            tokens: 0,
+            toolUses: 0,
+            activities: [],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: false },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    // Collapsed: header only, no output lines, no "more lines" hint.
+    expect(rendered).toContain("✓");
+    expect(rendered).not.toContain("line1");
+    expect(rendered).not.toContain("line15");
+    expect(rendered).not.toContain("more lines");
+  });
+
+  test("renderResult shows all lines when expanded", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [
+          {
+            agent: "inline",
+            output: "line1\nline2\nline3\nline4\nline5",
+            durationMs: 0,
+            tokens: 0,
+          },
+        ],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "done",
+            durationMs: 0,
+            tokens: 0,
+            toolUses: 0,
+            activities: [],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: true },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    expect(rendered).not.toContain("more lines");
+    expect(rendered).toContain("line5");
+  });
+
+  test("renderResult shows running tool activities in partial mode", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "running",
+            durationMs: 500,
+            tokens: 120,
+            toolUses: 2,
+            activities: [
+              {
+                id: "tc1",
+                name: "read",
+                args: { path: "src/config.ts" },
+                startTime: 0,
+                endTime: 100,
+                result: {
+                  content: [{ type: "text", text: "config" }],
+                  isError: false,
+                },
+              },
+              {
+                id: "tc2",
+                name: "bash",
+                args: { command: "git status" },
+                startTime: 150,
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    // Collapsed: compact activity + Ctrl+O hint
+    const compact = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      theme,
+      ctx,
+    );
+    const compactText = (compact as any).getText();
+    expect(compactText).toContain("Press Ctrl+O for live detail");
+    // Current in-flight tool shown compactly
+    expect(compactText).toContain("$ git status");
+    expect(compactText).not.toContain("→ read src/config.ts");
+
+    // Expanded: recent activities including completed ones
+    const expanded = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: true },
+      theme,
+      ctx,
+    );
+    const expandedText = (expanded as any).getText();
+    expect(expandedText).toContain("> $ git status |");
+    expect(expandedText).toContain("→ read src/config.ts");
+  });
+
+  test("renderResult hides tool summary and output in collapsed final mode", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [
+          {
+            agent: "inline",
+            output: "all good",
+            durationMs: 1000,
+            tokens: 200,
+          },
+        ],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "done",
+            durationMs: 1000,
+            tokens: 200,
+            toolUses: 1,
+            activities: [
+              {
+                id: "tc1",
+                name: "read",
+                args: { path: "src/config.ts" },
+                startTime: 0,
+                endTime: 100,
+                result: {
+                  content: [{ type: "text", text: "line1\nline2\nline3" }],
+                  isError: false,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    // Collapsed: header only — tool summary and output hidden.
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: false },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    expect(rendered).toContain("✓");
+    expect(rendered).not.toContain("1 tool: read");
+    expect(rendered).not.toContain("all good");
+
+    // Expanded: tool summary and output visible.
+    const expanded = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: true },
+      theme,
+      ctx,
+    );
+    const expandedRendered = (expanded as any).getText();
+    expect(expandedRendered).toContain("1 tool: read");
+    expect(expandedRendered).toContain("all good");
+  });
+
+  test("renderResult expands tool results when expanded is true", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [
+          { agent: "inline", output: "done", durationMs: 1000, tokens: 200 },
+        ],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "done",
+            durationMs: 1000,
+            tokens: 200,
+            toolUses: 1,
+            activities: [
+              {
+                id: "tc1",
+                name: "read",
+                args: { path: "src/config.ts" },
+                startTime: 0,
+                endTime: 100,
+                result: {
+                  content: [{ type: "text", text: "alpha\nbeta\ngamma" }],
+                  isError: false,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: true },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    // Agent output is rendered as markdown; individual tool dumps are gone.
+    expect(rendered).toContain("done");
+    expect(rendered).toContain("1 tool: read");
+    expect(rendered).not.toContain("lines hidden");
+  });
+
+  test("renderResult shows error and hides tool summary in collapsed final mode", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [
+          {
+            agent: "inline",
+            output: "",
+            error: "bad cmd",
+            durationMs: 500,
+            tokens: 50,
+          },
+        ],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "failed",
+            durationMs: 500,
+            tokens: 50,
+            toolUses: 1,
+            activities: [
+              {
+                id: "tc1",
+                name: "bash",
+                args: { command: "bad-cmd" },
+                startTime: 0,
+                endTime: 50,
+                result: {
+                  content: [{ type: "text", text: "not found" }],
+                  isError: true,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    // Collapsed: error icon and error message shown; tool summary hidden.
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: false },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    expect(rendered).toContain("✗");
+    expect(rendered).not.toContain("1 tool: bash");
+    expect(rendered).toContain("bad cmd");
+
+    // Expanded: tool summary and error visible.
+    const expanded = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: true },
+      theme,
+      ctx,
+    );
+    const expandedRendered = (expanded as any).getText();
+    expect(expandedRendered).toContain("1 tool: bash");
+    expect(expandedRendered).toContain("✗");
+  });
+
+  test("renderResult shows activities for completed subagent in partial mode", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }, { prompt: "task2" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "done",
+            durationMs: 1000,
+            tokens: 500,
+            toolUses: 2,
+            activities: [
+              {
+                id: "tc1",
+                name: "read",
+                args: { path: "a.ts" },
+                startTime: 0,
+                endTime: 50,
+                result: {
+                  content: [{ type: "text", text: "ok" }],
+                  isError: false,
+                },
+              },
+            ],
+          },
+          {
+            index: 1,
+            agent: "inline",
+            task: "task2",
+            status: "running",
+            durationMs: 500,
+            tokens: 100,
+            toolUses: 1,
+            activities: [
+              {
+                id: "tc2",
+                name: "bash",
+                args: { command: "ls" },
+                startTime: 0,
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    // Collapsed: activities hidden, compact hints for running
+    const compact = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      theme,
+      ctx,
+    );
+    const compactText = (compact as any).getText();
+    expect(compactText).toContain("Press Ctrl+O for live detail");
+    expect(compactText).not.toContain("→ read a.ts");
+    expect(compactText).toContain("├─");
+
+    // Expanded: activities visible for both done and running
+    const expanded = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: true },
+      theme,
+      ctx,
+    );
+    const expandedText = (expanded as any).getText();
+    expect(expandedText).toContain("→ read a.ts");
+    expect(expandedText).toContain("$ ls");
+  });
+
+  test("partial render shows last 5 activities in expanded mode", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const activities = [
+      {
+        id: "tc0",
+        name: "read",
+        args: { path: "0.ts" },
+        startTime: -10,
+        endTime: 0,
+        result: { content: [{ type: "text", text: "z" }], isError: false },
+      },
+      {
+        id: "tc1",
+        name: "read",
+        args: { path: "1.ts" },
+        startTime: 0,
+        endTime: 10,
+        result: { content: [{ type: "text", text: "a" }], isError: false },
+      },
+      {
+        id: "tc2",
+        name: "read",
+        args: { path: "2.ts" },
+        startTime: 20,
+        endTime: 30,
+        result: { content: [{ type: "text", text: "b" }], isError: false },
+      },
+      {
+        id: "tc3",
+        name: "read",
+        args: { path: "3.ts" },
+        startTime: 40,
+        endTime: 50,
+        result: { content: [{ type: "text", text: "c" }], isError: false },
+      },
+      { id: "tc4", name: "read", args: { path: "4.ts" }, startTime: 60 },
+    ];
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "running",
+            durationMs: 500,
+            tokens: 100,
+            toolUses: 4,
+            activities,
+          },
+        ],
+      },
+    };
+
+    // Collapsed: only the current in-flight tool (4.ts)
+    const compact = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      theme,
+      ctx,
+    );
+    const compactText = (compact as any).getText();
+    expect(compactText).toContain("Press Ctrl+O for live detail");
+    expect(compactText).toContain("read 4.ts");
+    expect(compactText).not.toContain("1.ts");
+
+    // Expanded: last 5 activities shown (all 5 in this case)
+    const expanded = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: true },
+      theme,
+      ctx,
+    );
+    const expandedText = (expanded as any).getText();
+    expect(expandedText).toContain("4.ts");
+    expect(expandedText).toContain("0.ts");
+    expect(expandedText).toContain("1.ts");
+    expect(expandedText).toContain("2.ts");
+    expect(expandedText).toContain("3.ts");
+  });
+
+  test("formatToolCallShort: various tool types render correctly", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const activities = [
+      {
+        id: "t1",
+        name: "read",
+        args: { path: "src/file.ts", offset: 10, limit: 5 },
+        startTime: 0,
+        endTime: 1,
+        result: { content: [{ type: "text", text: "x" }], isError: false },
+      },
+      {
+        id: "t1b",
+        name: "read",
+        args: { file_path: "alt.ts" },
+        startTime: 0,
+        endTime: 1,
+        result: { content: [{ type: "text", text: "x" }], isError: false },
+      },
+      {
+        id: "t2",
+        name: "write",
+        args: { path: "out.ts", content: "line1\nline2\nline3" },
+        startTime: 0,
+        endTime: 1,
+        result: { content: [{ type: "text", text: "ok" }], isError: false },
+      },
+      {
+        id: "t3",
+        name: "edit",
+        args: { path: "fix.ts" },
+        startTime: 0,
+        endTime: 1,
+        result: { content: [{ type: "text", text: "done" }], isError: false },
+      },
+      {
+        id: "t4",
+        name: "bash",
+        args: { command: "git status" },
+        startTime: 0,
+        endTime: 1,
+        result: { content: [{ type: "text", text: "clean" }], isError: false },
+      },
+      {
+        id: "t5",
+        name: "custom_tool",
+        args: { query: "search term" },
+        startTime: 0,
+        endTime: 1,
+        result: { content: [{ type: "text", text: "custom" }], isError: false },
+      },
+    ];
+
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [
+          { agent: "inline", output: "ok", durationMs: 100, tokens: 50 },
+        ],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "done",
+            durationMs: 100,
+            tokens: 50,
+            toolUses: 6,
+            activities,
+          },
+        ],
+      },
+    };
+
+    // Expanded final now shows compact tool summary, not individual calls.
+    // Test formatToolCallShort indirectly via partial mode (current tool only).
+    const mkPartial = (activities: any[]) => ({
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "running",
+            durationMs: 100,
+            tokens: 50,
+            toolUses: activities.length,
+            activities,
+          },
+        ],
+      },
+    });
+    const renderPartial = (activities: any[]) =>
+      (
+        toolDef!.renderResult(
+          mkPartial(activities),
+          { isPartial: true, expanded: true },
+          theme,
+          ctx,
+        ) as any
+      ).getText();
+
+    expect(
+      renderPartial([
+        {
+          id: "t1",
+          name: "read",
+          args: { path: "src/file.ts", offset: 10, limit: 5 },
+          startTime: 0,
+        },
+      ]),
+    ).toContain("read src/file.ts:10-14");
+    expect(
+      renderPartial([
+        {
+          id: "t1b",
+          name: "read",
+          args: { file_path: "alt.ts" },
+          startTime: 0,
+        },
+      ]),
+    ).toContain("read alt.ts");
+    expect(
+      renderPartial([
+        {
+          id: "t2",
+          name: "write",
+          args: { path: "out.ts", content: "line1\nline2\nline3" },
+          startTime: 0,
+        },
+      ]),
+    ).toContain("write out.ts (3 lines)");
+    expect(
+      renderPartial([
+        { id: "t3", name: "edit", args: { path: "fix.ts" }, startTime: 0 },
+      ]),
+    ).toContain("edit fix.ts");
+    expect(
+      renderPartial([
+        {
+          id: "t4",
+          name: "bash",
+          args: { command: "git status" },
+          startTime: 0,
+        },
+      ]),
+    ).toContain("$ git status");
+    expect(
+      renderPartial([
+        {
+          id: "t5",
+          name: "custom_tool",
+          args: { query: "search term" },
+          startTime: 0,
+        },
+      ]),
+    ).toContain("custom_tool search term");
+  });
+
+  test("renderResult shows activity age for running tasks", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "running",
+            durationMs: 5000,
+            tokens: 200,
+            toolUses: 3,
+            lastActivityAt: Date.now() - 3000,
+            activities: [
+              {
+                id: "tc1",
+                name: "read",
+                args: { path: "src/x.ts" },
+                startTime: Date.now() - 3000,
+                endTime: Date.now() - 2500,
+                result: {
+                  content: [{ type: "text", text: "ok" }],
+                  isError: false,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    expect(rendered).toContain("active ");
+    expect(rendered).toContain("s ago");
+  });
+
+  test("collapsed running shows ⎿ with current tool and Ctrl+O hint", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "running",
+            durationMs: 500,
+            tokens: 100,
+            toolUses: 2,
+            activities: [
+              {
+                id: "tc1",
+                name: "read",
+                args: { path: "done.ts" },
+                startTime: 0,
+                endTime: 100,
+                result: {
+                  content: [{ type: "text", text: "ok" }],
+                  isError: false,
+                },
+              },
+              {
+                id: "tc2",
+                name: "bash",
+                args: { command: "npm test" },
+                startTime: 150,
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    expect(rendered).toContain("Press Ctrl+O for live detail");
+    expect(rendered).toContain("⎿");
+    // Current in-flight tool shown compactly
+    expect(rendered).toContain("$ npm test");
+    // Completed tool NOT shown in collapsed mode
+    expect(rendered).not.toContain("done.ts");
+  });
+
+  test("collapsed running shows thinking… when no current tool", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "running",
+            durationMs: 500,
+            tokens: 100,
+            toolUses: 0,
+            activities: [],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    expect(rendered).toContain("thinking…");
+    expect(rendered).toContain("Press Ctrl+O for live detail");
+  });
+
+  test("expanded running shows current tool with elapsed duration", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "running",
+            durationMs: 5000,
+            tokens: 200,
+            toolUses: 3,
+            activities: [
+              {
+                id: "tc1",
+                name: "read",
+                args: { path: "a.ts" },
+                startTime: Date.now() - 5000,
+                endTime: Date.now() - 4500,
+                result: {
+                  content: [{ type: "text", text: "file contents" }],
+                  isError: false,
+                },
+              },
+              {
+                id: "tc2",
+                name: "bash",
+                args: { command: "npm test" },
+                startTime: Date.now() - 1000,
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: true },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    // Current in-flight tool with elapsed indicator
+    expect(rendered).toContain("> $ npm test |");
+    // Completed tools also shown in expanded running
+    expect(rendered).toContain("→ read a.ts");
+    expect(rendered).toContain("✓");
+    // Ctrl+O hint only in collapsed running
+    expect(rendered).not.toContain("Press Ctrl+O for live detail");
+  });
+
+  test("expanded running shows live output from tool_execution_update", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "running",
+            durationMs: 5000,
+            tokens: 200,
+            toolUses: 2,
+            activities: [
+              {
+                id: "tc1",
+                name: "read",
+                args: { path: "a.ts" },
+                startTime: Date.now() - 5000,
+                endTime: Date.now() - 4500,
+                result: {
+                  content: [{ type: "text", text: "file contents" }],
+                  isError: false,
+                },
+              },
+              {
+                id: "tc2",
+                name: "bash",
+                args: { command: "npm test" },
+                startTime: Date.now() - 1000,
+                liveOutput:
+                  "Test suite running...\nPASS src/utils.test.ts\nFAIL src/broken.test.ts",
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: true },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    // Live output lines shown indented under the in-flight bash tool
+    expect(rendered).toContain("PASS src/utils.test.ts");
+    expect(rendered).toContain("FAIL src/broken.test.ts");
+    // Carriage returns resolved (progress bars show final state)
+    expect(rendered).not.toContain("\r");
+    // Ctrl+O hint not shown in expanded
+    expect(rendered).not.toContain("Press Ctrl+O for live detail");
+  });
+
+  test("collapsed done hides activities, expanded shows them", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "inline",
+            task: "task",
+            status: "done",
+            durationMs: 1000,
+            tokens: 200,
+            toolUses: 1,
+            activities: [
+              {
+                id: "tc1",
+                name: "bash",
+                args: { command: "cargo build" },
+                startTime: 0,
+                endTime: 500,
+                result: {
+                  content: [{ type: "text", text: "compiled" }],
+                  isError: false,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    // Collapsed: no activity details
+    const compact = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      theme,
+      ctx,
+    );
+    expect((compact as any).getText()).not.toContain("cargo build");
+
+    // Expanded: activities visible
+    const expanded = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: true },
+      theme,
+      ctx,
+    );
+    expect((expanded as any).getText()).toContain("cargo build");
+  });
 });
 
 // ── Pool tests ────────────────────────────────────────────────────────────
 
 describe("delegate pool", () => {
-	let ts: TestSession | undefined;
+  let ts: TestSession | undefined;
 
-	afterEach(() => {
-		agentPool.clear();
-		ts?.dispose();
-		ts = undefined;
-	});
+  afterEach(() => {
+    agentPool.clear();
+    ts?.dispose();
+    ts = undefined;
+  });
 
-	test("prompt is optional for close and list actions", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+  test("prompt is optional for close and list actions", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
 
-		// list without prompt should work
-		const listResult = await toolDef!.execute(
-			"tc-pool-1",
-			{ tasks: [{ action: "list", systemPrompt: "test" }] },
-			undefined,
-			undefined,
-			ts.session.extensionRunner as any,
-		);
-		expect(listResult.content[0].text).toContain("Active sessions");
+    // list without prompt should work
+    const listResult = await toolDef!.execute(
+      "tc-pool-1",
+      { tasks: [{ action: "list", systemPrompt: "test" }] },
+      undefined,
+      undefined,
+      ts.session.extensionRunner as any,
+    );
+    expect(listResult.content[0].text).toContain("Active sessions");
 
-		// close without prompt should work (even if session doesn't exist)
-		const closeResult = await toolDef!.execute(
-			"tc-pool-2",
-			{ tasks: [{ action: "close", sessionId: "nonexistent", systemPrompt: "test" }] },
-			undefined,
-			undefined,
-			ts.session.extensionRunner as any,
-		);
-		expect(closeResult.content[0].text).toContain("not found");
-	});
+    // close without prompt should work (even if session doesn't exist)
+    const closeResult = await toolDef!.execute(
+      "tc-pool-2",
+      {
+        tasks: [
+          { action: "close", sessionId: "nonexistent", systemPrompt: "test" },
+        ],
+      },
+      undefined,
+      undefined,
+      ts.session.extensionRunner as any,
+    );
+    expect(closeResult.content[0].text).toContain("not found");
+  });
 
-	test("missing prompt throws for non-close/list actions", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+  test("missing prompt throws for non-close/list actions", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
 
-		await expect(
-			toolDef!.execute(
-				"tc-pool-3",
-				{ tasks: [{ systemPrompt: "test" }] },
-				undefined,
-				undefined,
-				ts.session.extensionRunner as any,
-			),
-		).rejects.toThrow("prompt is required");
-	});
+    await expect(
+      toolDef!.execute(
+        "tc-pool-3",
+        { tasks: [{ systemPrompt: "test" }] },
+        undefined,
+        undefined,
+        ts.session.extensionRunner as any,
+      ),
+    ).rejects.toThrow("prompt is required");
+  });
 
-	test("close action requires sessionId", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+  test("close action requires sessionId", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
 
-		const result = await toolDef!.execute(
-			"tc-pool-4",
-			{ tasks: [{ action: "close", systemPrompt: "test" }] },
-			undefined,
-			undefined,
-			ts.session.extensionRunner as any,
-		);
-		const details = (result as any).details as { results: Array<{ error?: string }> };
-		expect(details.results[0].error).toContain("action='close' requires sessionId");
-	});
+    const result = await toolDef!.execute(
+      "tc-pool-4",
+      { tasks: [{ action: "close", systemPrompt: "test" }] },
+      undefined,
+      undefined,
+      ts.session.extensionRunner as any,
+    );
+    const details = (result as any).details as {
+      results: Array<{ error?: string }>;
+    };
+    expect(details.results[0].error).toContain(
+      "action='close' requires sessionId",
+    );
+  });
 
-	test("closePooledAgent removes agent from pool", () => {
-		// Inject a fake pooled agent
-		agentPool.set("test-session", {
-			agent: {} as any,
-			sessionManager: {} as any,
-			sessionFile: "/tmp/test.jsonl",
-			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
-			lastUsed: Date.now(),
-			createdAt: Date.now(),
-			totalTokens: 0,
-			promptCount: 0,
-		});
-		expect(agentPool.has("test-session")).toBe(true);
-		expect(closePooledAgent("test-session")).toBe(true);
-		expect(agentPool.has("test-session")).toBe(false);
-		expect(closePooledAgent("test-session")).toBe(false);
-	});
+  test("closePooledAgent removes agent from pool", () => {
+    // Inject a fake pooled agent
+    agentPool.set("test-session", {
+      agent: {} as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/test.jsonl",
+      config: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      lastUsed: Date.now(),
+      createdAt: Date.now(),
+      totalTokens: 0,
+      promptCount: 0,
+    });
+    expect(agentPool.has("test-session")).toBe(true);
+    expect(closePooledAgent("test-session")).toBe(true);
+    expect(agentPool.has("test-session")).toBe(false);
+    expect(closePooledAgent("test-session")).toBe(false);
+  });
 
-	test("commitPoolCleanup removes the entry only if it's still ours", () => {
-		const ourAgent = { marker: "ours" } as any;
-		const otherAgent = { marker: "theirs" } as any;
+  test("commitPoolCleanup removes the entry only if it's still ours", () => {
+    const ourAgent = { marker: "ours" } as any;
+    const otherAgent = { marker: "theirs" } as any;
 
-		// Case 1: entry is ours → remove it.
-		agentPool.set("cleanup-ours", {
-			agent: ourAgent,
-			sessionManager: {} as any,
-			sessionFile: "/tmp/cleanup-ours.jsonl",
-			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
-			lastUsed: Date.now(),
-			createdAt: Date.now(),
-			totalTokens: 0,
-			promptCount: 0,
-		});
-		commitPoolCleanup("cleanup-ours", ourAgent);
-		expect(agentPool.has("cleanup-ours")).toBe(false);
+    // Case 1: entry is ours → remove it.
+    agentPool.set("cleanup-ours", {
+      agent: ourAgent,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/cleanup-ours.jsonl",
+      config: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      lastUsed: Date.now(),
+      createdAt: Date.now(),
+      totalTokens: 0,
+      promptCount: 0,
+    });
+    commitPoolCleanup("cleanup-ours", ourAgent);
+    expect(agentPool.has("cleanup-ours")).toBe(false);
 
-		// Case 2: entry was replaced by another task → leave it alone.
-		agentPool.set("cleanup-theirs", {
-			agent: otherAgent,
-			sessionManager: {} as any,
-			sessionFile: "/tmp/cleanup-theirs.jsonl",
-			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
-			lastUsed: Date.now(),
-			createdAt: Date.now(),
-			totalTokens: 0,
-			promptCount: 0,
-		});
-		commitPoolCleanup("cleanup-theirs", ourAgent);
-		expect(agentPool.has("cleanup-theirs")).toBe(true);
-		expect(agentPool.get("cleanup-theirs")?.agent).toBe(otherAgent);
-		agentPool.delete("cleanup-theirs");
+    // Case 2: entry was replaced by another task → leave it alone.
+    agentPool.set("cleanup-theirs", {
+      agent: otherAgent,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/cleanup-theirs.jsonl",
+      config: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      lastUsed: Date.now(),
+      createdAt: Date.now(),
+      totalTokens: 0,
+      promptCount: 0,
+    });
+    commitPoolCleanup("cleanup-theirs", ourAgent);
+    expect(agentPool.has("cleanup-theirs")).toBe(true);
+    expect(agentPool.get("cleanup-theirs")?.agent).toBe(otherAgent);
+    agentPool.delete("cleanup-theirs");
 
-		// Case 3: no entry at all → no-op.
-		expect(agentPool.has("cleanup-missing")).toBe(false);
-		commitPoolCleanup("cleanup-missing", ourAgent);
-		expect(agentPool.has("cleanup-missing")).toBe(false);
-	});
+    // Case 3: no entry at all → no-op.
+    expect(agentPool.has("cleanup-missing")).toBe(false);
+    commitPoolCleanup("cleanup-missing", ourAgent);
+    expect(agentPool.has("cleanup-missing")).toBe(false);
+  });
 
-	test("sweepPool evicts idle agents", () => {
-		const now = Date.now();
-		agentPool.set("fresh", {
-			agent: {} as any,
-			sessionManager: {} as any,
-			sessionFile: "/tmp/fresh.jsonl",
-			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
-			lastUsed: now,
-			createdAt: now,
-			totalTokens: 0,
-			promptCount: 0,
-		});
-		agentPool.set("stale", {
-			agent: {} as any,
-			sessionManager: {} as any,
-			sessionFile: "/tmp/stale.jsonl",
-			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
-			lastUsed: now - 11 * 60 * 1000, // 11 minutes ago
-			createdAt: now - 11 * 60 * 1000,
-			totalTokens: 0,
-			promptCount: 0,
-		});
-		sweepPool();
-		expect(agentPool.has("fresh")).toBe(true);
-		expect(agentPool.has("stale")).toBe(false);
-		// cleanup
-		agentPool.delete("fresh");
-	});
+  test("sweepPool evicts idle agents", () => {
+    const now = Date.now();
+    agentPool.set("fresh", {
+      agent: {} as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/fresh.jsonl",
+      config: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      lastUsed: now,
+      createdAt: now,
+      totalTokens: 0,
+      promptCount: 0,
+    });
+    agentPool.set("stale", {
+      agent: {} as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/stale.jsonl",
+      config: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      lastUsed: now - 11 * 60 * 1000, // 11 minutes ago
+      createdAt: now - 11 * 60 * 1000,
+      totalTokens: 0,
+      promptCount: 0,
+    });
+    sweepPool();
+    expect(agentPool.has("fresh")).toBe(true);
+    expect(agentPool.has("stale")).toBe(false);
+    // cleanup
+    agentPool.delete("fresh");
+  });
 
-	test("listPooledAgents shows stats and sweeps stale", () => {
-		agentPool.clear();
-		expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
+  test("listPooledAgents shows stats and sweeps stale", () => {
+    agentPool.clear();
+    expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
 
-		const now = Date.now();
-		agentPool.set("session-a", {
-			agent: {} as any,
-			sessionManager: {} as any,
-			sessionFile: "/home/user/.pi/agent/sessions/test.jsonl",
-			config: { systemPrompt: "test", model: { id: "test-model" } as any, thinking: "off" as any, tools: ["read"], cwd: "/tmp" },
-			lastUsed: now,
-			createdAt: now - 5000,
-			totalTokens: 1234,
-			promptCount: 3,
-		});
-		const lines = listPooledAgents();
-		expect(lines.length).toBe(1);
-		expect(lines[0]).toContain("session-a");
-		expect(lines[0]).toContain("3 prompts");
-		expect(lines[0]).toContain("1.2k tokens");
-		expect(lines[0]).toContain("test.jsonl"); // shortened path
-		agentPool.clear();
-	});
+    const now = Date.now();
+    agentPool.set("session-a", {
+      agent: {} as any,
+      sessionManager: {} as any,
+      sessionFile: "/home/user/.pi/agent/sessions/test.jsonl",
+      config: {
+        systemPrompt: "test",
+        model: { id: "test-model" } as any,
+        thinking: "off" as any,
+        tools: ["read"],
+        cwd: "/tmp",
+      },
+      lastUsed: now,
+      createdAt: now - 5000,
+      totalTokens: 1234,
+      promptCount: 3,
+    });
+    const lines = listPooledAgents();
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("session-a");
+    expect(lines[0]).toContain("3 prompts");
+    expect(lines[0]).toContain("1.2k tokens");
+    expect(lines[0]).toContain("test.jsonl"); // shortened path
+    agentPool.clear();
+  });
 
-	test("withSessionLock serializes concurrent access", async () => {
-		const order: string[] = [];
-		const p1 = withSessionLock("mutex-test", async () => {
-			order.push("a-start");
-			await new Promise((r) => setTimeout(r, 50));
-			order.push("a-end");
-			return "a";
-		});
-		const p2 = withSessionLock("mutex-test", async () => {
-			order.push("b-start");
-			await new Promise((r) => setTimeout(r, 50));
-			order.push("b-end");
-			return "b";
-		});
-		const [r1, r2] = await Promise.all([p1, p2]);
-		expect(r1).toBe("a");
-		expect(r2).toBe("b");
-		// a must complete before b starts
-		expect(order.indexOf("a-end")).toBeLessThan(order.indexOf("b-start"));
-	});
+  test("withSessionLock serializes concurrent access", async () => {
+    const order: string[] = [];
+    const p1 = withSessionLock("mutex-test", async () => {
+      order.push("a-start");
+      await new Promise((r) => setTimeout(r, 50));
+      order.push("a-end");
+      return "a";
+    });
+    const p2 = withSessionLock("mutex-test", async () => {
+      order.push("b-start");
+      await new Promise((r) => setTimeout(r, 50));
+      order.push("b-end");
+      return "b";
+    });
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1).toBe("a");
+    expect(r2).toBe("b");
+    // a must complete before b starts
+    expect(order.indexOf("a-end")).toBeLessThan(order.indexOf("b-start"));
+  });
 
-	test("withSessionLock queues multiple waiters without thundering herd", async () => {
-		const order: string[] = [];
-		const p1 = withSessionLock("herd-test", async () => {
-			order.push("a-start");
-			await new Promise((r) => setTimeout(r, 50));
-			order.push("a-end");
-			return "a";
-		});
-		const p2 = withSessionLock("herd-test", async () => {
-			order.push("b-start");
-			await new Promise((r) => setTimeout(r, 10));
-			order.push("b-end");
-			return "b";
-		});
-		const p3 = withSessionLock("herd-test", async () => {
-			order.push("c-start");
-			await new Promise((r) => setTimeout(r, 10));
-			order.push("c-end");
-			return "c";
-		});
-		const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
-		expect(r1).toBe("a");
-		expect(r2).toBe("b");
-		expect(r3).toBe("c");
-		// Only one task should ever be running at a time
-		let running = 0;
-		let maxConcurrent = 0;
-		for (const entry of order) {
-			if (entry.endsWith("-start")) running++;
-			else if (entry.endsWith("-end")) running--;
-			maxConcurrent = Math.max(maxConcurrent, running);
-		}
-		expect(maxConcurrent).toBe(1);
-	});
+  test("withSessionLock queues multiple waiters without thundering herd", async () => {
+    const order: string[] = [];
+    const p1 = withSessionLock("herd-test", async () => {
+      order.push("a-start");
+      await new Promise((r) => setTimeout(r, 50));
+      order.push("a-end");
+      return "a";
+    });
+    const p2 = withSessionLock("herd-test", async () => {
+      order.push("b-start");
+      await new Promise((r) => setTimeout(r, 10));
+      order.push("b-end");
+      return "b";
+    });
+    const p3 = withSessionLock("herd-test", async () => {
+      order.push("c-start");
+      await new Promise((r) => setTimeout(r, 10));
+      order.push("c-end");
+      return "c";
+    });
+    const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
+    expect(r1).toBe("a");
+    expect(r2).toBe("b");
+    expect(r3).toBe("c");
+    // Only one task should ever be running at a time
+    let running = 0;
+    let maxConcurrent = 0;
+    for (const entry of order) {
+      if (entry.endsWith("-start")) running++;
+      else if (entry.endsWith("-end")) running--;
+      maxConcurrent = Math.max(maxConcurrent, running);
+    }
+    expect(maxConcurrent).toBe(1);
+  });
 
-	test("rehydrateAgent returns null for non-existent file", () => {
-		const result = rehydrateAgent(
-			"/nonexistent/path/session.jsonl",
-			{ systemPrompt: "test", model: { id: "test" } as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
-			{} as any,
-		);
-		expect(result).toBeNull();
-	});
+  test("rehydrateAgent returns null for non-existent file", () => {
+    const result = rehydrateAgent(
+      "/nonexistent/path/session.jsonl",
+      {
+        systemPrompt: "test",
+        model: { id: "test" } as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      {} as any,
+    );
+    expect(result).toBeNull();
+  });
 });
 
 // ── Async Ticket Tests ────────────────────────────────────────────────────
 
 describe("async ticket registry", () => {
-	let ts: TestSession | undefined;
+  let ts: TestSession | undefined;
 
-	afterEach(() => {
-		ticketRegistry.clear();
-		agentPool.clear();
-		ts?.dispose();
-		ts = undefined;
-	});
+  afterEach(() => {
+    ticketRegistry.clear();
+    agentPool.clear();
+    ts?.dispose();
+    ts = undefined;
+  });
 
-	test("sweepTickets aborts tickets exceeding max runtime", () => {
-		const controller = new AbortController();
-		const now = Date.now();
-		const ticket: AsyncTicket = {
-			id: "timeout1",
-			created: now - 31 * 60 * 1000, // 31 minutes ago
-			tasks: [],
-			resolved: [],
-			status: "running",
-			results: [],
-			progress: [],
-			controller,
-			parentModelId: undefined,
-		};
-		ticketRegistry.set("timeout1", ticket);
-		sweepTickets();
-		expect(ticket.status).toBe("failed");
-		expect(ticket.error).toBe("Exceeded maximum runtime");
-		expect(ticket.completedAt).toBeDefined();
-		expect(controller.signal.aborted).toBe(true);
-	});
+  test("sweepTickets aborts tickets exceeding max runtime", () => {
+    const controller = new AbortController();
+    const now = Date.now();
+    const ticket: AsyncTicket = {
+      id: "timeout1",
+      created: now - 31 * 60 * 1000, // 31 minutes ago
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [],
+      progress: [],
+      controller,
+      parentModelId: undefined,
+    };
+    ticketRegistry.set("timeout1", ticket);
+    sweepTickets();
+    expect(ticket.status).toBe("failed");
+    expect(ticket.error).toBe("Exceeded maximum runtime");
+    expect(ticket.completedAt).toBeDefined();
+    expect(controller.signal.aborted).toBe(true);
+  });
 
-	test("sweepTickets cleans up completed tickets after TTL", () => {
-		const ticket: AsyncTicket = {
-			id: "expired",
-			created: Date.now() - 60 * 60 * 1000,
-			completedAt: Date.now() - 31 * 60 * 1000, // completed 31 min ago
-			tasks: [],
-			resolved: [],
-			status: "done",
-			results: [],
-			progress: [],
-			controller: new AbortController(),
-			parentModelId: undefined,
-		};
-		ticketRegistry.set("expired", ticket);
-		sweepTickets();
-		expect(ticketRegistry.has("expired")).toBe(false);
-	});
+  test("sweepTickets cleans up completed tickets after TTL", () => {
+    const ticket: AsyncTicket = {
+      id: "expired",
+      created: Date.now() - 60 * 60 * 1000,
+      completedAt: Date.now() - 31 * 60 * 1000, // completed 31 min ago
+      tasks: [],
+      resolved: [],
+      status: "done",
+      results: [],
+      progress: [],
+      controller: new AbortController(),
+      parentModelId: undefined,
+    };
+    ticketRegistry.set("expired", ticket);
+    sweepTickets();
+    expect(ticketRegistry.has("expired")).toBe(false);
+  });
 
-	test("sweepTickets keeps recent completed tickets", () => {
-		const ticket: AsyncTicket = {
-			id: "recent",
-			created: Date.now() - 5000,
-			completedAt: Date.now() - 1000,
-			tasks: [],
-			resolved: [],
-			status: "done",
-			results: [],
-			progress: [],
-			controller: new AbortController(),
-			parentModelId: undefined,
-		};
-		ticketRegistry.set("recent", ticket);
-		sweepTickets();
-		expect(ticketRegistry.has("recent")).toBe(true);
-	});
+  test("sweepTickets keeps recent completed tickets", () => {
+    const ticket: AsyncTicket = {
+      id: "recent",
+      created: Date.now() - 5000,
+      completedAt: Date.now() - 1000,
+      tasks: [],
+      resolved: [],
+      status: "done",
+      results: [],
+      progress: [],
+      controller: new AbortController(),
+      parentModelId: undefined,
+    };
+    ticketRegistry.set("recent", ticket);
+    sweepTickets();
+    expect(ticketRegistry.has("recent")).toBe(true);
+  });
 
-	test("isSessionBusy returns null when no tickets running", () => {
-		expect(isSessionBusy("auth")).toBeNull();
-	});
+  test("isSessionBusy returns null when no tickets running", () => {
+    expect(isSessionBusy("auth")).toBeNull();
+  });
 
-	test("isSessionBusy returns ticket id when session is in use", () => {
-		const ticket: AsyncTicket = {
-			id: "tkt1",
-			created: Date.now(),
-			tasks: [],
-			resolved: [{ prompt: "test", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "inline", warnings: [], sessionId: "auth" }],
-			status: "running",
-			results: [],
-			progress: [],
-			controller: new AbortController(),
-			parentModelId: undefined,
-		};
-		ticketRegistry.set("tkt1", ticket);
-		expect(isSessionBusy("auth")).toBe("tkt1");
-		expect(isSessionBusy("other")).toBeNull();
-	});
+  test("isSessionBusy returns ticket id when session is in use", () => {
+    const ticket: AsyncTicket = {
+      id: "tkt1",
+      created: Date.now(),
+      tasks: [],
+      resolved: [
+        {
+          prompt: "test",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "inline",
+          warnings: [],
+          sessionId: "auth",
+        },
+      ],
+      status: "running",
+      results: [],
+      progress: [],
+      controller: new AbortController(),
+      parentModelId: undefined,
+    };
+    ticketRegistry.set("tkt1", ticket);
+    expect(isSessionBusy("auth")).toBe("tkt1");
+    expect(isSessionBusy("other")).toBeNull();
+  });
 
-	test("isSessionBusy ignores non-running tickets", () => {
-		const ticket: AsyncTicket = {
-			id: "tkt1",
-			created: Date.now(),
-			tasks: [],
-			resolved: [{ prompt: "test", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "inline", warnings: [], sessionId: "auth" }],
-			status: "done",
-			completedAt: Date.now(),
-			results: [],
-			progress: [],
-			controller: new AbortController(),
-			parentModelId: undefined,
-		};
-		ticketRegistry.set("tkt1", ticket);
-		expect(isSessionBusy("auth")).toBeNull();
-	});
+  test("isSessionBusy ignores non-running tickets", () => {
+    const ticket: AsyncTicket = {
+      id: "tkt1",
+      created: Date.now(),
+      tasks: [],
+      resolved: [
+        {
+          prompt: "test",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "inline",
+          warnings: [],
+          sessionId: "auth",
+        },
+      ],
+      status: "done",
+      completedAt: Date.now(),
+      results: [],
+      progress: [],
+      controller: new AbortController(),
+      parentModelId: undefined,
+    };
+    ticketRegistry.set("tkt1", ticket);
+    expect(isSessionBusy("auth")).toBeNull();
+  });
 });
 
 describe("async delegate integration", () => {
-	let ts: TestSession | undefined;
+  let ts: TestSession | undefined;
 
-	afterEach(() => {
-		ticketRegistry.clear();
-		agentPool.clear();
-		ts?.dispose();
-		ts = undefined;
-	});
+  afterEach(() => {
+    ticketRegistry.clear();
+    agentPool.clear();
+    ts?.dispose();
+    ts = undefined;
+  });
 
-	test("poll with no tickets returns empty message", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const result = await toolDef!.execute(
-			"tc-poll-1",
-			{ action: "poll", async: undefined, ticket: undefined },
-			undefined,
-			undefined,
-			ts.session.extensionRunner as any,
-		);
-		expect(result.content[0].text).toContain("No async tickets");
-	});
+  test("poll with no tickets returns empty message", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const result = await toolDef!.execute(
+      "tc-poll-1",
+      { action: "poll", async: undefined, ticket: undefined },
+      undefined,
+      undefined,
+      ts.session.extensionRunner as any,
+    );
+    expect(result.content[0].text).toContain("No async tickets");
+  });
 
-	test("poll lists running tickets", () => {
-		const ticket: AsyncTicket = {
-			id: "abc12345",
-			created: Date.now(),
-			tasks: [{ prompt: "investigate" }],
-			resolved: [{ prompt: "investigate", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] }],
-			status: "running",
-			results: [undefined],
-			progress: [{ index: 0, agent: "scout", task: "investigate", status: "running", durationMs: 0, tokens: 0, toolUses: 0, activities: [] }],
-			controller: new AbortController(),
-			parentModelId: "test-model",
-		};
-		ticketRegistry.set("abc12345", ticket);
-		const result = handlePoll({ tasks: [], ticket: undefined }, {} as any);
-		expect(result.content[0].text).toContain("abc12345");
-		expect(result.content[0].text).toContain("running");
-	});
+  test("poll lists running tickets", () => {
+    const ticket: AsyncTicket = {
+      id: "abc12345",
+      created: Date.now(),
+      tasks: [{ prompt: "investigate" }],
+      resolved: [
+        {
+          prompt: "investigate",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "investigate",
+          status: "running",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "test-model",
+    };
+    ticketRegistry.set("abc12345", ticket);
+    const result = handlePoll({ tasks: [], ticket: undefined }, {} as any);
+    expect(result.content[0].text).toContain("abc12345");
+    expect(result.content[0].text).toContain("running");
+  });
 
-	test("poll with specific ticket returns progress", () => {
-		const ticket: AsyncTicket = {
-			id: "xyz98765",
-			created: Date.now(),
-			tasks: [{ prompt: "check auth" }],
-			resolved: [{ prompt: "check auth", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] }],
-			status: "running",
-			results: [undefined],
-			progress: [{ index: 0, agent: "scout", task: "check auth", status: "running", durationMs: 1000, tokens: 500, toolUses: 2, activities: [] }],
-			controller: new AbortController(),
-			parentModelId: "test-model",
-		};
-		ticketRegistry.set("xyz98765", ticket);
-		const result = handlePoll({ tasks: [], ticket: "xyz98765" }, {} as any);
-		expect(result.content[0].text).toContain("xyz98765");
-		expect(result.content[0].text).toContain("RUNNING");
-	});
+  test("poll with specific ticket returns progress", () => {
+    const ticket: AsyncTicket = {
+      id: "xyz98765",
+      created: Date.now(),
+      tasks: [{ prompt: "check auth" }],
+      resolved: [
+        {
+          prompt: "check auth",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "check auth",
+          status: "running",
+          durationMs: 1000,
+          tokens: 500,
+          toolUses: 2,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "test-model",
+    };
+    ticketRegistry.set("xyz98765", ticket);
+    const result = handlePoll({ tasks: [], ticket: "xyz98765" }, {} as any);
+    expect(result.content[0].text).toContain("xyz98765");
+    expect(result.content[0].text).toContain("RUNNING");
+  });
 
-	test("poll returns completed results for running ticket", () => {
-		const ticket: AsyncTicket = {
-			id: "partial1",
-			created: Date.now(),
-			tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
-			resolved: [
-				{ prompt: "task-a", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] },
-				{ prompt: "task-b", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "worker", warnings: [] },
-				{ prompt: "task-c", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "runner", warnings: [] },
-			],
-			status: "running",
-			results: [
-				{ agent: "scout", output: "found it", durationMs: 1000, tokens: 50, touchedFiles: [] },
-				undefined,
-				{ agent: "runner", output: "", error: "timeout", durationMs: 2000, tokens: 0, touchedFiles: [] },
-			],
-			progress: [
-				{ index: 0, agent: "scout", task: "task-a", status: "done", durationMs: 1000, tokens: 50, toolUses: 1, activities: [] },
-				{ index: 1, agent: "worker", task: "task-b", status: "running", durationMs: 0, tokens: 100, toolUses: 3, activities: [] },
-				{ index: 2, agent: "runner", task: "task-c", status: "failed", durationMs: 2000, tokens: 0, toolUses: 0, activities: [] },
-			],
-			controller: new AbortController(),
-			parentModelId: "test-model",
-		};
-		ticketRegistry.set("partial1", ticket);
+  test("poll returns completed results for running ticket", () => {
+    const ticket: AsyncTicket = {
+      id: "partial1",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "worker",
+          warnings: [],
+        },
+        {
+          prompt: "task-c",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "runner",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [
+        {
+          agent: "scout",
+          output: "found it",
+          durationMs: 1000,
+          tokens: 50,
+          touchedFiles: [],
+        },
+        undefined,
+        {
+          agent: "runner",
+          output: "",
+          error: "timeout",
+          durationMs: 2000,
+          tokens: 0,
+          touchedFiles: [],
+        },
+      ],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "task-a",
+          status: "done",
+          durationMs: 1000,
+          tokens: 50,
+          toolUses: 1,
+          activities: [],
+        },
+        {
+          index: 1,
+          agent: "worker",
+          task: "task-b",
+          status: "running",
+          durationMs: 0,
+          tokens: 100,
+          toolUses: 3,
+          activities: [],
+        },
+        {
+          index: 2,
+          agent: "runner",
+          task: "task-c",
+          status: "failed",
+          durationMs: 2000,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "test-model",
+    };
+    ticketRegistry.set("partial1", ticket);
 
-		const result = handlePoll({ ticket: "partial1" }, {} as any);
-		const text = result.content[0].text;
+    const result = handlePoll({ ticket: "partial1" }, {} as any);
+    const text = result.content[0].text;
 
-		// Header shows partial completion
-		expect(text).toContain("2/3 done");
-		// Completed task output is present
-		expect(text).toContain("found it");
-		// Failed task error is present
-		expect(text).toContain("timeout");
-		// Running task still shows as running
-		expect(text).toContain("worker");
+    // Header shows partial completion
+    expect(text).toContain("2/3 done");
+    // Completed task output is present
+    expect(text).toContain("found it");
+    // Failed task error is present
+    expect(text).toContain("timeout");
+    // Running task still shows as running
+    expect(text).toContain("worker");
 
-		// details.results is index-aligned — same length as progress
-		// Undefined results are filled with error objects to match DelegateDetails type
-		expect(result.details.results).toHaveLength(3);
-		expect(result.details.results![0]!.agent).toBe("scout");
-		expect(result.details.results![1]).toEqual({ error: "PENDING — result not available" });
-		expect(result.details.results![2]!.agent).toBe("runner");
-	});
+    // details.results is index-aligned — same length as progress
+    // Undefined results are filled with error objects to match DelegateDetails type
+    expect(result.details.results).toHaveLength(3);
+    expect(result.details.results![0]!.agent).toBe("scout");
+    expect(result.details.results![1]).toEqual({
+      error: "PENDING — result not available",
+    });
+    expect(result.details.results![2]!.agent).toBe("runner");
+  });
 
-	test("poll with unknown ticket returns not found", () => {
-		const result = handlePoll({ tasks: [], ticket: "nonexistent" }, {} as any);
-		expect(result.content[0].text).toContain("not found");
-	});
+  test("poll with unknown ticket returns not found", () => {
+    const result = handlePoll({ tasks: [], ticket: "nonexistent" }, {} as any);
+    expect(result.content[0].text).toContain("not found");
+  });
 
-	test("cancel aborts a running ticket", () => {
-		const controller = new AbortController();
-		const ticket: AsyncTicket = {
-			id: "cancel1",
-			created: Date.now(),
-			tasks: [],
-			resolved: [],
-			status: "running",
-			results: [],
-			progress: [],
-			controller,
-			parentModelId: undefined,
-		};
-		ticketRegistry.set("cancel1", ticket);
-		const result = handleCancel({ tasks: [], ticket: "cancel1" });
-		expect(result.content[0].text).toContain("cancelled");
-		expect(ticket.status).toBe("cancelled");
-		expect(ticket.completedAt).toBeDefined();
-		expect(controller.signal.aborted).toBe(true);
-	});
+  test("cancel aborts a running ticket", () => {
+    const controller = new AbortController();
+    const ticket: AsyncTicket = {
+      id: "cancel1",
+      created: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [],
+      progress: [],
+      controller,
+      parentModelId: undefined,
+    };
+    ticketRegistry.set("cancel1", ticket);
+    const result = handleCancel({ tasks: [], ticket: "cancel1" });
+    expect(result.content[0].text).toContain("cancelled");
+    expect(ticket.status).toBe("cancelled");
+    expect(ticket.completedAt).toBeDefined();
+    expect(controller.signal.aborted).toBe(true);
+  });
 
-	test("cancel requires ticket ID", () => {
-		const result = handleCancel({ tasks: [], ticket: undefined });
-		expect(result.content[0].text).toContain("requires a ticket ID");
-	});
+  test("cancel requires ticket ID", () => {
+    const result = handleCancel({ tasks: [], ticket: undefined });
+    expect(result.content[0].text).toContain("requires a ticket ID");
+  });
 
-	test("cancel on already completed ticket returns status", () => {
-		const ticket: AsyncTicket = {
-			id: "done1",
-			created: Date.now(),
-			completedAt: Date.now(),
-			tasks: [],
-			resolved: [],
-			status: "done",
-			results: [],
-			progress: [],
-			controller: new AbortController(),
-			parentModelId: undefined,
-		};
-		ticketRegistry.set("done1", ticket);
-		const result = handleCancel({ tasks: [], ticket: "done1" });
-		expect(result.content[0].text).toContain("already done");
-	});
+  test("cancel on already completed ticket returns status", () => {
+    const ticket: AsyncTicket = {
+      id: "done1",
+      created: Date.now(),
+      completedAt: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "done",
+      results: [],
+      progress: [],
+      controller: new AbortController(),
+      parentModelId: undefined,
+    };
+    ticketRegistry.set("done1", ticket);
+    const result = handleCancel({ tasks: [], ticket: "done1" });
+    expect(result.content[0].text).toContain("already done");
+  });
 
-	test("formatCompletedTicket preserves index alignment for cancelled ticket with partial results", () => {
-		const ticket: AsyncTicket = {
-			id: "cancelled-partial",
-			created: Date.now() - 2000,
-			completedAt: Date.now(),
-			tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
-			resolved: [
-				{ prompt: "task-a", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] },
-				{ prompt: "task-b", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "worker", warnings: [] },
-				{ prompt: "task-c", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "runner", warnings: [] },
-			],
-			status: "cancelled",
-			results: [
-				{ agent: "scout", output: "done early", durationMs: 500, tokens: 10, touchedFiles: [] },
-				undefined, // task-b never started
-				undefined, // task-c never started
-			],
-			progress: [
-				{ index: 0, agent: "scout", task: "task-a", status: "done", durationMs: 500, tokens: 10, toolUses: 0, activities: [] },
-				{ index: 1, agent: "worker", task: "task-b", status: "pending", durationMs: 0, tokens: 0, toolUses: 0, activities: [] },
-				{ index: 2, agent: "runner", task: "task-c", status: "pending", durationMs: 0, tokens: 0, toolUses: 0, activities: [] },
-			],
-			controller: new AbortController(),
-			parentModelId: "test-model",
-		};
-		ticketRegistry.set("cancelled-partial", ticket);
+  test("formatCompletedTicket preserves index alignment for cancelled ticket with partial results", () => {
+    const ticket: AsyncTicket = {
+      id: "cancelled-partial",
+      created: Date.now() - 2000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "worker",
+          warnings: [],
+        },
+        {
+          prompt: "task-c",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "runner",
+          warnings: [],
+        },
+      ],
+      status: "cancelled",
+      results: [
+        {
+          agent: "scout",
+          output: "done early",
+          durationMs: 500,
+          tokens: 10,
+          touchedFiles: [],
+        },
+        undefined, // task-b never started
+        undefined, // task-c never started
+      ],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "task-a",
+          status: "done",
+          durationMs: 500,
+          tokens: 10,
+          toolUses: 0,
+          activities: [],
+        },
+        {
+          index: 1,
+          agent: "worker",
+          task: "task-b",
+          status: "pending",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+        {
+          index: 2,
+          agent: "runner",
+          task: "task-c",
+          status: "pending",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "test-model",
+    };
+    ticketRegistry.set("cancelled-partial", ticket);
 
-		// Simulate poll after cancellation
-		const result = handlePoll({ ticket: "cancelled-partial" }, {} as any);
-		const text = result.content[0].text;
+    // Simulate poll after cancellation
+    const result = handlePoll({ ticket: "cancelled-partial" }, {} as any);
+    const text = result.content[0].text;
 
-		// Text output handles undefined results gracefully
-		expect(text).toContain("done early");
-		expect(text).toContain("PENDING — result not available");
+    // Text output handles undefined results gracefully
+    expect(text).toContain("done early");
+    expect(text).toContain("PENDING — result not available");
 
-		// details.results is index-aligned — same length as tasks
-		// Undefined results are filled with error objects to match DelegateDetails type
-		expect(result.details.results).toHaveLength(3);
-		expect(result.details.results![0]!.agent).toBe("scout");
-		expect(result.details.results![1]).toEqual({ error: "PENDING — result not available" });
-		expect(result.details.results![2]).toEqual({ error: "PENDING — result not available" });
-	});
+    // details.results is index-aligned — same length as tasks
+    // Undefined results are filled with error objects to match DelegateDetails type
+    expect(result.details.results).toHaveLength(3);
+    expect(result.details.results![0]!.agent).toBe("scout");
+    expect(result.details.results![1]).toEqual({
+      error: "PENDING — result not available",
+    });
+    expect(result.details.results![2]).toEqual({
+      error: "PENDING — result not available",
+    });
+  });
 
-	test("execute routes top-level cancel without tasks", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+  test("execute routes top-level cancel without tasks", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
 
-		const result = await toolDef!.execute(
-			"tc-cancel-frontdoor",
-			{ action: "cancel" },
-			undefined,
-			undefined,
-			ts.session.extensionRunner as any,
-		);
+    const result = await toolDef!.execute(
+      "tc-cancel-frontdoor",
+      { action: "cancel" },
+      undefined,
+      undefined,
+      ts.session.extensionRunner as any,
+    );
 
-		expect(result.content[0].text).toContain("requires a ticket ID");
-	});
+    expect(result.content[0].text).toContain("requires a ticket ID");
+  });
 
-	test("deliverTicketResults sends formatted task output", () => {
-		const sent: any[] = [];
-		const ticket: AsyncTicket = {
-			id: "done2",
-			created: Date.now() - 1000,
-			completedAt: Date.now(),
-			tasks: [{ prompt: "find the bug" }],
-			resolved: [{ prompt: "find the bug", model: {} as any, tools: [], thinking: "off", systemPrompt: "", cwd: "/tmp", agentName: "scout", warnings: [] }],
-			status: "done",
-			results: [{ agent: "scout", output: "found the bug", durationMs: 1234, tokens: 42, touchedFiles: [] }],
-			progress: [{ index: 0, agent: "scout", task: "find the bug", status: "done", durationMs: 1234, tokens: 42, toolUses: 0, activities: [] }],
-			controller: new AbortController(),
-			parentModelId: "test-model",
-		};
+  test("deliverTicketResults sends formatted task output", () => {
+    const sent: any[] = [];
+    const ticket: AsyncTicket = {
+      id: "done2",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "find the bug" }],
+      resolved: [
+        {
+          prompt: "find the bug",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "done",
+      results: [
+        {
+          agent: "scout",
+          output: "found the bug",
+          durationMs: 1234,
+          tokens: 42,
+          touchedFiles: [],
+        },
+      ],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "find the bug",
+          status: "done",
+          durationMs: 1234,
+          tokens: 42,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "test-model",
+    };
 
-		deliverTicketResults({
-			sendMessage: (message: any, options: any) => sent.push({ message, options }),
-		} as any, ticket);
+    deliverTicketResults(
+      {
+        sendMessage: (message: any, options: any) =>
+          sent.push({ message, options }),
+      } as any,
+      ticket,
+    );
 
-		expect(sent).toHaveLength(1);
-		expect(sent[0].message.content).toContain("1/1 tasks completed");
-		expect(sent[0].message.content).toContain("found the bug");
-		expect(sent[0].message.details.ticketId).toBe("done2");
-		expect(sent[0].message.details.status).toBe("done");
-		expect(sent[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
-	});
+    expect(sent).toHaveLength(1);
+    expect(sent[0].message.content).toContain("1/1 tasks completed");
+    expect(sent[0].message.content).toContain("found the bug");
+    expect(sent[0].message.details.ticketId).toBe("done2");
+    expect(sent[0].message.details.status).toBe("done");
+    expect(sent[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
+  });
 
-	test("help text includes async mode section", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const result = await toolDef!.execute(
-			"tc-help-async",
-			{ tasks: [], async: undefined, ticket: undefined },
-			undefined,
-			undefined,
-			ts.session.extensionRunner as any,
-		);
-		expect(result.content[0].text).toContain("Async Mode");
-		expect(result.content[0].text).toContain("async: true");
-		expect(result.content[0].text).toContain("poll");
-		expect(result.content[0].text).toContain("cancel");
-	});
+  test("help text includes async mode section", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const result = await toolDef!.execute(
+      "tc-help-async",
+      { tasks: [], async: undefined, ticket: undefined },
+      undefined,
+      undefined,
+      ts.session.extensionRunner as any,
+    );
+    expect(result.content[0].text).toContain("Async Mode");
+    expect(result.content[0].text).toContain("async: true");
+    expect(result.content[0].text).toContain("poll");
+    expect(result.content[0].text).toContain("cancel");
+  });
 
-	test("action enum includes poll and cancel", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
-		const actionEnum = taskSchema.properties.action.enum;
-		expect(actionEnum).toContain("poll");
-		expect(actionEnum).toContain("cancel");
-	});
+  test("action enum includes poll and cancel", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
+    const actionEnum = taskSchema.properties.action.enum;
+    expect(actionEnum).toContain("poll");
+    expect(actionEnum).toContain("cancel");
+  });
 
-	test("parameter schema includes top-level async ticket controls", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
-		const schema = toolDef!.parameters as any;
-		expect(schema.properties.action.enum).toEqual(["poll", "cancel"]);
-		expect(schema.properties.async).toBeDefined();
-		expect(schema.properties.ticket).toBeDefined();
-		expect(schema.required ?? []).not.toContain("tasks");
-	});
+  test("parameter schema includes top-level async ticket controls", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const schema = toolDef!.parameters as any;
+    expect(schema.properties.action.enum).toEqual(["poll", "cancel"]);
+    expect(schema.properties.async).toBeDefined();
+    expect(schema.properties.ticket).toBeDefined();
+    expect(schema.required ?? []).not.toContain("tasks");
+  });
 });

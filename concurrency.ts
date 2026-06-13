@@ -63,12 +63,18 @@ export async function mapConcurrentByModel<T, R>(
   let totalRunning = 0;
   const totalWaiters: Array<() => void> = [];
   const acquireTotal = async () => {
-    if (!maxTotal || totalRunning < maxTotal) { totalRunning++; return; }
+    if (!maxTotal || totalRunning < maxTotal) {
+      totalRunning++;
+      return;
+    }
     await new Promise<void>((r) => totalWaiters.push(r));
   };
   const releaseTotal = () => {
     totalRunning--;
-    if (totalWaiters.length > 0) { totalRunning++; totalWaiters.shift()!(); }
+    if (totalWaiters.length > 0) {
+      totalRunning++;
+      totalWaiters.shift()!();
+    }
   };
 
   // Run all groups in parallel, each with its own concurrency limit + global cap

@@ -176,11 +176,18 @@ export function loadAgentsMdFiles(cwd: string): string[] {
 
 const DEFAULT_SUBAGENT_SYSTEM_PROMPT = "You are a helpful coding assistant.";
 
-function firstNonBlank(...values: Array<string | undefined>): string | undefined {
-  return values.find((v): v is string => typeof v === "string" && v.trim().length > 0);
+function firstNonBlank(
+  ...values: Array<string | undefined>
+): string | undefined {
+  return values.find(
+    (v): v is string => typeof v === "string" && v.trim().length > 0,
+  );
 }
 
-function appendPromptSections(systemPrompt: string, sections: string[]): string {
+function appendPromptSections(
+  systemPrompt: string,
+  sections: string[],
+): string {
   let result = systemPrompt.trimEnd();
   for (const section of sections) {
     const body = section.trim();

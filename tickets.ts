@@ -1,9 +1,18 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import { ASYNC_MAX_RUNTIME_MS, ASYNC_TICKET_TTL_MS } from "./constants.ts";
-import { fmtDuration, fmtTokens, formatToolCallShort, shortenPath, trunc } from "./format.ts";
+import {
+  fmtDuration,
+  fmtTokens,
+  formatToolCallShort,
+  shortenPath,
+  trunc,
+} from "./format.ts";
 import type { AsyncTicket, DelegateDetails, TaskResult } from "./types.ts";
 
 export const ticketRegistry = new Map<string, AsyncTicket>();

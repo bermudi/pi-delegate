@@ -66,7 +66,10 @@ export function loadDelegateConfig(): DelegateConfig {
       ...DEFAULT_DELEGATE_CONFIG,
       ...parsed,
       agent: { ...DEFAULT_DELEGATE_CONFIG.agent, ...(parsed.agent ?? {}) },
-      concurrency: { ...DEFAULT_DELEGATE_CONFIG.concurrency, ...(parsed.concurrency ?? {}) },
+      concurrency: {
+        ...DEFAULT_DELEGATE_CONFIG.concurrency,
+        ...(parsed.concurrency ?? {}),
+      },
     } as DelegateConfig;
   } catch {
     return structuredClone(DEFAULT_DELEGATE_CONFIG);
@@ -128,7 +131,10 @@ export function setConcurrencyDefault(n: number): void {
 /** Set or update a per-provider concurrency limit. */
 export function setConcurrencyProvider(key: string, n: number): void {
   const current = __delegateConfig.concurrency.providers ?? {};
-  __delegateConfig.concurrency.providers = { ...current, [key]: Math.max(1, n) };
+  __delegateConfig.concurrency.providers = {
+    ...current,
+    [key]: Math.max(1, n),
+  };
   saveDelegateConfigAtomic(__delegateConfig);
 }
 

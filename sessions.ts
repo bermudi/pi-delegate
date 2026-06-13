@@ -1,7 +1,14 @@
 import * as path from "node:path";
-import { Agent, type AgentMessage, type ThinkingLevel } from "@mariozechner/pi-agent-core";
+import {
+  Agent,
+  type AgentMessage,
+  type ThinkingLevel,
+} from "@mariozechner/pi-agent-core";
 import type { Api, Model } from "@mariozechner/pi-ai";
-import { SessionManager, type ModelRegistry } from "@mariozechner/pi-coding-agent";
+import {
+  SessionManager,
+  type ModelRegistry,
+} from "@mariozechner/pi-coding-agent";
 import type { AgentRunConfig, SessionManagerLike } from "./types.ts";
 import { createAgent } from "./runner.ts";
 

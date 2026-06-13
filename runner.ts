@@ -1,11 +1,37 @@
-import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from "@mariozechner/pi-agent-core";
+import {
+  Agent,
+  type AgentMessage,
+  type AgentTool,
+  type ThinkingLevel,
+} from "@mariozechner/pi-agent-core";
 import { type Api, type Model, streamSimple } from "@mariozechner/pi-ai";
-import { convertToLlm, type ModelRegistry } from "@mariozechner/pi-coding-agent";
+import {
+  convertToLlm,
+  type ModelRegistry,
+} from "@mariozechner/pi-coding-agent";
 import { TOOL_FACTORIES } from "./tools.ts";
-import { getGitChangedFiles, extractTouchedFromActivities } from "./file-tracking.ts";
-import { isRetryableError, isRateLimitError, computeRetryDelay, sleepWithAbort, AbortError } from "./retry.ts";
-import { extractOutput, extractTextFromPartialResult, extractUsage } from "./utils.ts";
-import type { AgentProgressUpdate, AgentRunConfig, SessionManagerLike, ToolActivity } from "./types.ts";
+import {
+  getGitChangedFiles,
+  extractTouchedFromActivities,
+} from "./file-tracking.ts";
+import {
+  isRetryableError,
+  isRateLimitError,
+  computeRetryDelay,
+  sleepWithAbort,
+  AbortError,
+} from "./retry.ts";
+import {
+  extractOutput,
+  extractTextFromPartialResult,
+  extractUsage,
+} from "./utils.ts";
+import type {
+  AgentProgressUpdate,
+  AgentRunConfig,
+  SessionManagerLike,
+  ToolActivity,
+} from "./types.ts";
 
 export function createAgent(
   config: AgentRunConfig,

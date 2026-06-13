@@ -26,7 +26,7 @@ export function findAvailableAlternative(
   if (registry.hasConfiguredAuth(model)) return model;
   // Look for another model with the same id that DOES have auth.
   // Prefer a different provider (avoid returning the same broken model).
-  return registry.getAvailable().find(
-    (m) => m.id === model.id && m.provider !== model.provider,
-  );
+  return registry
+    .getAvailable()
+    .find((m) => m.id === model.id && m.provider !== model.provider);
 }

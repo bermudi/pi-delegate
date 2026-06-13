@@ -1,4 +1,8 @@
-import type { Agent, AgentMessage, ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type {
+  Agent,
+  AgentMessage,
+  ThinkingLevel,
+} from "@mariozechner/pi-agent-core";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 
