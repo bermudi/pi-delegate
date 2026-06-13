@@ -1,0 +1,23 @@
+{
+  "name": "pi-delegate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --outfile=delegate.bundle.ts",
+    "format": "prettier --write \"**/*.ts\""
+  },
+  "devDependencies": {
+    "@marcfargas/pi-test-harness": "^0.5.0",
+    "@mariozechner/pi-agent-core": "npm:@earendil-works/pi-agent-core@^0.75.3",
+    "@mariozechner/pi-ai": "npm:@earendil-works/pi-ai@^0.75.3",
+    "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@^0.75.3",
+    "@mariozechner/pi-tui": "npm:@earendil-works/pi-tui@^0.75.3",
+    "@sinclair/typebox": "^0.34.0",
+    "esbuild": "^0.27.0",
+    "prettier": "^3.8.4",
+    "typescript": "^5.9.0"
+  }
+}
