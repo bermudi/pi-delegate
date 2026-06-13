@@ -191,23 +191,30 @@ export function setMaxConcurrent(n: number): void {
 }
 
 /**
- * Resolve the model spec string using the precedence chain.
- * Returns the first non-null, non-empty string value.
+ * Resolve an *explicit* model spec string using the precedence chain.
+ * Returns the first non-null, non-empty string value, or `undefined` when no
+ * explicit spec is set — in which case the caller inherits the parent
+ * session's model object directly (see extension.ts).
+ *
+ * Parent inheritance is intentionally NOT a tier here: the parent model is
+ * already a resolved, authenticated Model object. Re-resolving its id string
+ * through the registry would be both redundant and lossy for composite ids
+ * such as OpenRouter's "provider/upstream/model", whose first segment is an
+ * upstream provider name, not a configured pi provider — that misroutes auth
+ * lookup to the wrong provider.
  *
  * Precedence (highest to lowest):
- *   1. taskModel        — per-task explicit override (from API call)
- *   2. sessionOverrides[agentType]  — session per-type
- *   3. sessionOverrides["default"]  — session global
- *   4. config.agent[agentType]      — config per-type
- *   5. config.agent["default"]     — config global
- *   6. frontmatterModel            — agent .md frontmatter
- *   7. parentModelId               — inherit from parent (final fallback)
+ *   1. taskModel                      — per-task explicit override (from API call)
+ *   2. sessionOverrides[agentType]    — session per-type
+ *   3. sessionOverrides["default"]    — session global
+ *   4. config.agent[agentType]        — config per-type
+ *   5. config.agent["default"]        — config global
+ *   6. frontmatterModel               — agent .md frontmatter
  */
 export function resolveModelSpec(options: {
   taskModel?: string;
   agentType: string;
   frontmatterModel?: string;
-  parentModelId?: string;
   config?: DelegateConfig;
   overrides?: SessionModelOverrides;
 }): string | undefined {
@@ -215,7 +222,6 @@ export function resolveModelSpec(options: {
     taskModel,
     agentType,
     frontmatterModel,
-    parentModelId,
     config = __delegateConfig,
     overrides = sessionOverrides,
   } = options;
@@ -227,7 +233,6 @@ export function resolveModelSpec(options: {
     config.agent[agentType] as string | null | undefined,
     config.agent["default"],
     frontmatterModel,
-    parentModelId,
   ];
 
   return candidates.find(

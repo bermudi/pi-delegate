@@ -401,19 +401,23 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           if (t.sessionId && agentPool.has(t.sessionId)) {
             model = agentPool.get(t.sessionId)!.config.model;
           } else {
-            // Use precedence chain: task > session > config > frontmatter > parent
+            // Resolve an explicit model spec (precedence: task > session > config >
+            // frontmatter). resolveModelSpec returns undefined when none is set, so
+            // we skip resolveModel entirely — passing the parent's composite id
+            // (e.g. OpenRouter's "deepseek/deepseek-v4-flash") would split on "/"
+            // and misroute to the upstream provider. Leaving resolvedModel
+            // undefined also lets findAvailableAlternative run below: it returns
+            // ctx.model as-is when it has auth, or swaps to an authenticated
+            // same-id alternative when the parent's provider lost auth.
             const agentType = t.agent ?? "inline";
             const modelSpec = resolveModelSpec({
               taskModel: t.model ?? agentOverride?.model,
               agentType,
               frontmatterModel: agent?.model,
-              parentModelId: ctx.model?.id,
             });
-            const resolvedModel = resolveModel(
-              modelSpec ?? pooledConfig?.model?.id,
-              ctx.modelRegistry,
-              ctx.model,
-            );
+            const resolvedModel = modelSpec
+              ? resolveModel(modelSpec, ctx.modelRegistry, ctx.model)
+              : undefined;
 
             // If the task or settings explicitly set a model but it couldn't resolve, fail loudly
             const explicitRequest = t.model ?? agentOverride?.model;
