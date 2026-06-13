@@ -823,7 +823,6 @@ describe("resolveModelSpec", () => {
 			taskModel: "task-model",
 			agentType: "coder",
 			frontmatterModel: "frontmatter",
-			parentModelId: "parent",
 			config: baseConfig,
 			overrides: baseOverrides,
 		});
@@ -834,7 +833,6 @@ describe("resolveModelSpec", () => {
 		const result = resolveModelSpec({
 			agentType: "coder",
 			frontmatterModel: "frontmatter",
-			parentModelId: "parent",
 			config: baseConfig,
 			overrides: baseOverrides,
 		});
@@ -845,7 +843,6 @@ describe("resolveModelSpec", () => {
 		const result = resolveModelSpec({
 			agentType: "unknown-type",
 			frontmatterModel: "frontmatter",
-			parentModelId: "parent",
 			config: baseConfig,
 			overrides: baseOverrides,
 		});
@@ -856,7 +853,6 @@ describe("resolveModelSpec", () => {
 		const result = resolveModelSpec({
 			agentType: "coder",
 			frontmatterModel: "frontmatter",
-			parentModelId: "parent",
 			config: baseConfig,
 			overrides: { default: null },
 		});
@@ -867,7 +863,6 @@ describe("resolveModelSpec", () => {
 		const result = resolveModelSpec({
 			agentType: "unknown-type",
 			frontmatterModel: "frontmatter",
-			parentModelId: "parent",
 			config: baseConfig,
 			overrides: { default: null },
 		});
@@ -878,21 +873,24 @@ describe("resolveModelSpec", () => {
 		const result = resolveModelSpec({
 			agentType: "unknown-type",
 			frontmatterModel: "frontmatter",
-			parentModelId: "parent",
 			config: { agent: { default: null }, concurrency: { default: 3 } },
 			overrides: { default: null },
 		});
 		expect(result).toBe("frontmatter");
 	});
 
-	test("parent model is final fallback", () => {
+	test("no explicit spec returns undefined — parent inheritance is the caller's job", () => {
+		// resolveModelSpec no longer has a parent tier: when nothing explicit
+		// is set it returns undefined, and the caller uses ctx.model directly.
+		// This prevents re-resolving a composite parent id (e.g. OpenRouter's
+		// "deepseek/deepseek-v4-flash") through the registry, which would
+		// misroute auth to the upstream provider name.
 		const result = resolveModelSpec({
 			agentType: "unknown-type",
-			parentModelId: "parent",
 			config: { agent: { default: null }, concurrency: { default: 3 } },
 			overrides: { default: null },
 		});
-		expect(result).toBe("parent");
+		expect(result).toBeUndefined();
 	});
 
 	test("returns undefined when all sources empty", () => {
@@ -904,14 +902,13 @@ describe("resolveModelSpec", () => {
 		expect(result).toBeUndefined();
 	});
 
-	test("skips empty string overrides", () => {
+	test("skips empty string overrides — falls through to undefined", () => {
 		const result = resolveModelSpec({
 			agentType: "coder",
-			parentModelId: "parent",
 			config: { agent: { default: "", coder: "" }, concurrency: { default: 3 } },
 			overrides: { default: "" },
 		});
-		expect(result).toBe("parent");
+		expect(result).toBeUndefined();
 	});
 });
 
@@ -1887,6 +1884,52 @@ describe("delegate extension integration", () => {
 			return;
 		}
 		expect.unreachable("should have thrown at model resolution");
+	});
+
+	test("inherits parent model as-is when its id is a composite OpenRouter-style id (no re-resolution)", async () => {
+		// Regression for the bug where omitting a task model fell back to the
+		// parent's model *id string*, which resolveModel split on "/" and
+		// re-resolved through the registry. For OpenRouter ids like
+		// "deepseek/deepseek-v4-flash" that splits to provider="deepseek",
+		// misrouting auth to an upstream provider with no key.
+		//
+		// Fix: resolveModelSpec has no parent tier; when nothing explicit is
+		// set it returns undefined, and resolveModel's undefined-guard returns
+		// ctx.model directly (no registry lookup, no id splitting).
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+
+		const parentModel = { provider: "openrouter", id: "deepseek/deepseek-v4-flash" } as any;
+		// The trap: a deepseek-provider variant with the bare id exists in the
+		// registry. The OLD code would split the parent id and resolve to this
+		// (unauthenticated) model. The registry reports no auth for it so a
+		// regression surfaces as a fast auth failure rather than a network call.
+		const deepseekVariant = { provider: "deepseek", id: "deepseek-v4-flash" } as any;
+		const mockRegistry = {
+			getAvailable: () => [deepseekVariant],
+			find: (provider: string, id: string) =>
+				provider === "deepseek" && id === "deepseek-v4-flash" ? deepseekVariant : null,
+			hasConfiguredAuth: () => false,
+			getApiKeyAndHeaders: async () => ({ ok: false, error: "No API key for provider: deepseek" }),
+		} as any;
+
+		const result = await toolDef!.execute(
+			"tc-parent-inherit",
+			{ tasks: [{ prompt: "hello", action: "prompt" }] },
+			undefined,
+			undefined,
+			// Custom ctx: composite-id parent + trap registry. No explicit task model.
+			{ model: parentModel, modelRegistry: mockRegistry, cwd: ts.cwd, sessionManager: undefined } as any,
+		);
+
+		const progress = (result.details as any).progress as Array<{ model?: string; status: string; error?: string }>;
+		// The resolved model must be the parent object as-is: its full composite id,
+		// NOT the split bare id "deepseek-v4-flash" the old code resolved to.
+		expect(progress[0].model).toBe("deepseek/deepseek-v4-flash");
+		expect(progress[0].model).not.toBe("deepseek-v4-flash");
+		// Runner reaches auth and fails fast (no network) — proves the model was
+		// wired through to execution rather than short-circuited.
+		expect(progress[0].error).toContain("No API key");
 	});
 });
 

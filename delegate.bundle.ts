@@ -652,7 +652,6 @@ function resolveModelSpec(options) {
     taskModel,
     agentType,
     frontmatterModel,
-    parentModelId,
     config = __delegateConfig,
     overrides = sessionOverrides
   } = options;
@@ -662,8 +661,7 @@ function resolveModelSpec(options) {
     overrides["default"],
     config.agent[agentType],
     config.agent["default"],
-    frontmatterModel,
-    parentModelId
+    frontmatterModel
   ];
   return candidates.find(
     (v) => typeof v === "string" && v.length > 0
@@ -1654,10 +1652,6 @@ async function acquireAgentSession(env, task, p) {
       env.modelRegistry
     );
   }
-  if (sessionManager && !isPoolHit && !task.resumeFrom) {
-    const label = `\u2387 delegate \xB7 ${task.agentName}`;
-    sessionManager.appendSessionInfo?.(label);
-  }
   if (!agent) {
     return { error: failTask(task, "Internal: no agent acquired") };
   }
@@ -2124,14 +2118,9 @@ function delegateExtension(pi) {
             const modelSpec = resolveModelSpec({
               taskModel: t.model ?? agentOverride?.model,
               agentType,
-              frontmatterModel: agent?.model,
-              parentModelId: ctx.model?.id
+              frontmatterModel: agent?.model
             });
-            const resolvedModel = resolveModel(
-              modelSpec ?? pooledConfig?.model?.id,
-              ctx.modelRegistry,
-              ctx.model
-            );
+            const resolvedModel = modelSpec ? resolveModel(modelSpec, ctx.modelRegistry, ctx.model) : void 0;
             const explicitRequest = t.model ?? agentOverride?.model;
             if (explicitRequest && !resolvedModel) {
               throw new Error(
