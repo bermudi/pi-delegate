@@ -1,3 +1,5 @@
+// @ts-nocheck
+
 // extension.ts
 import * as fs6 from "node:fs";
 import * as path8 from "node:path";

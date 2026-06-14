@@ -6,7 +6,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --outfile=delegate.bundle.ts",
+    "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=delegate.bundle.ts",
     "format": "prettier --write \"**/*.ts\""
   },
   "devDependencies": {
