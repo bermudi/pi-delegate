@@ -283,6 +283,52 @@ describe("delegate task lifecycle integration", () => {
     }
   });
 
+  test("named agent discovery is parent-scoped, not per-task cwd", async () => {
+    // Agent discovery uses ctx.cwd (parent session), not the per-task cwd.
+    // A .pi/agents/ghost.md placed in the per-task cwd must NOT be discovered.
+    installStreamMock("Should never run.");
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts);
+
+    const perTaskCwd = fs.mkdtempSync(
+      path.join(os.tmpdir(), "delegate-discovery-"),
+    );
+    try {
+      const agentDir = path.join(perTaskCwd, ".pi", "agents");
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(agentDir, "ghost.md"),
+        [
+          "---",
+          "name: ghost",
+          "description: Should not be discovered via per-task cwd",
+          "---",
+          "GHOST_PROMPT",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const toolDef = getDelegateTool(ts);
+      // Parent ctx.cwd left at default (no .pi/agents/ghost.md).
+      const ctx = getExecContext(ts);
+
+      const result = await toolDef.execute(
+        "tc-discovery-scope",
+        { tasks: [{ agent: "ghost", prompt: "boo", cwd: perTaskCwd }] },
+        undefined,
+        undefined,
+        ctx,
+      );
+
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain("Unknown agent");
+      expect(text).toContain("ghost");
+    } finally {
+      fs.rmSync(perTaskCwd, { recursive: true, force: true });
+    }
+  });
+
   test("parent model with no auth falls back to available alternative", async () => {
     // Track which model the sub-agent actually used.
     let usedModelId: string | undefined;

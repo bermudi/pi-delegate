@@ -169,7 +169,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "- `tools` — Array of tool names. Default: read, write, edit, bash.",
     "- `skills` — Skill names injected into the system prompt.",
     "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
-    "- `cwd` — Working directory. Default: parent session cwd.",
+    "- `cwd` — Working directory for the subagent (settings, skills, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
     "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
     "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
     "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
@@ -269,6 +269,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         return handleCancel(params);
       }
 
+      // Agent discovery is intentionally parent-cwd-scoped: agent profiles are a
+      // session-level resource, not per-task. Per-task cwd governs settings,
+      // skills, and AGENTS.md injection (see resolveCwd below), but not which
+      // named agents exist. Changing this would let a task's throwaway cwd
+      // silently swap the agent roster.
       const agents = discoverAgents(ctx.cwd);
 
       // ── Help mode ─────────────────────────────────────────────────
