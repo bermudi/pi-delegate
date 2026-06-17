@@ -13,7 +13,7 @@ import {
   VALID_THINKING,
   POOL_TTL_MS,
 } from "./constants.ts";
-import { TOOL_FACTORIES, expandToolsStar } from "./tools.ts";
+import { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
 import { agentPool, sweepPool } from "./pool.ts";
 import {
   ticketRegistry,
@@ -154,7 +154,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "description: What it does",
     "model: anthropic/claude-haiku-4-5  # optional",
     "thinking: low                     # off/minimal/low/medium/high/xhigh",
-    "tools: read, bash                 # default: all 4 core tools. Use * for all.",
+    "tools: *                          # * = full agent. ro = read-only. Named agents must declare.",
     "skills: web-content               # comma-separated skill names",
     "---",
     "You are a helpful agent...",
@@ -166,7 +166,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
     "- `systemPrompt` — System prompt. Falls back to agent definition, then parent session system prompt.",
     "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
-    "- `tools` — Array of tool names. Default: read, write, edit, bash.",
+    "- `tools` — Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Inline tasks default to `*`; named agents must declare.",
     "- `skills` — Skill names injected into the system prompt.",
     "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
     "- `cwd` — Working directory for the subagent (settings, skills, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
@@ -230,7 +230,8 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "",
     "## Gotchas",
     "",
-    "- Subagents only get `read`, `write`, `edit`, `bash` \u2014 MCP and extension tools are never available. The `tools` field accepts only those four.",
+    "- `*` means the full agent (read, write, edit, bash), not \"every tool.\" The grep/find/ls trio exists only for `ro` (read-only) agents where bash is unavailable — bash already subsumes them.",
+    "- Named agent profiles must declare a `tools:` field; inline tasks default to `*`.",
     "- `skills` injects a skill's SKILL.md *instructions* into the system prompt (text). It does not unlock extra tools.",
     `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
     "- `with-parent-transcript` injects your entire conversation. A 50k-token session means the subagent starts 50k tokens deep.",
@@ -517,7 +518,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           // "continue with only sessionId" works without re-supplying tools.
           // Explicit overrides that don't match get rejected by acquireAgentSession.
           const isPoolHit = t.sessionId ? agentPool.has(t.sessionId) : false;
-          tools = expandToolsStar(
+          tools = resolveToolGroups(
             t.tools ??
               agentOverride?.tools ??
               agent?.tools ??
@@ -530,6 +531,16 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           if (unknownTools.length) {
             warnings.push(
               `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`,
+            );
+          }
+          // Named agents must declare a `tools:` field. An agent with empty
+          // tools means the profile omitted it — reject with an actionable
+          // message. Inline tasks may pass an explicit empty list deliberately,
+          // so we only fire when the emptiness comes from the agent profile.
+          if (agent && agent.tools.length === 0 && !t.tools && !agentOverride?.tools) {
+            throw new Error(
+              `Task ${i}: agent "${t.agent}" has no \`tools:\` field. ` +
+                `Declare one, e.g. \`tools: *\` (full) or \`tools: ro\` (read-only).`,
             );
           }
 

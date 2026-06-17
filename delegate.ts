@@ -17,8 +17,8 @@ export type {
 } from "./types.ts";
 export type { DelegateConfig, SessionModelOverrides } from "./config.ts";
 
-export { DEFAULT_TOOLS, MAX_CONCURRENCY, VALID_THINKING } from "./constants.ts";
-export { TOOL_FACTORIES, expandToolsStar } from "./tools.ts";
+export { DEFAULT_TOOLS, READONLY_TOOLS, MAX_CONCURRENCY, VALID_THINKING } from "./constants.ts";
+export { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
 export {
   resetSessionOverrides,
   loadDelegateConfig,

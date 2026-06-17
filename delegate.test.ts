@@ -28,9 +28,10 @@ import {
   shortenPath,
   getActivityAge,
   DEFAULT_TOOLS,
+  READONLY_TOOLS,
   VALID_THINKING,
   TOOL_FACTORIES,
-  expandToolsStar,
+  resolveToolGroups,
   extractTouchedFromActivities,
   agentPool,
   closePooledAgent,
@@ -269,19 +270,19 @@ You are a scout. Be concise.
     expect(cfg.systemPrompt).toBe("You are a scout. Be concise.");
   });
 
-  test("defaults tools to DEFAULT_TOOLS when not specified", () => {
-    const filePath = path.join(tmpDir, "minimal.md");
+  test("named agent without tools field resolves to empty (not default)", () => {
+    const filePath = path.join(tmpDir, "no-tools.md");
     writeFileSync(
       filePath,
       `---
-name: minimal
-description: Minimal agent
+name: no-tools
+description: No tools agent
 ---
 Prompt.
 `,
     );
     const cfg = loadAgentFile(filePath)!;
-    expect(cfg.tools).toEqual(DEFAULT_TOOLS);
+    expect(cfg.tools).toEqual([]);
   });
 
   test("defaults thinking to off when invalid", () => {
@@ -342,7 +343,7 @@ Prompt.
     expect(cfg.tools).toEqual(["read", "write", "grep"]);
   });
 
-  test("expands * to all registered tools", () => {
+  test("expands * to the full agent set (not every registered tool)", () => {
     const filePath = path.join(tmpDir, "star-tools.md");
     writeFileSync(
       filePath,
@@ -355,30 +356,48 @@ Prompt.
 `,
     );
     const cfg = loadAgentFile(filePath)!;
-    expect(cfg.tools).toEqual(Object.keys(TOOL_FACTORIES));
+    expect(cfg.tools).toEqual(DEFAULT_TOOLS);
+  });
+
+  test("expands ro to the read-only scout set", () => {
+    const filePath = path.join(tmpDir, "ro-tools.md");
+    writeFileSync(
+      filePath,
+      `---
+name: ro-agent
+description: Read-only agent
+tools: ro
+---
+Prompt.
+`,
+    );
+    const cfg = loadAgentFile(filePath)!;
+    expect(cfg.tools).toEqual(READONLY_TOOLS);
   });
 });
 
 // ── expandToolsStar ──────────────────────────────────────────────────────
 
-describe("expandToolsStar", () => {
-  test("passes through arrays without *", () => {
-    expect(expandToolsStar(["read", "bash"])).toEqual(["read", "bash"]);
+describe("resolveToolGroups", () => {
+  test("passes through arrays without shorthands", () => {
+    expect(resolveToolGroups(["read", "bash"])).toEqual(["read", "bash"]);
   });
 
-  test("expands * to all TOOL_FACTORIES keys", () => {
-    const result = expandToolsStar(["*"]);
-    expect(result).toEqual(Object.keys(TOOL_FACTORIES));
+  test("expands * to the full agent set", () => {
+    expect(resolveToolGroups(["*"])).toEqual(DEFAULT_TOOLS);
+  });
+
+  test("expands ro to the read-only scout set", () => {
+    expect(resolveToolGroups(["ro"])).toEqual(READONLY_TOOLS);
   });
 
   test("expands * and keeps additional tools (deduped)", () => {
-    const result = expandToolsStar(["*", "read"]);
-    const allKeys = Object.keys(TOOL_FACTORIES);
-    expect(result.sort()).toEqual([...new Set([...allKeys, "read"])].sort());
+    const result = resolveToolGroups(["*", "read"]);
+    expect(result.sort()).toEqual([...new Set([...DEFAULT_TOOLS, "read"])].sort());
   });
 
   test("returns empty array as-is", () => {
-    expect(expandToolsStar([])).toEqual([]);
+    expect(resolveToolGroups([])).toEqual([]);
   });
 });
 
@@ -1530,6 +1549,14 @@ describe("constants", () => {
     expect(DEFAULT_TOOLS).toContain("bash");
   });
 
+  test("READONLY_TOOLS has the 4 read-only scout tools", () => {
+    expect(READONLY_TOOLS).toHaveLength(4);
+    expect(READONLY_TOOLS).toContain("read");
+    expect(READONLY_TOOLS).toContain("grep");
+    expect(READONLY_TOOLS).toContain("find");
+    expect(READONLY_TOOLS).toContain("ls");
+  });
+
   test("VALID_THINKING contains all expected levels", () => {
     expect(VALID_THINKING.has("off")).toBe(true);
     expect(VALID_THINKING.has("minimal")).toBe(true);
@@ -1542,6 +1569,15 @@ describe("constants", () => {
 
   test("TOOL_FACTORIES has factory for each DEFAULT_TOOL", () => {
     for (const name of DEFAULT_TOOLS) {
+      expect(TOOL_FACTORIES[name]).toBeFunction();
+    }
+  });
+
+  test("TOOL_FACTORIES registers the 7 core tools", () => {
+    expect(Object.keys(TOOL_FACTORIES).sort()).toEqual(
+      ["bash", "edit", "find", "grep", "ls", "read", "write"],
+    );
+    for (const name of ["grep", "find", "ls"] as const) {
       expect(TOOL_FACTORIES[name]).toBeFunction();
     }
   });

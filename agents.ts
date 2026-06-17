@@ -2,8 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@mariozechner/pi-agent-core";
-import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
-import { expandToolsStar } from "./tools.ts";
+import { VALID_THINKING } from "./constants.ts";
+import { resolveToolGroups } from "./tools.ts";
 import type { AgentConfig } from "./types.ts";
 
 export function parseFrontmatter(content: string): {
@@ -49,14 +49,14 @@ export function loadAgentFile(filePath: string): AgentConfig | null {
     thinking: VALID_THINKING.has(data.thinking ?? "")
       ? (data.thinking as ThinkingLevel)
       : "off",
-    tools: expandToolsStar(
-      data.tools
-        ? data.tools
+    tools: data.tools
+      ? resolveToolGroups(
+          data.tools
             .split(",")
             .map((s) => s.trim())
-            .filter(Boolean)
-        : DEFAULT_TOOLS,
-    ),
+            .filter(Boolean),
+        )
+      : [], // named agents must declare tools; empty triggers a resolution error
     skills: data.skills
       ? data.skills
           .split(",")

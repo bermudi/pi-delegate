@@ -251,6 +251,7 @@ describe("delegate task lifecycle integration", () => {
           "---",
           "name: reviewer",
           "description: Reviews code",
+          "tools: *",
           "---",
           "NAMED_AGENT_SYSTEM_PROMPT",
         ].join("\n"),
@@ -702,6 +703,47 @@ describe("delegate task lifecycle integration", () => {
     const text = result.content[0].text;
     expect(text).toContain("Unknown agent");
     expect(text).toContain("nonexistent-xyz-abc");
+  });
+
+  test("named agent without tools field rejects with actionable error", async () => {
+    installStreamMock("Should never run.");
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts);
+
+    const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-notools-"));
+    try {
+      const agentDir = path.join(taskCwd, ".pi", "agents");
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(agentDir, "notools.md"),
+        [
+          "---",
+          "name: notools",
+          "description: Agent with no tools field",
+          "---",
+          "Prompt.",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const toolDef = getDelegateTool(ts);
+      const baseCtx = getExecContext(ts);
+      const ctx = Object.create(baseCtx) as typeof baseCtx;
+      Object.defineProperty(ctx, "cwd", { value: taskCwd });
+
+      await expect(
+        toolDef.execute(
+          "tc-no-tools",
+          { tasks: [{ agent: "notools", prompt: "do stuff" }] },
+          undefined,
+          undefined,
+          ctx,
+        ),
+      ).rejects.toThrow("no `tools:` field");
+    } finally {
+      fs.rmSync(taskCwd, { recursive: true, force: true });
+    }
   });
 
   test("task without prompt (and not close/list/resume) throws", async () => {
