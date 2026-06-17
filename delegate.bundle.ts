@@ -1214,9 +1214,6 @@ function extractUsage(messages) {
 
 // runner.ts
 var __retryBaseMsOverride;
-function setRetryBaseMsForTesting(ms) {
-  __retryBaseMsOverride = ms;
-}
 function createAgent(config, modelRegistry, messages) {
   const tools = config.tools.map((name) => TOOL_FACTORIES[name]?.(config.cwd)).filter(Boolean);
   return new Agent({
@@ -2790,7 +2787,6 @@ export {
   setDefaultModel,
   setMaxConcurrent,
   setModelOverride,
-  setRetryBaseMsForTesting,
   shortenPath,
   sweepPool,
   sweepTickets,

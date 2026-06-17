@@ -24,11 +24,8 @@ import { createTestSession } from "@marcfargas/pi-test-harness";
 // go through execute() (e.g., list action for pool state, poll for tickets).
 // We import these only for cleanup in afterEach (clearing our own module's maps
 // to avoid leaking between test file runs).
-import {
-  agentPool,
-  ticketRegistry,
-  setRetryBaseMsForTesting,
-} from "./delegate.ts";
+import { agentPool, ticketRegistry } from "./delegate.ts";
+import { setRetryBaseMsForTesting } from "./runner.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
 
@@ -927,6 +924,7 @@ function installFailingThenSuccess(
 
 describe("delegate retry and error recovery", () => {
   let ts: TestSession | undefined;
+  const realRandom = Math.random;
 
   beforeEach(() => {
     // Make retries fast — shrink backoff to 1ms via test setter, zero jitter
@@ -939,6 +937,7 @@ describe("delegate retry and error recovery", () => {
     mock.restore();
     agentPool.clear();
     ticketRegistry.clear();
+    Math.random = realRandom;
     ts?.dispose();
     ts = undefined;
     setRetryBaseMsForTesting(undefined);
