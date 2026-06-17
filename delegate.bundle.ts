@@ -833,7 +833,11 @@ ${body}` : body;
 }
 function buildSubagentSystemPrompt(options) {
   if (options.pooledSystemPrompt?.trim()) return options.pooledSystemPrompt;
-  const base = firstNonBlank(options.taskSystemPrompt, options.agentSystemPrompt) ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT;
+  const base = firstNonBlank(
+    options.taskSystemPrompt,
+    options.agentSystemPrompt,
+    options.parentSystemPrompt
+  ) ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT;
   const agentsMdContext = options.agentsMdFiles.length ? options.agentsMdFiles.join("\n\n") : void 0;
   return appendPromptSections(base, [
     ...options.skillBodies,
@@ -1950,7 +1954,7 @@ function getSubagentManualMarkdown(agents) {
     '{ "prompt": "", "sessionId": "auth-research", "action": "close" }',
     "```",
     "",
-    "Pooled agents are automatically closed after 10 minutes of inactivity.",
+    `Pooled agents are automatically closed after ${POOL_TTL_MS / 6e4} minutes of inactivity.`,
     "",
     "## Resuming Previous Sessions",
     "",
@@ -1985,7 +1989,18 @@ function getSubagentManualMarkdown(agents) {
     '- `delegate({ action: "poll", ticket: "abc123" })` \u2014 check one ticket',
     '- `delegate({ action: "cancel", ticket: "abc123" })` \u2014 abort a running ticket',
     "",
-    "Max 5 concurrent async tickets. Results are delivered automatically when all tasks finish. Poll for progress while running, but avoid polling in a tight loop \u2014 do other work while waiting."
+    `Max ${getMaxAsyncTickets()} concurrent async tickets. Results are delivered automatically when all tasks finish. Poll for progress while running, but avoid polling in a tight loop \u2014 do other work while waiting.`,
+    "",
+    "## Gotchas",
+    "",
+    "- Subagents only get `read`, `write`, `edit`, `bash` \u2014 MCP and extension tools are never available. The `tools` field accepts only those four.",
+    "- `skills` injects a skill's SKILL.md *instructions* into the system prompt (text). It does not unlock extra tools.",
+    `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
+    "- `with-parent-transcript` injects your entire conversation. A 50k-token session means the subagent starts 50k tokens deep.",
+    "",
+    "## Config",
+    "",
+    "Tunables live in `~/.pi/agent/delegate.json`: `maxConcurrent` (sync ceiling), `maxAsyncTickets` (background ticket cap), per-model/per-provider concurrency limits, and global model overrides."
   ].join("\n");
 }
 function delegateExtension(pi) {
@@ -2092,6 +2107,8 @@ function delegateExtension(pi) {
           ctx.sessionManager.getLeafId()
         );
       }
+      const getParentSystemPrompt = ctx.getSystemPrompt;
+      const parentSystemPrompt = typeof getParentSystemPrompt === "function" ? getParentSystemPrompt.call(ctx) : void 0;
       const resolved = tasks.map((t, i) => {
         const agent = t.agent ? agents.get(t.agent) : void 0;
         const cwd = resolveCwd(t.cwd ?? ctx.cwd);
@@ -2116,6 +2133,7 @@ function delegateExtension(pi) {
         const systemPrompt = buildSubagentSystemPrompt({
           taskSystemPrompt: t.systemPrompt,
           agentSystemPrompt: agent?.systemPrompt,
+          parentSystemPrompt,
           pooledSystemPrompt: pooledConfig?.systemPrompt,
           skillBodies,
           agentsMdFiles
@@ -2703,6 +2721,7 @@ ${content}` : "");
   });
 }
 export {
+  DEFAULT_SUBAGENT_SYSTEM_PROMPT,
   DEFAULT_TOOLS,
   MAX_CONCURRENCY,
   RATE_LIMIT_PATTERNS,
@@ -2712,6 +2731,7 @@ export {
   VALID_THINKING,
   agentPool,
   buildParentTranscript,
+  buildSubagentSystemPrompt,
   clearAllModelOverrides,
   clearModelOverride,
   closePooledAgent,

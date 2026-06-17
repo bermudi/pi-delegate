@@ -72,6 +72,8 @@ export {
   discoverAgents,
   loadSkill,
   loadAgentsMdFiles,
+  buildSubagentSystemPrompt,
+  DEFAULT_SUBAGENT_SYSTEM_PROMPT,
 } from "./agents.ts";
 export { buildParentTranscript, extractTextContent } from "./parent-context.ts";
 export { extractTouchedFromActivities } from "./file-tracking.ts";

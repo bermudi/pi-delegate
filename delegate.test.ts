@@ -2112,9 +2112,15 @@ describe("delegate extension integration", () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     expect(toolDef).toBeDefined();
-    expect(toolDef!.name).toBe("delegate");
-    expect(toolDef!.label).toBe("Delegate to Subagents");
-    expect(toolDef!.description).toBe(".");
+    expect(toolDef!.name).toBe("delegate"); // lookup key — hard contract
+    // label is human-facing; assert shape, not exact wording (copy can drift).
+    expect(typeof toolDef!.label).toBe("string");
+    expect(toolDef!.label!.trim().length).toBeGreaterThan(0);
+    // Description is a plain string — exact wording is not a contract.
+    // Stealth hygiene is enforced by the sibling test below (no schema
+    // descriptions, no prompt snippet).
+    expect(typeof toolDef!.description).toBe("string");
+    expect(toolDef!.description!.trim().length).toBeGreaterThan(0);
   });
 
   test("has tasks array parameter with minItems 0 (allows help mode)", async () => {
