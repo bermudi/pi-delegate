@@ -33,6 +33,15 @@ import type {
   ToolActivity,
 } from "./types.ts";
 
+let __retryBaseMsOverride: number | undefined;
+
+/** Test-only: override the default retryBaseMs for all runAgent calls.
+ *  Lets test suites shrink backoff without real-clock sleeps. Pass undefined
+ *  to reset. No effect in production code — only runAgent consults this. */
+export function setRetryBaseMsForTesting(ms?: number): void {
+  __retryBaseMsOverride = ms;
+}
+
 export function createAgent(
   config: AgentRunConfig,
   modelRegistry: ModelRegistry,
@@ -336,7 +345,7 @@ export async function runAgent(
       const isRateLimit = isRateLimitError(result.error);
       const { delay } = computeRetryDelay(
         attempt,
-        retryBaseMs,
+        __retryBaseMsOverride ?? retryBaseMs,
         taskIndex,
         isRateLimit,
       );

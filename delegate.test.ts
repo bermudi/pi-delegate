@@ -45,6 +45,7 @@ import {
   isRetryableError,
   isRateLimitError,
   computeRetryDelay,
+  RATE_LIMIT_BACKOFF_MULTIPLIER,
   runAgent,
   runAgentOnce,
   readDelegateSettingsFile,
@@ -1674,38 +1675,41 @@ describe("computeRetryDelay", () => {
   test("rate-limit backoff doubles and caps at 5min", () => {
     const orig = Math.random;
     Math.random = () => 0;
+    // Rate-limit rawBase = retryBaseMs * RATE_LIMIT_BACKOFF_MULTIPLIER (= 30_000).
+    // baseDelay = rawBase * 2^attempt; delay = min(baseDelay, 300_000).
+    const rlBase = 2000 * RATE_LIMIT_BACKOFF_MULTIPLIER;
     expect(computeRetryDelay(0, 2000, 0, true)).toMatchObject({
-      baseDelay: 30_000,
+      baseDelay: rlBase,
       jitter: 0,
       stagger: 0,
-      delay: 30_000,
+      delay: rlBase,
     });
     expect(computeRetryDelay(1, 2000, 0, true)).toMatchObject({
-      baseDelay: 60_000,
+      baseDelay: rlBase * 2,
       jitter: 0,
       stagger: 0,
-      delay: 60_000,
+      delay: rlBase * 2,
     });
     expect(computeRetryDelay(2, 2000, 0, true)).toMatchObject({
-      baseDelay: 120_000,
+      baseDelay: rlBase * 4,
       jitter: 0,
       stagger: 0,
-      delay: 120_000,
+      delay: rlBase * 4,
     });
     expect(computeRetryDelay(3, 2000, 0, true)).toMatchObject({
-      baseDelay: 240_000,
+      baseDelay: rlBase * 8,
       jitter: 0,
       stagger: 0,
-      delay: 240_000,
+      delay: rlBase * 8,
     });
     expect(computeRetryDelay(4, 2000, 0, true)).toMatchObject({
-      baseDelay: 480_000,
+      baseDelay: rlBase * 16,
       jitter: 0,
       stagger: 0,
       delay: 300_000,
     });
     expect(computeRetryDelay(10, 2000, 0, true)).toMatchObject({
-      baseDelay: 30_720_000,
+      baseDelay: rlBase * 1024,
       jitter: 0,
       stagger: 0,
       delay: 300_000,

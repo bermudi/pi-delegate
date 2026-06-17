@@ -1126,8 +1126,9 @@ function isRateLimitError(error) {
   if (!error) return false;
   return RATE_LIMIT_PATTERNS.some((p) => p.test(error));
 }
+var RATE_LIMIT_BACKOFF_MULTIPLIER = 15;
 function computeRetryDelay(attempt, retryBaseMs, taskIndex, isRateLimit) {
-  const rawBase = isRateLimit ? 3e4 : retryBaseMs;
+  const rawBase = isRateLimit ? retryBaseMs * RATE_LIMIT_BACKOFF_MULTIPLIER : retryBaseMs;
   const baseDelay = rawBase * Math.pow(2, attempt);
   const jitter = Math.random() * rawBase;
   const stagger = taskIndex * 1e4;
@@ -1212,6 +1213,10 @@ function extractUsage(messages) {
 }
 
 // runner.ts
+var __retryBaseMsOverride;
+function setRetryBaseMsForTesting(ms) {
+  __retryBaseMsOverride = ms;
+}
 function createAgent(config, modelRegistry, messages) {
   const tools = config.tools.map((name) => TOOL_FACTORIES[name]?.(config.cwd)).filter(Boolean);
   return new Agent({
@@ -1411,7 +1416,7 @@ async function runAgent(config, prompt, modelRegistry, signal, onProgress, sessi
       const isRateLimit = isRateLimitError(result.error);
       const { delay } = computeRetryDelay(
         attempt,
-        retryBaseMs,
+        __retryBaseMsOverride ?? retryBaseMs,
         taskIndex,
         isRateLimit
       );
@@ -1932,7 +1937,7 @@ function getSubagentManualMarkdown(agents) {
     "- `tools` \u2014 Array of tool names. Default: read, write, edit, bash.",
     "- `skills` \u2014 Skill names injected into the system prompt.",
     "- `thinking` \u2014 off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
-    "- `cwd` \u2014 Working directory. Default: parent session cwd.",
+    "- `cwd` \u2014 Working directory for the subagent (settings, skills, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
     "- `context` \u2014 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive \u2014 use deliberately).",
     "- `sessionId` \u2014 Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
     "- `action` \u2014 Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
@@ -2724,6 +2729,7 @@ export {
   DEFAULT_SUBAGENT_SYSTEM_PROMPT,
   DEFAULT_TOOLS,
   MAX_CONCURRENCY,
+  RATE_LIMIT_BACKOFF_MULTIPLIER,
   RATE_LIMIT_PATTERNS,
   RETRYABLE_PATTERN,
   RETRYABLE_PATTERNS,
@@ -2784,6 +2790,7 @@ export {
   setDefaultModel,
   setMaxConcurrent,
   setModelOverride,
+  setRetryBaseMsForTesting,
   shortenPath,
   sweepPool,
   sweepTickets,

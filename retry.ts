@@ -58,6 +58,11 @@ export function isRateLimitError(error: string): boolean {
   return RATE_LIMIT_PATTERNS.some((p) => p.test(error));
 }
 
+/** Rate limits need much longer backoff than transient network errors.
+ *  Multiplied against retryBaseMs so test suites can shrink all backoff by
+ *  passing a small retryBaseMs — production default (2000) yields 30s. */
+export const RATE_LIMIT_BACKOFF_MULTIPLIER = 15;
+
 /** Pure helper for retry backoff math. Exported for testing. */
 export function computeRetryDelay(
   attempt: number,
@@ -65,7 +70,7 @@ export function computeRetryDelay(
   taskIndex: number,
   isRateLimit: boolean,
 ): { baseDelay: number; jitter: number; stagger: number; delay: number } {
-  const rawBase = isRateLimit ? 30_000 : retryBaseMs;
+  const rawBase = isRateLimit ? retryBaseMs * RATE_LIMIT_BACKOFF_MULTIPLIER : retryBaseMs;
   const baseDelay = rawBase * Math.pow(2, attempt);
   const jitter = Math.random() * rawBase;
   const stagger = taskIndex * 10_000;

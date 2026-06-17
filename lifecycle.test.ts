@@ -24,7 +24,11 @@ import { createTestSession } from "@marcfargas/pi-test-harness";
 // go through execute() (e.g., list action for pool state, poll for tickets).
 // We import these only for cleanup in afterEach (clearing our own module's maps
 // to avoid leaking between test file runs).
-import { agentPool, ticketRegistry } from "./delegate.ts";
+import {
+  agentPool,
+  ticketRegistry,
+  setRetryBaseMsForTesting,
+} from "./delegate.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
 
@@ -925,8 +929,10 @@ describe("delegate retry and error recovery", () => {
   let ts: TestSession | undefined;
 
   beforeEach(() => {
-    // Make retries fast — 0ms base, 0ms jitter via Math.random stub.
+    // Make retries fast — shrink backoff to 1ms via test setter, zero jitter
+    // via Math.random stub. Without this, rate-limit tests sleep real 30s+.
     Math.random = () => 0;
+    setRetryBaseMsForTesting(1);
   });
 
   afterEach(() => {
@@ -935,6 +941,7 @@ describe("delegate retry and error recovery", () => {
     ticketRegistry.clear();
     ts?.dispose();
     ts = undefined;
+    setRetryBaseMsForTesting(undefined);
   });
 
   test("transient error → retry → success", async () => {
@@ -995,7 +1002,7 @@ describe("delegate retry and error recovery", () => {
 
     expect(details.results[0]?.error).toBeUndefined();
     expect(details.results[0]?.output).toContain("Rate limit cleared");
-  }, 60_000); // 30s base backoff + overhead
+  });
 
   test("non-retryable error → immediate failure, no retry", async () => {
     let callCount = 0;
@@ -1060,7 +1067,7 @@ describe("delegate retry and error recovery", () => {
     // Default maxRetries is 3, so 1 initial + 3 retries = 4 calls
     expect(callCount).toBeGreaterThan(1);
     expect(details.results[0]?.error).toContain("connection refused");
-  }, 30_000); // 2s + 4s + 8s backoff delays
+  });
 
   test("succeeds after multiple retries (clean transcript via snapshot/restore)", async () => {
     let callCount = 0;
@@ -1114,7 +1121,7 @@ describe("delegate retry and error recovery", () => {
       expect(Math.abs(third - second)).toBeLessThanOrEqual(1);
       expect(Math.abs(third - first)).toBeLessThanOrEqual(2);
     }
-  }, 15_000); // 2s + 4s backoff delays
+  });
 });
 
 // ── Abort Behavior ───────────────────────────────────────────────────────────
