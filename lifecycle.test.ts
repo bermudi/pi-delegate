@@ -18,12 +18,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { createTestSession } from "@marcfargas/pi-test-harness";
-// NOTE: The test harness loads the extension via jiti, creating a separate module
-// instance. The imported `agentPool` and `ticketRegistry` are the TEST MODULE's
-// copies, NOT the extension's. To observe the extension's internal state, we must
-// go through execute() (e.g., list action for pool state, poll for tickets).
-// We import these only for cleanup in afterEach (clearing our own module's maps
-// to avoid leaking between test file runs).
+// The test harness loads the extension via jiti. Under bun, jiti shares its
+// module graph with native imports, so the `agentPool`/`ticketRegistry`/
+// `setRetryBaseMsForTesting` imported below are the SAME instances the
+// extension uses — verified empirically (imported agentPool sees sessions
+// created via execute(); the retry-base override reaches the extension's
+// runAgent). We clear them in afterEach to avoid leaking between test runs.
 import { agentPool, ticketRegistry } from "./delegate.ts";
 import { setRetryBaseMsForTesting } from "./runner.ts";
 
