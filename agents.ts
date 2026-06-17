@@ -174,7 +174,7 @@ export function loadAgentsMdFiles(cwd: string): string[] {
 
 // ── Subagent Prompt Assembly ──────────────────────────────────────────────
 
-const DEFAULT_SUBAGENT_SYSTEM_PROMPT = "You are a helpful coding assistant.";
+export const DEFAULT_SUBAGENT_SYSTEM_PROMPT = "You are a helpful coding assistant.";
 
 function firstNonBlank(
   ...values: Array<string | undefined>
@@ -200,6 +200,7 @@ function appendPromptSections(
 export function buildSubagentSystemPrompt(options: {
   taskSystemPrompt?: string;
   agentSystemPrompt?: string;
+  parentSystemPrompt?: string;
   pooledSystemPrompt?: string;
   skillBodies: string[];
   agentsMdFiles: string[];
@@ -210,8 +211,11 @@ export function buildSubagentSystemPrompt(options: {
   if (options.pooledSystemPrompt?.trim()) return options.pooledSystemPrompt;
 
   const base =
-    firstNonBlank(options.taskSystemPrompt, options.agentSystemPrompt) ??
-    DEFAULT_SUBAGENT_SYSTEM_PROMPT;
+    firstNonBlank(
+      options.taskSystemPrompt,
+      options.agentSystemPrompt,
+      options.parentSystemPrompt,
+    ) ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT;
   const agentsMdContext = options.agentsMdFiles.length
     ? options.agentsMdFiles.join("\n\n")
     : undefined;
