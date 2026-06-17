@@ -86,7 +86,8 @@ export {
   isRetryableError,
   isRateLimitError,
   computeRetryDelay,
+  RATE_LIMIT_BACKOFF_MULTIPLIER,
 } from "./retry.ts";
-export { runAgentOnce, runAgent } from "./runner.ts";
+export { runAgentOnce, runAgent, setRetryBaseMsForTesting } from "./runner.ts";
 export { commitPoolCleanup } from "./lifecycle.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";
