@@ -145,7 +145,7 @@ describe("delegate task lifecycle integration", () => {
     expect(details.results[0]?.agent).toBe("inline");
   });
 
-  test("inline prompt does not inherit parent tool prompt or duplicate AGENTS.md", async () => {
+  test("ad-hoc prompt inherits parent system prompt and appends AGENTS.md", async () => {
     const projectInstruction = "SPAWN_PROMPT_HYGIENE_PROJECT_CONTEXT";
     let capturedSystemPrompt = "";
     mock.module("@mariozechner/pi-ai", (orig) => ({
@@ -171,9 +171,8 @@ describe("delegate task lifecycle integration", () => {
       const ctx = getExecContext(ts);
       (ctx as any).getSystemPrompt = () =>
         [
-          "PARENT_EFFECTIVE_PROMPT_SHOULD_NOT_LEAK",
+          "PARENT_EFFECTIVE_PROMPT_SHOULD_BE_INHERITED",
           "- delegate: verbose parent tool docs",
-          projectInstruction,
         ].join("\n");
 
       const result = await toolDef.execute(
@@ -189,12 +188,9 @@ describe("delegate task lifecycle integration", () => {
       };
       expect(details.results[0]?.error).toBeUndefined();
       expect(capturedSystemPrompt).toContain(
-        "You are a helpful coding assistant.",
+        "PARENT_EFFECTIVE_PROMPT_SHOULD_BE_INHERITED",
       );
-      expect(capturedSystemPrompt).not.toContain(
-        "PARENT_EFFECTIVE_PROMPT_SHOULD_NOT_LEAK",
-      );
-      expect(capturedSystemPrompt).not.toContain("verbose parent tool docs");
+      expect(capturedSystemPrompt).toContain("verbose parent tool docs");
       expect(capturedSystemPrompt.split(projectInstruction).length - 1).toBe(1);
     } finally {
       fs.rmSync(taskCwd, { recursive: true, force: true });
@@ -229,6 +225,62 @@ describe("delegate task lifecycle integration", () => {
     expect(details.results).toHaveLength(1);
     expect(details.results[0]?.error).toBeUndefined();
     expect(details.results[0]?.output).toContain("All good");
+  });
+
+  test("named agent prompt overrides inherited parent system prompt", async () => {
+    let capturedSystemPrompt = "";
+    mock.module("@mariozechner/pi-ai", (orig) => ({
+      ...orig,
+      streamSimple: (_model: unknown, context: { systemPrompt?: string }) => {
+        capturedSystemPrompt = context.systemPrompt ?? "";
+        return mockStream("Named agent ran.");
+      },
+    }));
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts);
+
+    const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-named-"));
+    try {
+      const agentDir = path.join(taskCwd, ".pi", "agents");
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(agentDir, "reviewer.md"),
+        [
+          "---",
+          "name: reviewer",
+          "description: Reviews code",
+          "---",
+          "NAMED_AGENT_SYSTEM_PROMPT",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const toolDef = getDelegateTool(ts);
+      const baseCtx = getExecContext(ts);
+      const ctx = Object.create(baseCtx) as typeof baseCtx;
+      Object.defineProperty(ctx, "cwd", { value: taskCwd });
+      Object.defineProperty(ctx, "getSystemPrompt", {
+        value: () => "PARENT_PROMPT_SHOULD_NOT_WIN",
+      });
+
+      const result = await toolDef.execute(
+        "tc-named-prompt",
+        { tasks: [{ agent: "reviewer", prompt: "review" }] },
+        undefined,
+        undefined,
+        ctx,
+      );
+
+      const details = (result as any).details as {
+        results: Array<{ error?: string }>;
+      };
+      expect(details.results[0]?.error).toBeUndefined();
+      expect(capturedSystemPrompt).toContain("NAMED_AGENT_SYSTEM_PROMPT");
+      expect(capturedSystemPrompt).not.toContain("PARENT_PROMPT_SHOULD_NOT_WIN");
+    } finally {
+      fs.rmSync(taskCwd, { recursive: true, force: true });
+    }
   });
 
   test("parent model with no auth falls back to available alternative", async () => {

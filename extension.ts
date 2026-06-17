@@ -8,7 +8,11 @@ import {
   getMarkdownTheme,
   type ExtensionAPI,
 } from "@mariozechner/pi-coding-agent";
-import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
+import {
+  DEFAULT_TOOLS,
+  VALID_THINKING,
+  POOL_TTL_MS,
+} from "./constants.ts";
 import { TOOL_FACTORIES, expandToolsStar } from "./tools.ts";
 import { agentPool, sweepPool } from "./pool.ts";
 import {
@@ -187,7 +191,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     '{ "prompt": "", "sessionId": "auth-research", "action": "close" }',
     "```",
     "",
-    "Pooled agents are automatically closed after 10 minutes of inactivity.",
+    `Pooled agents are automatically closed after ${POOL_TTL_MS / 60_000} minutes of inactivity.`,
     "",
     "## Resuming Previous Sessions",
     "",
@@ -222,7 +226,18 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     '- `delegate({ action: "poll", ticket: "abc123" })` \u2014 check one ticket',
     '- `delegate({ action: "cancel", ticket: "abc123" })` \u2014 abort a running ticket',
     "",
-    "Max 5 concurrent async tickets. Results are delivered automatically when all tasks finish. Poll for progress while running, but avoid polling in a tight loop \u2014 do other work while waiting.",
+    `Max ${getMaxAsyncTickets()} concurrent async tickets. Results are delivered automatically when all tasks finish. Poll for progress while running, but avoid polling in a tight loop \u2014 do other work while waiting.`,
+    "",
+    "## Gotchas",
+    "",
+    "- Subagents only get `read`, `write`, `edit`, `bash` \u2014 MCP and extension tools are never available. The `tools` field accepts only those four.",
+    "- `skills` injects a skill's SKILL.md *instructions* into the system prompt (text). It does not unlock extra tools.",
+    `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
+    "- `with-parent-transcript` injects your entire conversation. A 50k-token session means the subagent starts 50k tokens deep.",
+    "",
+    "## Config",
+    "",
+    "Tunables live in `~/.pi/agent/delegate.json`: `maxConcurrent` (sync ceiling), `maxAsyncTickets` (background ticket cap), per-model/per-provider concurrency limits, and global model overrides.",
   ].join("\n");
 }
 
@@ -357,6 +372,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         );
       }
 
+      const getParentSystemPrompt = (
+        ctx as { getSystemPrompt?: () => string | undefined }
+      ).getSystemPrompt;
+      const parentSystemPrompt =
+        typeof getParentSystemPrompt === "function"
+          ? getParentSystemPrompt.call(ctx)
+          : undefined;
+
       const resolved = tasks.map((t, i) => {
         const agent = t.agent ? agents.get(t.agent) : undefined;
         const cwd = resolveCwd(t.cwd ?? ctx.cwd);
@@ -368,10 +391,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             ? settings.agentOverrides[t.agent]
             : undefined;
 
-        // Build system prompt without inheriting the parent's full effective
-        // prompt. The parent prompt contains the parent tool catalogue,
-        // promptGuidelines, and project context; subagents get their own lean
-        // base prompt plus explicit skills/AGENTS.md injection below.
+        // Build system prompt. Explicit task prompts and named agent prompts
+        // win; ad-hoc subagents inherit the parent prompt when Pi exposes it,
+        // then get explicit skills/AGENTS.md injection below.
         const pooledConfig = t.sessionId
           ? agentPool.get(t.sessionId)?.config
           : undefined;
@@ -405,6 +427,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const systemPrompt = buildSubagentSystemPrompt({
           taskSystemPrompt: t.systemPrompt,
           agentSystemPrompt: agent?.systemPrompt,
+          parentSystemPrompt,
           pooledSystemPrompt: pooledConfig?.systemPrompt,
           skillBodies,
           agentsMdFiles,
