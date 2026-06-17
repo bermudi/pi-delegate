@@ -11,6 +11,7 @@ import {
 
 // constants.ts
 var DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
+var READONLY_TOOLS = ["read", "grep", "find", "ls"];
 var MAX_CONCURRENCY = 3;
 var POOL_TTL_MS = 10 * 60 * 1e3;
 var MAX_ASYNC_TICKETS = 5;
@@ -29,19 +30,33 @@ var VALID_THINKING = /* @__PURE__ */ new Set([
 import {
   createBashTool,
   createEditTool,
+  createFindTool,
+  createGrepTool,
+  createLsTool,
   createReadTool,
   createWriteTool
 } from "@mariozechner/pi-coding-agent";
+var TOOL_GROUPS = {
+  "*": DEFAULT_TOOLS,
+  ro: READONLY_TOOLS
+};
 var TOOL_FACTORIES = {
   read: createReadTool,
   write: createWriteTool,
   edit: createEditTool,
-  bash: createBashTool
+  bash: createBashTool,
+  grep: createGrepTool,
+  find: createFindTool,
+  ls: createLsTool
 };
-function expandToolsStar(tools) {
-  if (!tools.includes("*")) return tools;
-  const allNames = Object.keys(TOOL_FACTORIES);
-  return [.../* @__PURE__ */ new Set([...allNames, ...tools.filter((t) => t !== "*")])];
+function resolveToolGroups(tools) {
+  const resolved = [];
+  for (const t of tools) {
+    const group = TOOL_GROUPS[t];
+    if (group) resolved.push(...group);
+    else resolved.push(t);
+  }
+  return [...new Set(resolved)];
 }
 
 // format.ts
@@ -721,9 +736,10 @@ function loadAgentFile(filePath) {
     description: data.description,
     model: data.model,
     thinking: VALID_THINKING.has(data.thinking ?? "") ? data.thinking : "off",
-    tools: expandToolsStar(
-      data.tools ? data.tools.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_TOOLS
-    ),
+    tools: data.tools ? resolveToolGroups(
+      data.tools.split(",").map((s) => s.trim()).filter(Boolean)
+    ) : [],
+    // named agents must declare tools; empty triggers a resolution error
     skills: data.skills ? data.skills.split(",").map((s) => s.trim()).filter(Boolean) : [],
     systemPrompt: body
   };
@@ -1919,7 +1935,7 @@ function getSubagentManualMarkdown(agents) {
     "description: What it does",
     "model: anthropic/claude-haiku-4-5  # optional",
     "thinking: low                     # off/minimal/low/medium/high/xhigh",
-    "tools: read, bash                 # default: all 4 core tools. Use * for all.",
+    "tools: *                          # * = full agent. ro = read-only. Named agents must declare.",
     "skills: web-content               # comma-separated skill names",
     "---",
     "You are a helpful agent...",
@@ -1931,7 +1947,7 @@ function getSubagentManualMarkdown(agents) {
     "- `agent` \u2014 Named agent from the list above. Inline fields override agent defaults.",
     "- `systemPrompt` \u2014 System prompt. Falls back to agent definition, then parent session system prompt.",
     "- `model` \u2014 e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
-    "- `tools` \u2014 Array of tool names. Default: read, write, edit, bash.",
+    "- `tools` \u2014 Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Inline tasks default to `*`; named agents must declare.",
     "- `skills` \u2014 Skill names injected into the system prompt.",
     "- `thinking` \u2014 off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
     "- `cwd` \u2014 Working directory for the subagent (settings, skills, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
@@ -1995,7 +2011,8 @@ function getSubagentManualMarkdown(agents) {
     "",
     "## Gotchas",
     "",
-    "- Subagents only get `read`, `write`, `edit`, `bash` \u2014 MCP and extension tools are never available. The `tools` field accepts only those four.",
+    '- `*` means the full agent (read, write, edit, bash), not "every tool." The grep/find/ls trio exists only for `ro` (read-only) agents where bash is unavailable \u2014 bash already subsumes them.',
+    "- Named agent profiles must declare a `tools:` field; inline tasks default to `*`.",
     "- `skills` injects a skill's SKILL.md *instructions* into the system prompt (text). It does not unlock extra tools.",
     `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
     "- `with-parent-transcript` injects your entire conversation. A 50k-token session means the subagent starts 50k tokens deep.",
@@ -2185,7 +2202,7 @@ function delegateExtension(pi) {
             );
           }
           const isPoolHit = t.sessionId ? agentPool.has(t.sessionId) : false;
-          tools = expandToolsStar(
+          tools = resolveToolGroups(
             t.tools ?? agentOverride?.tools ?? agent?.tools ?? (isPoolHit ? pooledConfig?.tools : void 0) ?? DEFAULT_TOOLS
           );
           const unknownTools = tools.filter(
@@ -2194,6 +2211,11 @@ function delegateExtension(pi) {
           if (unknownTools.length) {
             warnings.push(
               `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`
+            );
+          }
+          if (agent && agent.tools.length === 0 && !t.tools && !agentOverride?.tools) {
+            throw new Error(
+              `Task ${i}: agent "${t.agent}" has no \`tools:\` field. Declare one, e.g. \`tools: *\` (full) or \`tools: ro\` (read-only).`
             );
           }
           const thinkingRaw = t.thinking ?? agentOverride?.thinking ?? agent?.thinking ?? (isPoolHit ? pooledConfig?.thinking : void 0) ?? "off";
@@ -2728,6 +2750,7 @@ export {
   MAX_CONCURRENCY,
   RATE_LIMIT_BACKOFF_MULTIPLIER,
   RATE_LIMIT_PATTERNS,
+  READONLY_TOOLS,
   RETRYABLE_PATTERN,
   RETRYABLE_PATTERNS,
   TOOL_FACTORIES,
@@ -2743,7 +2766,6 @@ export {
   delegateExtension as default,
   deliverTicketResults,
   discoverAgents,
-  expandToolsStar,
   extractOutput,
   extractTextContent,
   extractTouchedFromActivities,
@@ -2778,6 +2800,7 @@ export {
   resolveCwd,
   resolveModel,
   resolveModelSpec,
+  resolveToolGroups,
   runAgent,
   runAgentOnce,
   saveDelegateConfigAtomic,

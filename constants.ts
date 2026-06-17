@@ -1,4 +1,9 @@
+/** Full-capability agent set. Inline-task default and the `*` shorthand.
+ *  Bash subsumes search, so the dedicated grep/find/ls tools are excluded. */
 export const DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
+
+/** Read-only scout set: search without a shell. The `ro` shorthand. */
+export const READONLY_TOOLS = ["read", "grep", "find", "ls"];
 
 /** Maximum concurrent subagent tasks. Prevents rate-limit thundering herds. */
 export const MAX_CONCURRENCY = 3;
