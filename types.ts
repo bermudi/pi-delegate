@@ -1,10 +1,10 @@
-import type {
-  Agent,
-  AgentMessage,
-  ThinkingLevel,
-} from "@mariozechner/pi-agent-core";
+import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import type { Api, Model } from "@mariozechner/pi-ai";
-import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
+import type {
+  AgentSession,
+  ModelRegistry,
+  SessionManager,
+} from "@mariozechner/pi-coding-agent";
 
 export interface AgentConfig {
   name: string;
@@ -12,7 +12,6 @@ export interface AgentConfig {
   model?: string;
   thinking: ThinkingLevel;
   tools: string[];
-  skills: string[];
   systemPrompt: string;
   scope?: "project" | "global";
 }
@@ -31,7 +30,6 @@ export interface TaskDef {
   prompt: string;
   agent?: string;
   model?: string;
-  skills?: string[];
   tools?: string[];
   thinking?: string;
   systemPrompt?: string;
@@ -65,7 +63,6 @@ export interface ResolvedTask {
   prompt: string;
   agent?: string;
   model: Model<Api>;
-  skills?: string[];
   tools: string[];
   thinking: ThinkingLevel;
   systemPrompt: string;
@@ -124,8 +121,8 @@ export interface TaskResult {
   touchedFiles: string[];
 }
 
-/** Single source of truth for an Agent's runtime configuration.
- *  Used by createAgent, rehydrateAgent, runAgent, and the pool. */
+/** Single source of truth for a subagent's runtime configuration.
+ *  Passed to `createAgentSession` as `model` / `thinkingLevel` / `tools` / `cwd`. */
 export interface AgentRunConfig {
   systemPrompt: string;
   model: Model<Api>;
@@ -142,14 +139,6 @@ export interface AgentProgressUpdate {
   activities: ToolActivity[];
 }
 
-export interface SessionManagerLike {
-  sessionFile?: string;
-  getSessionFile?(): string | undefined;
-  appendMessage?(msg: AgentMessage): void;
-  appendSessionInfo?(label: string): void;
-  getEntries?(): unknown[];
-}
-
 export interface TaskRunEnv {
   /** Abort signal — parent's for sync, ticket's for async. May be undefined when no parent signal is available. */
   signal: AbortSignal | undefined;
@@ -160,21 +149,22 @@ export interface TaskRunEnv {
   ticketId?: string;
   /** When the delegate started. Used for close/list progress (elapsed time). */
   delegateStartedAt: number;
-  /** Called for every progress update from runAgent. */
+  /** Called for every progress update from runAgentSession. */
   onProgress: (p: TaskProgress, u: AgentProgressUpdate) => void;
   /** Called after every TaskProgress mutation (early-returns, completion). Sync uses this to fire onUpdate. */
   onStatusChange?: () => void;
 }
 
 export interface AcquiredSession {
-  agent: Agent;
-  sessionManager: SessionManagerLike | undefined;
+  /** The live AgentSession — constructed once and reused across prompts (pool hits). */
+  session: AgentSession;
+  sessionManager: SessionManager | undefined;
   sessionFile: string | undefined;
-  /** True if agent came from the pool (stateful multi-turn — skip retry). */
+  /** True if session came from the pool (stateful multi-turn). */
   isPoolHit: boolean;
-  /** True if this is a fresh agent that should be inserted into the pool after a successful run. */
+  /** True if this is a fresh session that should be inserted into the pool after a successful run. */
   shouldPoolAfter: boolean;
-  /** True if we synchronously inserted the agent into the pool (race protection).
+  /** True if we synchronously inserted the session into the pool (race protection).
    *  If the run fails, we may need to remove the empty entry to let a retry try fresh. */
   syncInserted: boolean;
 }

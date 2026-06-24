@@ -1,13 +1,16 @@
-import type { Agent } from "@mariozechner/pi-agent-core";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type {
+  AgentSession,
+  SessionManager,
+} from "@mariozechner/pi-coding-agent";
 import { POOL_TTL_MS } from "./constants.ts";
 import { fmtDuration, fmtTokens, shortenPath } from "./format.ts";
-import type { SessionManagerLike } from "./types.ts";
 
 interface PooledAgent {
-  agent: Agent;
-  sessionManager: SessionManagerLike;
+  /** The live AgentSession — reused across prompts for this sessionId. */
+  session: AgentSession;
+  sessionManager: SessionManager;
   sessionFile: string;
   /** Config frozen at creation time — used for validation on reuse. */
   config: {
@@ -19,9 +22,9 @@ interface PooledAgent {
   };
   lastUsed: number;
   createdAt: number;
-  /** Total tokens consumed across all prompts on this agent. */
+  /** Total tokens consumed across all prompts on this session. */
   totalTokens: number;
-  /** Number of prompts sent to this agent. */
+  /** Number of prompts sent to this session. */
   promptCount: number;
 }
 
@@ -58,12 +61,15 @@ export async function withSessionLock<T>(
   }
 }
 
-/** Close and remove a pooled agent. */
+/** Close and remove a pooled session. */
 export function closePooledAgent(sessionId: string): boolean {
   const pooled = agentPool.get(sessionId);
   if (!pooled) return false;
   try {
-    pooled.agent.abort();
+    // AgentSession.abort() cancels any in-flight model call / retry and waits for idle.
+    void pooled.session.abort().catch(() => {
+      /* best effort */
+    });
   } catch {
     /* best effort */
   }

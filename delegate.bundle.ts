@@ -1,7 +1,6 @@
 // @ts-nocheck
 
 // extension.ts
-import * as fs6 from "node:fs";
 import * as path8 from "node:path";
 import { Type } from "@sinclair/typebox";
 import { Text, Markdown } from "@mariozechner/pi-tui";
@@ -60,6 +59,7 @@ function resolveToolGroups(tools) {
 }
 
 // format.ts
+import * as fs from "node:fs";
 import * as path from "node:path";
 var SPINNER = ["\u280B", "\u2819", "\u2839", "\u2838", "\u283C", "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"];
 function spinnerFrame() {
@@ -235,6 +235,21 @@ function formatToolCallShort(name, args) {
     }
   }
 }
+function formatFailedTask(r) {
+  const parts = [];
+  const failParts = [r.error || "unknown error"];
+  if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
+  parts.push(`[FAILED: ${failParts.join(" \xB7 ")}]`);
+  if (r.sessionFile && fs.existsSync(r.sessionFile)) {
+    const safePath = JSON.stringify(r.sessionFile);
+    parts.push(
+      `\u2192 To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`
+    );
+  } else if (r.sessionFile) {
+    parts.push(`[no resumable session \u2014 re-dispatch as a fresh task]`);
+  }
+  return parts;
+}
 
 // pool.ts
 var agentPool = /* @__PURE__ */ new Map();
@@ -260,7 +275,8 @@ function closePooledAgent(sessionId) {
   const pooled = agentPool.get(sessionId);
   if (!pooled) return false;
   try {
-    pooled.agent.abort();
+    void pooled.session.abort().catch(() => {
+    });
   } catch {
   }
   agentPool.delete(sessionId);
@@ -290,7 +306,6 @@ function listPooledAgents() {
 }
 
 // tickets.ts
-import * as fs from "node:fs";
 import * as path2 from "node:path";
 var ticketRegistry = /* @__PURE__ */ new Map();
 function generateTicketId() {
@@ -342,16 +357,7 @@ function formatCompletedTicket(ticket) {
       for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
     }
     if ("error" in r && r.error) {
-      const failParts = [r.error];
-      if (r.sessionFile)
-        failParts.push(`session: ${shortenPath(r.sessionFile)}`);
-      parts.push(`[FAILED: ${failParts.join(" \xB7 ")}]`);
-      if (r.sessionFile && fs.existsSync(r.sessionFile)) {
-        const safePath = JSON.stringify(r.sessionFile);
-        parts.push(
-          `\u2192 To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`
-        );
-      }
+      parts.push(...formatFailedTask(r));
     } else {
       const meta = [
         `OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`
@@ -740,7 +746,6 @@ function loadAgentFile(filePath) {
       data.tools.split(",").map((s) => s.trim()).filter(Boolean)
     ) : [],
     // named agents must declare tools; empty triggers a resolution error
-    skills: data.skills ? data.skills.split(",").map((s) => s.trim()).filter(Boolean) : [],
     systemPrompt: body
   };
 }
@@ -836,17 +841,6 @@ function firstNonBlank(...values) {
     (v) => typeof v === "string" && v.trim().length > 0
   );
 }
-function appendPromptSections(systemPrompt, sections) {
-  let result = systemPrompt.trimEnd();
-  for (const section of sections) {
-    const body = section.trim();
-    if (!body) continue;
-    result = result ? `${result}
-
-${body}` : body;
-  }
-  return result || DEFAULT_SUBAGENT_SYSTEM_PROMPT;
-}
 function buildSubagentSystemPrompt(options) {
   if (options.pooledSystemPrompt?.trim()) return options.pooledSystemPrompt;
   const base = firstNonBlank(
@@ -854,11 +848,7 @@ function buildSubagentSystemPrompt(options) {
     options.agentSystemPrompt,
     options.parentSystemPrompt
   ) ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT;
-  const agentsMdContext = options.agentsMdFiles.length ? options.agentsMdFiles.join("\n\n") : void 0;
-  return appendPromptSections(base, [
-    ...options.skillBodies,
-    agentsMdContext ?? ""
-  ]);
+  return base;
 }
 
 // parent-context.ts
@@ -1035,21 +1025,45 @@ async function mapConcurrentByModel(items, getModelKey2, getConcurrency, fn, sig
 }
 
 // lifecycle.ts
-import * as fs5 from "node:fs";
+import * as fs6 from "node:fs";
+import {
+  createAgentSession,
+  SessionManager as SessionManager2
+} from "@mariozechner/pi-coding-agent";
 
 // sessions.ts
-import {
-  SessionManager
-} from "@mariozechner/pi-coding-agent";
-
-// runner.ts
-import {
-  Agent
-} from "@mariozechner/pi-agent-core";
-import { streamSimple } from "@mariozechner/pi-ai";
-import {
-  convertToLlm
-} from "@mariozechner/pi-coding-agent";
+import * as fs5 from "node:fs";
+import { SessionManager } from "@mariozechner/pi-coding-agent";
+function setParentSession(sm, parentPath) {
+  const header = (
+    // @ts-expect-error — accessing private fileEntries to mutate header's parentSession
+    sm.fileEntries[0]
+  );
+  if (header && header.type === "session") {
+    header.parentSession = parentPath;
+  }
+}
+function createSubagentSessionManager(parentSessionManager, cwd) {
+  const parentFile = parentSessionManager?.getSessionFile?.();
+  const sm = SessionManager.create(cwd);
+  const sessionFile = sm.getSessionFile();
+  if (!sessionFile) return void 0;
+  if (parentFile) {
+    setParentSession(sm, parentFile);
+  }
+  return { manager: sm, file: sessionFile };
+}
+function persistSessionHeader(sm) {
+  const inner = sm;
+  const file = inner.getSessionFile?.();
+  if (!file) return false;
+  if (fs5.existsSync(file)) return true;
+  try {
+    inner._rewriteFile?.();
+  } catch {
+  }
+  return fs5.existsSync(file);
+}
 
 // file-tracking.ts
 import { execFile } from "node:child_process";
@@ -1090,93 +1104,6 @@ function extractTouchedFromActivities(activities, cwd) {
     files.add(path6.resolve(cwd, raw));
   }
   return [...files];
-}
-
-// retry.ts
-var RETRYABLE_PATTERNS = [
-  /rate\s*limit/i,
-  /too many requests/i,
-  /\b429\b/,
-  /overloaded/i,
-  /service unavailable/i,
-  /temporar(?:ily)? unavailable/i,
-  /provider.*unavailable/i,
-  /model.*unavailable/i,
-  /model.*disabled/i,
-  /model.*not found/i,
-  /unknown model/i,
-  /connection refused/i,
-  /connection.*(?:error|lost)/i,
-  /other side closed/i,
-  /reset before headers/i,
-  /fetch failed/i,
-  /network error/i,
-  /socket hang up/i,
-  /ended without/i,
-  /http2 request did not get a response/i,
-  /upstream/i,
-  /timed? out/i,
-  /\btimeout\b/i,
-  /\b500\b/,
-  /\b502\b/,
-  /\b503\b/,
-  /\b504\b/,
-  /retry delay/i
-];
-var RETRYABLE_PATTERN = new RegExp(
-  RETRYABLE_PATTERNS.map((p) => p.source).join("|"),
-  "i"
-);
-function isRetryableError(error) {
-  if (!error) return false;
-  return RETRYABLE_PATTERNS.some((p) => p.test(error));
-}
-var RATE_LIMIT_PATTERNS = [
-  /rate\s*limit/i,
-  /too many requests/i,
-  /\b429\b/,
-  /overloaded/i,
-  /retry delay/i
-];
-function isRateLimitError(error) {
-  if (!error) return false;
-  return RATE_LIMIT_PATTERNS.some((p) => p.test(error));
-}
-var RATE_LIMIT_BACKOFF_MULTIPLIER = 15;
-function computeRetryDelay(attempt, retryBaseMs, taskIndex, isRateLimit) {
-  const rawBase = isRateLimit ? retryBaseMs * RATE_LIMIT_BACKOFF_MULTIPLIER : retryBaseMs;
-  const baseDelay = rawBase * Math.pow(2, attempt);
-  const jitter = Math.random() * rawBase;
-  const stagger = taskIndex * 1e4;
-  const delay = Math.min(
-    baseDelay + jitter + stagger,
-    isRateLimit ? 3e5 : 6e4
-  );
-  return { baseDelay, jitter, stagger, delay };
-}
-var AbortError = class extends Error {
-  name = "AbortError";
-  constructor() {
-    super("Aborted");
-  }
-};
-async function sleepWithAbort(ms, signal) {
-  if (signal?.aborted) return;
-  return new Promise((resolve5, reject) => {
-    const timer = setTimeout(resolve5, ms);
-    if (signal) {
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(new AbortError());
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      if (signal.aborted) {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-        reject(new AbortError());
-      }
-    }
-  });
 }
 
 // utils.ts
@@ -1229,40 +1156,16 @@ function extractUsage(messages) {
 }
 
 // runner.ts
-var __retryBaseMsOverride;
-function createAgent(config, modelRegistry, messages) {
-  const tools = config.tools.map((name) => TOOL_FACTORIES[name]?.(config.cwd)).filter(Boolean);
-  return new Agent({
-    initialState: {
-      systemPrompt: config.systemPrompt,
-      model: config.model,
-      thinkingLevel: config.thinking,
-      tools,
-      ...messages ? { messages } : {}
-    },
-    convertToLlm,
-    streamFn: async (m, context, options) => {
-      const auth = await modelRegistry.getApiKeyAndHeaders(m);
-      if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-      return streamSimple(m, context, {
-        ...options,
-        apiKey: auth.apiKey,
-        headers: auth.headers ?? void 0
-      });
-    }
-  });
-}
-async function runAgentOnce(agent, prompt, config, modelRegistry, signal, onProgress, sessionManager, gitBaseline, start, suppressSessionAppend = false) {
-  const startTime = start ?? Date.now();
-  const baseline = gitBaseline ?? /* @__PURE__ */ new Set();
+async function runAgentSession(session, prompt, config, signal, onProgress, gitBaseline, start) {
+  const startTime = start || Date.now();
   let toolUses = 0;
   let lastActivityAt;
   const activities = [];
   const pendingById = /* @__PURE__ */ new Map();
-  let usageBeforeTotal = 0;
+  const usageBeforeTotal = extractUsage(session.messages).total;
   const fireProgress = () => {
     if (!onProgress) return;
-    const usage = extractUsage(agent.state.messages);
+    const usage = extractUsage(session.messages);
     const delta = Math.max(0, usage.total - usageBeforeTotal);
     onProgress({
       tokens: delta,
@@ -1272,80 +1175,77 @@ async function runAgentOnce(agent, prompt, config, modelRegistry, signal, onProg
       activities: [...activities]
     });
   };
-  const unsubscribe = agent.subscribe((event) => {
-    if (event.type === "tool_execution_start") {
-      const now = Date.now();
-      lastActivityAt = now;
-      const activity = {
-        id: event.toolCallId,
-        name: event.toolName,
-        args: event.args,
-        startTime: now
-      };
-      pendingById.set(event.toolCallId, activity);
-      activities.push(activity);
-      fireProgress();
-    } else if (event.type === "tool_execution_update") {
-      lastActivityAt = Date.now();
-      const activity = pendingById.get(event.toolCallId);
-      if (activity) {
-        const text = extractTextFromPartialResult(event.partialResult);
-        if (text !== void 0) activity.liveOutput = text;
-        fireProgress();
-      }
-    } else if (event.type === "tool_execution_end") {
-      lastActivityAt = Date.now();
-      const activity = pendingById.get(event.toolCallId);
-      if (activity) {
-        activity.result = {
-          content: event.result?.content ?? [],
-          isError: event.isError
+  const unsubscribe = session.subscribe((event) => {
+    switch (event.type) {
+      case "tool_execution_start": {
+        const now = Date.now();
+        lastActivityAt = now;
+        const activity = {
+          id: event.toolCallId,
+          name: event.toolName,
+          args: event.args,
+          startTime: now
         };
-        activity.endTime = lastActivityAt;
-        pendingById.delete(event.toolCallId);
+        pendingById.set(event.toolCallId, activity);
+        activities.push(activity);
+        fireProgress();
+        break;
       }
-      toolUses++;
-      fireProgress();
-    } else if (event.type === "message_end") {
-      lastActivityAt = Date.now();
-      fireProgress();
+      case "tool_execution_update": {
+        lastActivityAt = Date.now();
+        const activity = pendingById.get(event.toolCallId);
+        if (activity) {
+          const text = extractTextFromPartialResult(event.partialResult);
+          if (text !== void 0) activity.liveOutput = text;
+          fireProgress();
+        }
+        break;
+      }
+      case "tool_execution_end": {
+        const now = Date.now();
+        lastActivityAt = now;
+        const activity = pendingById.get(event.toolCallId);
+        if (activity) {
+          activity.result = {
+            content: event.result?.content ?? [],
+            isError: event.isError
+          };
+          activity.endTime = now;
+          pendingById.delete(event.toolCallId);
+        }
+        toolUses++;
+        fireProgress();
+        break;
+      }
+      case "message_end": {
+        lastActivityAt = Date.now();
+        fireProgress();
+        break;
+      }
+      default:
+        break;
     }
   });
   let abortHandler;
   if (signal) {
     abortHandler = () => {
-      try {
-        agent.abort();
-      } catch {
-      }
+      void session.abort().catch(() => {
+      });
     };
     signal.addEventListener("abort", abortHandler, { once: true });
   }
   try {
-    const messagesBefore = agent.state.messages.length;
-    const usageBefore = extractUsage(agent.state.messages);
-    usageBeforeTotal = usageBefore.total;
-    await agent.prompt(prompt);
-    await agent.waitForIdle();
-    const state = agent.state;
+    const messagesBefore = session.messages.length;
+    await session.prompt(prompt);
+    const messages = session.messages;
+    const state = session.state;
     const errorMessage = state.errorMessage;
-    const output = extractOutput(state.messages.slice(messagesBefore));
-    const usageAfter = extractUsage(state.messages);
-    const tokensThisCall = usageAfter.total - usageBeforeTotal;
-    if (sessionManager && !suppressSessionAppend) {
-      try {
-        for (let mi = messagesBefore; mi < state.messages.length; mi++) {
-          const msg = state.messages[mi];
-          if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult" || msg.role === "custom") {
-            sessionManager.appendMessage?.(msg);
-          }
-        }
-      } catch {
-      }
-    }
+    const output = extractOutput(messages.slice(messagesBefore));
+    const usageAfterTotal = extractUsage(messages).total;
+    const tokensThisCall = Math.max(0, usageAfterTotal - usageBeforeTotal);
     const fromActivities = extractTouchedFromActivities(activities, config.cwd);
     const gitAfter = await getGitChangedFiles(config.cwd);
-    const fromGit = [...gitAfter].filter((f) => !baseline.has(f));
+    const fromGit = [...gitAfter].filter((f) => !gitBaseline.has(f));
     const touchedFiles = [.../* @__PURE__ */ new Set([...fromActivities, ...fromGit])];
     return {
       output: output || "(no output)",
@@ -1369,129 +1269,57 @@ async function runAgentOnce(agent, prompt, config, modelRegistry, signal, onProg
     unsubscribe();
   }
 }
-async function runAgent(config, prompt, modelRegistry, signal, onProgress, sessionManager, maxRetries = 3, retryBaseMs = 2e3, existingAgent, allowRetry = false, taskIndex = 0) {
-  const start = Date.now();
-  const gitBaseline = await getGitChangedFiles(config.cwd);
-  if (existingAgent && !allowRetry) {
-    return runAgentOnce(
-      existingAgent,
-      prompt,
-      config,
-      modelRegistry,
-      signal,
-      onProgress,
-      sessionManager,
-      gitBaseline,
-      start
-    );
-  }
-  let agent;
-  if (existingAgent) {
-    agent = existingAgent;
-  } else {
-    agent = createAgent(config, modelRegistry);
-  }
-  const messagesSnapshot = [...agent.state.messages];
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (signal?.aborted) {
-      return {
-        output: "",
-        error: "Aborted",
-        durationMs: Date.now() - start,
-        tokens: 0,
-        touchedFiles: []
-      };
-    }
-    if (attempt > 0 && onProgress)
-      onProgress({
-        tokens: 0,
-        toolUses: 0,
-        durationMs: Date.now() - start,
-        activities: []
-      });
-    if (attempt > 0) {
-      agent.state.messages = messagesSnapshot;
-    }
-    const messagesBeforeAttempt = agent.state.messages.length;
-    const result = await runAgentOnce(
-      agent,
-      prompt,
-      config,
-      modelRegistry,
-      signal,
-      onProgress,
-      sessionManager,
-      gitBaseline,
-      start,
-      true
-    );
-    if (result.error && attempt < maxRetries && isRetryableError(result.error)) {
-      const isRateLimit = isRateLimitError(result.error);
-      const { delay } = computeRetryDelay(
-        attempt,
-        __retryBaseMsOverride ?? retryBaseMs,
-        taskIndex,
-        isRateLimit
-      );
-      try {
-        await sleepWithAbort(delay, signal);
-      } catch (sleepErr) {
-        if (!(sleepErr instanceof AbortError)) throw sleepErr;
-      }
-      continue;
-    }
-    if (sessionManager && !result.error) {
-      try {
-        for (let mi = messagesBeforeAttempt; mi < agent.state.messages.length; mi++) {
-          const msg = agent.state.messages[mi];
-          if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult" || msg.role === "custom") {
-            sessionManager.appendMessage?.(msg);
-          }
-        }
-      } catch {
-      }
-    }
-    return result;
-  }
-  return {
-    output: "",
-    error: "Unknown error",
-    durationMs: Date.now() - start,
-    tokens: 0,
-    touchedFiles: []
-  };
-}
 
-// sessions.ts
-function rehydrateAgent(sessionFile, config, modelRegistry) {
+// host.ts
+import {
+  AuthStorage,
+  DefaultResourceLoader,
+  SettingsManager,
+  getAgentDir
+} from "@mariozechner/pi-coding-agent";
+var hostDepsCache = /* @__PURE__ */ new Map();
+var hostDepsInflight = /* @__PURE__ */ new Map();
+var testRetryBaseMs;
+async function getHostDeps(options) {
+  const key = `${options.cwd}\0${options.systemPrompt ?? ""}`;
+  const cached = hostDepsCache.get(key);
+  if (cached) return cached;
+  const inflight = hostDepsInflight.get(key);
+  if (inflight) return inflight;
+  const promise = (async () => {
+    const agentDir = options.agentDir ?? getAgentDir();
+    const authStorage = AuthStorage.create();
+    const settingsManager = SettingsManager.create(options.cwd, agentDir);
+    if (testRetryBaseMs !== void 0) {
+      installFastRetry(settingsManager, testRetryBaseMs);
+    }
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: options.cwd,
+      agentDir,
+      settingsManager,
+      // When a named agent supplies a custom prompt, it becomes the loader's
+      // customPrompt — overriding the default system prompt AgentSession would
+      // otherwise build. `systemPrompt` (the source) wins over file discovery.
+      ...options.systemPrompt !== void 0 ? { systemPrompt: options.systemPrompt } : {}
+    });
+    await resourceLoader.reload();
+    const deps = { authStorage, settingsManager, resourceLoader };
+    hostDepsCache.set(key, deps);
+    return deps;
+  })();
+  hostDepsInflight.set(key, promise);
   try {
-    const sm = SessionManager.open(sessionFile);
-    const ctx = sm.buildSessionContext();
-    if (!ctx.messages.length) return null;
-    const agent = createAgent(config, modelRegistry, ctx.messages);
-    return { agent, sessionManager: sm };
-  } catch {
-    return null;
+    return await promise;
+  } finally {
+    hostDepsInflight.delete(key);
   }
 }
-function setParentSession(sm, parentPath) {
-  const header = (
-    // @ts-expect-error — accessing private fileEntries to mutate header's parentSession
-    sm.fileEntries[0]
-  );
-  if (header && header.type === "session") {
-    header.parentSession = parentPath;
-  }
-}
-function createSubagentSessionManager(parentSessionManager, cwd) {
-  const parentFile = parentSessionManager?.getSessionFile?.();
-  const sm = SessionManager.create(cwd);
-  const sessionFile = sm.getSessionFile();
-  if (!sessionFile) return void 0;
-  if (parentFile) {
-    setParentSession(sm, parentFile);
-  }
-  return { manager: sm, file: sessionFile };
+function installFastRetry(sm, baseDelayMs) {
+  sm.getRetrySettings = (() => ({
+    enabled: true,
+    maxRetries: 3,
+    baseDelayMs
+  }));
 }
 
 // lifecycle.ts
@@ -1534,13 +1362,31 @@ function finishTask(env, p, r) {
   env.onStatusChange?.();
   return r;
 }
+async function buildDelegateSession(env, task, sessionManager) {
+  const hostDeps = await getHostDeps({
+    cwd: task.cwd,
+    systemPrompt: task.systemPrompt
+  });
+  const { session } = await createAgentSession({
+    cwd: task.cwd,
+    model: task.model,
+    thinkingLevel: task.thinking,
+    tools: task.tools,
+    sessionManager,
+    // Reuse the extension's shared registry (parent's) for consistent auth/model resolution.
+    modelRegistry: env.modelRegistry,
+    // Shared, read-only heavy deps (resourceLoader.reload() runs once per cwd, cached).
+    authStorage: hostDeps.authStorage,
+    settingsManager: hostDeps.settingsManager,
+    resourceLoader: hostDeps.resourceLoader
+  });
+  return session;
+}
 async function acquireAgentSession(env, task, p) {
-  let agent;
   let sessionManager;
   let sessionFile;
   let isPoolHit = false;
   let shouldPoolAfter = false;
-  let syncInserted = false;
   if (task.sessionId) {
     const pooled = agentPool.get(task.sessionId);
     if (pooled) {
@@ -1562,87 +1408,29 @@ async function acquireAgentSession(env, task, p) {
           )
         };
       }
-      agent = pooled.agent;
-      sessionManager = pooled.sessionManager;
-      sessionFile = pooled.sessionFile;
       pooled.lastUsed = Date.now();
       p.model = frozen.model.id;
-      isPoolHit = true;
-    } else {
-      if (task.resumeFrom) {
-        shouldPoolAfter = true;
-      } else {
-        const session = createSubagentSessionManager(
-          env.parentSessionManager,
-          task.cwd
-        );
-        sessionManager = session?.manager;
-        sessionFile = session?.file;
-        if (sessionFile) {
-          const rehydrated = rehydrateAgent(
-            sessionFile,
-            {
-              systemPrompt: task.systemPrompt,
-              model: task.model,
-              thinking: task.thinking,
-              tools: task.tools,
-              cwd: task.cwd
-            },
-            env.modelRegistry
-          );
-          if (rehydrated) {
-            agent = rehydrated.agent;
-            sessionManager = rehydrated.sessionManager;
-          }
-        }
-        if (!agent) {
-          agent = createAgent(
-            {
-              systemPrompt: task.systemPrompt,
-              model: task.model,
-              thinking: task.thinking,
-              tools: task.tools,
-              cwd: task.cwd
-            },
-            env.modelRegistry
-          );
-        }
-        if (task.sessionId && sessionManager && sessionFile) {
-          agentPool.set(task.sessionId, {
-            agent,
-            sessionManager,
-            sessionFile,
-            config: {
-              systemPrompt: task.systemPrompt,
-              model: task.model,
-              thinking: task.thinking,
-              tools: task.tools,
-              cwd: task.cwd
-            },
-            lastUsed: Date.now(),
-            createdAt: Date.now(),
-            totalTokens: 0,
-            promptCount: 0
-          });
-          syncInserted = true;
-        } else {
-          shouldPoolAfter = true;
-        }
-      }
+      return {
+        session: pooled.session,
+        sessionManager: pooled.sessionManager,
+        sessionFile: pooled.sessionFile,
+        isPoolHit: true,
+        shouldPoolAfter: false,
+        syncInserted: false
+      };
     }
   }
   if (task.resumeFrom) {
-    if (isPoolHit) {
+    if (task.sessionId && agentPool.has(task.sessionId)) {
       return {
         error: failTask(
           task,
-          `resumeFrom conflicts with active sessionId '${task.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`,
-          sessionFile
+          `resumeFrom conflicts with active sessionId '${task.sessionId}'. The pooled session has its own accumulated context. Close the session first if you want to resume from a different point.`
         )
       };
     }
     const resolvedPath = resolveCwd(task.resumeFrom);
-    if (!fs5.existsSync(resolvedPath)) {
+    if (!fs6.existsSync(resolvedPath)) {
       return {
         error: failTask(
           task,
@@ -1651,71 +1439,63 @@ async function acquireAgentSession(env, task, p) {
         )
       };
     }
-    const rehydrated = rehydrateAgent(
-      resolvedPath,
-      {
-        systemPrompt: task.systemPrompt,
-        model: task.model,
-        thinking: task.thinking,
-        tools: task.tools,
-        cwd: task.cwd
-      },
-      env.modelRegistry
-    );
-    if (!rehydrated) {
+    let resumed;
+    try {
+      resumed = SessionManager2.open(resolvedPath);
+    } catch {
       return {
         error: failTask(
           task,
-          `resumeFrom: empty or corrupt session: ${resolvedPath}`,
+          `resumeFrom: corrupt session: ${resolvedPath}`,
           resolvedPath
         )
       };
     }
-    agent = rehydrated.agent;
-    sessionManager = rehydrated.sessionManager;
-    sessionFile = resolvedPath;
-    const parentFile = env.parentSessionManager?.getSessionFile?.();
-    if (parentFile) {
-      setParentSession(
-        rehydrated.sessionManager,
-        parentFile
-      );
+    if (!resumed.buildSessionContext().messages.length) {
+      return {
+        error: failTask(
+          task,
+          `resumeFrom: empty session: ${resolvedPath}`,
+          resolvedPath
+        )
+      };
     }
+    const parentFile = env.parentSessionManager?.getSessionFile?.();
+    if (parentFile) setParentSession(resumed, parentFile);
+    const session2 = await buildDelegateSession(env, task, resumed);
+    return {
+      session: session2,
+      sessionManager: resumed,
+      sessionFile: resolvedPath,
+      isPoolHit: false,
+      // A resumed session under a sessionId becomes poolable after success.
+      shouldPoolAfter: Boolean(task.sessionId),
+      syncInserted: false
+    };
   }
-  if (!agent) {
-    const fresh = createSubagentSessionManager(
-      env.parentSessionManager,
-      task.cwd
-    );
-    sessionManager = fresh?.manager;
-    sessionFile = fresh?.file;
-    agent = createAgent(
-      {
-        systemPrompt: task.systemPrompt,
-        model: task.model,
-        thinking: task.thinking,
-        tools: task.tools,
-        cwd: task.cwd
-      },
-      env.modelRegistry
-    );
+  const fresh = createSubagentSessionManager(
+    env.parentSessionManager,
+    task.cwd
+  );
+  if (!fresh) {
+    return { error: failTask(task, "Internal: could not create session file") };
   }
-  if (!agent) {
-    return { error: failTask(task, "Internal: no agent acquired") };
-  }
+  sessionManager = fresh.manager;
+  sessionFile = fresh.file;
+  const session = await buildDelegateSession(env, task, sessionManager);
   return {
-    agent,
+    session,
     sessionManager,
     sessionFile,
-    isPoolHit,
-    shouldPoolAfter,
-    syncInserted
+    isPoolHit: false,
+    shouldPoolAfter: Boolean(task.sessionId),
+    syncInserted: false
   };
 }
 function commitPoolInsert(sessionId, task, acquired, result) {
   if (!acquired.sessionManager || !acquired.sessionFile) return;
   agentPool.set(sessionId, {
-    agent: acquired.agent,
+    session: acquired.session,
     sessionManager: acquired.sessionManager,
     sessionFile: acquired.sessionFile,
     config: {
@@ -1738,11 +1518,10 @@ function commitPoolStats(sessionId, result) {
   pooled.totalTokens += result.tokens;
   pooled.promptCount++;
 }
-function commitPoolCleanup(sessionId, acquiredAgent) {
-  const pooled = agentPool.get(sessionId);
-  if (!pooled) return;
-  if (pooled.agent !== acquiredAgent) return;
-  agentPool.delete(sessionId);
+function resolveResumableSessionFile(sessionFile, sessionManager, error) {
+  if (!sessionFile) return void 0;
+  if (error && sessionManager) persistSessionHeader(sessionManager);
+  return fs6.existsSync(sessionFile) ? sessionFile : void 0;
 }
 async function runResolvedTask(env, task, p, taskIndex) {
   if (task.sessionId) {
@@ -1803,40 +1582,22 @@ ${listPooledAgents().join("\n")}`,
       return finishTask(env, p, acquired.error);
     }
     const doRun = async () => {
-      const config = {
-        systemPrompt: task.systemPrompt,
-        model: task.model,
-        thinking: task.thinking,
-        tools: task.tools,
-        cwd: task.cwd
-      };
       try {
-        const r = await runAgent(
-          config,
+        const gitBaseline = await getGitChangedFiles(task.cwd);
+        const r = await runAgentSession(
+          acquired.session,
           task.prompt,
-          env.modelRegistry,
+          { cwd: task.cwd },
           env.signal,
           (u) => env.onProgress(p, u),
-          acquired.sessionManager,
-          void 0,
-          // maxRetries
-          2e3,
-          // retryBaseMs
-          acquired.agent,
-          // allowRetry: pooled agents carry accumulated state — retrying is unsafe.
-          // Fresh agents and resumed sessions are safe to retry.
-          !acquired.isPoolHit,
-          taskIndex
+          gitBaseline,
+          Date.now()
         );
-        if (task.sessionId) {
-          if (r.error && acquired.syncInserted) {
-            commitPoolCleanup(task.sessionId, acquired.agent);
-          } else if (!r.error) {
-            if (acquired.shouldPoolAfter) {
-              commitPoolInsert(task.sessionId, task, acquired, r);
-            } else {
-              commitPoolStats(task.sessionId, r);
-            }
+        if (task.sessionId && !r.error) {
+          if (acquired.shouldPoolAfter) {
+            commitPoolInsert(task.sessionId, task, acquired, r);
+          } else {
+            commitPoolStats(task.sessionId, r);
           }
         }
         return {
@@ -1845,13 +1606,14 @@ ${listPooledAgents().join("\n")}`,
           error: r.error,
           durationMs: r.durationMs,
           tokens: r.tokens,
-          sessionFile: acquired.sessionFile,
+          sessionFile: resolveResumableSessionFile(
+            acquired.sessionFile,
+            acquired.sessionManager,
+            r.error
+          ),
           touchedFiles: r.touchedFiles
         };
       } catch (err) {
-        if (acquired.syncInserted && task.sessionId) {
-          commitPoolCleanup(task.sessionId, acquired.agent);
-        }
         throw err;
       }
     };
@@ -1888,7 +1650,6 @@ var delegateParameters = Type.Object({
           Type.String({ enum: ["fresh", "with-parent-transcript"] })
         ),
         model: Type.Optional(Type.String()),
-        skills: Type.Optional(Type.Array(Type.String())),
         tools: Type.Optional(Type.Array(Type.String())),
         thinking: Type.Optional(
           Type.String({
@@ -1921,11 +1682,9 @@ function getSubagentManualMarkdown(agents) {
   return [
     "# Delegate Tool Manual",
     "",
-    "Delegate subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, skills, and thinking level.",
+    "Delegate subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, and thinking level.",
     "",
-    "## Named Agent Profiles",
-    "",
-    "Profiles are personas (system prompt + tool defaults), **not** a model catalog. A profile's `model:` is only a default \u2014 any `provider/model` from `pi --list-models` works via the `model` field, regardless of what profiles pin.",
+    "## Available Agents",
     "",
     agentList,
     "",
@@ -1938,7 +1697,6 @@ function getSubagentManualMarkdown(agents) {
     "model: anthropic/claude-haiku-4-5  # optional",
     "thinking: low                     # off/minimal/low/medium/high/xhigh",
     "tools: *                          # * = full agent. ro = read-only. Named agents must declare.",
-    "skills: web-content               # comma-separated skill names",
     "---",
     "You are a helpful agent...",
     "```",
@@ -1948,11 +1706,10 @@ function getSubagentManualMarkdown(agents) {
     "- `prompt` \u2014 The task for this subagent. Optional when `resumeFrom` is set (defaults to a continuation prompt).",
     "- `agent` \u2014 Named agent from the list above. Inline fields override agent defaults.",
     "- `systemPrompt` \u2014 System prompt. Falls back to agent definition, then parent session system prompt.",
-    "- `model` \u2014 Any `provider/model` from `pi --list-models` (run it for the full catalog; e.g. `opencode-go/deepseek-v4-pro`, `anthropic/claude-sonnet-4`). Falls back to the named agent's pinned model, then the parent model. Unavailable under the requested provider? It may resolve to the same id under another configured provider.",
+    "- `model` \u2014 e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
     "- `tools` \u2014 Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Inline tasks default to `*`; named agents must declare.",
-    "- `skills` \u2014 Skill names injected into the system prompt.",
     "- `thinking` \u2014 off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
-    "- `cwd` \u2014 Working directory for the subagent (settings, skills, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
+    "- `cwd` \u2014 Working directory for the subagent (settings, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
     "- `context` \u2014 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive \u2014 use deliberately).",
     "- `sessionId` \u2014 Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
     "- `action` \u2014 Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
@@ -2015,7 +1772,7 @@ function getSubagentManualMarkdown(agents) {
     "",
     '- `*` means the full agent (read, write, edit, bash), not "every tool." The grep/find/ls trio exists only for `ro` (read-only) agents where bash is unavailable \u2014 bash already subsumes them.',
     "- Named agent profiles must declare a `tools:` field; inline tasks default to `*`.",
-    "- `skills` injects a skill's SKILL.md *instructions* into the system prompt (text). It does not unlock extra tools.",
+    "- Subagents inherit all skills discovered in their `cwd` (via AgentSession's resource loader). Per-task skill filtering is not supported \u2014 curate the cwd's skill set instead.",
     `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
     "- `with-parent-transcript` injects your entire conversation. A 50k-token session means the subagent starts 50k tokens deep.",
     "",
@@ -2028,7 +1785,7 @@ function delegateExtension(pi) {
   pi.registerTool({
     name: "delegate",
     label: "Delegate to Subagents",
-    description: "Run the delegate tool with an empty task array for help text",
+    description: "Run the delegate tool with an empty task array for help text and a list of configured subagents.",
     parameters: delegateParameters,
     async execute(_id, params, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
@@ -2136,28 +1893,16 @@ function delegateExtension(pi) {
         const settings = loadDelegateSettings(cwd);
         const agentOverride = t.agent && settings?.agentOverrides?.[t.agent] ? settings.agentOverrides[t.agent] : void 0;
         const pooledConfig = t.sessionId ? agentPool.get(t.sessionId)?.config : void 0;
-        const usingPooledPrompt = Boolean(pooledConfig?.systemPrompt.trim());
         if (t.action !== "close" && t.action !== "list" && !t.resumeFrom && !t.prompt?.trim()) {
           throw new Error(
             `Task ${i}: prompt is required unless action is 'close'/'list' or resumeFrom is set.`
           );
         }
-        const skillNames = t.skills ?? agentOverride?.skills ?? agent?.skills ?? [];
-        const skillBodies = [];
-        if (!usingPooledPrompt) {
-          for (const name of skillNames) {
-            const content = loadSkill(name, cwd);
-            if (content) skillBodies.push(content);
-          }
-        }
-        const agentsMdFiles = usingPooledPrompt ? [] : loadAgentsMdFiles(cwd);
         const systemPrompt = buildSubagentSystemPrompt({
           taskSystemPrompt: t.systemPrompt,
           agentSystemPrompt: agent?.systemPrompt,
           parentSystemPrompt,
-          pooledSystemPrompt: pooledConfig?.systemPrompt,
-          skillBodies,
-          agentsMdFiles
+          pooledSystemPrompt: pooledConfig?.systemPrompt
         });
         let prompt = t.prompt || (t.resumeFrom ? "Continue from where you left off. Pick up the task and keep going." : t.prompt);
         const parentCtx = t.context === "with-parent-transcript" && parentTranscript ? parentTranscript : null;
@@ -2407,16 +2152,7 @@ function delegateExtension(pi) {
           for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
         }
         if (r.error) {
-          const failParts = [r.error];
-          if (r.sessionFile)
-            failParts.push(`session: ${shortenPath(r.sessionFile)}`);
-          parts.push(`[FAILED: ${failParts.join(" \xB7 ")}]`);
-          if (r.sessionFile && fs6.existsSync(r.sessionFile)) {
-            const safePath = JSON.stringify(r.sessionFile);
-            parts.push(
-              `\u2192 To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`
-            );
-          }
+          parts.push(...formatFailedTask(r));
         } else {
           const meta = [
             `OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`
@@ -2750,11 +2486,7 @@ export {
   DEFAULT_SUBAGENT_SYSTEM_PROMPT,
   DEFAULT_TOOLS,
   MAX_CONCURRENCY,
-  RATE_LIMIT_BACKOFF_MULTIPLIER,
-  RATE_LIMIT_PATTERNS,
   READONLY_TOOLS,
-  RETRYABLE_PATTERN,
-  RETRYABLE_PATTERNS,
   TOOL_FACTORIES,
   VALID_THINKING,
   agentPool,
@@ -2763,8 +2495,6 @@ export {
   clearAllModelOverrides,
   clearModelOverride,
   closePooledAgent,
-  commitPoolCleanup,
-  computeRetryDelay,
   delegateExtension as default,
   deliverTicketResults,
   discoverAgents,
@@ -2776,15 +2506,15 @@ export {
   findProjectRoot,
   fmtDuration,
   fmtTokens,
+  formatFailedTask,
   getActivityAge,
   getConcurrencyLimit,
+  getHostDeps,
   getMaxAsyncTickets,
   getMaxConcurrent,
   handleCancel,
   handlePoll,
   indent,
-  isRateLimitError,
-  isRetryableError,
   isSessionBusy,
   listPooledAgents,
   loadAgentFile,
@@ -2794,7 +2524,6 @@ export {
   loadSkill,
   parseFrontmatter,
   readDelegateSettingsFile,
-  rehydrateAgent,
   removeConcurrencyModel,
   removeConcurrencyProvider,
   resetConcurrency,
@@ -2803,8 +2532,7 @@ export {
   resolveModel,
   resolveModelSpec,
   resolveToolGroups,
-  runAgent,
-  runAgentOnce,
+  runAgentSession,
   saveDelegateConfigAtomic,
   setConcurrencyDefault,
   setConcurrencyModel,

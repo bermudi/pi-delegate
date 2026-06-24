@@ -1,43 +1,5 @@
 import * as fs from "node:fs";
-import * as path from "node:path";
-import {
-  Agent,
-  type AgentMessage,
-  type ThinkingLevel,
-} from "@mariozechner/pi-agent-core";
-import type { Api, Model } from "@mariozechner/pi-ai";
-import {
-  SessionManager,
-  type ModelRegistry,
-} from "@mariozechner/pi-coding-agent";
-import type { AgentRunConfig, SessionManagerLike } from "./types.ts";
-import { createAgent } from "./runner.ts";
-
-export function rehydrateAgent(
-  sessionFile: string,
-  config: {
-    systemPrompt: string;
-    model: Model<Api>;
-    thinking: ThinkingLevel;
-    tools: string[];
-    cwd: string;
-  },
-  modelRegistry: ModelRegistry,
-): { agent: Agent; sessionManager: SessionManagerLike } | null {
-  try {
-    const sm = (
-      SessionManager as unknown as { open(p: string): SessionManager }
-    ).open(sessionFile);
-    const ctx = sm.buildSessionContext();
-    if (!ctx.messages.length) return null;
-
-    const agent = createAgent(config, modelRegistry, ctx.messages);
-
-    return { agent, sessionManager: sm as unknown as SessionManagerLike };
-  } catch {
-    return null;
-  }
-}
+import { SessionManager } from "@mariozechner/pi-coding-agent";
 
 export function setParentSession(sm: SessionManager, parentPath: string): void {
   const header =
@@ -55,11 +17,14 @@ export function setParentSession(sm: SessionManager, parentPath: string): void {
  * Always creates a standalone session file in the target cwd.
  * Sets `parentSession` in the header so subagent work is discoverable
  * as a child of the parent session in `/resume`.
+ *
+ * Returns the concrete `SessionManager` (ready to hand to `createAgentSession`)
+ * and its file path (for result reporting + pool bookkeeping).
  */
 export function createSubagentSessionManager(
   parentSessionManager: unknown,
   cwd: string,
-): { manager: SessionManagerLike; file: string } | undefined {
+): { manager: SessionManager; file: string } | undefined {
   // Resolve parent session file path for linking.
   const parentFile = (
     parentSessionManager as
@@ -77,7 +42,7 @@ export function createSubagentSessionManager(
     setParentSession(sm, parentFile);
   }
 
-  return { manager: sm as unknown as SessionManagerLike, file: sessionFile };
+  return { manager: sm, file: sessionFile };
 }
 
 /**
