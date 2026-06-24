@@ -26,6 +26,7 @@ import {
   rehydrateAgent,
   createSubagentSessionManager,
   setParentSession,
+  persistSessionHeader,
 } from "./sessions.ts";
 import { createAgent, runAgent } from "./runner.ts";
 import { fmtDuration } from "./format.ts";
@@ -364,6 +365,29 @@ export function commitPoolCleanup(
   agentPool.delete(sessionId);
 }
 
+/**
+ * Resolve the `sessionFile` to report on a TaskResult.
+ *
+ * On failure, the upstream SessionManager may never have written the `.jsonl`
+ * (it gates the first write behind an assistant message — a documented contract).
+ * A first-call failure (e.g. Cloudflare 524) leaves the planned path uncreated,
+ * yet delegate would otherwise report it as if it existed. So when a run failed,
+ * force-flush the header first so the path becomes real and resumable.
+ *
+ * Defense-in-depth: regardless of success/failure, only report the path if the
+ * file actually exists on disk, so the TaskResult never points at nothing.
+ */
+function resolveResumableSessionFile(
+  sessionFile: string | undefined,
+  sessionManager: SessionManagerLike | undefined,
+  error: string | undefined,
+): string | undefined {
+  if (!sessionFile) return undefined;
+  // On failure, the header may not have been written yet — force it now.
+  if (error && sessionManager) persistSessionHeader(sessionManager);
+  return fs.existsSync(sessionFile) ? sessionFile : undefined;
+}
+
 /** Run a single resolved task. Single source of truth for the per-task lifecycle.
  *  Used by both sync (params.async === false) and async (params.async === true) paths.
  *  When task.sessionId is set, the entire acquire/run/close lifecycle runs under
@@ -498,7 +522,11 @@ async function runResolvedTaskUnlocked(
           error: r.error,
           durationMs: r.durationMs,
           tokens: r.tokens,
-          sessionFile: acquired.sessionFile,
+          sessionFile: resolveResumableSessionFile(
+            acquired.sessionFile,
+            acquired.sessionManager,
+            r.error,
+          ),
           touchedFiles: r.touchedFiles,
         };
       } catch (err) {

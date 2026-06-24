@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type {
@@ -10,6 +9,7 @@ import {
   fmtDuration,
   fmtTokens,
   formatToolCallShort,
+  formatFailedTask,
   shortenPath,
   trunc,
 } from "./format.ts";
@@ -86,16 +86,7 @@ export function formatCompletedTicket(
       for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
     }
     if ("error" in r && r.error) {
-      const failParts = [r.error];
-      if (r.sessionFile)
-        failParts.push(`session: ${shortenPath(r.sessionFile)}`);
-      parts.push(`[FAILED: ${failParts.join(" · ")}]`);
-      if (r.sessionFile && fs.existsSync(r.sessionFile)) {
-        const safePath = JSON.stringify(r.sessionFile);
-        parts.push(
-          `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
-        );
-      }
+      parts.push(...formatFailedTask(r as TaskResult));
     } else {
       const meta = [
         `OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`,

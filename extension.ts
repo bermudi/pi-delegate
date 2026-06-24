@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { Api, Model } from "@mariozechner/pi-ai";
@@ -8,11 +7,7 @@ import {
   getMarkdownTheme,
   type ExtensionAPI,
 } from "@mariozechner/pi-coding-agent";
-import {
-  DEFAULT_TOOLS,
-  VALID_THINKING,
-  POOL_TTL_MS,
-} from "./constants.ts";
+import { DEFAULT_TOOLS, VALID_THINKING, POOL_TTL_MS } from "./constants.ts";
 import { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
 import { agentPool, sweepPool } from "./pool.ts";
 import {
@@ -52,6 +47,7 @@ import {
   spinnerFrame,
   applyLineBudget,
   formatToolCallShort,
+  formatFailedTask,
   shortenPath,
   getTermWidth,
 } from "./format.ts";
@@ -230,7 +226,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "",
     "## Gotchas",
     "",
-    "- `*` means the full agent (read, write, edit, bash), not \"every tool.\" The grep/find/ls trio exists only for `ro` (read-only) agents where bash is unavailable — bash already subsumes them.",
+    '- `*` means the full agent (read, write, edit, bash), not "every tool." The grep/find/ls trio exists only for `ro` (read-only) agents where bash is unavailable — bash already subsumes them.',
     "- Named agent profiles must declare a `tools:` field; inline tasks default to `*`.",
     "- `skills` injects a skill's SKILL.md *instructions* into the system prompt (text). It does not unlock extra tools.",
     `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
@@ -246,7 +242,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "delegate",
     label: "Delegate to Subagents",
-    description: "Run the delegate tool with an empty task array for help text",
+    description:
+      "Run the delegate tool with an empty task array for help text and a list of configured subagents.",
     parameters: delegateParameters,
 
     async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
@@ -537,7 +534,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           // tools means the profile omitted it — reject with an actionable
           // message. Inline tasks may pass an explicit empty list deliberately,
           // so we only fire when the emptiness comes from the agent profile.
-          if (agent && agent.tools.length === 0 && !t.tools && !agentOverride?.tools) {
+          if (
+            agent &&
+            agent.tools.length === 0 &&
+            !t.tools &&
+            !agentOverride?.tools
+          ) {
             throw new Error(
               `Task ${i}: agent "${t.agent}" has no \`tools:\` field. ` +
                 `Declare one, e.g. \`tools: *\` (full) or \`tools: ro\` (read-only).`,
@@ -769,16 +771,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
         }
         if (r.error) {
-          const failParts = [r.error];
-          if (r.sessionFile)
-            failParts.push(`session: ${shortenPath(r.sessionFile)}`);
-          parts.push(`[FAILED: ${failParts.join(" · ")}]`);
-          if (r.sessionFile && fs.existsSync(r.sessionFile)) {
-            const safePath = JSON.stringify(r.sessionFile);
-            parts.push(
-              `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
-            );
-          }
+          parts.push(...formatFailedTask(r));
         } else {
           const meta = [
             `OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`,

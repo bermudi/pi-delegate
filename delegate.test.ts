@@ -26,6 +26,7 @@ import {
   tree,
   indent,
   shortenPath,
+  formatFailedTask,
   getActivityAge,
   DEFAULT_TOOLS,
   READONLY_TOOLS,
@@ -1405,6 +1406,87 @@ describe("shortenPath", () => {
   test("returns non-home paths unchanged", () => {
     expect(shortenPath("/usr/local/bin")).toBe("/usr/local/bin");
     expect(shortenPath("/tmp/stuff")).toBe("/tmp/stuff");
+  });
+});
+
+// ── formatFailedTask ────────────────────────────────────────────────────
+// Single source of truth for the [FAILED: …] + retry-hint rendering used by
+// both the sync (execute) and async (formatCompletedTicket) paths. Previously
+// duplicated, the two copies had drifted into reporting a sessionFile that
+// didn't exist on disk. These tests pin the deduped behavior.
+
+describe("formatFailedTask", () => {
+  type ResultLike = Parameters<typeof formatFailedTask>[0];
+
+  test("emits retry hint when sessionFile exists on disk", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "delegate-fmt-"));
+    const sessionFile = path.join(dir, "2026-01-01T00-00-00Z_abc.jsonl");
+    try {
+      writeFileSync(sessionFile, '{"type":"session"}\n');
+      const r: ResultLike = {
+        agent: "scout",
+        output: "",
+        error: "524 cloudflare timeout",
+        durationMs: 1000,
+        tokens: 0,
+        sessionFile,
+        touchedFiles: [],
+      };
+      const lines = formatFailedTask(r);
+      expect(lines[0]).toBe(
+        `[FAILED: 524 cloudflare timeout · session: ${shortenPath(sessionFile)}]`,
+      );
+      expect(lines[1]).toContain("→ To retry: delegate(");
+      // The path is JSON-stringified (quoted) inside the resumeFrom hint.
+      expect(lines[1]).toContain(JSON.stringify(sessionFile));
+      expect(lines[1]).toContain("resumeFrom");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("emits explicit notice when sessionFile is set but absent — no fabricated resume", () => {
+    // The bug: a nonexistent path was printed in [FAILED:] but no guidance was
+    // given, leaving the parent to fabricate a resumeFrom. Now we say so plainly.
+    const r: ResultLike = {
+      agent: "scout",
+      output: "",
+      error: "524 cloudflare timeout",
+      durationMs: 1000,
+      tokens: 0,
+      sessionFile: "/nonexistent/path/ghost.jsonl",
+      touchedFiles: [],
+    };
+    const lines = formatFailedTask(r);
+    expect(lines[0]).toContain("[FAILED: 524 cloudflare timeout · session:");
+    expect(lines[0]).toContain("ghost.jsonl");
+    expect(lines[1]).toBe("[no resumable session — re-dispatch as a fresh task]");
+    // Must NOT emit a resume hint pointing at a nonexistent file.
+    expect(lines.some((l) => l.includes("resumeFrom"))).toBe(false);
+  });
+
+  test("emits FAILED line only when no sessionFile", () => {
+    const r: ResultLike = {
+      agent: "scout",
+      output: "",
+      error: "action='close' requires sessionId.",
+      durationMs: 0,
+      tokens: 0,
+      touchedFiles: [],
+    };
+    expect(formatFailedTask(r)).toEqual(["[FAILED: action='close' requires sessionId.]"]);
+  });
+
+  test("falls back to 'unknown error' when error is empty", () => {
+    const r: ResultLike = {
+      agent: "scout",
+      output: "",
+      error: "",
+      durationMs: 0,
+      tokens: 0,
+      touchedFiles: [],
+    };
+    expect(formatFailedTask(r)).toEqual(["[FAILED: unknown error]"]);
   });
 });
 
