@@ -17,7 +17,12 @@ export type {
 } from "./types.ts";
 export type { DelegateConfig, SessionModelOverrides } from "./config.ts";
 
-export { DEFAULT_TOOLS, READONLY_TOOLS, MAX_CONCURRENCY, VALID_THINKING } from "./constants.ts";
+export {
+  DEFAULT_TOOLS,
+  READONLY_TOOLS,
+  MAX_CONCURRENCY,
+  VALID_THINKING,
+} from "./constants.ts";
 export { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
 export {
   resetSessionOverrides,
@@ -54,7 +59,9 @@ export {
   handleCancel,
   deliverTicketResults,
 } from "./tickets.ts";
-export { rehydrateAgent } from "./sessions.ts";
+export { runAgentSession } from "./runner.ts";
+export { getHostDeps } from "./host.ts";
+export type { HostDeps, HostDepsOptions } from "./host.ts";
 export {
   truncLine,
   shortenPath,
@@ -80,15 +87,4 @@ export { buildParentTranscript, extractTextContent } from "./parent-context.ts";
 export { extractTouchedFromActivities } from "./file-tracking.ts";
 export { resolveModel, findAvailableAlternative } from "./model.ts";
 export { readDelegateSettingsFile, loadDelegateSettings } from "./settings.ts";
-export {
-  RETRYABLE_PATTERNS,
-  RETRYABLE_PATTERN,
-  RATE_LIMIT_PATTERNS,
-  isRetryableError,
-  isRateLimitError,
-  computeRetryDelay,
-  RATE_LIMIT_BACKOFF_MULTIPLIER,
-} from "./retry.ts";
-export { runAgentOnce, runAgent } from "./runner.ts";
-export { commitPoolCleanup } from "./lifecycle.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";

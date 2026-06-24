@@ -1,19 +1,16 @@
 import * as fs from "node:fs";
-import * as path from "node:path";
 import {
+  createAgentSession,
   SessionManager,
-  type ModelRegistry,
+  type AgentSession,
 } from "@mariozechner/pi-coding-agent";
-import type { Agent } from "@mariozechner/pi-agent-core";
 import type {
   AgentProgressUpdate,
-  AgentRunConfig,
   AcquiredSession,
   ResolvedTask,
   TaskProgress,
   TaskResult,
   TaskRunEnv,
-  SessionManagerLike,
 } from "./types.ts";
 import {
   agentPool,
@@ -23,13 +20,13 @@ import {
 } from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
 import {
-  rehydrateAgent,
   createSubagentSessionManager,
   setParentSession,
   persistSessionHeader,
 } from "./sessions.ts";
-import { createAgent, runAgent } from "./runner.ts";
-import { fmtDuration } from "./format.ts";
+import { runAgentSession } from "./runner.ts";
+import { getGitChangedFiles } from "./file-tracking.ts";
+import { getHostDeps } from "./host.ts";
 import { resolveCwd } from "./utils.ts";
 
 /** Build a failed TaskResult. Used for early-failure paths (abort, busy, validation). */
@@ -99,23 +96,56 @@ function finishTask(
   return r;
 }
 
+/** Build the AgentSession for a fresh or resumed subagent via createAgentSession.
+ *  Reuses the caller-supplied sessionManager (so parent-linking + per-task .jsonl
+ *  files stay under our control) and the shared host deps (cached per-cwd
+ *  resourceLoader/settingsManager/authStorage). */
+async function buildDelegateSession(
+  env: TaskRunEnv,
+  task: ResolvedTask,
+  sessionManager: SessionManager,
+): Promise<AgentSession> {
+  // Resolve shared host deps for this task's cwd + system prompt (cached after
+  // the first call). resourceLoader is cwd-scoped (it scans for AGENTS.md/skills)
+  // and the system prompt is per named-agent, so the cache key is (cwd + prompt).
+  // The custom prompt overrides the default AgentSession system prompt.
+  const hostDeps = await getHostDeps({
+    cwd: task.cwd,
+    systemPrompt: task.systemPrompt,
+  });
+
+  const { session } = await createAgentSession({
+    cwd: task.cwd,
+    model: task.model,
+    thinkingLevel: task.thinking,
+    tools: task.tools,
+    sessionManager,
+    // Reuse the extension's shared registry (parent's) for consistent auth/model resolution.
+    modelRegistry: env.modelRegistry,
+    // Shared, read-only heavy deps (resourceLoader.reload() runs once per cwd, cached).
+    authStorage: hostDeps.authStorage,
+    settingsManager: hostDeps.settingsManager,
+    resourceLoader: hostDeps.resourceLoader,
+  });
+  return session;
+}
+
 /** Resolve the agent + session for a task. Single source of truth for pool, resume, and miss logic. */
 async function acquireAgentSession(
   env: TaskRunEnv,
   task: ResolvedTask,
   p: TaskProgress,
 ): Promise<AcquiredSession | { error: TaskResult }> {
-  let agent: Agent | undefined;
-  let sessionManager: SessionManagerLike | undefined;
+  let sessionManager: SessionManager | undefined;
   let sessionFile: string | undefined;
   let isPoolHit = false;
   let shouldPoolAfter = false;
-  let syncInserted = false;
 
+  // ── Pool hit (reuse live stateful session) ───────────────────────────────
   if (task.sessionId) {
     const pooled = agentPool.get(task.sessionId);
     if (pooled) {
-      // Pool hit — validate frozen config matches the new task's request.
+      // Validate frozen config matches the new task's request.
       const frozen = pooled.config;
       const mismatches: string[] = [];
       if (frozen.cwd !== task.cwd)
@@ -134,95 +164,31 @@ async function acquireAgentSession(
           ),
         };
       }
-      agent = pooled.agent;
-      sessionManager = pooled.sessionManager;
-      sessionFile = pooled.sessionFile;
       pooled.lastUsed = Date.now();
       p.model = frozen.model.id;
-      isPoolHit = true;
-    } else {
-      // Pool miss.
-      if (task.resumeFrom) {
-        // Defer to the resume block below — creating a session here would orphan an empty .jsonl.
-        shouldPoolAfter = true;
-      } else {
-        const session = createSubagentSessionManager(
-          env.parentSessionManager,
-          task.cwd,
-        );
-        sessionManager = session?.manager;
-        sessionFile = session?.file;
-
-        if (sessionFile) {
-          const rehydrated = rehydrateAgent(
-            sessionFile,
-            {
-              systemPrompt: task.systemPrompt,
-              model: task.model,
-              thinking: task.thinking,
-              tools: task.tools,
-              cwd: task.cwd,
-            },
-            env.modelRegistry,
-          );
-          if (rehydrated) {
-            agent = rehydrated.agent;
-            sessionManager = rehydrated.sessionManager;
-          }
-        }
-        if (!agent) {
-          agent = createAgent(
-            {
-              systemPrompt: task.systemPrompt,
-              model: task.model,
-              thinking: task.thinking,
-              tools: task.tools,
-              cwd: task.cwd,
-            },
-            env.modelRegistry,
-          );
-        }
-
-        // Synchronous pool insertion — close the race window where a concurrent
-        // task with the same sessionId (across tickets) could also pass the busy
-        // guard and create a second agent. By claiming the sessionId now, a
-        // second task's isSessionBusy() will see this one and fail.
-        // The drift fix is preserved: isPoolHit stays false, so the run still
-        // retries on transient errors. If the run fails, commitPoolCleanup
-        // removes the empty entry so a retry starts fresh.
-        if (task.sessionId && sessionManager && sessionFile) {
-          agentPool.set(task.sessionId, {
-            agent: agent!,
-            sessionManager,
-            sessionFile,
-            config: {
-              systemPrompt: task.systemPrompt,
-              model: task.model,
-              thinking: task.thinking,
-              tools: task.tools,
-              cwd: task.cwd,
-            },
-            lastUsed: Date.now(),
-            createdAt: Date.now(),
-            totalTokens: 0,
-            promptCount: 0,
-          });
-          syncInserted = true;
-        } else {
-          shouldPoolAfter = true;
-        }
-      }
+      return {
+        session: pooled.session,
+        sessionManager: pooled.sessionManager,
+        sessionFile: pooled.sessionFile,
+        isPoolHit: true,
+        shouldPoolAfter: false,
+        syncInserted: false,
+      };
     }
   }
 
-  // Resume from a previous session file.
+  // ── Resume from a previous session file ──────────────────────────────────
+  // Resume takes precedence over a fresh sessionId miss: resumeFrom points at a
+  // concrete prior conversation we must continue, whereas a sessionId miss just
+  // means "create a new pooled session under this id".
   if (task.resumeFrom) {
-    if (isPoolHit) {
+    if (task.sessionId && agentPool.has(task.sessionId)) {
+      // Defensive — the pool-hit branch above returns early, so reaching here
+      // with a live pooled session is unreachable. Kept for clarity.
       return {
         error: failTask(
           task,
-          `resumeFrom conflicts with active sessionId '${task.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`,
-          sessionFile,
+          `resumeFrom conflicts with active sessionId '${task.sessionId}'. The pooled session has its own accumulated context. Close the session first if you want to resume from a different point.`,
         ),
       };
     }
@@ -236,86 +202,72 @@ async function acquireAgentSession(
         ),
       };
     }
-    const rehydrated = rehydrateAgent(
-      resolvedPath,
-      {
-        systemPrompt: task.systemPrompt,
-        model: task.model,
-        thinking: task.thinking,
-        tools: task.tools,
-        cwd: task.cwd,
-      },
-      env.modelRegistry,
-    );
-    if (!rehydrated) {
+    // Open the existing session and let createAgentSession restore its messages
+    // internally (sdk.js reads buildSessionContext().messages + model/thinking).
+    let resumed: SessionManager;
+    try {
+      resumed = SessionManager.open(resolvedPath);
+    } catch {
       return {
         error: failTask(
           task,
-          `resumeFrom: empty or corrupt session: ${resolvedPath}`,
+          `resumeFrom: corrupt session: ${resolvedPath}`,
           resolvedPath,
         ),
       };
     }
-    agent = rehydrated.agent;
-    sessionManager = rehydrated.sessionManager;
-    sessionFile = resolvedPath;
+    // Non-empty sessions have at least the header + the restored branch. An
+    // empty/corrupt file surfaces as a session with no restorable messages.
+    if (!resumed.buildSessionContext().messages.length) {
+      return {
+        error: failTask(
+          task,
+          `resumeFrom: empty session: ${resolvedPath}`,
+          resolvedPath,
+        ),
+      };
+    }
 
     // Link resumed session to parent for /resume discoverability.
-    const parentFile = (
-      env.parentSessionManager as
-        | { getSessionFile?(): string | undefined }
-        | undefined
-    )?.getSessionFile?.();
-    if (parentFile) {
-      setParentSession(
-        rehydrated.sessionManager as unknown as SessionManager,
-        parentFile,
-      );
-    }
+    const parentFile = env.parentSessionManager?.getSessionFile?.();
+    if (parentFile) setParentSession(resumed, parentFile);
+
+    const session = await buildDelegateSession(env, task, resumed);
+    return {
+      session,
+      sessionManager: resumed,
+      sessionFile: resolvedPath,
+      isPoolHit: false,
+      // A resumed session under a sessionId becomes poolable after success.
+      shouldPoolAfter: Boolean(task.sessionId),
+      syncInserted: false,
+    };
   }
 
-  // Fresh task (no sessionId, no resumeFrom) — create session + agent.
-  if (!agent) {
-    const fresh = createSubagentSessionManager(
-      env.parentSessionManager,
-      task.cwd,
-    );
-    sessionManager = fresh?.manager;
-    sessionFile = fresh?.file;
-    agent = createAgent(
-      {
-        systemPrompt: task.systemPrompt,
-        model: task.model,
-        thinking: task.thinking,
-        tools: task.tools,
-        cwd: task.cwd,
-      },
-      env.modelRegistry,
-    );
+  // ── Fresh session (no resume) ────────────────────────────────────────────
+  const fresh = createSubagentSessionManager(
+    env.parentSessionManager,
+    task.cwd,
+  );
+  if (!fresh) {
+    return { error: failTask(task, "Internal: could not create session file") };
   }
+  sessionManager = fresh.manager;
+  sessionFile = fresh.file;
 
-  // parentSession linking (set above / in createSubagentSessionManager) makes
-  // subagent sessions discoverable as children in /resume without polluting the
-  // named-session filter. Do NOT call appendSessionInfo() here — naming a
-  // subagent session causes it to show up in Ctrl+N "named only" view, burying
-  // the user's actual named sessions.
-
-  if (!agent) {
-    // Defensive: acquireAgentSession should always produce an agent for run tasks.
-    return { error: failTask(task, "Internal: no agent acquired") };
-  }
-
+  const session = await buildDelegateSession(env, task, sessionManager);
   return {
-    agent,
+    session,
     sessionManager,
     sessionFile,
-    isPoolHit,
-    shouldPoolAfter,
-    syncInserted,
+    isPoolHit: false,
+    shouldPoolAfter: Boolean(task.sessionId),
+    syncInserted: false,
   };
 }
 
-/** Insert a freshly-run agent into the pool. Called after a successful run for a new pooled session. */
+/** Insert a freshly-run session into the pool. Called after a successful run for
+ *  a new pooled session (first use of a sessionId, or a resumed session). */
 function commitPoolInsert(
   sessionId: string,
   task: ResolvedTask,
@@ -324,7 +276,7 @@ function commitPoolInsert(
 ): void {
   if (!acquired.sessionManager || !acquired.sessionFile) return;
   agentPool.set(sessionId, {
-    agent: acquired.agent,
+    session: acquired.session,
     sessionManager: acquired.sessionManager,
     sessionFile: acquired.sessionFile,
     config: {
@@ -350,21 +302,6 @@ function commitPoolStats(sessionId: string, result: { tokens: number }): void {
   pooled.promptCount++;
 }
 
-/** Remove a synchronously-inserted empty agent from the pool if it's still ours.
- *  Called after a failed run for a fresh pooled session — we claimed the sessionId
- *  to close the race window, but the run failed, so the empty entry is dead weight.
- *  If another task already claimed the slot (pool entry is now a different agent),
- *  leave it alone. */
-export function commitPoolCleanup(
-  sessionId: string,
-  acquiredAgent: Agent,
-): void {
-  const pooled = agentPool.get(sessionId);
-  if (!pooled) return;
-  if (pooled.agent !== acquiredAgent) return; // Another task already claimed/replaced it.
-  agentPool.delete(sessionId);
-}
-
 /**
  * Resolve the `sessionFile` to report on a TaskResult.
  *
@@ -379,7 +316,7 @@ export function commitPoolCleanup(
  */
 function resolveResumableSessionFile(
   sessionFile: string | undefined,
-  sessionManager: SessionManagerLike | undefined,
+  sessionManager: SessionManager | undefined,
   error: string | undefined,
 ): string | undefined {
   if (!sessionFile) return undefined;
@@ -476,43 +413,31 @@ async function runResolvedTaskUnlocked(
 
     // ── Run the agent ─────────────────────────────────────────────────
     const doRun = async (): Promise<TaskResult> => {
-      const config: AgentRunConfig = {
-        systemPrompt: task.systemPrompt,
-        model: task.model,
-        thinking: task.thinking,
-        tools: task.tools,
-        cwd: task.cwd,
-      };
       try {
-        const r = await runAgent(
-          config,
+        // Snapshot git status before the run so touchedFiles can diff after.
+        // AgentSession owns retry/compaction internally — runAgentSession just
+        // drives the prompt and maps events to the progress model.
+        const gitBaseline = await getGitChangedFiles(task.cwd);
+        const r = await runAgentSession(
+          acquired.session,
           task.prompt,
-          env.modelRegistry,
+          { cwd: task.cwd },
           env.signal,
           (u) => env.onProgress(p, u),
-          acquired.sessionManager,
-          undefined, // maxRetries
-          2000, // retryBaseMs
-          acquired.agent,
-          // allowRetry: pooled agents carry accumulated state — retrying is unsafe.
-          // Fresh agents and resumed sessions are safe to retry.
-          !acquired.isPoolHit,
-          taskIndex,
+          gitBaseline,
+          Date.now(),
         );
 
-        // Pool bookkeeping.
-        if (task.sessionId) {
-          if (r.error && acquired.syncInserted) {
-            // Failed first run with a synchronously-claimed sessionId: clean up
-            // the empty entry so a retry can try fresh.
-            commitPoolCleanup(task.sessionId, acquired.agent);
-          } else if (!r.error) {
-            if (acquired.shouldPoolAfter) {
-              commitPoolInsert(task.sessionId, task, acquired, r);
-            } else {
-              // Pool hit OR sync-inserted: agent is already in pool, just bump stats.
-              commitPoolStats(task.sessionId, r);
-            }
+        // Pool bookkeeping. With synchronous pool-insertion removed (the session
+        // lock serializes same-sessionId tasks), a fresh session is inserted only
+        // after success; pool hits just bump stats. On failure, nothing was
+        // inserted, so there is nothing to clean up.
+        if (task.sessionId && !r.error) {
+          if (acquired.shouldPoolAfter) {
+            commitPoolInsert(task.sessionId, task, acquired, r);
+          } else {
+            // Pool hit: session is already in pool, just bump stats.
+            commitPoolStats(task.sessionId, r);
           }
         }
 
@@ -530,12 +455,8 @@ async function runResolvedTaskUnlocked(
           touchedFiles: r.touchedFiles,
         };
       } catch (err) {
-        // Abnormal error (e.g., runAgent threw rather than returning r.error).
-        // Clean up the sync-inserted entry if it's still ours, then re-throw
-        // for the outer catch to convert to a TaskResult.
-        if (acquired.syncInserted && task.sessionId) {
-          commitPoolCleanup(task.sessionId, acquired.agent);
-        }
+        // Abnormal error (runAgentSession threw rather than returning r.error).
+        // No pool entry to clean up — fresh sessions are inserted only on success.
         throw err;
       }
     };

@@ -86,43 +86,45 @@ describe("buildSubagentSystemPrompt", () => {
     expect(prompt.startsWith("TASK_PROMPT")).toBe(true);
   });
 
-  // ── Skills / AGENTS append once, in order ─────────────────────────────
+  // ── Skills / AGENTS no longer appended here ────────────────────────────
+  // buildSubagentSystemPrompt now returns only the base prompt. AgentSession's
+  // resource loader owns skill + AGENTS.md discovery and appends them via
+  // _rebuildSystemPrompt. These tests pin that skills/AGENTS.md passed in are
+  // NOT appended (would double-count with AgentSession's own discovery).
 
-  test("skills and AGENTS.md append after base, in order", () => {
+  test("skills and AGENTS.md are NOT appended (AgentSession owns them)", () => {
     const prompt = buildSubagentSystemPrompt({
       ...empty,
       taskSystemPrompt: "BASE",
       skillBodies: ["SKILL_A", "SKILL_B"],
       agentsMdFiles: ["AGENTS_MD"],
     });
-    expect(prompt.indexOf("BASE")).toBeGreaterThanOrEqual(0);
-    expect(prompt.indexOf("SKILL_A")).toBeGreaterThan(prompt.indexOf("BASE"));
-    expect(prompt.indexOf("SKILL_B")).toBeGreaterThan(prompt.indexOf("SKILL_A"));
-    expect(prompt.indexOf("AGENTS_MD")).toBeGreaterThan(prompt.indexOf("SKILL_B"));
+    expect(prompt).toBe("BASE");
+    expect(prompt).not.toContain("SKILL_A");
+    expect(prompt).not.toContain("SKILL_B");
+    expect(prompt).not.toContain("AGENTS_MD");
   });
 
-  test("multiple AGENTS.md files are both appended after base, in order", () => {
+  test("multiple AGENTS.md files are not appended", () => {
     const prompt = buildSubagentSystemPrompt({
       ...empty,
       taskSystemPrompt: "BASE",
       agentsMdFiles: ["FILE_ONE", "FILE_TWO"],
     });
-    // Order via indexOf so the test doesn't depend on how the joined files
-    // are split by blank lines (split("\n\n") would miscount on real
-    // AGENTS.md content containing paragraph breaks).
-    expect(prompt.indexOf("BASE")).toBeGreaterThanOrEqual(0);
-    expect(prompt.indexOf("FILE_ONE")).toBeGreaterThan(prompt.indexOf("BASE"));
-    expect(prompt.indexOf("FILE_TWO")).toBeGreaterThan(prompt.indexOf("FILE_ONE"));
+    expect(prompt).toBe("BASE");
+    expect(prompt).not.toContain("FILE_ONE");
+    expect(prompt).not.toContain("FILE_TWO");
   });
 
-  test("blank skill/AGENTS sections are skipped", () => {
+  test("base prompt is returned verbatim regardless of skill/AGENTS inputs", () => {
     const prompt = buildSubagentSystemPrompt({
       ...empty,
       taskSystemPrompt: "BASE",
       skillBodies: ["", "  \n  ", "REAL_SKILL"],
       agentsMdFiles: [],
     });
-    expect(prompt).toBe("BASE\n\nREAL_SKILL");
+    expect(prompt).toBe("BASE");
+    expect(prompt).not.toContain("REAL_SKILL");
   });
 
   test("skills do not append when pooled prompt is set", () => {

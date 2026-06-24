@@ -36,20 +36,10 @@ import {
   extractTouchedFromActivities,
   agentPool,
   closePooledAgent,
-  commitPoolCleanup,
   sweepPool,
   listPooledAgents,
   withSessionLock,
-  rehydrateAgent,
-  RETRYABLE_PATTERNS,
-  RATE_LIMIT_PATTERNS,
-  RETRYABLE_PATTERN,
-  isRetryableError,
-  isRateLimitError,
-  computeRetryDelay,
-  RATE_LIMIT_BACKOFF_MULTIPLIER,
-  runAgent,
-  runAgentOnce,
+  getHostDeps,
   readDelegateSettingsFile,
   loadDelegateSettings,
   setModelOverride,
@@ -256,7 +246,6 @@ description: Fast reconnaissance agent
 model: anthropic/claude-haiku-4-5
 thinking: low
 tools: read, grep
-skills: web-content
 ---
 You are a scout. Be concise.
 `,
@@ -267,7 +256,6 @@ You are a scout. Be concise.
     expect(cfg.model).toBe("anthropic/claude-haiku-4-5");
     expect(cfg.thinking).toBe("low");
     expect(cfg.tools).toEqual(["read", "grep"]);
-    expect(cfg.skills).toEqual(["web-content"]);
     expect(cfg.systemPrompt).toBe("You are a scout. Be concise.");
   });
 
@@ -394,7 +382,9 @@ describe("resolveToolGroups", () => {
 
   test("expands * and keeps additional tools (deduped)", () => {
     const result = resolveToolGroups(["*", "read"]);
-    expect(result.sort()).toEqual([...new Set([...DEFAULT_TOOLS, "read"])].sort());
+    expect(result.sort()).toEqual(
+      [...new Set([...DEFAULT_TOOLS, "read"])].sort(),
+    );
   });
 
   test("returns empty array as-is", () => {
@@ -1460,7 +1450,9 @@ describe("formatFailedTask", () => {
     const lines = formatFailedTask(r);
     expect(lines[0]).toContain("[FAILED: 524 cloudflare timeout · session:");
     expect(lines[0]).toContain("ghost.jsonl");
-    expect(lines[1]).toBe("[no resumable session — re-dispatch as a fresh task]");
+    expect(lines[1]).toBe(
+      "[no resumable session — re-dispatch as a fresh task]",
+    );
     // Must NOT emit a resume hint pointing at a nonexistent file.
     expect(lines.some((l) => l.includes("resumeFrom"))).toBe(false);
   });
@@ -1474,7 +1466,9 @@ describe("formatFailedTask", () => {
       tokens: 0,
       touchedFiles: [],
     };
-    expect(formatFailedTask(r)).toEqual(["[FAILED: action='close' requires sessionId.]"]);
+    expect(formatFailedTask(r)).toEqual([
+      "[FAILED: action='close' requires sessionId.]",
+    ]);
   });
 
   test("falls back to 'unknown error' when error is empty", () => {
@@ -1656,471 +1650,21 @@ describe("constants", () => {
   });
 
   test("TOOL_FACTORIES registers the 7 core tools", () => {
-    expect(Object.keys(TOOL_FACTORIES).sort()).toEqual(
-      ["bash", "edit", "find", "grep", "ls", "read", "write"],
-    );
+    expect(Object.keys(TOOL_FACTORIES).sort()).toEqual([
+      "bash",
+      "edit",
+      "find",
+      "grep",
+      "ls",
+      "read",
+      "write",
+    ]);
     for (const name of ["grep", "find", "ls"] as const) {
       expect(TOOL_FACTORIES[name]).toBeFunction();
     }
   });
 });
 
-// ── Retryable Error Patterns ───────────────────────────────────────────────
-
-describe("isRetryableError", () => {
-  test("matches rate limit errors", () => {
-    expect(isRetryableError("rate limit exceeded")).toBe(true);
-    expect(isRetryableError("too many requests")).toBe(true);
-    expect(isRetryableError("HTTP 429")).toBe(true);
-  });
-
-  test("does not match permanent errors (auth, billing, quota)", () => {
-    expect(isRetryableError("quota exceeded")).toBe(false);
-    expect(isRetryableError("billing issue")).toBe(false);
-    expect(isRetryableError("authentication failed")).toBe(false);
-    expect(isRetryableError("unauthorized")).toBe(false);
-    expect(isRetryableError("forbidden")).toBe(false);
-    expect(isRetryableError("api key invalid")).toBe(false);
-    expect(isRetryableError("token expired")).toBe(false);
-  });
-
-  test("matches model availability errors", () => {
-    expect(isRetryableError("model unavailable")).toBe(true);
-    expect(isRetryableError("model disabled")).toBe(true);
-    expect(isRetryableError("model not found")).toBe(true);
-    expect(isRetryableError("unknown model")).toBe(true);
-  });
-
-  test("matches server errors", () => {
-    expect(isRetryableError("HTTP 502")).toBe(true);
-    expect(isRetryableError("HTTP 503")).toBe(true);
-    expect(isRetryableError("HTTP 504")).toBe(true);
-    expect(isRetryableError("service unavailable")).toBe(true);
-    expect(isRetryableError("overloaded")).toBe(true);
-  });
-
-  test("matches network errors", () => {
-    expect(isRetryableError("connection refused")).toBe(true);
-    expect(isRetryableError("fetch failed")).toBe(true);
-    expect(isRetryableError("network error")).toBe(true);
-    expect(isRetryableError("socket hang up")).toBe(true);
-    expect(isRetryableError("timed out")).toBe(true);
-    expect(isRetryableError("timeout")).toBe(true);
-  });
-
-  test("returns false for non-retryable errors", () => {
-    expect(isRetryableError("file not found")).toBe(false);
-    expect(isRetryableError("syntax error")).toBe(false);
-    expect(isRetryableError("")).toBe(false);
-    expect(isRetryableError("unknown error")).toBe(false);
-  });
-
-  test("all patterns are valid regexes", () => {
-    for (const p of RETRYABLE_PATTERNS) {
-      expect(p).toBeInstanceOf(RegExp);
-    }
-    expect(RETRYABLE_PATTERNS.length).toBeGreaterThan(15);
-  });
-
-  test("matches recovered old-pattern coverage", () => {
-    expect(isRetryableError("HTTP 500")).toBe(true);
-    expect(isRetryableError("connection error")).toBe(true);
-    expect(isRetryableError("connection lost")).toBe(true);
-    expect(isRetryableError("other side closed")).toBe(true);
-    expect(isRetryableError("reset before headers")).toBe(true);
-    expect(isRetryableError("ended without response")).toBe(true);
-    expect(isRetryableError("http2 request did not get a response")).toBe(true);
-    expect(isRetryableError("retry delay")).toBe(true);
-  });
-
-  test("RETRYABLE_PATTERN backward-compat export works", () => {
-    expect(RETRYABLE_PATTERN).toBeInstanceOf(RegExp);
-    expect(RETRYABLE_PATTERN.test("rate limit exceeded")).toBe(true);
-    expect(RETRYABLE_PATTERN.test("HTTP 500 internal error")).toBe(true);
-    expect(RETRYABLE_PATTERN.test("file not found")).toBe(false);
-  });
-});
-
-// ── Rate-Limit Classification ─────────────────────────────────────────────
-
-describe("isRateLimitError", () => {
-  test("matches 429 errors", () => {
-    expect(isRateLimitError("HTTP 429")).toBe(true);
-    expect(isRateLimitError("429 too many requests")).toBe(true);
-  });
-  test("matches rate limit strings", () => {
-    expect(isRateLimitError("rate limit exceeded")).toBe(true);
-    expect(isRateLimitError("RateLimit")).toBe(true);
-  });
-  test("matches too many requests", () => {
-    expect(isRateLimitError("too many requests")).toBe(true);
-  });
-  test("matches overloaded and retry delay", () => {
-    expect(isRateLimitError("server overloaded")).toBe(true);
-    expect(isRateLimitError("retry delay of 30s")).toBe(true);
-  });
-  test("returns false for non-rate-limit errors", () => {
-    expect(isRateLimitError("network error")).toBe(false);
-    expect(isRateLimitError("HTTP 500")).toBe(false);
-    expect(isRateLimitError("")).toBe(false);
-  });
-});
-
-describe("RATE_LIMIT_PATTERNS", () => {
-  test("contains expected patterns", () => {
-    expect(RATE_LIMIT_PATTERNS.length).toBe(5);
-    expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "rate\\s*limit")).toBe(
-      true,
-    );
-    expect(
-      RATE_LIMIT_PATTERNS.some((p) => p.source === "too many requests"),
-    ).toBe(true);
-    expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "\\b429\\b")).toBe(
-      true,
-    );
-    expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "overloaded")).toBe(
-      true,
-    );
-    expect(RATE_LIMIT_PATTERNS.some((p) => p.source === "retry delay")).toBe(
-      true,
-    );
-  });
-});
-
-// ── Retry Delay Math ──────────────────────────────────────────────────────
-
-describe("computeRetryDelay", () => {
-  test("rate-limit backoff doubles and caps at 5min", () => {
-    const orig = Math.random;
-    Math.random = () => 0;
-    // Rate-limit rawBase = retryBaseMs * RATE_LIMIT_BACKOFF_MULTIPLIER (= 30_000).
-    // baseDelay = rawBase * 2^attempt; delay = min(baseDelay, 300_000).
-    const rlBase = 2000 * RATE_LIMIT_BACKOFF_MULTIPLIER;
-    expect(computeRetryDelay(0, 2000, 0, true)).toMatchObject({
-      baseDelay: rlBase,
-      jitter: 0,
-      stagger: 0,
-      delay: rlBase,
-    });
-    expect(computeRetryDelay(1, 2000, 0, true)).toMatchObject({
-      baseDelay: rlBase * 2,
-      jitter: 0,
-      stagger: 0,
-      delay: rlBase * 2,
-    });
-    expect(computeRetryDelay(2, 2000, 0, true)).toMatchObject({
-      baseDelay: rlBase * 4,
-      jitter: 0,
-      stagger: 0,
-      delay: rlBase * 4,
-    });
-    expect(computeRetryDelay(3, 2000, 0, true)).toMatchObject({
-      baseDelay: rlBase * 8,
-      jitter: 0,
-      stagger: 0,
-      delay: rlBase * 8,
-    });
-    expect(computeRetryDelay(4, 2000, 0, true)).toMatchObject({
-      baseDelay: rlBase * 16,
-      jitter: 0,
-      stagger: 0,
-      delay: 300_000,
-    });
-    expect(computeRetryDelay(10, 2000, 0, true)).toMatchObject({
-      baseDelay: rlBase * 1024,
-      jitter: 0,
-      stagger: 0,
-      delay: 300_000,
-    });
-    Math.random = orig;
-  });
-
-  test("generic backoff doubles and caps at 1min", () => {
-    const orig = Math.random;
-    Math.random = () => 0;
-    expect(computeRetryDelay(0, 2000, 0, false)).toMatchObject({
-      baseDelay: 2000,
-      jitter: 0,
-      stagger: 0,
-      delay: 2000,
-    });
-    expect(computeRetryDelay(1, 2000, 0, false)).toMatchObject({
-      baseDelay: 4000,
-      jitter: 0,
-      stagger: 0,
-      delay: 4000,
-    });
-    expect(computeRetryDelay(2, 2000, 0, false)).toMatchObject({
-      baseDelay: 8000,
-      jitter: 0,
-      stagger: 0,
-      delay: 8000,
-    });
-    expect(computeRetryDelay(5, 2000, 0, false)).toMatchObject({
-      baseDelay: 64_000,
-      jitter: 0,
-      stagger: 0,
-      delay: 60_000,
-    });
-    Math.random = orig;
-  });
-
-  test("stagger is always taskIndex * 10_000", () => {
-    const orig = Math.random;
-    Math.random = () => 0;
-    expect(computeRetryDelay(0, 2000, 2, true)).toMatchObject({
-      baseDelay: 30_000,
-      jitter: 0,
-      stagger: 20_000,
-      delay: 50_000,
-    });
-    expect(computeRetryDelay(0, 2000, 2, false)).toMatchObject({
-      baseDelay: 2000,
-      jitter: 0,
-      stagger: 20_000,
-      delay: 22_000,
-    });
-    Math.random = orig;
-  });
-
-  test("jitter equals Math.random() * rawBase", () => {
-    const orig = Math.random;
-    Math.random = () => 0.5;
-    const rateLimit = computeRetryDelay(0, 2000, 0, true);
-    expect(rateLimit.jitter).toBe(15_000);
-    expect(rateLimit.delay).toBe(45_000);
-    const generic = computeRetryDelay(0, 2000, 0, false);
-    expect(generic.jitter).toBe(1000);
-    expect(generic.delay).toBe(3000);
-    Math.random = orig;
-  });
-});
-
-// ── Session Pollution Fix ─────────────────────────────────────────────────
-
-describe("runAgentOnce suppressSessionAppend", () => {
-  test("does not append messages when suppressed", async () => {
-    const appended: unknown[] = [];
-    const sessionManager = {
-      appendMessage: (msg: unknown) => {
-        appended.push(msg);
-        return "id";
-      },
-      getSessionFile: () => "test.jsonl",
-      appendSessionInfo: () => "id",
-    };
-
-    const agent = {
-      state: { messages: [{ role: "user", content: "hi" }] as any[] },
-      async prompt() {
-        this.state.messages.push({
-          role: "assistant",
-          content: [{ type: "text", text: "hello" }],
-        });
-      },
-      async waitForIdle() {},
-      abort() {},
-      subscribe() {
-        return () => {};
-      },
-    };
-
-    await runAgentOnce(
-      agent as any,
-      "test",
-      {
-        systemPrompt: "",
-        model: {} as any,
-        thinking: "off",
-        tools: [],
-        cwd: "/tmp",
-      },
-      {} as any,
-      undefined,
-      undefined,
-      sessionManager as any,
-      new Set(),
-      Date.now(),
-      true,
-    );
-
-    expect(appended).toEqual([]);
-  });
-
-  test("appends messages when not suppressed", async () => {
-    const appended: unknown[] = [];
-    const sessionManager = {
-      appendMessage: (msg: unknown) => {
-        appended.push(msg);
-        return "id";
-      },
-      getSessionFile: () => "test.jsonl",
-      appendSessionInfo: () => "id",
-    };
-
-    const agent = {
-      state: { messages: [{ role: "user", content: "hi" }] as any[] },
-      async prompt() {
-        this.state.messages.push({
-          role: "assistant",
-          content: [{ type: "text", text: "hello" }],
-        });
-      },
-      async waitForIdle() {},
-      abort() {},
-      subscribe() {
-        return () => {};
-      },
-    };
-
-    await runAgentOnce(
-      agent as any,
-      "test",
-      {
-        systemPrompt: "",
-        model: {} as any,
-        thinking: "off",
-        tools: [],
-        cwd: "/tmp",
-      },
-      {} as any,
-      undefined,
-      undefined,
-      sessionManager as any,
-      new Set(),
-      Date.now(),
-      false,
-    );
-
-    expect(appended.length).toBe(1);
-    expect((appended[0] as any).role).toBe("assistant");
-  });
-});
-
-describe("runAgent retry loop", () => {
-  test("flushes messages only on final success after retries", async () => {
-    const appended: any[] = [];
-    const sessionManager = {
-      appendMessage: (msg: any) => {
-        appended.push(msg);
-        return "id";
-      },
-      getSessionFile: () => "test.jsonl",
-      appendSessionInfo: () => "id",
-    };
-
-    let callCount = 0;
-    const agent = {
-      state: { messages: [] as any[] },
-      async prompt() {
-        callCount++;
-        if (callCount === 1) {
-          throw new Error("network error");
-        }
-        this.state.messages.push({
-          role: "assistant",
-          content: [{ type: "text", text: "success" }],
-        });
-      },
-      async waitForIdle() {},
-      abort() {},
-      subscribe() {
-        return () => {};
-      },
-    };
-
-    const origRandom = Math.random;
-    Math.random = () => 0;
-
-    const result = await runAgent(
-      {
-        systemPrompt: "",
-        model: {} as any,
-        thinking: "off",
-        tools: [],
-        cwd: "/tmp",
-      },
-      "test",
-      {} as any,
-      undefined,
-      undefined,
-      sessionManager as any,
-      1,
-      1,
-      agent as any,
-      true,
-      0,
-    );
-
-    Math.random = origRandom;
-
-    expect(callCount).toBe(2);
-    expect(result.error).toBeUndefined();
-    expect(result.output).toBe("success");
-    expect(appended.length).toBe(1);
-    expect(appended[0].role).toBe("assistant");
-    expect(appended[0].content[0].text).toBe("success");
-  });
-
-  test("does not flush any messages when all retries are exhausted", async () => {
-    const appended: any[] = [];
-    const sessionManager = {
-      appendMessage: (msg: any) => {
-        appended.push(msg);
-        return "id";
-      },
-      getSessionFile: () => "test.jsonl",
-      appendSessionInfo: () => "id",
-    };
-
-    let callCount = 0;
-    const agent = {
-      state: { messages: [] as any[] },
-      async prompt() {
-        callCount++;
-        this.state.messages.push({
-          role: "assistant",
-          content: [{ type: "text", text: `attempt ${callCount}` }],
-        });
-        this.state.errorMessage = "network error";
-      },
-      async waitForIdle() {},
-      abort() {},
-      subscribe() {
-        return () => {};
-      },
-    };
-
-    const origRandom = Math.random;
-    Math.random = () => 0;
-
-    const result = await runAgent(
-      {
-        systemPrompt: "",
-        model: {} as any,
-        thinking: "off",
-        tools: [],
-        cwd: "/tmp",
-      },
-      "test",
-      {} as any,
-      undefined,
-      undefined,
-      sessionManager as any,
-      1,
-      1,
-      agent as any,
-      true,
-      0,
-    );
-
-    Math.random = origRandom;
-
-    expect(callCount).toBe(2);
-    expect(result.error).toBe("network error");
-    expect(appended).toEqual([]);
-  });
-});
 // ── Settings Overrides ──────────────────────────────────────────────────────
 
 describe("readDelegateSettingsFile", () => {
@@ -2298,7 +1842,6 @@ describe("delegate extension integration", () => {
     const optionalFields = [
       "agent",
       "model",
-      "skills",
       "tools",
       "thinking",
       "systemPrompt",
@@ -2388,6 +1931,7 @@ describe("delegate extension integration", () => {
           ? deepseekVariant
           : null,
       hasConfiguredAuth: () => false,
+      isUsingOAuth: () => false,
       getApiKeyAndHeaders: async () => ({
         ok: false,
         error: "No API key for provider: deepseek",
@@ -3671,7 +3215,7 @@ describe("delegate pool", () => {
   test("closePooledAgent removes agent from pool", () => {
     // Inject a fake pooled agent
     agentPool.set("test-session", {
-      agent: {} as any,
+      session: {} as any,
       sessionManager: {} as any,
       sessionFile: "/tmp/test.jsonl",
       config: {
@@ -3692,62 +3236,10 @@ describe("delegate pool", () => {
     expect(closePooledAgent("test-session")).toBe(false);
   });
 
-  test("commitPoolCleanup removes the entry only if it's still ours", () => {
-    const ourAgent = { marker: "ours" } as any;
-    const otherAgent = { marker: "theirs" } as any;
-
-    // Case 1: entry is ours → remove it.
-    agentPool.set("cleanup-ours", {
-      agent: ourAgent,
-      sessionManager: {} as any,
-      sessionFile: "/tmp/cleanup-ours.jsonl",
-      config: {
-        systemPrompt: "test",
-        model: {} as any,
-        thinking: "off" as any,
-        tools: [],
-        cwd: "/tmp",
-      },
-      lastUsed: Date.now(),
-      createdAt: Date.now(),
-      totalTokens: 0,
-      promptCount: 0,
-    });
-    commitPoolCleanup("cleanup-ours", ourAgent);
-    expect(agentPool.has("cleanup-ours")).toBe(false);
-
-    // Case 2: entry was replaced by another task → leave it alone.
-    agentPool.set("cleanup-theirs", {
-      agent: otherAgent,
-      sessionManager: {} as any,
-      sessionFile: "/tmp/cleanup-theirs.jsonl",
-      config: {
-        systemPrompt: "test",
-        model: {} as any,
-        thinking: "off" as any,
-        tools: [],
-        cwd: "/tmp",
-      },
-      lastUsed: Date.now(),
-      createdAt: Date.now(),
-      totalTokens: 0,
-      promptCount: 0,
-    });
-    commitPoolCleanup("cleanup-theirs", ourAgent);
-    expect(agentPool.has("cleanup-theirs")).toBe(true);
-    expect(agentPool.get("cleanup-theirs")?.agent).toBe(otherAgent);
-    agentPool.delete("cleanup-theirs");
-
-    // Case 3: no entry at all → no-op.
-    expect(agentPool.has("cleanup-missing")).toBe(false);
-    commitPoolCleanup("cleanup-missing", ourAgent);
-    expect(agentPool.has("cleanup-missing")).toBe(false);
-  });
-
   test("sweepPool evicts idle agents", () => {
     const now = Date.now();
     agentPool.set("fresh", {
-      agent: {} as any,
+      session: {} as any,
       sessionManager: {} as any,
       sessionFile: "/tmp/fresh.jsonl",
       config: {
@@ -3763,7 +3255,7 @@ describe("delegate pool", () => {
       promptCount: 0,
     });
     agentPool.set("stale", {
-      agent: {} as any,
+      session: {} as any,
       sessionManager: {} as any,
       sessionFile: "/tmp/stale.jsonl",
       config: {
@@ -3791,7 +3283,7 @@ describe("delegate pool", () => {
 
     const now = Date.now();
     agentPool.set("session-a", {
-      agent: {} as any,
+      session: {} as any,
       sessionManager: {} as any,
       sessionFile: "/home/user/.pi/agent/sessions/test.jsonl",
       config: {
@@ -3870,23 +3362,9 @@ describe("delegate pool", () => {
     }
     expect(maxConcurrent).toBe(1);
   });
-
-  test("rehydrateAgent returns null for non-existent file", () => {
-    const result = rehydrateAgent(
-      "/nonexistent/path/session.jsonl",
-      {
-        systemPrompt: "test",
-        model: { id: "test" } as any,
-        thinking: "off" as any,
-        tools: [],
-        cwd: "/tmp",
-      },
-      {} as any,
-    );
-    expect(result).toBeNull();
-  });
 });
 
+// delegate pool describe closes above
 // ── Async Ticket Tests ────────────────────────────────────────────────────
 
 describe("async ticket registry", () => {

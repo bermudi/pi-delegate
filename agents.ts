@@ -57,12 +57,6 @@ export function loadAgentFile(filePath: string): AgentConfig | null {
             .filter(Boolean),
         )
       : [], // named agents must declare tools; empty triggers a resolution error
-    skills: data.skills
-      ? data.skills
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [],
     systemPrompt: body,
   };
 }
@@ -174,7 +168,8 @@ export function loadAgentsMdFiles(cwd: string): string[] {
 
 // ── Subagent Prompt Assembly ──────────────────────────────────────────────
 
-export const DEFAULT_SUBAGENT_SYSTEM_PROMPT = "You are a helpful coding assistant.";
+export const DEFAULT_SUBAGENT_SYSTEM_PROMPT =
+  "You are a helpful coding assistant.";
 
 function firstNonBlank(
   ...values: Array<string | undefined>
@@ -184,44 +179,34 @@ function firstNonBlank(
   );
 }
 
-function appendPromptSections(
-  systemPrompt: string,
-  sections: string[],
-): string {
-  let result = systemPrompt.trimEnd();
-  for (const section of sections) {
-    const body = section.trim();
-    if (!body) continue;
-    result = result ? `${result}\n\n${body}` : body;
-  }
-  return result || DEFAULT_SUBAGENT_SYSTEM_PROMPT;
-}
-
 export function buildSubagentSystemPrompt(options: {
   taskSystemPrompt?: string;
   agentSystemPrompt?: string;
   parentSystemPrompt?: string;
   pooledSystemPrompt?: string;
-  skillBodies: string[];
-  agentsMdFiles: string[];
+  /**
+   * Kept for API compatibility but no longer appended here. The AgentSession's
+   * resource loader owns skill/AGENTS.md discovery and appends them to the
+   * system prompt itself (via `_rebuildSystemPrompt`). Appending them here too
+   * caused double-inclusion. These fields are accepted and ignored.
+   */
+  skillBodies?: string[];
+  agentsMdFiles?: string[];
 }): string {
-  // Pooled agents already have a frozen prompt baked into their Agent state.
-  // Return it unchanged so repeated sessionId calls do not re-append skills or
-  // AGENTS.md content in resolved task metadata.
+  // Pooled agents already have a frozen prompt baked into their session state.
+  // Return it unchanged so repeated sessionId calls do not re-resolve.
   if (options.pooledSystemPrompt?.trim()) return options.pooledSystemPrompt;
 
+  // Return only the base prompt. AgentSession constructs the full system prompt
+  // from this custom prompt + its own resource-loader discovery (skills,
+  // AGENTS.md, active-tool snippets). We previously appended skills/AGENTS.md
+  // here; that duplicated AgentSession's work.
   const base =
     firstNonBlank(
       options.taskSystemPrompt,
       options.agentSystemPrompt,
       options.parentSystemPrompt,
     ) ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT;
-  const agentsMdContext = options.agentsMdFiles.length
-    ? options.agentsMdFiles.join("\n\n")
-    : undefined;
 
-  return appendPromptSections(base, [
-    ...options.skillBodies,
-    agentsMdContext ?? "",
-  ]);
+  return base;
 }

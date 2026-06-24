@@ -1,8 +1,8 @@
 /**
  * Integration tests for delegate extension's task execution lifecycle.
  *
- * These tests exercise the full execute() → acquireAgentSession → runAgent path,
- * verifying that tasks actually create agents and produce output (or correct errors).
+ * These tests exercise the full execute() → acquireAgentSession → runAgentSession path,
+ * verifying that tasks actually create sessions and produce output (or correct errors).
  *
  * Strategy:
  * - Use pi-test-harness to create a real session with the delegate extension loaded.
@@ -20,12 +20,12 @@ import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { createTestSession } from "@marcfargas/pi-test-harness";
 // The test harness loads the extension via jiti. Under bun, jiti shares its
 // module graph with native imports, so the `agentPool`/`ticketRegistry`/
-// `setRetryBaseMsForTesting` imported below are the SAME instances the
+// `_setHostRetryBaseMsForTesting` imported below are the SAME instances the
 // extension uses — verified empirically (imported agentPool sees sessions
 // created via execute(); the retry-base override reaches the extension's
-// runAgent). We clear them in afterEach to avoid leaking between test runs.
+// createAgentSession). We clear them in afterEach to avoid leaking between runs.
 import { agentPool, ticketRegistry } from "./delegate.ts";
-import { setRetryBaseMsForTesting } from "./runner.ts";
+import { _setHostRetryBaseMsForTesting } from "./host.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
 
@@ -59,21 +59,36 @@ function mockStream(text: string) {
   return stream;
 }
 
+/** Set up mock.module to intercept streamSimple with a canned response.
+ *  Mocks BOTH module specifiers: pi-delegate's own code imports from
+ *  "@mariozechner/pi-ai", but pi-coding-agent's internal createAgentSession
+ *  imports streamSimple from "@earendil-works/pi-ai" (the package's real name —
+ *  @mariozechner/pi-ai is a renamed copy). Both must be patched or the
+ *  AgentSession streamFn calls the real, network-hitting streamSimple. */
+function mockPiAiStream(factory: (orig: any) => Record<string, unknown>): void {
+  mock.module("@mariozechner/pi-ai", factory as never);
+  mock.module("@earendil-works/pi-ai", factory as never);
+}
+
 /** Set up mock.module to intercept streamSimple with a canned response. */
 function installStreamMock(responseText: string) {
-  mock.module("@mariozechner/pi-ai", (orig) => ({
+  mockPiAiStream((orig) => ({
     ...orig,
     streamSimple: () => mockStream(responseText),
   }));
 }
 
-/** Patch model registry auth so sub-agents skip real auth. */
+/** Patch model registry auth so sub-agents skip real auth.
+ *  AgentSession (unlike the old createAgent) checks hasConfiguredAuth + isUsingOAuth
+ *  before calling getApiKeyAndHeaders, so all three must be patched. */
 function patchAuth(ts: TestSession) {
   const reg = (ts.session as any)._modelRegistry;
   reg.getApiKeyAndHeaders = async () => ({
     ok: true,
     apiKey: "test-key",
   });
+  reg.hasConfiguredAuth = () => true;
+  reg.isUsingOAuth = () => false;
 }
 
 /** Get delegate tool definition from the test session. */
@@ -149,7 +164,7 @@ describe("delegate task lifecycle integration", () => {
   test("ad-hoc prompt inherits parent system prompt and appends AGENTS.md", async () => {
     const projectInstruction = "SPAWN_PROMPT_HYGIENE_PROJECT_CONTEXT";
     let capturedSystemPrompt = "";
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: (_model: unknown, context: { systemPrompt?: string }) => {
         capturedSystemPrompt = context.systemPrompt ?? "";
@@ -230,7 +245,7 @@ describe("delegate task lifecycle integration", () => {
 
   test("named agent prompt overrides inherited parent system prompt", async () => {
     let capturedSystemPrompt = "";
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: (_model: unknown, context: { systemPrompt?: string }) => {
         capturedSystemPrompt = context.systemPrompt ?? "";
@@ -279,7 +294,9 @@ describe("delegate task lifecycle integration", () => {
       };
       expect(details.results[0]?.error).toBeUndefined();
       expect(capturedSystemPrompt).toContain("NAMED_AGENT_SYSTEM_PROMPT");
-      expect(capturedSystemPrompt).not.toContain("PARENT_PROMPT_SHOULD_NOT_WIN");
+      expect(capturedSystemPrompt).not.toContain(
+        "PARENT_PROMPT_SHOULD_NOT_WIN",
+      );
     } finally {
       fs.rmSync(taskCwd, { recursive: true, force: true });
     }
@@ -334,7 +351,7 @@ describe("delegate task lifecycle integration", () => {
   test("parent model with no auth falls back to available alternative", async () => {
     // Track which model the sub-agent actually used.
     let usedModelId: string | undefined;
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: (model: any) => {
         usedModelId = model.id;
@@ -404,7 +421,7 @@ describe("delegate task lifecycle integration", () => {
 
   test("multiple fresh tasks run in parallel and all succeed", async () => {
     let callCount = 0;
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -485,7 +502,7 @@ describe("delegate task lifecycle integration", () => {
 
   test("task with sessionId reuses pooled session on second call", async () => {
     let callCount = 0;
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -952,7 +969,7 @@ function installFailingThenSuccess(
   successText: string,
 ) {
   let callCount = 0;
-  mock.module("@mariozechner/pi-ai", (orig) => ({
+  mockPiAiStream((orig) => ({
     ...orig,
     streamSimple: () => {
       callCount++;
@@ -969,10 +986,11 @@ describe("delegate retry and error recovery", () => {
   const realRandom = Math.random;
 
   beforeEach(() => {
-    // Make retries fast — shrink backoff to 1ms via test setter, zero jitter
-    // via Math.random stub. Without this, rate-limit tests sleep real 30s+.
+    // AgentSession owns retry (strip-and-continue + exponential backoff read
+    // from the shared settingsManager). Shrink backoff to 1ms so retries don't
+    // sleep real seconds; zero jitter via Math.random stub.
     Math.random = () => 0;
-    setRetryBaseMsForTesting(1);
+    _setHostRetryBaseMsForTesting(1);
   });
 
   afterEach(() => {
@@ -982,7 +1000,7 @@ describe("delegate retry and error recovery", () => {
     Math.random = realRandom;
     ts?.dispose();
     ts = undefined;
-    setRetryBaseMsForTesting(undefined);
+    _setHostRetryBaseMsForTesting(undefined);
   });
 
   test("transient error → retry → success", async () => {
@@ -1047,7 +1065,7 @@ describe("delegate retry and error recovery", () => {
 
   test("non-retryable error → immediate failure, no retry", async () => {
     let callCount = 0;
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -1079,7 +1097,7 @@ describe("delegate retry and error recovery", () => {
 
   test("max retries exhausted → returns last error", async () => {
     let callCount = 0;
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -1110,13 +1128,14 @@ describe("delegate retry and error recovery", () => {
     expect(details.results[0]?.error).toContain("connection refused");
   });
 
-  test("succeeds after multiple retries (clean transcript via snapshot/restore)", async () => {
+  test("succeeds after multiple retries (clean transcript via strip-and-continue)", async () => {
     let callCount = 0;
-    // Track message count on each call. If snapshot/restore works,
-    // the count stays roughly the same across retries — only the user
-    // prompt is re-added, failed assistant responses are rolled back.
+    // Track message count on each call. AgentSession's retry removes only the
+    // trailing failed assistant message (strip-and-continue), so the count stays
+    // roughly flat across retries — it does NOT grow by the failed response each
+    // time. If strip were broken, counts would grow by 1-2 per retry.
     const messageCounts: number[] = [];
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: (_model: unknown, context: any) => {
         callCount++;
@@ -1150,17 +1169,16 @@ describe("delegate retry and error recovery", () => {
     expect(details.results[0]?.error).toBeUndefined();
     expect(details.results[0]?.output).toContain("Done after retries");
 
-    // Verify snapshot/restore: message count should NOT grow across
-    // retries (failed assistant responses were rolled back).
-    // If snapshot/restore were broken, counts would grow by 1-2 per retry.
+    // Verify strip-and-continue: AgentSession removes the trailing failed
+    // assistant message before each retry, so the transcript does NOT grow
+    // across retries. Allow small drift (the re-added user prompt on retry).
     if (messageCounts.length >= 2) {
       const first = messageCounts[0]!;
       const second = messageCounts[1]!;
       const third = messageCounts[2]!;
-    // Allow at most 1 message difference (the re-added user prompt).
-    expect(Math.abs(second - first)).toBeLessThanOrEqual(1);
-    expect(Math.abs(third - second)).toBeLessThanOrEqual(1);
-    expect(Math.abs(third - first)).toBeLessThanOrEqual(2);
+      expect(Math.abs(second - first)).toBeLessThanOrEqual(1);
+      expect(Math.abs(third - second)).toBeLessThanOrEqual(1);
+      expect(Math.abs(third - first)).toBeLessThanOrEqual(2);
     }
   });
 
@@ -1173,7 +1191,7 @@ describe("delegate retry and error recovery", () => {
     // against a nonexistent path. Now the failure path force-flushes the
     // header so the path is real and resumable.
     let callCount = 0;
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -1232,7 +1250,7 @@ describe("delegate abort behavior", () => {
 
   test("abort signal stops all tasks and returns Aborted status (no undefined holes)", async () => {
     // Mock that hangs so the abort signal has time to fire.
-    mock.module("@mariozechner/pi-ai", (orig) => ({
+    mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         const stream = createAssistantMessageEventStream();

@@ -24,12 +24,7 @@ import {
   getMaxAsyncTickets,
   getMaxConcurrent,
 } from "./config.ts";
-import {
-  discoverAgents,
-  buildSubagentSystemPrompt,
-  loadAgentsMdFiles,
-  loadSkill,
-} from "./agents.ts";
+import { discoverAgents, buildSubagentSystemPrompt } from "./agents.ts";
 import { buildParentTranscript } from "./parent-context.ts";
 import { findAvailableAlternative, resolveModel } from "./model.ts";
 import { resolveModelSpec } from "./config.ts";
@@ -87,7 +82,6 @@ const delegateParameters = Type.Object({
           Type.String({ enum: ["fresh", "with-parent-transcript"] }),
         ),
         model: Type.Optional(Type.String()),
-        skills: Type.Optional(Type.Array(Type.String())),
         tools: Type.Optional(Type.Array(Type.String())),
         thinking: Type.Optional(
           Type.String({
@@ -136,7 +130,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
   return [
     "# Delegate Tool Manual",
     "",
-    "Delegate subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, skills, and thinking level.",
+    "Delegate subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, and thinking level.",
     "",
     "## Available Agents",
     "",
@@ -151,7 +145,6 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "model: anthropic/claude-haiku-4-5  # optional",
     "thinking: low                     # off/minimal/low/medium/high/xhigh",
     "tools: *                          # * = full agent. ro = read-only. Named agents must declare.",
-    "skills: web-content               # comma-separated skill names",
     "---",
     "You are a helpful agent...",
     "```",
@@ -163,9 +156,8 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "- `systemPrompt` — System prompt. Falls back to agent definition, then parent session system prompt.",
     "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
     "- `tools` — Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Inline tasks default to `*`; named agents must declare.",
-    "- `skills` — Skill names injected into the system prompt.",
     "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
-    "- `cwd` — Working directory for the subagent (settings, skills, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
+    "- `cwd` — Working directory for the subagent (settings, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
     "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
     "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
     "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
@@ -228,7 +220,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "",
     '- `*` means the full agent (read, write, edit, bash), not "every tool." The grep/find/ls trio exists only for `ro` (read-only) agents where bash is unavailable — bash already subsumes them.',
     "- Named agent profiles must declare a `tools:` field; inline tasks default to `*`.",
-    "- `skills` injects a skill's SKILL.md *instructions* into the system prompt (text). It does not unlock extra tools.",
+    "- Subagents inherit all skills discovered in their `cwd` (via AgentSession's resource loader). Per-task skill filtering is not supported — curate the cwd's skill set instead.",
     `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
     "- `with-parent-transcript` injects your entire conversation. A 50k-token session means the subagent starts 50k tokens deep.",
     "",
@@ -269,7 +261,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // Agent discovery is intentionally parent-cwd-scoped: agent profiles are a
       // session-level resource, not per-task. Per-task cwd governs settings,
-      // skills, and AGENTS.md injection (see resolveCwd below), but not which
+      // and AGENTS.md resolution (see resolveCwd below), but not which
       // named agents exist. Changing this would let a task's throwaway cwd
       // silently swap the agent roster.
       const agents = discoverAgents(ctx.cwd);
@@ -400,7 +392,6 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const pooledConfig = t.sessionId
           ? agentPool.get(t.sessionId)?.config
           : undefined;
-        const usingPooledPrompt = Boolean(pooledConfig?.systemPrompt.trim());
 
         // Prompt is required for fresh tasks. ResumeFrom provides context already.
         if (
@@ -414,26 +405,16 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           );
         }
 
-        // Inject skills
-        const skillNames =
-          t.skills ?? agentOverride?.skills ?? agent?.skills ?? [];
-        const skillBodies: string[] = [];
-        if (!usingPooledPrompt) {
-          for (const name of skillNames) {
-            const content = loadSkill(name, cwd);
-            if (content) skillBodies.push(content);
-          }
-        }
-
-        // Inject AGENTS.md context files (global + cwd ancestors)
-        const agentsMdFiles = usingPooledPrompt ? [] : loadAgentsMdFiles(cwd);
+        // System prompt resolution. AgentSession's resource loader owns
+        // skills + AGENTS.md discovery (it appends them via _rebuildSystemPrompt),
+        // so we resolve only the *base* prompt here: explicit task prompt → named
+        // agent body → parent session prompt → default. The resolved base is
+        // passed as the loader's customPrompt (see buildDelegateSession).
         const systemPrompt = buildSubagentSystemPrompt({
           taskSystemPrompt: t.systemPrompt,
           agentSystemPrompt: agent?.systemPrompt,
           parentSystemPrompt,
           pooledSystemPrompt: pooledConfig?.systemPrompt,
-          skillBodies,
-          agentsMdFiles,
         });
 
         // Build prompt — wrap with parent context if using with-parent-transcript

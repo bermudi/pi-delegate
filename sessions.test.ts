@@ -32,9 +32,7 @@ function fakeSessionManager(sessionFile: string, headerId = "test-session-id") {
 
 describe("persistSessionHeader", () => {
   test("force-writes the header when the file does not yet exist", () => {
-    const dir = fs.mkdtempSync(
-      path.join(os.tmpdir(), "delegate-persist-"),
-    );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-persist-"));
     const sessionFile = path.join(dir, "2026-01-01T00-00-00Z_abc.jsonl");
     try {
       expect(fs.existsSync(sessionFile)).toBe(false);
@@ -54,9 +52,7 @@ describe("persistSessionHeader", () => {
   });
 
   test("is idempotent — second call is a no-op when the file already exists", () => {
-    const dir = fs.mkdtempSync(
-      path.join(os.tmpdir(), "delegate-persist-"),
-    );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-persist-"));
     const sessionFile = path.join(dir, "2026-01-01T00-00-00Z_def.jsonl");
     let rewriteCalls = 0;
     try {
@@ -91,9 +87,7 @@ describe("persistSessionHeader", () => {
   });
 
   test("returns false when _rewriteFile throws", () => {
-    const dir = fs.mkdtempSync(
-      path.join(os.tmpdir(), "delegate-persist-"),
-    );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-persist-"));
     const sessionFile = path.join(dir, "2026-01-01T00-00-00Z_ghi.jsonl");
     try {
       const sm = {
@@ -110,9 +104,7 @@ describe("persistSessionHeader", () => {
   });
 
   test("tolerates a session manager lacking _rewriteFile", () => {
-    const dir = fs.mkdtempSync(
-      path.join(os.tmpdir(), "delegate-persist-"),
-    );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-persist-"));
     const sessionFile = path.join(dir, "2026-01-01T00-00-00Z_jkl.jsonl");
     try {
       // No _rewriteFile seam at all — should not throw, returns false.
