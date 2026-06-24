@@ -1157,11 +1157,63 @@ describe("delegate retry and error recovery", () => {
       const first = messageCounts[0]!;
       const second = messageCounts[1]!;
       const third = messageCounts[2]!;
-      // Allow at most 1 message difference (the re-added user prompt).
-      expect(Math.abs(second - first)).toBeLessThanOrEqual(1);
-      expect(Math.abs(third - second)).toBeLessThanOrEqual(1);
-      expect(Math.abs(third - first)).toBeLessThanOrEqual(2);
+    // Allow at most 1 message difference (the re-added user prompt).
+    expect(Math.abs(second - first)).toBeLessThanOrEqual(1);
+    expect(Math.abs(third - second)).toBeLessThanOrEqual(1);
+    expect(Math.abs(third - first)).toBeLessThanOrEqual(2);
     }
+  });
+
+  test("failed first-call run still reports a resumable sessionFile on disk", async () => {
+    // Reproduces the Cloudflare-524 scenario: the upstream model never
+    // responds, every attempt fails, retries are exhausted. Previously the
+    // reported sessionFile pointed at a file that was never written (upstream
+    // SessionManager only persists after the first assistant message, and the
+    // failure flush was skipped), so the parent would fabricate a resumeFrom
+    // against a nonexistent path. Now the failure path force-flushes the
+    // header so the path is real and resumable.
+    let callCount = 0;
+    mock.module("@mariozechner/pi-ai", (orig) => ({
+      ...orig,
+      streamSimple: () => {
+        callCount++;
+        // A retryable transient error — retries will fire and exhaust.
+        return mockStreamError(
+          "524 https://developers.cloudflare.com/.../524-a-timeout-occurred",
+        );
+      },
+    }));
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts);
+
+    const toolDef = getDelegateTool(ts);
+    const ctx = getExecContext(ts);
+
+    const result = await toolDef.execute(
+      "tc-fail-flush",
+      { tasks: [{ prompt: "do work" }] },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const details = (result as any).details as {
+      results: Array<{ error?: string; sessionFile?: string }>;
+    };
+
+    expect(callCount).toBeGreaterThan(1); // Retries fired and exhausted.
+    expect(details.results[0]?.error).toContain("524");
+
+    // The reported sessionFile MUST exist on disk — no phantom paths.
+    const sessionFile = details.results[0]?.sessionFile;
+    expect(sessionFile).toBeDefined();
+    expect(fs.existsSync(sessionFile!)).toBe(true);
+
+    // The persisted file is a valid resumable session: header line present.
+    const firstLine = fs.readFileSync(sessionFile!, "utf8").split("\n")[0]!;
+    const parsed = JSON.parse(firstLine);
+    expect(parsed.type).toBe("session");
   });
 });
 

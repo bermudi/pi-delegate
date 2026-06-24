@@ -1,5 +1,7 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { TaskResult } from "./types.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -242,4 +244,37 @@ export function formatToolCallShort(
       }
     }
   }
+}
+
+/**
+ * Render a failed task's result lines for LLM consumption.
+ *
+ * Single source of truth used by both the sync (execute) and async
+ * (formatCompletedTicket) render paths — previously this logic was duplicated
+ * and the two copies had drifted into the same bug: reporting a sessionFile
+ * path that didn't exist on disk.
+ *
+ * Emits:
+ *   [FAILED: <error> · session: <shortpath>]
+ *   → To retry: delegate({ tasks: [{ resumeFrom: "<path>", prompt: "continue" }] })
+ *
+ * When a sessionFile is present but the file is genuinely absent (no resumable
+ * session), emit an explicit notice instead of a retry hint — so the parent
+ * model is told to re-dispatch fresh rather than left to fabricate a path.
+ */
+export function formatFailedTask(r: TaskResult): string[] {
+  const parts: string[] = [];
+  // Empty string is falsy but not nullish — `||` covers both undefined and "".
+  const failParts = [r.error || "unknown error"];
+  if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
+  parts.push(`[FAILED: ${failParts.join(" · ")}]`);
+  if (r.sessionFile && fs.existsSync(r.sessionFile)) {
+    const safePath = JSON.stringify(r.sessionFile);
+    parts.push(
+      `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
+    );
+  } else if (r.sessionFile) {
+    parts.push(`[no resumable session — re-dispatch as a fresh task]`);
+  }
+  return parts;
 }
