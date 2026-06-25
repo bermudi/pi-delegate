@@ -411,6 +411,17 @@ async function runResolvedTaskUnlocked(
       return finishTask(env, p, acquired.error);
     }
 
+    // Re-check abort after acquisition. The pre-acquire check at the top can
+    // miss a signal that fires during getHostDeps/createAgentSession/git
+    // baseline. runAgentSession re-checks after attaching its listener, but a
+    // cancelled ticket should not even start the subagent (no file writes, no
+    // pool insert). Returning here keeps the just-acquired session out of the
+    // run path; pool hits leave the session in the pool untouched, fresh
+    // sessions simply never get inserted (insertion is success-only).
+    if (env.signal?.aborted) {
+      return finishTask(env, p, failTask(task, "Aborted"));
+    }
+
     // ── Run the agent ─────────────────────────────────────────────────
     const doRun = async (): Promise<TaskResult> => {
       try {

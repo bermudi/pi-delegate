@@ -235,12 +235,30 @@ function formatToolCallShort(name, args) {
     }
   }
 }
+function isResumableSessionFile(sessionFile) {
+  if (!fs.existsSync(sessionFile)) return false;
+  try {
+    const content = fs.readFileSync(sessionFile, "utf8");
+    for (const line of content.split("\n")) {
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type === "message" || entry.type === "custom_message") {
+          return true;
+        }
+      } catch {
+      }
+    }
+  } catch {
+  }
+  return false;
+}
 function formatFailedTask(r) {
   const parts = [];
   const failParts = [r.error || "unknown error"];
   if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
   parts.push(`[FAILED: ${failParts.join(" \xB7 ")}]`);
-  if (r.sessionFile && fs.existsSync(r.sessionFile)) {
+  if (r.sessionFile && isResumableSessionFile(r.sessionFile)) {
     const safePath = JSON.stringify(r.sessionFile);
     parts.push(
       `\u2192 To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`
@@ -1035,12 +1053,17 @@ import {
 import * as fs5 from "node:fs";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 function setParentSession(sm, parentPath) {
-  const header = (
-    // @ts-expect-error — accessing private fileEntries to mutate header's parentSession
-    sm.fileEntries[0]
-  );
+  const inner = sm;
+  const header = inner.fileEntries[0];
   if (header && header.type === "session") {
     header.parentSession = parentPath;
+    const file = inner.getSessionFile?.();
+    if (file && fs5.existsSync(file)) {
+      try {
+        inner._rewriteFile?.();
+      } catch {
+      }
+    }
   }
 }
 function createSubagentSessionManager(parentSessionManager, cwd) {
@@ -1234,6 +1257,16 @@ async function runAgentSession(session, prompt, config, signal, onProgress, gitB
     };
     signal.addEventListener("abort", abortHandler, { once: true });
   }
+  if (signal?.aborted) {
+    abortHandler?.();
+    return {
+      output: "",
+      error: "Aborted",
+      durationMs: Date.now() - startTime,
+      tokens: 0,
+      touchedFiles: []
+    };
+  }
   try {
     const messagesBefore = session.messages.length;
     await session.prompt(prompt);
@@ -1297,6 +1330,12 @@ async function getHostDeps(options) {
       cwd: options.cwd,
       agentDir,
       settingsManager,
+      // Subagents are headless workers — they must not load the parent's
+      // interactive extensions. This also neutralizes the shared-runtime
+      // cross-wiring risk (see module doc): with no extensions, no handlers
+      // bind to the mutated runtime methods, so the cached loader is safe to
+      // share across live sessions.
+      noExtensions: true,
       // When a named agent supplies a custom prompt, it becomes the loader's
       // customPrompt — overriding the default system prompt AgentSession would
       // otherwise build. `systemPrompt` (the source) wins over file discovery.
@@ -1580,6 +1619,9 @@ ${listPooledAgents().join("\n")}`,
     const acquired = await acquireAgentSession(env, task, p);
     if ("error" in acquired) {
       return finishTask(env, p, acquired.error);
+    }
+    if (env.signal?.aborted) {
+      return finishTask(env, p, failTask(task, "Aborted"));
     }
     const doRun = async () => {
       try {

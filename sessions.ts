@@ -2,12 +2,32 @@ import * as fs from "node:fs";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 
 export function setParentSession(sm: SessionManager, parentPath: string): void {
-  const header =
-    // @ts-expect-error — accessing private fileEntries to mutate header's parentSession
-    (sm as { fileEntries: Array<{ type: string; parentSession?: string }> })
-      .fileEntries[0];
+  const inner = sm as unknown as {
+    fileEntries: Array<{ type: string; parentSession?: string }>;
+    getSessionFile?: () => string | undefined;
+    _rewriteFile?: () => void;
+  };
+  const header = inner.fileEntries[0];
   if (header && header.type === "session") {
     header.parentSession = parentPath;
+    // For a *resumed* session the file already exists on disk and the manager
+    // is flushed (SessionManager.open/setSessionFile sets flushed=true). The
+    // in-memory header mutation above is otherwise lost: upstream _persist()
+    // only *appends* new entries once flushed — it never rewrites the header.
+    // So a resumeFrom session would never surface as a child in /resume despite
+    // the link being set in memory. Rewrite the whole file (header + entries)
+    // so the parentSession field is actually persisted. Fresh sessions skip
+    // this (file doesn't exist yet); their first _persist() writes the mutated
+    // header along with the rest, and rewriting early would trip the
+    // duplicate-header bug in _persist()'s not-yet-flushed path.
+    const file = inner.getSessionFile?.();
+    if (file && fs.existsSync(file)) {
+      try {
+        inner._rewriteFile?.();
+      } catch {
+        /* best effort — link stays in-memory; not fatal */
+      }
+    }
   }
 }
 

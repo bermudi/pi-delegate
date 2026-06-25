@@ -139,6 +139,22 @@ export async function runAgentSession(
     signal.addEventListener("abort", abortHandler, { once: true });
   }
 
+  // The signal may have fired *between* lifecycle's pre-acquire abort check
+  // and this listener registration (e.g. during getHostDeps/createAgentSession/
+  // git baseline). addEventListener("abort", …, { once }) does NOT fire for an
+  // already-aborted signal, so without this re-check a cancelled async ticket
+  // can still start a subagent that writes files and gets pooled.
+  if (signal?.aborted) {
+    abortHandler?.();
+    return {
+      output: "",
+      error: "Aborted",
+      durationMs: Date.now() - startTime,
+      tokens: 0,
+      touchedFiles: [],
+    };
+  }
+
   try {
     // Remember how many messages existed before the prompt so we can extract
     // only the new assistant output (not cumulative history).

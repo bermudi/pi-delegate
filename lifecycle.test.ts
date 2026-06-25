@@ -1228,10 +1228,16 @@ describe("delegate retry and error recovery", () => {
     expect(sessionFile).toBeDefined();
     expect(fs.existsSync(sessionFile!)).toBe(true);
 
-    // The persisted file is a valid resumable session: header line present.
+    // The persisted file is a valid session file: header line present, and
+    // because AgentSession records the user prompt + failed assistant attempts
+    // before retries exhaust, it also carries restorable messages — so it is
+    // genuinely resumable via resumeFrom (not a header-only dead path).
     const firstLine = fs.readFileSync(sessionFile!, "utf8").split("\n")[0]!;
     const parsed = JSON.parse(firstLine);
     expect(parsed.type).toBe("session");
+    const text = (result.content as Array<{ type: string; text: string }>)[0]!
+      .text;
+    expect(text).toContain("→ To retry: delegate(");
   });
 });
 

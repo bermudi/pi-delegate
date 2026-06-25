@@ -247,6 +247,42 @@ export function formatToolCallShort(
 }
 
 /**
+ * A session file is *resumable* iff `resumeFrom` would accept it: the file
+ * exists **and** contains at least one restorable message/custom_message entry
+ * on the leaf path (i.e. `buildSessionContext().messages.length > 0`). A
+ * header-only `.jsonl` — produced when a subagent's first model call dies
+ * before emitting any assistant message and the failure path force-flushed the
+ * header — is real on disk but rejected by `resumeFrom` with "empty session".
+ * Advertising those as resumable sends the parent to a dead path.
+ *
+ * This reads the file but short-circuits at the first restorable entry; on the
+ * failure path these files are typically tiny (header-only or near-empty).
+ */
+function isResumableSessionFile(sessionFile: string): boolean {
+  if (!fs.existsSync(sessionFile)) return false;
+  try {
+    // Read line-by-line; a header-only file is one line. We only need to know
+    // whether any message-bearing entry exists — matches the gate resumeFrom
+    // applies (buildSessionContext().messages.length > 0) for the common case.
+    const content = fs.readFileSync(sessionFile, "utf8");
+    for (const line of content.split("\n")) {
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line) as { type?: string };
+        if (entry.type === "message" || entry.type === "custom_message") {
+          return true;
+        }
+      } catch {
+        /* skip malformed/trailing line */
+      }
+    }
+  } catch {
+    /* unreadable — treat as not resumable */
+  }
+  return false;
+}
+
+/**
  * Render a failed task's result lines for LLM consumption.
  *
  * Single source of truth used by both the sync (execute) and async
@@ -258,9 +294,10 @@ export function formatToolCallShort(
  *   [FAILED: <error> · session: <shortpath>]
  *   → To retry: delegate({ tasks: [{ resumeFrom: "<path>", prompt: "continue" }] })
  *
- * When a sessionFile is present but the file is genuinely absent (no resumable
- * session), emit an explicit notice instead of a retry hint — so the parent
- * model is told to re-dispatch fresh rather than left to fabricate a path.
+ * When a sessionFile is present but not actually resumable (file absent, or a
+ * header-only file that `resumeFrom` would reject as empty), emit an explicit
+ * notice instead of a retry hint — so the parent model is told to re-dispatch
+ * fresh rather than left to fabricate a path or chase a dead resume.
  */
 export function formatFailedTask(r: TaskResult): string[] {
   const parts: string[] = [];
@@ -268,7 +305,7 @@ export function formatFailedTask(r: TaskResult): string[] {
   const failParts = [r.error || "unknown error"];
   if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
   parts.push(`[FAILED: ${failParts.join(" · ")}]`);
-  if (r.sessionFile && fs.existsSync(r.sessionFile)) {
+  if (r.sessionFile && isResumableSessionFile(r.sessionFile)) {
     const safePath = JSON.stringify(r.sessionFile);
     parts.push(
       `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
