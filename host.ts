@@ -5,11 +5,25 @@
  *
  * `DefaultResourceLoader.reload()` is the one expensive step (~1.2s cold — it
  * scans for skills, prompts, agents.md files, system prompts). It is a
- * read-only cache: `_buildRuntime` only reads `resourceLoader.getExtensions()`
- * and the prompt/skill getters, none of which mutate. We benchmarked this as
- * safe to share across concurrent subagent sessions, so we build the deps
- * exactly once per (cwd + systemPrompt) and hand the same instances to every
- * subagent with that combo.
+ * read-only cache for the parts we care about: skills, AGENTS.md/context files,
+ * and the system prompt. `_buildRuntime` reads `resourceLoader.getExtensions()`
+ * and the prompt/skill getters.
+ *
+ * **Extensions are disabled for subagents** (`noExtensions: true`). Subagents
+ * are headless workers spawned by the parent's delegate tool — they must not
+ * run the parent's interactive extensions (custom UI, slash commands, hooks
+ * that call `pi.appendEntry()`/`pi.sendMessage()`). This also closes the
+ * cross-wiring risk flagged in review: `AgentSession._buildRuntime` hands the
+ * loader's shared `extensionsResult.runtime` to a new `ExtensionRunner`, whose
+ * `bindCore()` overwrites mutable methods on that runtime (`sendMessage`,
+ * `appendEntry`, `setSessionName`, …). With no extensions loaded there are no
+ * handlers bound to those methods, so sharing the cached loader across live
+ * sessions is safe — the runtime is mutated but never read by extension code.
+ * `extendResourcesFromExtensions()` also early-returns when there are no
+ * `resources_discover` handlers, so extension-discovered skills/prompts cannot
+ * leak across sessions. We therefore build the deps exactly once per
+ * (cwd + systemPrompt) and hand the same instances to every subagent with
+ * that combo.
  *
  * The `authStorage` / `settingsManager` / `resourceLoader` are pi-delegate-
  * owned siblings reading the same on-disk files under `~/.pi/agent` as the
@@ -85,6 +99,12 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
       cwd: options.cwd,
       agentDir,
       settingsManager,
+      // Subagents are headless workers — they must not load the parent's
+      // interactive extensions. This also neutralizes the shared-runtime
+      // cross-wiring risk (see module doc): with no extensions, no handlers
+      // bind to the mutated runtime methods, so the cached loader is safe to
+      // share across live sessions.
+      noExtensions: true,
       // When a named agent supplies a custom prompt, it becomes the loader's
       // customPrompt — overriding the default system prompt AgentSession would
       // otherwise build. `systemPrompt` (the source) wins over file discovery.

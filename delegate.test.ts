@@ -67,6 +67,10 @@ import {
   deliverTicketResults,
   resolveCwd,
 } from "./delegate.ts";
+import {
+  _setHostRetryBaseMsForTesting,
+  _resetHostDepsCacheForTesting,
+} from "./host.ts";
 
 // ── Integration test imports ──────────────────────────────────────────────
 
@@ -1408,28 +1412,66 @@ describe("shortenPath", () => {
 describe("formatFailedTask", () => {
   type ResultLike = Parameters<typeof formatFailedTask>[0];
 
-  test("emits retry hint when sessionFile exists on disk", () => {
+  test("emits retry hint only when sessionFile has restorable messages", () => {
+    // A header-only .jsonl (produced when the first model call dies before any
+    // assistant message and the failure path force-flushed the header) is real
+    // on disk but rejected by resumeFrom as "empty session". It must NOT
+    // advertise a retry hint — the parent would chase a dead resume.
     const dir = mkdtempSync(path.join(tmpdir(), "delegate-fmt-"));
-    const sessionFile = path.join(dir, "2026-01-01T00-00-00Z_abc.jsonl");
+    const headerOnly = path.join(dir, "2026-01-01T00-00-00Z_hdr.jsonl");
+    const withMessages = path.join(dir, "2026-01-01T00-00-00Z_msg.jsonl");
     try {
-      writeFileSync(sessionFile, '{"type":"session"}\n');
-      const r: ResultLike = {
+      writeFileSync(headerOnly, '{"type":"session"}\n');
+      writeFileSync(
+        withMessages,
+        [
+          JSON.stringify({ type: "session", id: "s1", version: 3 }),
+          JSON.stringify({
+            type: "message",
+            id: "m1",
+            parentId: null,
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "hi" }],
+              timestamp: 0,
+            },
+          }),
+        ].join("\n") + "\n",
+      );
+
+      const base: Omit<ResultLike, "sessionFile"> = {
         agent: "scout",
         output: "",
         error: "524 cloudflare timeout",
         durationMs: 1000,
         tokens: 0,
-        sessionFile,
         touchedFiles: [],
       };
-      const lines = formatFailedTask(r);
-      expect(lines[0]).toBe(
-        `[FAILED: 524 cloudflare timeout · session: ${shortenPath(sessionFile)}]`,
+
+      // Header-only → no retry hint, explicit re-dispatch notice.
+      const headerLines = formatFailedTask({
+        ...base,
+        sessionFile: headerOnly,
+      });
+      expect(headerLines[0]).toBe(
+        `[FAILED: 524 cloudflare timeout · session: ${shortenPath(headerOnly)}]`,
       );
-      expect(lines[1]).toContain("→ To retry: delegate(");
-      // The path is JSON-stringified (quoted) inside the resumeFrom hint.
-      expect(lines[1]).toContain(JSON.stringify(sessionFile));
-      expect(lines[1]).toContain("resumeFrom");
+      expect(headerLines[1]).toBe(
+        "[no resumable session — re-dispatch as a fresh task]",
+      );
+      expect(headerLines.some((l) => l.includes("resumeFrom"))).toBe(false);
+
+      // File with messages → retry hint with JSON-stringified path.
+      const msgLines = formatFailedTask({
+        ...base,
+        sessionFile: withMessages,
+      });
+      expect(msgLines[0]).toBe(
+        `[FAILED: 524 cloudflare timeout · session: ${shortenPath(withMessages)}]`,
+      );
+      expect(msgLines[1]).toContain("→ To retry: delegate(");
+      expect(msgLines[1]).toContain(JSON.stringify(withMessages));
+      expect(msgLines[1]).toContain("resumeFrom");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -3981,5 +4023,38 @@ describe("async delegate integration", () => {
     expect(schema.properties.async).toBeDefined();
     expect(schema.properties.ticket).toBeDefined();
     expect(schema.required ?? []).not.toContain("tasks");
+  });
+});
+
+// ── getHostDeps: extensions disabled for subagents ───────────────────────
+// Subagents are headless workers and must not load the parent's interactive
+// extensions. Beyond intent, this neutralizes the shared-runtime cross-wiring
+// risk: AgentSession hands the loader's shared extensionsResult.runtime to a
+// new ExtensionRunner whose bindCore() overwrites mutable runtime methods.
+// With no extensions loaded there are no handlers bound to those methods, so
+// the cached loader is safe to share across live sessions.
+
+describe("getHostDeps disables extensions for subagents", () => {
+  beforeEach(() => {
+    _resetHostDepsCacheForTesting();
+  });
+  afterEach(() => {
+    _resetHostDepsCacheForTesting();
+    _setHostRetryBaseMsForTesting(undefined);
+  });
+
+  test("resourceLoader reports zero extensions", async () => {
+    const deps = await getHostDeps({ cwd: process.cwd() });
+    const ext = deps.resourceLoader.getExtensions();
+    expect(ext.extensions).toHaveLength(0);
+  });
+
+  test("resourceLoader is cached/shared across calls for same cwd", async () => {
+    const a = await getHostDeps({ cwd: process.cwd() });
+    const b = await getHostDeps({ cwd: process.cwd() });
+    // Same cached instance — the documented optimization. Safe because no
+    // extensions means no handlers bind to the shared runtime.
+    expect(b.resourceLoader).toBe(a.resourceLoader);
+    expect(b.resourceLoader.getExtensions().extensions).toHaveLength(0);
   });
 });
