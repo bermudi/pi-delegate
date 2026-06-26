@@ -101,6 +101,9 @@ export interface TaskProgress {
   model?: string;
   lastActivityAt?: number;
   activities: ToolActivity[];
+  /** Human-facing notices (e.g. unknown tools ignored). Surfaced in the TUI
+   *  under the task; the LLM gets the same text in `content` already. */
+  warnings?: string[];
 }
 
 export interface DelegateDetails {

@@ -168,6 +168,35 @@ export function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
 
+/**
+ * Extract a single-line preview of agent output for collapsed final display.
+ *
+ * Collapsed mode can't afford the full markdown render (and the render cache is
+ * keyed to expanded width), so we pull a cheap plain-text first line instead.
+ * Skips leading blanks and strips common markdown markers (headings, bullets,
+ * code fences) so the preview is the first *meaningful* line of content.
+ * Returns "" for empty / "(no output)" — callers should omit the line entirely.
+ */
+export function previewOutputLine(output: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  const clean = output.trim();
+  if (!clean || clean === "(no output)") return "";
+  for (const raw of clean.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    // Strip leading markdown noise so the preview reads as content, not markup.
+    const stripped = line
+      .replace(/^#{1,6}\s+/, "")
+      .replace(/^[-*+]\s+/, "")
+      .replace(/^\d+\.\s+/, "")
+      .replace(/^>\s*/, "")
+      .replace(/^```+.*$/, "")
+      .trim();
+    if (stripped) return truncLine(stripped, maxWidth);
+  }
+  return "";
+}
+
 export const tree = (i: number, n: number) => (i === n - 1 ? "└─" : "├─");
 export const indent = (i: number, n: number) => (i === n - 1 ? "   " : "│  ");
 
