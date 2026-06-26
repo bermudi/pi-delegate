@@ -111,6 +111,9 @@ export function formatCompletedTicket(
       ),
       progress: [...ticket.progress],
       parentModel: ticket.parentModelId,
+      // Thread ticketId so renderResult can show the running-ticket banner and
+      // the human sees which ticket they polled, even in the rich tree path.
+      ticketId: ticket.id,
     },
   };
 }
@@ -164,7 +167,17 @@ export function handlePoll(
     const tickets = [...ticketRegistry.values()];
     if (!tickets.length) {
       return {
-        content: [{ type: "text", text: "No async tickets." }],
+        content: [
+          {
+            type: "text",
+            text: [
+              "No async tickets.",
+              "",
+              "To spawn a subagent: delegate({ tasks: [{ agent, prompt }] }).",
+              "For the full manual and agent list, call delegate({ tasks: [] }) with no top-level `action`.",
+            ].join("\n"),
+          },
+        ],
         details: {
           tasks: [],
           results: [],
@@ -178,7 +191,22 @@ export function handlePoll(
         t.status === "running" ? "⏳" : t.status === "done" ? "✓" : "✗";
       const done = t.progress.filter((p) => p.status === "done").length;
       const age = fmtDuration(Date.now() - t.created);
-      return `${icon} ${t.id} · ${done}/${t.progress.length} tasks · ${t.status} · ${age}`;
+      // Agent roster — compact, deduplicated (a ticket may run the same agent
+      // several times). Helps a human tell tickets apart at a glance.
+      const agentSet = [
+        ...new Set(t.progress.map((p) => p.agent).filter(Boolean)),
+      ];
+      const agents = agentSet.length
+        ? ` · ${agentSet.slice(0, 3).join(", ")}${agentSet.length > 3 ? ` +${agentSet.length - 3}` : ""}`
+        : "";
+      let line = `${icon} ${t.id}${agents} · ${done}/${t.progress.length} tasks · ${t.status} · ${age}`;
+      // Copy-pasteable controls for running tickets — a human can grab these
+      // straight out of the TUI without retyping the ticket id.
+      if (t.status === "running") {
+        line += `\n     poll:   delegate({ action: "poll", ticket: "${t.id}" })`;
+        line += `\n     cancel: delegate({ action: "cancel", ticket: "${t.id}" })`;
+      }
+      return line;
     });
     return {
       content: [{ type: "text", text: `Async tickets:\n${lines.join("\n")}` }],
@@ -284,6 +312,9 @@ export function handlePoll(
         ),
         progress: [...ticket.progress],
         parentModel: ticket.parentModelId,
+        // Thread ticketId so the rich renderResult path shows the ticket banner
+        // (friction #2). The LLM-facing content still names the ticket id too.
+        ticketId: ticket.id,
       },
     };
   }

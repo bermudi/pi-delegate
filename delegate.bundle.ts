@@ -171,6 +171,18 @@ function fmtTokens(n) {
 function trunc(s, n) {
   return s.length <= n ? s : s.slice(0, n - 1) + "\u2026";
 }
+function previewOutputLine(output, maxWidth) {
+  if (maxWidth <= 0) return "";
+  const clean = output.trim();
+  if (!clean || clean === "(no output)") return "";
+  for (const raw of clean.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const stripped = line.replace(/^#{1,6}\s+/, "").replace(/^[-*+]\s+/, "").replace(/^\d+\.\s+/, "").replace(/^>\s*/, "").replace(/^```+.*$/, "").trim();
+    if (stripped) return truncLine(stripped, maxWidth);
+  }
+  return "";
+}
 var tree = (i, n) => i === n - 1 ? "\u2514\u2500" : "\u251C\u2500";
 var indent = (i, n) => i === n - 1 ? "   " : "\u2502  ";
 function firstArg(args, primary, fallbacks = []) {
@@ -398,7 +410,10 @@ ${r.output}`);
         (r) => r ?? { error: "PENDING \u2014 result not available" }
       ),
       progress: [...ticket.progress],
-      parentModel: ticket.parentModelId
+      parentModel: ticket.parentModelId,
+      // Thread ticketId so renderResult can show the running-ticket banner and
+      // the human sees which ticket they polled, even in the rich tree path.
+      ticketId: ticket.id
     }
   };
 }
@@ -433,7 +448,17 @@ function handlePoll(params, ctx) {
     const tickets = [...ticketRegistry.values()];
     if (!tickets.length) {
       return {
-        content: [{ type: "text", text: "No async tickets." }],
+        content: [
+          {
+            type: "text",
+            text: [
+              "No async tickets.",
+              "",
+              "To spawn a subagent: delegate({ tasks: [{ agent, prompt }] }).",
+              "For the full manual and agent list, call delegate({ tasks: [] }) with no top-level `action`."
+            ].join("\n")
+          }
+        ],
         details: {
           tasks: [],
           results: [],
@@ -446,7 +471,18 @@ function handlePoll(params, ctx) {
       const icon = t.status === "running" ? "\u23F3" : t.status === "done" ? "\u2713" : "\u2717";
       const done = t.progress.filter((p) => p.status === "done").length;
       const age = fmtDuration(Date.now() - t.created);
-      return `${icon} ${t.id} \xB7 ${done}/${t.progress.length} tasks \xB7 ${t.status} \xB7 ${age}`;
+      const agentSet = [
+        ...new Set(t.progress.map((p) => p.agent).filter(Boolean))
+      ];
+      const agents = agentSet.length ? ` \xB7 ${agentSet.slice(0, 3).join(", ")}${agentSet.length > 3 ? ` +${agentSet.length - 3}` : ""}` : "";
+      let line = `${icon} ${t.id}${agents} \xB7 ${done}/${t.progress.length} tasks \xB7 ${t.status} \xB7 ${age}`;
+      if (t.status === "running") {
+        line += `
+     poll:   delegate({ action: "poll", ticket: "${t.id}" })`;
+        line += `
+     cancel: delegate({ action: "cancel", ticket: "${t.id}" })`;
+      }
+      return line;
     });
     return {
       content: [{ type: "text", text: `Async tickets:
@@ -537,7 +573,10 @@ ${guidance}` : ""}`
           (r) => r ?? { error: "PENDING \u2014 result not available" }
         ),
         progress: [...ticket.progress],
-        parentModel: ticket.parentModelId
+        parentModel: ticket.parentModelId,
+        // Thread ticketId so the rich renderResult path shows the ticket banner
+        // (friction #2). The LLM-facing content still names the ticket id too.
+        ticketId: ticket.id
       }
     };
   }
@@ -1827,7 +1866,7 @@ function delegateExtension(pi) {
   pi.registerTool({
     name: "delegate",
     label: "Delegate to Subagents",
-    description: "Run the delegate tool with an empty task array for help text and a list of configured subagents.",
+    description: "Spawn subagents to run tasks in parallel \u2014 each with its own model, tools, and context. Supports named agent profiles, persistent multi-turn sessions, async background tickets, and resuming interrupted runs. Call with an empty tasks array for the full manual and list of configured agents.",
     parameters: delegateParameters,
     async execute(_id, params, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
@@ -2018,7 +2057,10 @@ function delegateExtension(pi) {
           tools,
           thinking,
           prompt,
-          agentName: agent?.name ?? "inline",
+          // Display label for ad-hoc subagents (no named profile). NOTE: the
+          // config-namespace key at resolveModelSpec stays "inline" — that's a
+          // delegate.json/settings contract, not a display string (friction #4).
+          agentName: agent?.name ?? "ad-hoc",
           warnings
         };
       });
@@ -2032,7 +2074,8 @@ function delegateExtension(pi) {
         tokens: 0,
         toolUses: 0,
         activities: [],
-        model: t.model?.id
+        model: t.model?.id,
+        warnings: t.warnings.length ? [...t.warnings] : void 0
       }));
       const fire = () => onUpdate?.({
         content: [
@@ -2287,6 +2330,12 @@ ${content}` : "");
         }
         return "thinking\u2026";
       };
+      const pushWarnings = (p, ind) => {
+        if (!p.warnings?.length) return;
+        for (const wn of p.warnings) {
+          lines.push(truncLine(`${ind}${theme.fg("warning", `\u26A0 ${wn}`)}`, w));
+        }
+      };
       if (options.isPartial) {
         const done = progress.filter(
           (p) => p.status === "done" || p.status === "failed"
@@ -2296,6 +2345,8 @@ ${content}` : "");
         const headerParts = [];
         if (running > 0) headerParts.push(`${running} running`);
         headerParts.push(`${done}/${total} done`);
+        if (!options.expanded && running > 0)
+          headerParts.push(theme.fg("accent", "Ctrl+O for detail"));
         lines.push(
           theme.fg("muted", `${headerParts.join(" \xB7 ")}${elapsed}`),
           ""
@@ -2416,23 +2467,21 @@ ${content}` : "");
                       w
                     )
                   );
-                  lines.push(
-                    truncLine(
-                      `${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`,
-                      w
-                    )
-                  );
                 }
               }
               break;
-            default:
+            default: {
+              const ahead = running;
+              const queuedTag = ahead >= getMaxConcurrent() ? theme.fg("muted", ` queued (${ahead} running)`) : theme.fg("muted", " waiting\u2026");
               lines.push(
                 truncLine(
-                  `${tree(i, total)} ${theme.fg("muted", "\u25CB")} ${theme.bold(p.agent)}${modelLabel(p)} ${theme.fg("muted", "waiting\u2026")}`,
+                  `${tree(i, total)} ${theme.fg("muted", "\u25CB")} ${theme.bold(p.agent)}${modelLabel(p)} ${queuedTag}`,
                   w
                 )
               );
+            }
           }
+          pushWarnings(p, ind);
         }
         const budgeted = applyLineBudget(
           lines.filter(Boolean),
@@ -2443,27 +2492,51 @@ ${content}` : "");
       } else {
         const succeeded = progress.filter((p) => p.status === "done").length;
         const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
-        const elapsed = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
-        lines.push(
-          theme.fg(
-            "muted",
-            `${succeeded}/${total} completed \xB7 ${elapsed} wall \xB7 ${fmtTokens(totalTokens)} tokens`
-          ),
-          ""
+        const hasLiveTasks = progress.some(
+          (p) => p.status === "running" || p.status === "pending"
         );
+        const ticketId = details.ticketId;
+        const elapsed = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
+        if (ticketId && hasLiveTasks) {
+          const running = progress.filter((p) => p.status === "running").length;
+          const ticketParts = [
+            `ticket ${ticketId}`,
+            `${succeeded}/${total} done`
+          ];
+          if (running > 0) ticketParts.push(`${running} running`);
+          ticketParts.push("running in background");
+          lines.push(theme.fg("warning", `\u23F3 ${ticketParts.join(" \xB7 ")}`), "");
+        } else {
+          lines.push(
+            theme.fg(
+              "muted",
+              `${succeeded}/${total} completed \xB7 ${elapsed} wall \xB7 ${fmtTokens(totalTokens)} tokens`
+            ),
+            ""
+          );
+        }
+        const runningNow = progress.filter(
+          (q) => q.status === "running"
+        ).length;
         for (let i = 0; i < total; i++) {
           const p = progress[i];
           const r = taskResults[i];
           const ind = indent(i, total);
-          const icon = p.status === "done" ? theme.fg("success", "\u2713") : theme.fg("error", "\u2717");
+          const icon = p.status === "done" ? theme.fg("success", "\u2713") : p.status === "failed" ? theme.fg("error", "\u2717") : p.status === "running" ? theme.fg("warning", "\u25D0") : theme.fg("muted", "\u25CB");
           const taskPreview = theme.fg("muted", trunc(p.task, w - 30));
+          const isLive = p.status === "running" || p.status === "pending";
+          const liveTail = p.status === "running" ? theme.fg("muted", ` \xB7 ${compactActivity(p)}`) : p.status === "pending" ? theme.fg(
+            "muted",
+            runningNow >= getMaxConcurrent() ? ` queued (${runningNow} running)` : " waiting\u2026"
+          ) : "";
           lines.push(
             truncLine(
-              `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
+              `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${isLive ? liveTail : statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
               w
             )
           );
-          if (p.activities.length > 0 && options.expanded) {
+          pushWarnings(p, ind);
+          if (p.activities.length > 0 && options.expanded && !isLive) {
             const names = p.activities.map((a) => a.name).filter((n, i2, arr) => arr.indexOf(n) === i2);
             const nameList = names.slice(0, 4).join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
             const okCount = p.activities.filter(
@@ -2485,6 +2558,17 @@ ${content}` : "");
           }
           if (r && "error" in r && r.error) {
             lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
+          }
+          if (!options.expanded && p.status === "done") {
+            const preview = r && "output" in r ? previewOutputLine(r.output ?? "", w - ind.length - 3) : "";
+            if (preview) {
+              lines.push(
+                truncLine(
+                  `${ind}${theme.fg("muted", `\u23BF ${preview}`)}`,
+                  w
+                )
+              );
+            }
           }
           if (r && "output" in r && r.output?.trim() && r.output !== "(no output)" && options.expanded) {
             const cacheKey = `md_${i}_${options.expanded ? "exp" : "col"}_${w - ind.length}`;

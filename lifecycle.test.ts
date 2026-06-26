@@ -158,7 +158,7 @@ describe("delegate task lifecycle integration", () => {
       "completed the task successfully",
     );
     expect(details.results[0]?.tokens).toBeGreaterThan(0);
-    expect(details.results[0]?.agent).toBe("inline");
+    expect(details.results[0]?.agent).toBe("ad-hoc");
   });
 
   test("ad-hoc prompt inherits parent system prompt and appends AGENTS.md", async () => {

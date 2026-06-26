@@ -45,6 +45,7 @@ import {
   formatFailedTask,
   shortenPath,
   getTermWidth,
+  previewOutputLine,
 } from "./format.ts";
 import { resolveCwd, stripAnsi, resolveCarriageReturn } from "./utils.ts";
 import type {
@@ -235,7 +236,10 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     name: "delegate",
     label: "Delegate to Subagents",
     description:
-      "Run the delegate tool with an empty task array for help text and a list of configured subagents.",
+      "Spawn subagents to run tasks in parallel — each with its own model, tools, and context. " +
+      "Supports named agent profiles, persistent multi-turn sessions, async background tickets, " +
+      "and resuming interrupted runs. Call with an empty tasks array for the full manual and list " +
+      "of configured agents.",
     parameters: delegateParameters,
 
     async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
@@ -547,7 +551,10 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           tools,
           thinking,
           prompt,
-          agentName: agent?.name ?? "inline",
+          // Display label for ad-hoc subagents (no named profile). NOTE: the
+          // config-namespace key at resolveModelSpec stays "inline" — that's a
+          // delegate.json/settings contract, not a display string (friction #4).
+          agentName: agent?.name ?? "ad-hoc",
           warnings,
         };
       });
@@ -564,6 +571,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         toolUses: 0,
         activities: [],
         model: t.model?.id,
+        warnings: t.warnings.length ? [...t.warnings] : undefined,
       }));
       const fire = () =>
         onUpdate?.({
@@ -873,6 +881,16 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         return "thinking…";
       };
 
+      // Push muted warning lines for a task under its status row. Rendered in
+      // both partial and final views so a human watching the TUI sees that tools
+      // were silently dropped — the LLM already gets this in `content`.
+      const pushWarnings = (p: TaskProgress, ind: string) => {
+        if (!p.warnings?.length) return;
+        for (const wn of p.warnings) {
+          lines.push(truncLine(`${ind}${theme.fg("warning", `⚠ ${wn}`)}`, w));
+        }
+      };
+
       if (options.isPartial) {
         const done = progress.filter(
           (p) => p.status === "done" || p.status === "failed",
@@ -882,10 +900,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           ? ` · ${fmtDuration(Date.now() - state.startedAt)}`
           : "";
 
-        // Richer header: agent counts + wall time
+        // Richer header: agent counts + wall time. The Ctrl+O affordance is
+        // tool-scoped in Pi, so a single header hint suffices — one per running
+        // task just repeats the same line N times.
         const headerParts: string[] = [];
         if (running > 0) headerParts.push(`${running} running`);
         headerParts.push(`${done}/${total} done`);
+        if (!options.expanded && running > 0)
+          headerParts.push(theme.fg("accent", "Ctrl+O for detail"));
         lines.push(
           theme.fg("muted", `${headerParts.join(" · ")}${elapsed}`),
           "",
@@ -1016,15 +1038,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                   }
                 } else {
                   // ── Collapsed: compact tool line with duration ─────
+                  // The Ctrl+O affordance lives once in the header now — emitting
+                  // it per task just repeats the same hint for every running agent.
                   lines.push(
                     truncLine(
                       `${ind}${theme.fg("muted", `⎿  ${compactActivity(p)}`)}`,
-                      w,
-                    ),
-                  );
-                  lines.push(
-                    truncLine(
-                      `${ind}${theme.fg("accent", "Press Ctrl+O for live detail")}`,
                       w,
                     ),
                   );
@@ -1032,14 +1050,23 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               }
               break;
             default:
-              // Pending / waiting
-              lines.push(
-                truncLine(
-                  `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelLabel(p)} ${theme.fg("muted", "waiting…")}`,
-                  w,
-                ),
-              );
+              // Pending / waiting. When the concurrency cap is the reason, show
+              // how many slots are occupied so a human sees throttling, not a stall.
+              {
+                const ahead = running;
+                const queuedTag =
+                  ahead >= getMaxConcurrent()
+                    ? theme.fg("muted", ` queued (${ahead} running)`)
+                    : theme.fg("muted", " waiting…");
+                lines.push(
+                  truncLine(
+                    `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelLabel(p)} ${queuedTag}`,
+                    w,
+                  ),
+                );
+              }
           }
+          pushWarnings(p, ind);
         }
         const budgeted = applyLineBudget(
           lines.filter(Boolean),
@@ -1049,37 +1076,87 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         lines.push(...budgeted);
       } else {
         // ── Final result ─────────────────────────────────────────────
+        // Also covers async dispatch + poll of a *running* ticket: those return
+        // details.progress with non-terminal (pending/running) statuses. The
+        // partial branch isn't used for them (execute has already returned), so
+        // this branch must render every status. A ticket banner is shown when
+        // details.ticketId is present so the human sees this is background work.
         const succeeded = progress.filter((p) => p.status === "done").length;
         const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
+        const hasLiveTasks = progress.some(
+          (p) => p.status === "running" || p.status === "pending",
+        );
+        const ticketId = details.ticketId;
         const elapsed = state.startedAt
           ? fmtDuration(Date.now() - state.startedAt)
           : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
-        lines.push(
-          theme.fg(
-            "muted",
-            `${succeeded}/${total} completed · ${elapsed} wall · ${fmtTokens(totalTokens)} tokens`,
-          ),
-          "",
-        );
 
+        if (ticketId && hasLiveTasks) {
+          // Background ticket — frame it as in-progress, not a finished result.
+          const running = progress.filter((p) => p.status === "running").length;
+          const ticketParts = [
+            `ticket ${ticketId}`,
+            `${succeeded}/${total} done`,
+          ];
+          if (running > 0) ticketParts.push(`${running} running`);
+          ticketParts.push("running in background");
+          lines.push(theme.fg("warning", `⏳ ${ticketParts.join(" · ")}`), "");
+        } else {
+          lines.push(
+            theme.fg(
+              "muted",
+              `${succeeded}/${total} completed · ${elapsed} wall · ${fmtTokens(totalTokens)} tokens`,
+            ),
+            "",
+          );
+        }
+
+        // Invariant across tasks: compute once, not per iteration (mirrors the
+        // partial branch's `running` at line 898).
+        const runningNow = progress.filter(
+          (q) => q.status === "running",
+        ).length;
         for (let i = 0; i < total; i++) {
           const p = progress[i]!;
           const r = taskResults[i];
           const ind = indent(i, total);
+          // Unified status glyphs: ✓ done, ✗ failed, ◐ running, ○ pending.
+          // (The live partial branch uses an animated spinner for running; this
+          // static final/ticket view can't animate, so a fixed glyph is right.)
           const icon =
             p.status === "done"
               ? theme.fg("success", "✓")
-              : theme.fg("error", "✗");
+              : p.status === "failed"
+                ? theme.fg("error", "✗")
+                : p.status === "running"
+                  ? theme.fg("warning", "◐")
+                  : theme.fg("muted", "○");
           const taskPreview = theme.fg("muted", trunc(p.task, w - 30));
+          const isLive = p.status === "running" || p.status === "pending";
+          // Live tasks show an activity/waiting hint instead of final stats.
+          const liveTail =
+            p.status === "running"
+              ? theme.fg("muted", ` · ${compactActivity(p)}`)
+              : p.status === "pending"
+                ? theme.fg(
+                    "muted",
+                    runningNow >= getMaxConcurrent()
+                      ? ` queued (${runningNow} running)`
+                      : " waiting…",
+                  )
+                : "";
           lines.push(
             truncLine(
-              `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
+              `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${isLive ? liveTail : statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
               w,
             ),
           );
 
-          // Tool activities: compact summary only in expanded mode.
-          if (p.activities.length > 0 && options.expanded) {
+          // Warnings (e.g. unknown tools ignored) — muted line under the task.
+          pushWarnings(p, ind);
+
+          // Tool activities: compact summary only in expanded mode, terminal tasks only.
+          if (p.activities.length > 0 && options.expanded && !isLive) {
             const names = p.activities
               .map((a) => a.name)
               .filter((n, i, arr) => arr.indexOf(n) === i);
@@ -1109,6 +1186,23 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           // Surface errors even when output exists (agent may have emitted text before failing).
           if (r && "error" in r && r.error) {
             lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
+          }
+          // Collapsed: one-line output preview so a human scanning the TUI sees
+          // the payoff without expanding every task. Expanded mode renders the
+          // full markdown below instead.
+          if (!options.expanded && p.status === "done") {
+            const preview =
+              r && "output" in r
+                ? previewOutputLine(r.output ?? "", w - ind.length - 3)
+                : "";
+            if (preview) {
+              lines.push(
+                truncLine(
+                  `${ind}${theme.fg("muted", `⎿ ${preview}`)}`,
+                  w,
+                ),
+              );
+            }
           }
           // Output: render markdown only in expanded mode.
           if (

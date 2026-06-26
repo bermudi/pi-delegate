@@ -2207,9 +2207,10 @@ describe("delegate renderers", () => {
       ctx,
     );
     const rendered = (text as any).getText();
-    // Collapsed: header only, no output lines, no "more lines" hint.
+    // Collapsed: a one-line preview surfaces the first content line (friction
+    // #1), but the full body and any "more lines" affordance stay hidden.
     expect(rendered).toContain("✓");
-    expect(rendered).not.toContain("line1");
+    expect(rendered).toContain("line1");
     expect(rendered).not.toContain("line15");
     expect(rendered).not.toContain("more lines");
   });
@@ -2310,7 +2311,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const compactText = (compact as any).getText();
-    expect(compactText).toContain("Press Ctrl+O for live detail");
+    expect(compactText).toContain("Ctrl+O for detail");
     // Current in-flight tool shown compactly
     expect(compactText).toContain("$ git status");
     expect(compactText).not.toContain("→ read src/config.ts");
@@ -2327,7 +2328,7 @@ describe("delegate renderers", () => {
     expect(expandedText).toContain("→ read src/config.ts");
   });
 
-  test("renderResult hides tool summary and output in collapsed final mode", async () => {
+  test("renderResult hides tool summary but shows output preview in collapsed final mode", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
@@ -2372,7 +2373,8 @@ describe("delegate renderers", () => {
       },
     };
 
-    // Collapsed: header only — tool summary and output hidden.
+    // Collapsed: tool summary hidden, but a one-line output preview surfaces the
+    // payoff so a human doesn't have to expand every task (friction #1 fix).
     const text = toolDef!.renderResult(
       result,
       { isPartial: false, expanded: false },
@@ -2382,9 +2384,11 @@ describe("delegate renderers", () => {
     const rendered = (text as any).getText();
     expect(rendered).toContain("✓");
     expect(rendered).not.toContain("1 tool: read");
-    expect(rendered).not.toContain("all good");
+    expect(rendered).toContain("all good");
+    // Preview is a single line (no full multiline body in collapsed mode).
+    expect(rendered).not.toContain("line1\nline2");
 
-    // Expanded: tool summary and output visible.
+    // Expanded: tool summary and full output visible.
     const expanded = toolDef!.renderResult(
       result,
       { isPartial: false, expanded: true },
@@ -2582,7 +2586,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const compactText = (compact as any).getText();
-    expect(compactText).toContain("Press Ctrl+O for live detail");
+    expect(compactText).toContain("Ctrl+O for detail");
     expect(compactText).not.toContain("→ read a.ts");
     expect(compactText).toContain("├─");
 
@@ -2668,7 +2672,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const compactText = (compact as any).getText();
-    expect(compactText).toContain("Press Ctrl+O for live detail");
+    expect(compactText).toContain("Ctrl+O for detail");
     expect(compactText).toContain("read 4.ts");
     expect(compactText).not.toContain("1.ts");
 
@@ -2955,7 +2959,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const rendered = (text as any).getText();
-    expect(rendered).toContain("Press Ctrl+O for live detail");
+    expect(rendered).toContain("Ctrl+O for detail");
     expect(rendered).toContain("⎿");
     // Current in-flight tool shown compactly
     expect(rendered).toContain("$ npm test");
@@ -2997,7 +3001,7 @@ describe("delegate renderers", () => {
     );
     const rendered = (text as any).getText();
     expect(rendered).toContain("thinking…");
-    expect(rendered).toContain("Press Ctrl+O for live detail");
+    expect(rendered).toContain("Ctrl+O for detail");
   });
 
   test("expanded running shows current tool with elapsed duration", async () => {
@@ -3057,7 +3061,7 @@ describe("delegate renderers", () => {
     expect(rendered).toContain("→ read a.ts");
     expect(rendered).toContain("✓");
     // Ctrl+O hint only in collapsed running
-    expect(rendered).not.toContain("Press Ctrl+O for live detail");
+    expect(rendered).not.toContain("Ctrl+O for detail");
   });
 
   test("expanded running shows live output from tool_execution_update", async () => {
@@ -3119,7 +3123,7 @@ describe("delegate renderers", () => {
     // Carriage returns resolved (progress bars show final state)
     expect(rendered).not.toContain("\r");
     // Ctrl+O hint not shown in expanded
-    expect(rendered).not.toContain("Press Ctrl+O for live detail");
+    expect(rendered).not.toContain("Ctrl+O for detail");
   });
 
   test("collapsed done hides activities, expanded shows them", async () => {
@@ -3177,6 +3181,273 @@ describe("delegate renderers", () => {
       ctx,
     );
     expect((expanded as any).getText()).toContain("cargo build");
+  });
+
+  // ── UX-REVIEW tasks: warnings, async/ticket render, queue position ───────
+
+  test("renderResult surfaces task warnings in the TUI (final and partial)", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [
+          { agent: "ad-hoc", output: "ok", durationMs: 0, tokens: 0 },
+        ],
+        progress: [
+          {
+            index: 0,
+            agent: "ad-hoc",
+            task: "task",
+            status: "done",
+            durationMs: 0,
+            tokens: 0,
+            toolUses: 0,
+            activities: [],
+            warnings: ["Unknown tool(s) ignored: frobnicate"],
+          },
+        ],
+      },
+    };
+
+    const finalText = (
+      toolDef!.renderResult(
+        result,
+        { isPartial: false, expanded: false },
+        theme,
+        ctx,
+      ) as any
+    ).getText();
+    expect(finalText).toContain("⚠");
+    expect(finalText).toContain("Unknown tool(s) ignored: frobnicate");
+
+    // Also visible while running.
+    const partialText = (
+      toolDef!.renderResult(
+        { ...result, details: { ...result.details, results: [] } },
+        {
+          ...{ isPartial: true, expanded: false },
+          ...{ executionStarted: true },
+        } as any,
+        theme,
+        { ...ctx, state: {}, isPartial: true } as any,
+      ) as any
+    ).getText();
+    expect(partialText).toContain("⚠");
+  });
+
+  test("renderResult shows a running-ticket banner for non-terminal async state", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    // Simulates poll({ ticket }) on a still-running ticket: progress carries
+    // running/pending statuses and details.ticketId is set.
+    const result = {
+      content: [{ type: "text", text: "RUNNING" }],
+      details: {
+        tasks: [{ prompt: "investigate" }, { prompt: "build" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "scout",
+            task: "investigate",
+            status: "running",
+            durationMs: 0,
+            tokens: 10,
+            toolUses: 1,
+            activities: [],
+          },
+          {
+            index: 1,
+            agent: "worker",
+            task: "build",
+            status: "pending",
+            durationMs: 0,
+            tokens: 0,
+            toolUses: 0,
+            activities: [],
+          },
+        ],
+        ticketId: "abc12345",
+      },
+    };
+
+    const text = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: false },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    // Ticket banner frames it as background work, not a finished result.
+    expect(rendered).toContain("⏳");
+    expect(rendered).toContain("ticket abc12345");
+    expect(rendered).toContain("running in background");
+    expect(rendered).toContain("scout");
+    // Running + pending tasks render with their glyphs, never ✗ for still-live work.
+    expect(rendered).toContain("◐");
+    expect(rendered).not.toContain("✗");
+  });
+
+  test("renderResult shows ticket banner end-to-end via handlePoll (real integration)", async () => {
+    // Exercises the real poll path — handlePoll must thread ticketId into
+    // details so the banner appears (not a hand-constructed details object).
+    const ticket: AsyncTicket = {
+      id: "poll45678",
+      created: Date.now(),
+      tasks: [{ prompt: "investigate" }],
+      resolved: [
+        {
+          prompt: "investigate",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "investigate",
+          status: "running",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "test-model",
+    };
+    ticketRegistry.set("poll45678", ticket);
+    try {
+      ts = await createTestSession({ extensions: [EXTENSION] });
+      const toolDef = getToolDef(ts, "delegate");
+      const theme = mockTheme();
+      const ctx = mockRenderCtx();
+
+      const pollResult = handlePoll({ ticket: "poll45678" }, {} as any);
+      // details must carry the ticketId — this is the gap the test guards.
+      expect(pollResult.details.ticketId).toBe("poll45678");
+
+      const rendered = (
+        toolDef!.renderResult(
+          pollResult,
+          { isPartial: false, expanded: false },
+          theme,
+          ctx,
+        ) as any
+      ).getText();
+      expect(rendered).toContain("⏳");
+      expect(rendered).toContain("ticket poll45678");
+      expect(rendered).toContain("running in background");
+    } finally {
+      ticketRegistry.delete("poll45678");
+    }
+  });
+
+  test("collapsed final preview strips markdown noise from the first content line", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [
+          {
+            agent: "ad-hoc",
+            output:
+              "# Heading\n\n- bullet\n1. step one\nThe real finding: X is broken.",
+            durationMs: 0,
+            tokens: 0,
+          },
+        ],
+        progress: [
+          {
+            index: 0,
+            agent: "ad-hoc",
+            task: "task",
+            status: "done",
+            durationMs: 0,
+            tokens: 0,
+            toolUses: 0,
+            activities: [],
+          },
+        ],
+      },
+    };
+
+    const rendered = (
+      toolDef!.renderResult(
+        result,
+        { isPartial: false, expanded: false },
+        theme,
+        ctx,
+      ) as any
+    ).getText();
+    // Preview skips the heading/bullet/numbered-list lines and surfaces the
+    // first real line, with the leading "#" stripped so it reads as content.
+    expect(rendered).toContain("Heading");
+    expect(rendered).not.toContain("bullet");
+    expect(rendered).not.toContain("step one");
+  });
+
+  test("queue position shown for pending tasks when concurrency cap is saturated", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx({ executionStarted: true });
+
+    // 3 running (== default MAX_CONCURRENCY) + 1 pending → pending is queued.
+    const mk = (agent: string, status: any) => ({
+      index: 0,
+      agent,
+      task: "t",
+      status,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    });
+    const result = {
+      content: [{ type: "text", text: "Running" }],
+      details: {
+        tasks: [{}, {}, {}, {}],
+        results: [],
+        progress: [
+          mk("a", "running"),
+          mk("b", "running"),
+          mk("c", "running"),
+          mk("d", "pending"),
+        ],
+      },
+    };
+
+    const rendered = (
+      toolDef!.renderResult(
+        result,
+        { isPartial: true, expanded: false } as any,
+        theme,
+        ctx,
+      ) as any
+    ).getText();
+    expect(rendered).toContain("queued (3 running)");
   });
 });
 
@@ -3563,6 +3834,15 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("No async tickets");
   });
 
+  test("poll with no tickets includes a discovery hint", () => {
+    const result = handlePoll({ tasks: [], ticket: undefined }, {} as any);
+    // Dead-end must self-correct: a confused `action: "poll"` should point
+    // the caller at the spawn syntax and the help path, not strand them.
+    expect(result.content[0].text).toContain("No async tickets");
+    expect(result.content[0].text).toContain("tasks: [{ agent, prompt }]");
+    expect(result.content[0].text).toContain("tasks: []");
+  });
+
   test("poll lists running tickets", () => {
     const ticket: AsyncTicket = {
       id: "abc12345",
@@ -3601,6 +3881,11 @@ describe("async delegate integration", () => {
     const result = handlePoll({ tasks: [], ticket: undefined }, {} as any);
     expect(result.content[0].text).toContain("abc12345");
     expect(result.content[0].text).toContain("running");
+    // Enriched list: agent roster + copy-pasteable poll/cancel controls.
+    expect(result.content[0].text).toContain("scout");
+    expect(result.content[0].text).toContain(
+      'delegate({ action: "cancel", ticket: "abc12345" })',
+    );
   });
 
   test("poll with specific ticket returns progress", () => {
