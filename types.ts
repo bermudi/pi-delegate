@@ -25,7 +25,7 @@ export interface DelegateParams {
   action?: DelegateAction;
   async?: boolean;
   ticket?: string;
-  tasks?: TaskDef[] | string;
+  tasks?: TaskDef[];
 }
 
 export interface TaskDef {
