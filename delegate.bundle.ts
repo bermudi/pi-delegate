@@ -2437,8 +2437,13 @@ ${r.output}`);
     },
     renderCall(args, theme, ctx) {
       const state = ctx.state;
-      const tasks = args.tasks ?? [];
+      const rawTasks = args.tasks;
+      const tasks = Array.isArray(rawTasks) ? rawTasks : [];
       const text = ctx.lastComponent ?? new Text("", 0, 0);
+      if (typeof rawTasks === "string") {
+        text.setText(theme.fg("toolTitle", theme.bold("delegate invalid tasks")));
+        return text;
+      }
       if (!tasks.length) {
         text.setText(theme.fg("toolTitle", theme.bold("delegate")));
         return text;
