@@ -929,25 +929,6 @@ describe("delegate task lifecycle integration", () => {
     expect(details.results[0]?.error).not.toContain("file not found");
   });
 
-  test("stringified tasks returns actionable validation error", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
-
-    const toolDef = getDelegateTool(ts);
-    const ctx = getExecContext(ts);
-
-    const result = await toolDef.execute(
-      "tc-stringified-tasks",
-      { tasks: '[{"prompt":"hello"}]' },
-      undefined,
-      undefined,
-      ctx,
-    );
-
-    const text = result.content[0]?.text ?? "";
-    expect(text).toContain("tasks` must be an array");
-    expect(text).toContain("not a JSON string");
-  });
-
   test("session config mismatch rejects with actionable message", async () => {
     installStreamMock("Init.");
 

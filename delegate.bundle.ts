@@ -1869,42 +1869,36 @@ var delegateParameters = Type.Object({
   async: Type.Optional(Type.Boolean()),
   ticket: Type.Optional(Type.String()),
   tasks: Type.Optional(
-    Type.Union([
-      Type.Array(
-        Type.Object({
-          prompt: Type.Optional(Type.String()),
-          agent: Type.Optional(Type.String()),
-          cwd: Type.Optional(Type.String()),
-          // ── Undocumented overrides — accepted but not advertised in schema.
-          // Discovered via empty-tasks help text.
-          systemPrompt: Type.Optional(Type.String()),
-          context: Type.Optional(
-            Type.String({ enum: ["fresh", "with-parent-transcript"] })
-          ),
-          model: Type.Optional(Type.String()),
-          tools: Type.Optional(Type.Array(Type.String())),
-          thinking: Type.Optional(
-            Type.String({
-              enum: [...VALID_THINKING]
-            })
-          ),
-          sessionId: Type.Optional(Type.String()),
-          action: Type.Optional(
-            Type.String({
-              enum: ["prompt", "close", "list", "poll", "cancel"]
-            })
-          ),
-          resumeFrom: Type.Optional(Type.String())
-        }),
-        {
-          minItems: 0
-        }
-      ),
-      // Some models stringify the task array when emitting tool calls. Accept
-      // the type so execute can return an actionable repair hint instead of
-      // Pi's generic schema error; never parse it implicitly.
-      Type.String()
-    ])
+    Type.Array(
+      Type.Object({
+        prompt: Type.Optional(Type.String()),
+        agent: Type.Optional(Type.String()),
+        cwd: Type.Optional(Type.String()),
+        // ── Undocumented overrides — accepted but not advertised in schema.
+        // Discovered via empty-tasks help text.
+        systemPrompt: Type.Optional(Type.String()),
+        context: Type.Optional(
+          Type.String({ enum: ["fresh", "with-parent-transcript"] })
+        ),
+        model: Type.Optional(Type.String()),
+        tools: Type.Optional(Type.Array(Type.String())),
+        thinking: Type.Optional(
+          Type.String({
+            enum: [...VALID_THINKING]
+          })
+        ),
+        sessionId: Type.Optional(Type.String()),
+        action: Type.Optional(
+          Type.String({
+            enum: ["prompt", "close", "list", "poll", "cancel"]
+          })
+        ),
+        resumeFrom: Type.Optional(Type.String())
+      }),
+      {
+        minItems: 0
+      }
+    )
   )
 });
 function getSubagentManualMarkdown(agents) {
@@ -2028,26 +2022,6 @@ function delegateExtension(pi) {
     parameters: delegateParameters,
     async execute(_id, params, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
-      if (typeof params.tasks === "string") {
-        return {
-          content: [
-            {
-              type: "text",
-              text: 'Invalid delegate arguments: `tasks` must be an array of task objects, not a JSON string. Use `{ "tasks": [{ "prompt": "...", "agent": "scout" }] }`, not `{ "tasks": "[{...}]" }`.'
-            }
-          ],
-          details: {
-            tasks: [],
-            results: [
-              {
-                error: "Invalid delegate arguments: tasks must be an array of task objects, not a JSON string."
-              }
-            ],
-            progress: [],
-            parentModel: parentModelId
-          }
-        };
-      }
       const tasks = params.tasks ?? [];
       if (params.action === "poll" || tasks.some((t) => t.action === "poll")) {
         return handlePoll(params, ctx);
