@@ -9,6 +9,7 @@ import {
   parseFrontmatter,
   findProjectRoot,
   loadAgentFile,
+  loadClaudeAgentFile,
   discoverAgents,
   buildParentTranscript,
   extractTextContent,
@@ -42,22 +43,10 @@ import {
   getHostDeps,
   readDelegateSettingsFile,
   loadDelegateSettings,
-  setModelOverride,
-  setDefaultModel,
-  clearModelOverride,
-  clearAllModelOverrides,
-  setConcurrencyDefault,
-  setConcurrencyProvider,
-  setConcurrencyModel,
-  removeConcurrencyProvider,
-  removeConcurrencyModel,
-  resetConcurrency,
   getConcurrencyLimit,
   getMaxAsyncTickets,
-  resetSessionOverrides,
   type AgentConfig,
   type DelegateConfig,
-  type SessionModelOverrides,
   ticketRegistry,
   type AsyncTicket,
   sweepTickets,
@@ -104,6 +93,13 @@ function collectSchemaDescriptions(schema: unknown): string[] {
   };
   visit(schema);
   return descriptions;
+}
+
+function getTasksArraySchema(schema: any): any {
+  const tasks = schema.properties.tasks;
+  if (tasks.type === "array") return tasks;
+  const branches = tasks.anyOf ?? tasks.oneOf ?? [];
+  return branches.find((branch: any) => branch.type === "array");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -263,7 +259,7 @@ You are a scout. Be concise.
     expect(cfg.systemPrompt).toBe("You are a scout. Be concise.");
   });
 
-  test("named agent without tools field resolves to empty (not default)", () => {
+  test("named agent without tools field inherits the full agent set (*)", () => {
     const filePath = path.join(tmpDir, "no-tools.md");
     writeFileSync(
       filePath,
@@ -275,7 +271,8 @@ Prompt.
 `,
     );
     const cfg = loadAgentFile(filePath)!;
-    expect(cfg.tools).toEqual([]);
+    // Matches CC/OpenCode/Devin: omitted tools → inherit all (DEFAULT_TOOLS).
+    expect(cfg.tools).toEqual(DEFAULT_TOOLS);
   });
 
   test("defaults thinking to off when invalid", () => {
@@ -496,9 +493,14 @@ Global prompt.
     expect(agents.get("shared-agent")!.scope).toBe("project");
   });
 
-  test("returns empty map when no .pi/agents directory exists", () => {
+  test("returns built-in defaults when no .pi/agents directory exists", () => {
     const agents = discoverAgents("/nonexistent");
-    expect(agents.size).toBe(0);
+    // No user agents, but the three built-ins (scout/reviewer/workhorse) are
+    // always seeded so the tool works out of the box.
+    expect(agents.has("scout")).toBe(true);
+    expect(agents.has("reviewer")).toBe(true);
+    expect(agents.has("workhorse")).toBe(true);
+    for (const a of agents.values()) expect(a.scope).toBe("builtin");
   });
 
   test("skips .chain.md files", () => {
@@ -532,9 +534,213 @@ Prompt.
     expect(agents.has("txt")).toBe(false);
   });
 
-  test("returns empty map when no agents found", () => {
+  test("returns only built-in defaults when no user agents found", () => {
     const agents = discoverAgents(tmpDir);
-    expect(agents.size).toBe(0);
+    expect(agents.size).toBe(3);
+    expect(agents.has("scout")).toBe(true);
+  });
+
+  // ── Built-in supersession ──────────────────────────────────────────────
+
+  test("user markdown supersedes a same-named built-in", () => {
+    const projectDir = path.join(tmpDir, "project");
+    writeAgent(
+      path.join(projectDir, ".pi", "agents"),
+      "scout.md",
+      `---
+name: scout
+description: My custom scout
+tools: read
+---
+Custom scout body.
+`,
+    );
+    const agents = discoverAgents(projectDir);
+    const scout = agents.get("scout")!;
+    expect(scout.description).toBe("My custom scout");
+    expect(scout.systemPrompt).toBe("Custom scout body.");
+    expect(scout.scope).toBe("project");
+    // The other built-ins survive untouched.
+    expect(agents.get("reviewer")!.scope).toBe("builtin");
+    expect(agents.get("workhorse")!.scope).toBe("builtin");
+  });
+
+  // ── Claude Code interchange ────────────────────────────────────────────
+
+  test("discovers agents from project .claude/agents/", () => {
+    const projectDir = path.join(tmpDir, "project");
+    writeAgent(
+      path.join(projectDir, ".claude", "agents"),
+      "claudey.md",
+      `---
+name: claudey
+description: Imported from Claude Code
+tools: Read, Bash, Glob
+---
+Claude body.
+`,
+    );
+    const agents = discoverAgents(projectDir);
+    const c = agents.get("claudey")!;
+    expect(c).toBeDefined();
+    expect(c.scope).toBe("claude");
+    // Capitalized names are normalized: Read→read, Bash→bash, Glob→find.
+    expect(c.tools.sort()).toEqual(["bash", "find", "read"]);
+  });
+
+  test("claude tool names are mapped, unmappable tools dropped, empty inherits *", () => {
+    const fp = path.join(tmpDir, "claude-only.md");
+    writeFileSync(
+      fp,
+      `---
+name: claude-only
+description: Mixed mappable + unmappable tools
+tools: Read, WebSearch, WebFetch, TodoWrite
+---
+Body.
+`,
+    );
+    const c = loadClaudeAgentFile(fp)!;
+    // Only Read maps; the rest (WebSearch/WebFetch/TodoWrite) are dropped.
+    expect(c.tools).toEqual(["read"]);
+  });
+
+  test("claude agent with only unmappable tools inherits the full agent set", () => {
+    const fp = path.join(tmpDir, "web-only.md");
+    writeFileSync(
+      fp,
+      `---
+name: web-only
+description: Only web tools, nothing maps
+tools: WebSearch, WebFetch
+---
+Body.
+`,
+    );
+    const c = loadClaudeAgentFile(fp)!;
+    // Nothing mappable → inherit * (DEFAULT_TOOLS), not an empty toolset.
+    expect(c.tools).toEqual(DEFAULT_TOOLS);
+  });
+
+  test("native pi agents take precedence over same-named .claude/agents", () => {
+    const projectDir = path.join(tmpDir, "project");
+    writeAgent(
+      path.join(projectDir, ".pi", "agents"),
+      "shared.md",
+      `---
+name: shared
+description: Pi wins
+---
+Pi body.
+`,
+    );
+    writeAgent(
+      path.join(projectDir, ".claude", "agents"),
+      "shared.md",
+      `---
+name: shared
+description: Claude loses
+tools: Read
+---
+Claude body.
+`,
+    );
+    const agents = discoverAgents(projectDir);
+    expect(agents.get("shared")!.description).toBe("Pi wins");
+    expect(agents.get("shared")!.scope).toBe("project");
+  });
+
+  // ── Claude model: inherit + disallowedTools ────────────────────────────
+
+  test("claude model:inherit is stripped so the agent inherits the parent model", () => {
+    const fp = path.join(tmpDir, "inherit.md");
+    writeFileSync(
+      fp,
+      `---
+name: inherit
+description: Uses Claude's default model
+tools: Read
+model: inherit
+---
+Body.
+`,
+    );
+    const c = loadClaudeAgentFile(fp)!;
+    // `inherit` is Claude's "use parent" sentinel. If passed through verbatim,
+    // resolveModel("inherit") throws. Must be stripped → undefined.
+    expect(c.model).toBeUndefined();
+  });
+
+  test("claude model:INHERIT is case-insensitive", () => {
+    const fp = path.join(tmpDir, "inherit-upper.md");
+    writeFileSync(
+      fp,
+      `---
+name: inherit-upper
+description: Uppercase inherit
+tools: Read
+model: INHERIT
+---
+Body.
+`,
+    );
+    expect(loadClaudeAgentFile(fp)!.model).toBeUndefined();
+  });
+
+  test("claude disallowedTools removes tools from the inherited set (security)", () => {
+    // The dangerous case: a reviewer that denies Write/Edit but specifies no
+    // `tools` (intending read-only). Without denylist handling it would import
+    // as full-tools inherit-*. The denylist must subtract from the base set.
+    const fp = path.join(tmpDir, "deny-only.md");
+    writeFileSync(
+      fp,
+      `---
+name: deny-only
+description: Read-only via denylist
+disallowedTools: Write, Edit
+---
+Body.
+`,
+    );
+    const c = loadClaudeAgentFile(fp)!;
+    // DEFAULT_TOOLS (read,write,edit,bash) minus {write,edit} = read, bash.
+    expect(c.tools.sort()).toEqual(["bash", "read"]);
+  });
+
+  test("claude disallowedTools layers on top of an explicit allowlist", () => {
+    const fp = path.join(tmpDir, "allow-plus-deny.md");
+    writeFileSync(
+      fp,
+      `---
+name: allow-plus-deny
+description: Allowlist with denylist
+tools: Read, Write, Bash
+disallowedTools: Write, Edit
+---
+Body.
+`,
+    );
+    const c = loadClaudeAgentFile(fp)!;
+    // Allow {read,write,bash} minus deny {write,edit} = read, bash.
+    expect(c.tools.sort()).toEqual(["bash", "read"]);
+  });
+
+  test("claude disallowedTools with only unmappable names is a no-op", () => {
+    const fp = path.join(tmpDir, "deny-unmappable.md");
+    writeFileSync(
+      fp,
+      `---
+name: deny-unmappable
+description: Denylist references non-delegate tools
+tools: Read
+disallowedTools: WebSearch, NotebookEdit
+---
+Body.
+`,
+    );
+    const c = loadClaudeAgentFile(fp)!;
+    // None of the denied names map → denylist is empty → allowlist untouched.
+    expect(c.tools).toEqual(["read"]);
   });
 });
 
@@ -944,10 +1150,6 @@ describe("resolveModelSpec", () => {
     agent: { default: "config-default", coder: "config-coder" },
     concurrency: { default: 3 },
   };
-  const baseOverrides: SessionModelOverrides = {
-    default: "session-default",
-    coder: "session-coder",
-  };
 
   test("task model takes highest precedence", () => {
     const result = resolveModelSpec({
@@ -955,57 +1157,33 @@ describe("resolveModelSpec", () => {
       agentType: "coder",
       frontmatterModel: "frontmatter",
       config: baseConfig,
-      overrides: baseOverrides,
     });
     expect(result).toBe("task-model");
   });
 
-  test("session per-type override is second precedence", () => {
+  test("config per-type is second precedence", () => {
     const result = resolveModelSpec({
       agentType: "coder",
       frontmatterModel: "frontmatter",
       config: baseConfig,
-      overrides: baseOverrides,
-    });
-    expect(result).toBe("session-coder");
-  });
-
-  test("session default is third precedence", () => {
-    const result = resolveModelSpec({
-      agentType: "unknown-type",
-      frontmatterModel: "frontmatter",
-      config: baseConfig,
-      overrides: baseOverrides,
-    });
-    expect(result).toBe("session-default");
-  });
-
-  test("config per-type is fourth precedence", () => {
-    const result = resolveModelSpec({
-      agentType: "coder",
-      frontmatterModel: "frontmatter",
-      config: baseConfig,
-      overrides: { default: null },
     });
     expect(result).toBe("config-coder");
   });
 
-  test("config default is fifth precedence", () => {
+  test("config default is third precedence", () => {
     const result = resolveModelSpec({
       agentType: "unknown-type",
       frontmatterModel: "frontmatter",
       config: baseConfig,
-      overrides: { default: null },
     });
     expect(result).toBe("config-default");
   });
 
-  test("frontmatter model is sixth precedence", () => {
+  test("frontmatter model is fourth precedence", () => {
     const result = resolveModelSpec({
       agentType: "unknown-type",
       frontmatterModel: "frontmatter",
       config: { agent: { default: null }, concurrency: { default: 3 } },
-      overrides: { default: null },
     });
     expect(result).toBe("frontmatter");
   });
@@ -1019,7 +1197,6 @@ describe("resolveModelSpec", () => {
     const result = resolveModelSpec({
       agentType: "unknown-type",
       config: { agent: { default: null }, concurrency: { default: 3 } },
-      overrides: { default: null },
     });
     expect(result).toBeUndefined();
   });
@@ -1028,7 +1205,6 @@ describe("resolveModelSpec", () => {
     const result = resolveModelSpec({
       agentType: "unknown-type",
       config: { agent: { default: null }, concurrency: { default: 3 } },
-      overrides: { default: null },
     });
     expect(result).toBeUndefined();
   });
@@ -1040,67 +1216,57 @@ describe("resolveModelSpec", () => {
         agent: { default: "", coder: "" },
         concurrency: { default: 3 },
       },
-      overrides: { default: "" },
     });
     expect(result).toBeUndefined();
   });
 });
 
-// ── Delegate Config I/O ─────────────────────────────────────────────────────
-
 // ── getConcurrencyLimit ──────────────────────────────────────────────────
+// No config mutators ship (delegate.json is the only write path), so these
+// tests inject config objects directly to exercise the precedence chain.
 
 describe("getConcurrencyLimit", () => {
-  beforeEach(() => {
-    resetConcurrency();
-  });
-
   test("returns default when no per-model or per-provider config", () => {
-    expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
+    const config: DelegateConfig = {
+      agent: { default: null },
+      concurrency: { default: 3 },
+    };
+    expect(getConcurrencyLimit("anthropic/claude-sonnet-4", config)).toBe(3);
   });
 
   test("per-model limit takes precedence", () => {
-    setConcurrencyModel("llamacpp/4b", 1);
-    expect(getConcurrencyLimit("llamacpp/4b")).toBe(1);
+    const config: DelegateConfig = {
+      agent: { default: null },
+      concurrency: { default: 3, models: { "llamacpp/4b": 1 } },
+    };
+    expect(getConcurrencyLimit("llamacpp/4b", config)).toBe(1);
     // Other models still get default
-    expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
+    expect(getConcurrencyLimit("anthropic/claude-sonnet-4", config)).toBe(3);
   });
 
   test("per-provider limit is second precedence", () => {
-    setConcurrencyProvider("llamacpp", 2);
-    expect(getConcurrencyLimit("llamacpp/4b")).toBe(2);
-    expect(getConcurrencyLimit("llamacpp/7b")).toBe(2);
+    const config: DelegateConfig = {
+      agent: { default: null },
+      concurrency: { default: 3, providers: { llamacpp: 2 } },
+    };
+    expect(getConcurrencyLimit("llamacpp/4b", config)).toBe(2);
+    expect(getConcurrencyLimit("llamacpp/7b", config)).toBe(2);
     // Other providers still get default
-    expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
+    expect(getConcurrencyLimit("anthropic/claude-sonnet-4", config)).toBe(3);
   });
 
   test("per-model overrides per-provider", () => {
-    setConcurrencyProvider("llamacpp", 2);
-    setConcurrencyModel("llamacpp/4b", 4);
-    expect(getConcurrencyLimit("llamacpp/4b")).toBe(4);
-    expect(getConcurrencyLimit("llamacpp/7b")).toBe(2);
-  });
-
-  test("removeConcurrencyModel restores provider/default", () => {
-    setConcurrencyProvider("llamacpp", 2);
-    setConcurrencyModel("llamacpp/4b", 4);
-    removeConcurrencyModel("llamacpp/4b");
-    expect(getConcurrencyLimit("llamacpp/4b")).toBe(2);
-  });
-
-  test("removeConcurrencyProvider restores default", () => {
-    setConcurrencyProvider("llamacpp", 2);
-    removeConcurrencyProvider("llamacpp");
-    expect(getConcurrencyLimit("llamacpp/4b")).toBe(3);
-  });
-
-  test("resetConcurrency restores all defaults", () => {
-    setConcurrencyModel("llamacpp/4b", 1);
-    setConcurrencyProvider("openai", 10);
-    setConcurrencyDefault(1);
-    resetConcurrency();
-    expect(getConcurrencyLimit("llamacpp/4b")).toBe(3);
-    expect(getConcurrencyLimit("openai/gpt-5")).toBe(3);
+    const config: DelegateConfig = {
+      agent: { default: null },
+      concurrency: {
+        default: 3,
+        providers: { llamacpp: 2 },
+        models: { "llamacpp/4b": 4 },
+      },
+    };
+    expect(getConcurrencyLimit("llamacpp/4b", config)).toBe(4);
+    // Sibling model under same provider falls through to per-provider
+    expect(getConcurrencyLimit("llamacpp/7b", config)).toBe(2);
   });
 });
 
@@ -1835,9 +2001,10 @@ describe("delegate extension integration", () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const schema = toolDef!.parameters as any;
+    const tasksArraySchema = getTasksArraySchema(schema);
     expect(schema.type).toBe("object");
-    expect(schema.properties.tasks.type).toBe("array");
-    expect(schema.properties.tasks.minItems).toBe(0);
+    expect(tasksArraySchema.type).toBe("array");
+    expect(tasksArraySchema.minItems).toBe(0);
   });
 
   test("uses stealth registration metadata and schema", async () => {
@@ -1870,7 +2037,8 @@ describe("delegate extension integration", () => {
   test("task schema has prompt as required string", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
-    const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
+    const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
+    const taskSchema = tasksArraySchema.items;
     expect(taskSchema.type).toBe("object");
     expect(taskSchema.properties.prompt.type).toBe("string");
     // prompt is optional — required only for non-close/list actions (enforced at runtime).
@@ -1880,7 +2048,8 @@ describe("delegate extension integration", () => {
   test("task schema has optional fields", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
-    const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
+    const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
+    const taskSchema = tasksArraySchema.items;
     const optionalFields = [
       "agent",
       "model",
@@ -4294,7 +4463,8 @@ describe("async delegate integration", () => {
   test("action enum includes poll and cancel", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
-    const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
+    const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
+    const taskSchema = tasksArraySchema.items;
     const actionEnum = taskSchema.properties.action.enum;
     expect(actionEnum).toContain("poll");
     expect(actionEnum).toContain("cancel");
