@@ -810,9 +810,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         startedAt?: number;
         interval?: ReturnType<typeof setInterval>;
       };
-      const tasks = (args as { tasks?: TaskDef[] }).tasks ?? [];
+      const rawTasks = (args as { tasks?: TaskDef[] | string }).tasks;
+      const tasks = Array.isArray(rawTasks) ? rawTasks : [];
       const text =
         (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      if (typeof rawTasks === "string") {
+        text.setText(theme.fg("toolTitle", theme.bold("delegate invalid tasks")));
+        return text;
+      }
       if (!tasks.length) {
         text.setText(theme.fg("toolTitle", theme.bold("delegate")));
         return text;

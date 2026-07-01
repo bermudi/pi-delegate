@@ -2246,6 +2246,22 @@ describe("delegate renderers", () => {
     expect(rendered).toContain("delegate 1 task");
   });
 
+  test("renderCall does not count characters in stringified tasks", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    const text = toolDef!.renderCall(
+      { tasks: '[{"prompt":"do work"}]' },
+      theme,
+      ctx,
+    );
+    const rendered = (text as any).getText();
+    expect(rendered).toContain("delegate invalid tasks");
+    expect(rendered).not.toContain("22 tasks");
+  });
+
   test("renderCall does not bloat with long prompts", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
