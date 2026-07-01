@@ -71,36 +71,42 @@ const delegateParameters = Type.Object({
   async: Type.Optional(Type.Boolean()),
   ticket: Type.Optional(Type.String()),
   tasks: Type.Optional(
-    Type.Array(
-      Type.Object({
-        prompt: Type.Optional(Type.String()),
-        agent: Type.Optional(Type.String()),
-        cwd: Type.Optional(Type.String()),
-        // ── Undocumented overrides — accepted but not advertised in schema.
-        // Discovered via empty-tasks help text.
-        systemPrompt: Type.Optional(Type.String()),
-        context: Type.Optional(
-          Type.String({ enum: ["fresh", "with-parent-transcript"] }),
-        ),
-        model: Type.Optional(Type.String()),
-        tools: Type.Optional(Type.Array(Type.String())),
-        thinking: Type.Optional(
-          Type.String({
-            enum: [...VALID_THINKING],
-          }),
-        ),
-        sessionId: Type.Optional(Type.String()),
-        action: Type.Optional(
-          Type.String({
-            enum: ["prompt", "close", "list", "poll", "cancel"],
-          }),
-        ),
-        resumeFrom: Type.Optional(Type.String()),
-      }),
-      {
-        minItems: 0,
-      },
-    ),
+    Type.Union([
+      Type.Array(
+        Type.Object({
+          prompt: Type.Optional(Type.String()),
+          agent: Type.Optional(Type.String()),
+          cwd: Type.Optional(Type.String()),
+          // ── Undocumented overrides — accepted but not advertised in schema.
+          // Discovered via empty-tasks help text.
+          systemPrompt: Type.Optional(Type.String()),
+          context: Type.Optional(
+            Type.String({ enum: ["fresh", "with-parent-transcript"] }),
+          ),
+          model: Type.Optional(Type.String()),
+          tools: Type.Optional(Type.Array(Type.String())),
+          thinking: Type.Optional(
+            Type.String({
+              enum: [...VALID_THINKING],
+            }),
+          ),
+          sessionId: Type.Optional(Type.String()),
+          action: Type.Optional(
+            Type.String({
+              enum: ["prompt", "close", "list", "poll", "cancel"],
+            }),
+          ),
+          resumeFrom: Type.Optional(Type.String()),
+        }),
+        {
+          minItems: 0,
+        },
+      ),
+      // Some models stringify the task array when emitting tool calls. Accept
+      // the type so execute can return an actionable repair hint instead of
+      // Pi's generic schema error; never parse it implicitly.
+      Type.String(),
+    ]),
   ),
 });
 
@@ -122,7 +128,11 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
               ? " [project]"
               : a.scope === "global"
                 ? " [global]"
-                : "";
+                : a.scope === "claude"
+                  ? " [claude]"
+                  : a.scope === "builtin"
+                    ? " [builtin]"
+                    : "";
           return `- **${n}**${model}${thinking}${tools}${scope}: ${a.description}`;
         })
         .join("\n")
@@ -137,7 +147,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "",
     agentList,
     "",
-    "Agents live in `.pi/agents/*.md` (project-local) and `~/.pi/agent/agents/` (global). Each agent file is Markdown with YAML-ish frontmatter:",
+    "Agents live in `.pi/agents/*.md` (project-local), `~/.pi/agent/agents/` (global), and `.claude/agents/` (interchange with Claude Code). Each agent file is Markdown with YAML-ish frontmatter:",
     "",
     "```markdown",
     "---",
@@ -145,7 +155,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "description: What it does",
     "model: anthropic/claude-haiku-4-5  # optional",
     "thinking: low                     # off/minimal/low/medium/high/xhigh",
-    "tools: *                          # * = full agent. ro = read-only. Named agents must declare.",
+    "tools: *                          # * = full agent. ro = read-only. Omit to inherit *.",
     "---",
     "You are a helpful agent...",
     "```",
@@ -156,13 +166,14 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
     "- `systemPrompt` — System prompt. Falls back to agent definition, then parent session system prompt.",
     "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
-    "- `tools` — Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Inline tasks default to `*`; named agents must declare.",
+    "- `tools` — Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Omitted → inherit `*`. Claude Code tool names (Read/Glob/…) are mapped automatically; unmappable tools are dropped.",
     "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
     "- `cwd` — Working directory for the subagent (settings, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
     "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
     "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
     "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
     "- top-level `action` — Async ticket action: 'poll' or 'cancel'. Does not require `tasks`.",
+    "- `tasks` must be a real JSON array of objects, not a quoted/stringified JSON array.",
     "",
     "## Session Reuse",
     "",
@@ -185,7 +196,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "## Resuming Previous Sessions",
     "",
     "Use `resumeFrom` to continue a failed or interrupted subagent from where it left off.",
-    "Pass the absolute path to the session `.jsonl` file (shown in delegate output).",
+    "Pass the exact absolute path to the session `.jsonl` file copied from delegate retry output. Do not invent placeholder values, and do not use `resumeFrom` for async polling.",
     "The agent gets the full conversation history and the new `prompt` continues naturally.",
     "",
     "```json",
@@ -220,7 +231,8 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "## Gotchas",
     "",
     '- `*` means the full agent (read, write, edit, bash), not "every tool." The grep/find/ls trio exists only for `ro` (read-only) agents where bash is unavailable — bash already subsumes them.',
-    "- Named agent profiles must declare a `tools:` field; inline tasks default to `*`.",
+    '- `tasks` must be an array, not a string containing JSON. Use `{ "tasks": [{ "prompt": "..." }] }`, never `{ "tasks": "[{...}]" }`.',
+    "- Omitting `tools:` inherits the full agent set (`*`) — for both inline tasks and named agent files.",
     "- Subagents inherit all skills discovered in their `cwd` (via AgentSession's resource loader). Per-task skill filtering is not supported — curate the cwd's skill set instead.",
     `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
     "- `with-parent-transcript` injects your entire conversation. A 50k-token session means the subagent starts 50k tokens deep.",
@@ -244,6 +256,27 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
     async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
+      if (typeof params.tasks === "string") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: 'Invalid delegate arguments: `tasks` must be an array of task objects, not a JSON string. Use `{ "tasks": [{ "prompt": "...", "agent": "scout" }] }`, not `{ "tasks": "[{...}]" }`.',
+            },
+          ],
+          details: {
+            tasks: [],
+            results: [
+              {
+                error:
+                  "Invalid delegate arguments: tasks must be an array of task objects, not a JSON string.",
+              },
+            ],
+            progress: [],
+            parentModel: parentModelId,
+          },
+        };
+      }
       const tasks = params.tasks ?? [];
 
       // ── Poll action ───────────────────────────────────────────────────
@@ -513,21 +546,6 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           if (unknownTools.length) {
             warnings.push(
               `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`,
-            );
-          }
-          // Named agents must declare a `tools:` field. An agent with empty
-          // tools means the profile omitted it — reject with an actionable
-          // message. Inline tasks may pass an explicit empty list deliberately,
-          // so we only fire when the emptiness comes from the agent profile.
-          if (
-            agent &&
-            agent.tools.length === 0 &&
-            !t.tools &&
-            !agentOverride?.tools
-          ) {
-            throw new Error(
-              `Task ${i}: agent "${t.agent}" has no \`tools:\` field. ` +
-                `Declare one, e.g. \`tools: *\` (full) or \`tools: ro\` (read-only).`,
             );
           }
 

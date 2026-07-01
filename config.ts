@@ -25,12 +25,6 @@ export interface DelegateConfig {
   maxAsyncTickets?: number;
 }
 
-/** Session-only model overrides. Not persisted — cleared on session_start. */
-export interface SessionModelOverrides {
-  default: string | null;
-  [agentType: string]: string | null | undefined;
-}
-
 const DELEGATE_CONFIG_DIR = path.join(os.homedir(), ".pi", "agent");
 const DELEGATE_CONFIG_PATH = path.join(DELEGATE_CONFIG_DIR, "delegate.json");
 
@@ -46,13 +40,6 @@ let __delegateConfig: DelegateConfig = {
   agent: { ...DEFAULT_DELEGATE_CONFIG.agent },
   concurrency: { ...DEFAULT_DELEGATE_CONFIG.concurrency },
 };
-
-/** Session-only overrides. Cleared on session_start. */
-let sessionOverrides: SessionModelOverrides = { default: null };
-
-export function resetSessionOverrides(): void {
-  sessionOverrides = { default: null };
-}
 
 /** Read delegate config from disk. Returns defaults if file missing or corrupt. */
 export function loadDelegateConfig(): DelegateConfig {
@@ -76,18 +63,6 @@ export function loadDelegateConfig(): DelegateConfig {
   }
 }
 
-/** Write delegate config to disk with atomic rename. */
-export function saveDelegateConfigAtomic(config: DelegateConfig): void {
-  const tmpPath = DELEGATE_CONFIG_PATH + ".tmp";
-  try {
-    fs.mkdirSync(DELEGATE_CONFIG_DIR, { recursive: true });
-    fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), "utf-8");
-    fs.renameSync(tmpPath, DELEGATE_CONFIG_PATH);
-  } catch (err) {
-    console.error(`[delegate] Failed to save config: ${err}`);
-  }
-}
-
 /** Initialize module config from disk. Called once at extension load. */
 function initDelegateConfig(): void {
   __delegateConfig = loadDelegateConfig();
@@ -96,88 +71,28 @@ function initDelegateConfig(): void {
 // Auto-init on module load
 initDelegateConfig();
 
-// ── Config Mutators ──────────────────────────────────────────────────────
+// ── Config Getters ───────────────────────────────────────────────────────
 
-/** Set or update a model override for an agent type (or "default" for global). */
-export function setModelOverride(type: string, value: string | null): void {
-  __delegateConfig.agent[type] = value;
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-
-/** Set the global default model. */
-export function setDefaultModel(value: string | null): void {
-  __delegateConfig.agent.default = value;
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-
-/** Clear a single per-type model override. */
-export function clearModelOverride(type: string): void {
-  delete __delegateConfig.agent[type];
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-
-/** Clear all model overrides, preserving non-model config. */
-export function clearAllModelOverrides(): void {
-  __delegateConfig.agent = { default: null };
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-
-/** Set the global concurrency default. */
-export function setConcurrencyDefault(n: number): void {
-  __delegateConfig.concurrency.default = Math.max(1, n);
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-
-/** Set or update a per-provider concurrency limit. */
-export function setConcurrencyProvider(key: string, n: number): void {
-  const current = __delegateConfig.concurrency.providers ?? {};
-  __delegateConfig.concurrency.providers = {
-    ...current,
-    [key]: Math.max(1, n),
-  };
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-
-/** Set or update a per-model concurrency limit. */
-export function setConcurrencyModel(key: string, n: number): void {
-  const current = __delegateConfig.concurrency.models ?? {};
-  __delegateConfig.concurrency.models = { ...current, [key]: Math.max(1, n) };
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-
-/** Remove a per-provider concurrency limit. */
-export function removeConcurrencyProvider(key: string): void {
-  if (__delegateConfig.concurrency.providers) {
-    delete __delegateConfig.concurrency.providers[key];
-    saveDelegateConfigAtomic(__delegateConfig);
-  }
-}
-
-/** Remove a per-model concurrency limit. */
-export function removeConcurrencyModel(key: string): void {
-  if (__delegateConfig.concurrency.models) {
-    delete __delegateConfig.concurrency.models[key];
-    saveDelegateConfigAtomic(__delegateConfig);
-  }
-}
-
-/** Reset all concurrency settings to defaults. */
-export function resetConcurrency(): void {
-  __delegateConfig.concurrency = { ...DEFAULT_DELEGATE_CONFIG.concurrency };
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-
-/** Get the effective concurrency limit for a model key. */
-export function getConcurrencyLimit(modelKey: string): number {
+/**
+ * Get the effective concurrency limit for a model key.
+ *
+ * Precedence: per-model → per-provider → default. Accepts an injected config
+ * so the precedence chain is testable without touching the module singleton
+ * (there are no config mutators — `delegate.json` is the only write path).
+ */
+export function getConcurrencyLimit(
+  modelKey: string,
+  config: DelegateConfig = __delegateConfig,
+): number {
   // 1. Per-model
-  const perModel = __delegateConfig.concurrency.models?.[modelKey];
+  const perModel = config.concurrency.models?.[modelKey];
   if (perModel != null) return perModel;
   // 2. Per-provider
   const provider = modelKey.split("/")[0];
-  const perProvider = __delegateConfig.concurrency.providers?.[provider];
+  const perProvider = config.concurrency.providers?.[provider];
   if (perProvider != null) return perProvider;
   // 3. Default
-  return __delegateConfig.concurrency.default;
+  return config.concurrency.default;
 }
 
 /** Get the effective max async tickets limit. */
@@ -188,12 +103,6 @@ export function getMaxAsyncTickets(): number {
 /** Get the hard ceiling on total concurrent agents. */
 export function getMaxConcurrent(): number {
   return __delegateConfig.maxConcurrent ?? MAX_CONCURRENCY;
-}
-
-/** Set the hard ceiling on total concurrent agents. */
-export function setMaxConcurrent(n: number): void {
-  __delegateConfig.maxConcurrent = Math.max(1, n);
-  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 /**
@@ -210,32 +119,22 @@ export function setMaxConcurrent(n: number): void {
  * lookup to the wrong provider.
  *
  * Precedence (highest to lowest):
- *   1. taskModel                      — per-task explicit override (from API call)
- *   2. sessionOverrides[agentType]    — session per-type
- *   3. sessionOverrides["default"]    — session global
- *   4. config.agent[agentType]        — config per-type
- *   5. config.agent["default"]        — config global
- *   6. frontmatterModel               — agent .md frontmatter
+ *   1. taskModel                 — per-task explicit override (from API call)
+ *   2. config.agent[agentType]   — config per-type (delegate.json)
+ *   3. config.agent["default"]   — config global
+ *   4. frontmatterModel          — agent .md frontmatter
  */
 export function resolveModelSpec(options: {
   taskModel?: string;
   agentType: string;
   frontmatterModel?: string;
   config?: DelegateConfig;
-  overrides?: SessionModelOverrides;
 }): string | undefined {
-  const {
-    taskModel,
-    agentType,
-    frontmatterModel,
-    config = __delegateConfig,
-    overrides = sessionOverrides,
-  } = options;
+  const { taskModel, agentType, frontmatterModel, config = __delegateConfig } =
+    options;
 
   const candidates: Array<string | null | undefined> = [
     taskModel,
-    overrides[agentType],
-    overrides["default"],
     config.agent[agentType] as string | null | undefined,
     config.agent["default"],
     frontmatterModel,

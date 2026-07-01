@@ -722,8 +722,8 @@ describe("delegate task lifecycle integration", () => {
     expect(text).toContain("nonexistent-xyz-abc");
   });
 
-  test("named agent without tools field rejects with actionable error", async () => {
-    installStreamMock("Should never run.");
+  test("named agent without tools field inherits the full agent set (*)", async () => {
+    installStreamMock("Inherited tools, ran fine.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
     patchAuth(ts);
@@ -749,15 +749,20 @@ describe("delegate task lifecycle integration", () => {
       const ctx = Object.create(baseCtx) as typeof baseCtx;
       Object.defineProperty(ctx, "cwd", { value: taskCwd });
 
-      await expect(
-        toolDef.execute(
-          "tc-no-tools",
-          { tasks: [{ agent: "notools", prompt: "do stuff" }] },
-          undefined,
-          undefined,
-          ctx,
-        ),
-      ).rejects.toThrow("no `tools:` field");
+      // Omitted `tools:` now inherits * (DEFAULT_TOOLS), matching CC/OpenCode/
+      // Devin — so the agent runs instead of being rejected.
+      const result = await toolDef.execute(
+        "tc-no-tools",
+        { tasks: [{ agent: "notools", prompt: "do stuff" }] },
+        undefined,
+        undefined,
+        ctx,
+      );
+      const details = (result as any).details as {
+        results: Array<{ output?: string; error?: string }>;
+      };
+      expect(details.results[0]?.error).toBeUndefined();
+      expect(details.results[0]?.output).toContain("Inherited tools, ran fine.");
     } finally {
       fs.rmSync(taskCwd, { recursive: true, force: true });
     }
@@ -892,6 +897,55 @@ describe("delegate task lifecycle integration", () => {
     };
 
     expect(details.results[0]?.error).toContain("file not found");
+  });
+
+  test("resumeFrom with placeholder string returns invalid path error", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+
+    const toolDef = getDelegateTool(ts);
+    const ctx = getExecContext(ts);
+
+    const result = await toolDef.execute(
+      "tc-resume-invalid",
+      {
+        tasks: [
+          {
+            prompt: "resume",
+            resumeFrom:
+              "polling-state-needed-for-async-orchestration-but-this-task-is-incomplete-please-retry-the-tool-call-with-action-poll-instead.-Action:-poll",
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const details = (result as any).details as {
+      results: Array<{ error?: string }>;
+    };
+
+    expect(details.results[0]?.error).toContain("invalid session path");
+    expect(details.results[0]?.error).not.toContain("file not found");
+  });
+
+  test("stringified tasks returns actionable validation error", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+
+    const toolDef = getDelegateTool(ts);
+    const ctx = getExecContext(ts);
+
+    const result = await toolDef.execute(
+      "tc-stringified-tasks",
+      { tasks: '[{"prompt":"hello"}]' },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain("tasks` must be an array");
+    expect(text).toContain("not a JSON string");
   });
 
   test("session config mismatch rejects with actionable message", async () => {

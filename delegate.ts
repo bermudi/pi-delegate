@@ -15,7 +15,7 @@ export type {
   AgentRunConfig,
   TaskRunEnv,
 } from "./types.ts";
-export type { DelegateConfig, SessionModelOverrides } from "./config.ts";
+export type { DelegateConfig } from "./config.ts";
 
 export {
   DEFAULT_TOOLS,
@@ -25,23 +25,10 @@ export {
 } from "./constants.ts";
 export { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
 export {
-  resetSessionOverrides,
   loadDelegateConfig,
-  saveDelegateConfigAtomic,
-  setModelOverride,
-  setDefaultModel,
-  clearModelOverride,
-  clearAllModelOverrides,
-  setConcurrencyDefault,
-  setConcurrencyProvider,
-  setConcurrencyModel,
-  removeConcurrencyProvider,
-  removeConcurrencyModel,
-  resetConcurrency,
   getConcurrencyLimit,
   getMaxAsyncTickets,
   getMaxConcurrent,
-  setMaxConcurrent,
   resolveModelSpec,
 } from "./config.ts";
 export {
@@ -77,6 +64,7 @@ export {
   parseFrontmatter,
   findProjectRoot,
   loadAgentFile,
+  loadClaudeAgentFile,
   discoverAgents,
   loadSkill,
   loadAgentsMdFiles,

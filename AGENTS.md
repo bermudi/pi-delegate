@@ -22,6 +22,9 @@ This is **not a standalone app** — it's a Pi extension. Entry points:
 - **Host deps are cached** per `(cwd, systemPrompt)`. `AuthStorage`, `SettingsManager`, and `ResourceLoader` are built once and shared across subagents with the same profile. `ModelRegistry` is threaded from the parent.
 - **Session pooling** keeps live `AgentSession` objects in memory keyed by `sessionId`. Subsequent delegate calls with the same `sessionId` reuse the session. Pool TTL: 10 min idle.
 - **Async tickets are fire-and-forget.** `async: true` spawns background execution and returns a ticket ID immediately. Results are pushed via `sendMessage({deliverAs:"followUp"})`. Poll/cancel with top-level `action: "poll"` or `action: "cancel"`.
+- **Named agents have layered discovery.** `discoverAgents()` walks sources in order, first definition wins: project `.pi/agents/` → global `~/.pi/agent/agents/` → legacy `~/.agents/` → project `.claude/agents/` → global `~/.claude/agents/` → built-in defaults. A same-named `.md` in a higher-priority dir supersedes anything below it.
+- **Three built-in agents** (`scout`, `reviewer`, `workhorse`) are seeded last and superseded by any same-named user markdown. Defined in `builtin-agents.ts`. They omit `model` so they inherit the parent model — user markdown can pin one by setting frontmatter `model:`.
+- **Claude Code interchange.** `.claude/agents/*.md` files are imported with field adaptation: capitalized tool names are mapped (`Read`→`read`, `Glob`→`find`, …), unmappable tools dropped, `disallowedTools` honored as a denylist layered on the resolved set, and `model: inherit` stripped to mean parent-inherit. See `loadClaudeAgentFile` in `agents.ts`.
 
 ## Conventions
 
@@ -46,7 +49,7 @@ After install or rebuild, `/reload` in Pi.
 ## Stable Reference Facts
 
 - **Extension dir:** `~/.pi/agent/extensions/`
-- **Delegate config:** `~/.pi/agent/delegate.json` (managed by `config.ts`, not hand-edited)
+- **Delegate config:** `~/.pi/agent/delegate.json` (user-edited; `config.ts` reads it — no programmatic mutators)
 - **Named agent dirs:** `.pi/agents/` (project) and `~/.pi/agent/agents/` (global)
 - **Named agents** are Markdown files with YAML frontmatter — required fields `name`, `description`; optional `model`, `thinking`, `tools`
 - **Settings:** `~/.pi/agent/settings.json` — `delegate.agentOverrides` key for per-agent model/thinking/tool/skill overrides

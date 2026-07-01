@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@mariozechner/pi-agent-core";
-import { VALID_THINKING } from "./constants.ts";
+import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
 import { resolveToolGroups } from "./tools.ts";
+import { BUILTIN_AGENTS } from "./builtin-agents.ts";
 import type { AgentConfig } from "./types.ts";
 
 export function parseFrontmatter(content: string): {
@@ -26,11 +27,68 @@ export function parseFrontmatter(content: string): {
 export function findProjectRoot(cwd: string): string | null {
   let dir = cwd;
   while (true) {
-    if (fs.existsSync(path.join(dir, ".pi", "agents"))) return dir;
+    // A project root is any dir hosting a pi-native or Claude agent dir.
+    // Recognizing .claude/agents here means a project using only Claude Code's
+    // convention still resolves its project-scoped agents.
+    if (
+      fs.existsSync(path.join(dir, ".pi", "agents")) ||
+      fs.existsSync(path.join(dir, ".claude", "agents"))
+    )
+      return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
+}
+
+/** Map Claude Code's capitalized tool names to delegate's lowercase set.
+ *  Unmappable tools (WebSearch, WebFetch, TodoWrite, …) are dropped — they are
+ *  not delegate tools, and warning per imported agent would be noise. The map
+ *  is exported for tests; do not call it for native pi frontmatter. */
+const CLAUDE_TOOL_ALIASES: Record<string, string> = {
+  read: "read",
+  write: "write",
+  edit: "edit",
+  bash: "bash",
+  glob: "find",
+  grep: "grep",
+  ls: "ls",
+};
+
+/** Parse a `tools:` frontmatter value into a resolved tool list.
+ *  Omitted or blank → inherit the full agent set (`*`), matching CC/OpenCode/
+ *  Devin convention. This is the only caller-owned knob — both inline tasks
+ *  and named agents now inherit-all when `tools:` is absent. */
+function resolveFrontmatterTools(
+  raw: string | undefined,
+  aliasMap?: Record<string, string>,
+): string[] {
+  if (!raw) return DEFAULT_TOOLS; // omitted/blank → inherit *
+  const names = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!names.length) return DEFAULT_TOOLS;
+  const mapped = aliasMap
+    ? names
+        .map((n) => aliasMap[n.toLowerCase()] ?? null)
+        .filter((n): n is string => n !== null)
+    : names;
+  // Empty after aliasing (e.g. a Claude agent listing only WebSearch) → inherit.
+  return mapped.length ? resolveToolGroups(mapped) : DEFAULT_TOOLS;
+}
+
+/** Parse and alias a comma-separated Claude tool list into delegate tool names,
+ *  WITHOUT inheriting on empty. Returns the mapped names only (may be empty).
+ *  Used when the result will be subtracted from a base set (disallowedTools). */
+function mapClaudeToolNames(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((n) => CLAUDE_TOOL_ALIASES[n.toLowerCase()] ?? null)
+    .filter((n): n is string => n !== null);
 }
 
 export function loadAgentFile(filePath: string): AgentConfig | null {
@@ -49,48 +107,125 @@ export function loadAgentFile(filePath: string): AgentConfig | null {
     thinking: VALID_THINKING.has(data.thinking ?? "")
       ? (data.thinking as ThinkingLevel)
       : "off",
-    tools: data.tools
-      ? resolveToolGroups(
-          data.tools
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
-        )
-      : [], // named agents must declare tools; empty triggers a resolution error
+    // Omitted/blank `tools:` → inherit the full agent set (`*`), matching
+    // CC/OpenCode/Devin. A previous version rejected empty tools; that was
+    // stricter than every comparable tool and surprised anyone porting a
+    // profile. Inline tasks still get `[]` as a deliberate escape hatch —
+    // this code path only governs named-agent file loading.
+    tools: resolveFrontmatterTools(data.tools),
+    systemPrompt: body,
+  };
+}
+
+/** Variant for `.claude/agents/*.md` files. Two Claude-specific adaptations:
+ *  - Maps capitalized tool names (Read/Glob/…) to delegate tools, dropping
+ *    unmappable ones (WebSearch, TodoWrite, …). Omitted `tools` inherits `*`.
+ *  - Honors `disallowedTools` as a denylist layered on top of the resolved
+ *    set (Claude semantics: denylist applies whether or not an allowlist is
+ *    set). Since delegate has no runtime denylist, we bake it into `tools` at
+ *    import time. A reviewer with `disallowedTools: Write, Edit` and no
+ *    `tools` becomes `read, bash, grep, find, ls` — it does NOT silently
+ *    inherit full tools.
+ *  - `model: inherit` (Claude's default) is mapped to "omit" so the agent
+ *    inherits the parent model; passing it through verbatim would crash
+ *    resolveModel() with "model 'inherit' is not available". */
+export function loadClaudeAgentFile(filePath: string): AgentConfig | null {
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+  const { data, body } = parseFrontmatter(content);
+  if (!data.name || !data.description) return null;
+
+  let tools = resolveFrontmatterTools(data.tools, CLAUDE_TOOL_ALIASES);
+  // disallowedTools is a denylist applied after the allowlist resolves.
+  // Empty-after-mapping denylist (e.g. only unmappable names) → no-op.
+  const denied = new Set(mapClaudeToolNames(data.disallowedTools));
+  if (denied.size) tools = tools.filter((t) => !denied.has(t));
+
+  return {
+    name: data.name,
+    description: data.description,
+    // `inherit` is Claude's "use parent" default — drop it so we fall through
+    // to parent-model inheritance. Any other value passes through verbatim.
+    model: data.model && data.model.toLowerCase() === "inherit"
+      ? undefined
+      : data.model,
+    thinking: VALID_THINKING.has(data.thinking ?? "")
+      ? (data.thinking as ThinkingLevel)
+      : "off",
+    tools,
     systemPrompt: body,
   };
 }
 
 export function discoverAgents(cwd: string): Map<string, AgentConfig> {
-  const dirs: { dir: string; scope: "project" | "global" }[] = [];
+  // Discovery order (first definition wins; later dirs cannot overwrite):
+  //   1. project  .pi/agents            (highest priority)
+  //   2. global   ~/.pi/agent/agents
+  //   3. global   ~/.agents             (legacy)
+  //   4. project  .claude/agents        (Claude Code interchange)
+  //   5. global   ~/.claude/agents
+  //   6. built-in scout/reviewer/workhorse  (lowest — superseded by any .md)
+  //
+  // Built-ins are seeded last so any same-named user markdown silently
+  // supersedes them. That is the customization contract: a user who dislikes
+  // a built-in drops a same-named .md anywhere above and wins.
   const projectRoot = findProjectRoot(cwd);
+  const nativeDirs: { dir: string; scope: "project" | "global" }[] = [];
   if (projectRoot)
-    dirs.push({
+    nativeDirs.push({
       dir: path.join(projectRoot, ".pi", "agents"),
       scope: "project",
     });
   // Global user agents — same convention as skills, AGENTS.md, and pi-subagents
-  dirs.push({
+  nativeDirs.push({
     dir: path.join(os.homedir(), ".pi", "agent", "agents"),
     scope: "global",
   });
-  dirs.push({ dir: path.join(os.homedir(), ".agents"), scope: "global" }); // legacy
+  nativeDirs.push({ dir: path.join(os.homedir(), ".agents"), scope: "global" }); // legacy
+
+  const claudeDirs: { dir: string; scope: "claude" }[] = [];
+  if (projectRoot)
+    claudeDirs.push({
+      dir: path.join(projectRoot, ".claude", "agents"),
+      scope: "claude",
+    });
+  claudeDirs.push({
+    dir: path.join(os.homedir(), ".claude", "agents"),
+    scope: "claude",
+  });
 
   const agents = new Map<string, AgentConfig>();
-  for (const { dir, scope } of dirs) {
+  const loadDir = (
+    { dir, scope }: { dir: string; scope: AgentConfig["scope"] },
+    loader: (fp: string) => AgentConfig | null,
+  ) => {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
-      continue;
+      return;
     }
     for (const e of entries) {
       if (!e.name.endsWith(".md") || e.name.endsWith(".chain.md")) continue;
-      const cfg = loadAgentFile(path.join(dir, e.name));
+      const cfg = loader(path.join(dir, e.name));
       if (cfg && !agents.has(cfg.name)) {
         cfg.scope = scope;
         agents.set(cfg.name, cfg);
       }
+    }
+  };
+
+  for (const d of nativeDirs) loadDir(d, loadAgentFile);
+  for (const d of claudeDirs) loadDir(d, loadClaudeAgentFile);
+
+  // Built-ins seeded last — superseded by any same-named user .md above.
+  for (const builtin of BUILTIN_AGENTS) {
+    if (!agents.has(builtin.name)) {
+      agents.set(builtin.name, { ...builtin, scope: "builtin" });
     }
   }
   return agents;

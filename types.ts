@@ -13,7 +13,9 @@ export interface AgentConfig {
   thinking: ThinkingLevel;
   tools: string[];
   systemPrompt: string;
-  scope?: "project" | "global";
+  /** Origin of the profile. Built-ins are seeded last and superseded by any
+   *  same-named user markdown. `claude` denotes imported .claude/agents files. */
+  scope?: "project" | "global" | "claude" | "builtin";
 }
 
 export type SessionAction = "prompt" | "close" | "list" | "poll" | "cancel";
@@ -23,7 +25,7 @@ export interface DelegateParams {
   action?: DelegateAction;
   async?: boolean;
   ticket?: string;
-  tasks?: TaskDef[];
+  tasks?: TaskDef[] | string;
 }
 
 export interface TaskDef {

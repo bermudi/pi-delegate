@@ -27,7 +27,7 @@ import {
 import { runAgentSession } from "./runner.ts";
 import { getGitChangedFiles } from "./file-tracking.ts";
 import { getHostDeps } from "./host.ts";
-import { resolveCwd } from "./utils.ts";
+import { resolveCwd, validateResumeFromPath } from "./utils.ts";
 
 /** Build a failed TaskResult. Used for early-failure paths (abort, busy, validation). */
 function failTask(
@@ -189,6 +189,15 @@ async function acquireAgentSession(
         error: failTask(
           task,
           `resumeFrom conflicts with active sessionId '${task.sessionId}'. The pooled session has its own accumulated context. Close the session first if you want to resume from a different point.`,
+        ),
+      };
+    }
+    const resumeFromPathError = validateResumeFromPath(task.resumeFrom);
+    if (resumeFromPathError) {
+      return {
+        error: failTask(
+          task,
+          `resumeFrom: invalid session path: ${resumeFromPathError}; got ${JSON.stringify(task.resumeFrom)}`,
         ),
       };
     }

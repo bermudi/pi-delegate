@@ -636,10 +636,6 @@ var __delegateConfig = {
   agent: { ...DEFAULT_DELEGATE_CONFIG.agent },
   concurrency: { ...DEFAULT_DELEGATE_CONFIG.concurrency }
 };
-var sessionOverrides = { default: null };
-function resetSessionOverrides() {
-  sessionOverrides = { default: null };
-}
 function loadDelegateConfig() {
   try {
     const raw = fs2.readFileSync(DELEGATE_CONFIG_PATH, "utf-8");
@@ -659,76 +655,17 @@ function loadDelegateConfig() {
     return structuredClone(DEFAULT_DELEGATE_CONFIG);
   }
 }
-function saveDelegateConfigAtomic(config) {
-  const tmpPath = DELEGATE_CONFIG_PATH + ".tmp";
-  try {
-    fs2.mkdirSync(DELEGATE_CONFIG_DIR, { recursive: true });
-    fs2.writeFileSync(tmpPath, JSON.stringify(config, null, 2), "utf-8");
-    fs2.renameSync(tmpPath, DELEGATE_CONFIG_PATH);
-  } catch (err) {
-    console.error(`[delegate] Failed to save config: ${err}`);
-  }
-}
 function initDelegateConfig() {
   __delegateConfig = loadDelegateConfig();
 }
 initDelegateConfig();
-function setModelOverride(type, value) {
-  __delegateConfig.agent[type] = value;
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-function setDefaultModel(value) {
-  __delegateConfig.agent.default = value;
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-function clearModelOverride(type) {
-  delete __delegateConfig.agent[type];
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-function clearAllModelOverrides() {
-  __delegateConfig.agent = { default: null };
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-function setConcurrencyDefault(n) {
-  __delegateConfig.concurrency.default = Math.max(1, n);
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-function setConcurrencyProvider(key, n) {
-  const current = __delegateConfig.concurrency.providers ?? {};
-  __delegateConfig.concurrency.providers = {
-    ...current,
-    [key]: Math.max(1, n)
-  };
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-function setConcurrencyModel(key, n) {
-  const current = __delegateConfig.concurrency.models ?? {};
-  __delegateConfig.concurrency.models = { ...current, [key]: Math.max(1, n) };
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-function removeConcurrencyProvider(key) {
-  if (__delegateConfig.concurrency.providers) {
-    delete __delegateConfig.concurrency.providers[key];
-    saveDelegateConfigAtomic(__delegateConfig);
-  }
-}
-function removeConcurrencyModel(key) {
-  if (__delegateConfig.concurrency.models) {
-    delete __delegateConfig.concurrency.models[key];
-    saveDelegateConfigAtomic(__delegateConfig);
-  }
-}
-function resetConcurrency() {
-  __delegateConfig.concurrency = { ...DEFAULT_DELEGATE_CONFIG.concurrency };
-  saveDelegateConfigAtomic(__delegateConfig);
-}
-function getConcurrencyLimit(modelKey) {
-  const perModel = __delegateConfig.concurrency.models?.[modelKey];
+function getConcurrencyLimit(modelKey, config = __delegateConfig) {
+  const perModel = config.concurrency.models?.[modelKey];
   if (perModel != null) return perModel;
   const provider = modelKey.split("/")[0];
-  const perProvider = __delegateConfig.concurrency.providers?.[provider];
+  const perProvider = config.concurrency.providers?.[provider];
   if (perProvider != null) return perProvider;
-  return __delegateConfig.concurrency.default;
+  return config.concurrency.default;
 }
 function getMaxAsyncTickets() {
   return __delegateConfig.maxAsyncTickets ?? MAX_ASYNC_TICKETS;
@@ -736,22 +673,10 @@ function getMaxAsyncTickets() {
 function getMaxConcurrent() {
   return __delegateConfig.maxConcurrent ?? MAX_CONCURRENCY;
 }
-function setMaxConcurrent(n) {
-  __delegateConfig.maxConcurrent = Math.max(1, n);
-  saveDelegateConfigAtomic(__delegateConfig);
-}
 function resolveModelSpec(options) {
-  const {
-    taskModel,
-    agentType,
-    frontmatterModel,
-    config = __delegateConfig,
-    overrides = sessionOverrides
-  } = options;
+  const { taskModel, agentType, frontmatterModel, config = __delegateConfig } = options;
   const candidates = [
     taskModel,
-    overrides[agentType],
-    overrides["default"],
     config.agent[agentType],
     config.agent["default"],
     frontmatterModel
@@ -765,6 +690,146 @@ function resolveModelSpec(options) {
 import * as fs3 from "node:fs";
 import * as os2 from "node:os";
 import * as path4 from "node:path";
+
+// builtin-agents.ts
+var SCOUT_PROMPT = `You are Scout \u2014 a fast, efficient codebase investigator who maps territory so a downstream agent can act without re-reading anything you already read.
+
+Your role is to investigate an unfamiliar area of a codebase and return a structured map: where things live, how they connect, and where to start. You are a subagent inside pi coding harness, called when the main agent needs to understand code before deciding what to do with it.
+
+Critical constraint: your output is handed to an agent that has NOT seen the files you explored. Write for them \u2014 precise paths, exact line ranges, and enough context that they never need to re-open a file you already read.
+
+Key responsibilities:
+- Locate the relevant code quickly; follow imports, call sites, and definitions
+- Read the critical sections (types, interfaces, key functions) \u2014 not whole files
+- Explain how the pieces connect and depend on each other
+- Recommend the single best starting point for the downstream agent
+
+Operating principles:
+- Use \`grep\` and \`find\` to locate code. They are native tools \u2014 prefer them over shell pipelines.
+- Read strategically: key sections only, always with exact line ranges. Don't dump entire files.
+- Calibrate thoroughness to the task (infer from the ask, default medium):
+  - Quick \u2014 targeted lookups, key files only
+  - Medium \u2014 follow imports, read critical sections
+  - Thorough \u2014 trace all dependencies, check tests and types
+- You map; you don't judge. Report what the code does, not whether it's right \u2014 that's a reviewer's job.
+- If the area is too large to map fully, map the relevant slice and say so explicitly.
+
+Response format:
+
+## Files Retrieved
+List with exact line ranges:
+1. \`path/to/file.ts\` (lines 10-50) \u2014 Description
+
+## Key Code
+Critical types, interfaces, or functions with actual snippets.
+
+## Architecture
+Brief explanation of how the pieces connect.
+
+## Start Here
+Which file to look at first and why.
+
+Guidelines:
+- Read-only (read, grep, find, ls). You never modify.
+- Every file you cite must include a line range \u2014 no bare paths.
+
+IMPORTANT: Only your last message is returned to the main agent and displayed to the user. Your last message should be comprehensive yet focused, with a clear, simple recommendation that helps the user act immediately.`;
+var REVIEWER_PROMPT = `You are a senior code reviewer. \`bash\` covers both search (\`rg\`, \`fd\`, \`ls\`) and git inspection (\`git diff\`, \`git log\`, \`git show\`). Use \`read\` for file contents, \`bash\` for everything else. Keep commands read-only \u2014 you review, you do not modify.
+
+## Reasoning Protocol
+
+Before producing findings, you MUST complete these steps mentally:
+
+1. **State premises**: What does the spec/code claim to do? What are the stated invariants?
+2. **Trace execution**: For each finding, trace the relevant code path from entry to exit. Note the file:line at each step.
+3. **Distinguish symptom from cause**: What is the observable behavior? What is your inferred root cause? Flag if you cannot confirm the cause from reading alone.
+
+## Anti-Patterns
+
+Do NOT flag any of these unless you have traced a concrete code path that demonstrates the issue:
+- **Logic Error** \u2014 claiming an algorithm is wrong without a falsifying counterexample (input \u2192 expected \u2192 actual)
+- **Added Requirement** \u2014 rejecting code for not implementing something the spec doesn't require
+- **Boundary Error** \u2014 asserting off-by-one errors in correct code; show the exact index mismatch
+- **Misread Spec** \u2014 misinterpreting stated requirements to justify a finding
+
+These four patterns account for 87%+ of false negatives in LLM code review. Err on the side of saying nothing rather than flagging something you cannot trace.
+
+## Output Format
+
+### Review Summary
+One sentence verdict.
+
+### Findings
+Numbered list. Each finding MUST include:
+1. **[Severity]** \u2014 CRITICAL / WARNING / SUGGESTION
+2. **Symptom** \u2014 the observable behavior or spec gap (file:line)
+3. **Trace** \u2014 the code path that produces it (at least two file:line anchors)
+4. **Cause** \u2014 your inferred root cause, explicitly tagged as \`[confirmed]\` or \`[inferred]\`
+
+If you cannot produce a trace, you do not have a finding. Move it to an "Observations" section instead.
+
+### Observations (optional)
+Things that look suspicious but cannot be traced to a concrete issue. Tag each as \`[unconfirmed]\`. Do not pad this section.
+
+Do NOT include a "Suggestions" or "Fixes" section. You are a reviewer, not an implementor. If the user wants fixes, they should delegate that separately \u2014 mixing review and implementation degrades review quality.`;
+var WORKHORSE_PROMPT = `You are Workhorse \u2014 a mechanical execution agent for well-defined, repetitive tasks. You are not a decision-maker; the task tells you exactly what to do, and your job is to do it thoroughly and consistently.
+
+Your role is to execute tasks that are already fully specified: bulk edits, boilerplate, mechanical refactors, apply-this-everywhere work. You are a subagent inside pi coding harness, called when the main agent has a clear, repetitive change to make and wants it applied everywhere without judgment calls.
+
+You will receive instructions like:
+- "Rename X to Y across these files"
+- "Add these boilerplate exports to every file in this directory"
+- "Apply this transformation pattern to all matching occurrences"
+- "Generate N similar files from this template"
+
+Key responsibilities:
+- Apply the same transformation consistently across every matching file or occurrence
+- Generate boilerplate, exports, or templated files exactly to spec
+- Rename, refactor, or restructure mechanically without second-guessing the intent
+
+Operating principles:
+- Be mechanical and thorough. Don't skip files. Don't stop early.
+- Don't second-guess the task. If something is genuinely ambiguous, apply the obvious interpretation and note it \u2014 don't invent creative alternatives.
+- Match existing patterns and local style in the codebase. You replicate conventions; you don't set them.
+- Don't introduce new dependencies, abstractions, or files unless the task explicitly requires them.
+- When you hit an edge case the task doesn't cover, do the closest consistent thing and flag it.
+
+Response format:
+- Every file you changed, each with a one-line summary of what changed.
+- Any edge cases you resolved by interpretation, flagged explicitly.
+
+Guidelines:
+- Full tools (read, write, edit, bash). You modify code.
+- Verify before declaring done \u2014 run the project's typecheck/lint/build if it has them. Code is not done until it is verified.
+
+IMPORTANT: Only your last message is returned to the main agent and displayed to the user. Your last message should be comprehensive yet focused, with a clear, simple recommendation that helps the user act immediately.`;
+var BUILTIN_AGENTS = [
+  {
+    name: "scout",
+    description: "Investigate a codebase area \u2014 map architecture, trace imports, find implementations",
+    thinking: "high",
+    tools: ["ro"],
+    systemPrompt: SCOUT_PROMPT
+  },
+  {
+    name: "reviewer",
+    description: "Senior code reviewer \u2014 reads code and reports bugs, edge cases, security issues",
+    thinking: "xhigh",
+    // Deliberately not `ro`: bash covers search + git inspection (rg, fd,
+    // git diff/log/show). read covers file contents.
+    tools: ["read", "bash"],
+    systemPrompt: REVIEWER_PROMPT
+  },
+  {
+    name: "workhorse",
+    description: "Repetitive execution agent \u2014 bulk edits, boilerplate, mechanical refactors, apply-this-everywhere tasks",
+    thinking: "xhigh",
+    tools: ["*"],
+    systemPrompt: WORKHORSE_PROMPT
+  }
+];
+
+// agents.ts
 function parseFrontmatter(content) {
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!m) return { data: {}, body: content.trim() };
@@ -779,11 +844,32 @@ function parseFrontmatter(content) {
 function findProjectRoot(cwd) {
   let dir = cwd;
   while (true) {
-    if (fs3.existsSync(path4.join(dir, ".pi", "agents"))) return dir;
+    if (fs3.existsSync(path4.join(dir, ".pi", "agents")) || fs3.existsSync(path4.join(dir, ".claude", "agents")))
+      return dir;
     const parent = path4.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
+}
+var CLAUDE_TOOL_ALIASES = {
+  read: "read",
+  write: "write",
+  edit: "edit",
+  bash: "bash",
+  glob: "find",
+  grep: "grep",
+  ls: "ls"
+};
+function resolveFrontmatterTools(raw, aliasMap) {
+  if (!raw) return DEFAULT_TOOLS;
+  const names = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!names.length) return DEFAULT_TOOLS;
+  const mapped = aliasMap ? names.map((n) => aliasMap[n.toLowerCase()] ?? null).filter((n) => n !== null) : names;
+  return mapped.length ? resolveToolGroups(mapped) : DEFAULT_TOOLS;
+}
+function mapClaudeToolNames(raw) {
+  if (!raw) return [];
+  return raw.split(",").map((s) => s.trim()).filter(Boolean).map((n) => CLAUDE_TOOL_ALIASES[n.toLowerCase()] ?? null).filter((n) => n !== null);
 }
 function loadAgentFile(filePath) {
   let content;
@@ -799,41 +885,83 @@ function loadAgentFile(filePath) {
     description: data.description,
     model: data.model,
     thinking: VALID_THINKING.has(data.thinking ?? "") ? data.thinking : "off",
-    tools: data.tools ? resolveToolGroups(
-      data.tools.split(",").map((s) => s.trim()).filter(Boolean)
-    ) : [],
-    // named agents must declare tools; empty triggers a resolution error
+    // Omitted/blank `tools:` → inherit the full agent set (`*`), matching
+    // CC/OpenCode/Devin. A previous version rejected empty tools; that was
+    // stricter than every comparable tool and surprised anyone porting a
+    // profile. Inline tasks still get `[]` as a deliberate escape hatch —
+    // this code path only governs named-agent file loading.
+    tools: resolveFrontmatterTools(data.tools),
+    systemPrompt: body
+  };
+}
+function loadClaudeAgentFile(filePath) {
+  let content;
+  try {
+    content = fs3.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+  const { data, body } = parseFrontmatter(content);
+  if (!data.name || !data.description) return null;
+  let tools = resolveFrontmatterTools(data.tools, CLAUDE_TOOL_ALIASES);
+  const denied = new Set(mapClaudeToolNames(data.disallowedTools));
+  if (denied.size) tools = tools.filter((t) => !denied.has(t));
+  return {
+    name: data.name,
+    description: data.description,
+    // `inherit` is Claude's "use parent" default — drop it so we fall through
+    // to parent-model inheritance. Any other value passes through verbatim.
+    model: data.model && data.model.toLowerCase() === "inherit" ? void 0 : data.model,
+    thinking: VALID_THINKING.has(data.thinking ?? "") ? data.thinking : "off",
+    tools,
     systemPrompt: body
   };
 }
 function discoverAgents(cwd) {
-  const dirs = [];
   const projectRoot = findProjectRoot(cwd);
+  const nativeDirs = [];
   if (projectRoot)
-    dirs.push({
+    nativeDirs.push({
       dir: path4.join(projectRoot, ".pi", "agents"),
       scope: "project"
     });
-  dirs.push({
+  nativeDirs.push({
     dir: path4.join(os2.homedir(), ".pi", "agent", "agents"),
     scope: "global"
   });
-  dirs.push({ dir: path4.join(os2.homedir(), ".agents"), scope: "global" });
+  nativeDirs.push({ dir: path4.join(os2.homedir(), ".agents"), scope: "global" });
+  const claudeDirs = [];
+  if (projectRoot)
+    claudeDirs.push({
+      dir: path4.join(projectRoot, ".claude", "agents"),
+      scope: "claude"
+    });
+  claudeDirs.push({
+    dir: path4.join(os2.homedir(), ".claude", "agents"),
+    scope: "claude"
+  });
   const agents = /* @__PURE__ */ new Map();
-  for (const { dir, scope } of dirs) {
+  const loadDir = ({ dir, scope }, loader) => {
     let entries;
     try {
       entries = fs3.readdirSync(dir, { withFileTypes: true });
     } catch {
-      continue;
+      return;
     }
     for (const e of entries) {
       if (!e.name.endsWith(".md") || e.name.endsWith(".chain.md")) continue;
-      const cfg = loadAgentFile(path4.join(dir, e.name));
+      const cfg = loader(path4.join(dir, e.name));
       if (cfg && !agents.has(cfg.name)) {
         cfg.scope = scope;
         agents.set(cfg.name, cfg);
       }
+    }
+  };
+  for (const d of nativeDirs) loadDir(d, loadAgentFile);
+  for (const d of claudeDirs) loadDir(d, loadClaudeAgentFile);
+  for (const builtin of BUILTIN_AGENTS) {
+    if (!agents.has(builtin.name)) {
+      agents.set(builtin.name, { ...builtin, scope: "builtin" });
     }
   }
   return agents;
@@ -1175,6 +1303,19 @@ function resolveCwd(cwd) {
   const expanded = cwd.startsWith("~") ? path7.join(os4.homedir(), cwd.slice(1)) : cwd;
   return path7.resolve(expanded);
 }
+function validateResumeFromPath(resumeFrom) {
+  if (!resumeFrom.trim()) {
+    return "expected an absolute .jsonl session file path copied from delegate retry output";
+  }
+  if (!resumeFrom.endsWith(".jsonl")) {
+    return "expected an absolute .jsonl session file path copied from delegate retry output";
+  }
+  const expanded = resumeFrom.startsWith("~") ? path7.join(os4.homedir(), resumeFrom.slice(1)) : resumeFrom;
+  if (!path7.isAbsolute(expanded)) {
+    return "expected an absolute .jsonl session file path copied from delegate retry output";
+  }
+  return void 0;
+}
 function extractTextFromPartialResult(partialResult) {
   if (!partialResult || typeof partialResult !== "object" || !("content" in partialResult))
     return void 0;
@@ -1507,6 +1648,15 @@ async function acquireAgentSession(env, task, p) {
         )
       };
     }
+    const resumeFromPathError = validateResumeFromPath(task.resumeFrom);
+    if (resumeFromPathError) {
+      return {
+        error: failTask(
+          task,
+          `resumeFrom: invalid session path: ${resumeFromPathError}; got ${JSON.stringify(task.resumeFrom)}`
+        )
+      };
+    }
     const resolvedPath = resolveCwd(task.resumeFrom);
     if (!fs6.existsSync(resolvedPath)) {
       return {
@@ -1719,36 +1869,42 @@ var delegateParameters = Type.Object({
   async: Type.Optional(Type.Boolean()),
   ticket: Type.Optional(Type.String()),
   tasks: Type.Optional(
-    Type.Array(
-      Type.Object({
-        prompt: Type.Optional(Type.String()),
-        agent: Type.Optional(Type.String()),
-        cwd: Type.Optional(Type.String()),
-        // ── Undocumented overrides — accepted but not advertised in schema.
-        // Discovered via empty-tasks help text.
-        systemPrompt: Type.Optional(Type.String()),
-        context: Type.Optional(
-          Type.String({ enum: ["fresh", "with-parent-transcript"] })
-        ),
-        model: Type.Optional(Type.String()),
-        tools: Type.Optional(Type.Array(Type.String())),
-        thinking: Type.Optional(
-          Type.String({
-            enum: [...VALID_THINKING]
-          })
-        ),
-        sessionId: Type.Optional(Type.String()),
-        action: Type.Optional(
-          Type.String({
-            enum: ["prompt", "close", "list", "poll", "cancel"]
-          })
-        ),
-        resumeFrom: Type.Optional(Type.String())
-      }),
-      {
-        minItems: 0
-      }
-    )
+    Type.Union([
+      Type.Array(
+        Type.Object({
+          prompt: Type.Optional(Type.String()),
+          agent: Type.Optional(Type.String()),
+          cwd: Type.Optional(Type.String()),
+          // ── Undocumented overrides — accepted but not advertised in schema.
+          // Discovered via empty-tasks help text.
+          systemPrompt: Type.Optional(Type.String()),
+          context: Type.Optional(
+            Type.String({ enum: ["fresh", "with-parent-transcript"] })
+          ),
+          model: Type.Optional(Type.String()),
+          tools: Type.Optional(Type.Array(Type.String())),
+          thinking: Type.Optional(
+            Type.String({
+              enum: [...VALID_THINKING]
+            })
+          ),
+          sessionId: Type.Optional(Type.String()),
+          action: Type.Optional(
+            Type.String({
+              enum: ["prompt", "close", "list", "poll", "cancel"]
+            })
+          ),
+          resumeFrom: Type.Optional(Type.String())
+        }),
+        {
+          minItems: 0
+        }
+      ),
+      // Some models stringify the task array when emitting tool calls. Accept
+      // the type so execute can return an actionable repair hint instead of
+      // Pi's generic schema error; never parse it implicitly.
+      Type.String()
+    ])
   )
 });
 function getSubagentManualMarkdown(agents) {
@@ -1757,7 +1913,7 @@ function getSubagentManualMarkdown(agents) {
     const model = a.model ? ` (model: ${a.model})` : "";
     const thinking = a.thinking !== "off" ? ` [thinking: ${a.thinking}]` : "";
     const tools = a.tools.length !== DEFAULT_TOOLS.length || a.tools.some((t, i) => t !== DEFAULT_TOOLS[i]) ? ` tools: ${a.tools.join(", ")}` : "";
-    const scope = a.scope === "project" ? " [project]" : a.scope === "global" ? " [global]" : "";
+    const scope = a.scope === "project" ? " [project]" : a.scope === "global" ? " [global]" : a.scope === "claude" ? " [claude]" : a.scope === "builtin" ? " [builtin]" : "";
     return `- **${n}**${model}${thinking}${tools}${scope}: ${a.description}`;
   }).join("\n") : "_(none defined)_";
   return [
@@ -1769,7 +1925,7 @@ function getSubagentManualMarkdown(agents) {
     "",
     agentList,
     "",
-    "Agents live in `.pi/agents/*.md` (project-local) and `~/.pi/agent/agents/` (global). Each agent file is Markdown with YAML-ish frontmatter:",
+    "Agents live in `.pi/agents/*.md` (project-local), `~/.pi/agent/agents/` (global), and `.claude/agents/` (interchange with Claude Code). Each agent file is Markdown with YAML-ish frontmatter:",
     "",
     "```markdown",
     "---",
@@ -1777,7 +1933,7 @@ function getSubagentManualMarkdown(agents) {
     "description: What it does",
     "model: anthropic/claude-haiku-4-5  # optional",
     "thinking: low                     # off/minimal/low/medium/high/xhigh",
-    "tools: *                          # * = full agent. ro = read-only. Named agents must declare.",
+    "tools: *                          # * = full agent. ro = read-only. Omit to inherit *.",
     "---",
     "You are a helpful agent...",
     "```",
@@ -1788,13 +1944,14 @@ function getSubagentManualMarkdown(agents) {
     "- `agent` \u2014 Named agent from the list above. Inline fields override agent defaults.",
     "- `systemPrompt` \u2014 System prompt. Falls back to agent definition, then parent session system prompt.",
     "- `model` \u2014 e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
-    "- `tools` \u2014 Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Inline tasks default to `*`; named agents must declare.",
+    "- `tools` \u2014 Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Omitted \u2192 inherit `*`. Claude Code tool names (Read/Glob/\u2026) are mapped automatically; unmappable tools are dropped.",
     "- `thinking` \u2014 off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
     "- `cwd` \u2014 Working directory for the subagent (settings, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
     "- `context` \u2014 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive \u2014 use deliberately).",
     "- `sessionId` \u2014 Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
     "- `action` \u2014 Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
     "- top-level `action` \u2014 Async ticket action: 'poll' or 'cancel'. Does not require `tasks`.",
+    "- `tasks` must be a real JSON array of objects, not a quoted/stringified JSON array.",
     "",
     "## Session Reuse",
     "",
@@ -1817,7 +1974,7 @@ function getSubagentManualMarkdown(agents) {
     "## Resuming Previous Sessions",
     "",
     "Use `resumeFrom` to continue a failed or interrupted subagent from where it left off.",
-    "Pass the absolute path to the session `.jsonl` file (shown in delegate output).",
+    "Pass the exact absolute path to the session `.jsonl` file copied from delegate retry output. Do not invent placeholder values, and do not use `resumeFrom` for async polling.",
     "The agent gets the full conversation history and the new `prompt` continues naturally.",
     "",
     "```json",
@@ -1852,7 +2009,8 @@ function getSubagentManualMarkdown(agents) {
     "## Gotchas",
     "",
     '- `*` means the full agent (read, write, edit, bash), not "every tool." The grep/find/ls trio exists only for `ro` (read-only) agents where bash is unavailable \u2014 bash already subsumes them.',
-    "- Named agent profiles must declare a `tools:` field; inline tasks default to `*`.",
+    '- `tasks` must be an array, not a string containing JSON. Use `{ "tasks": [{ "prompt": "..." }] }`, never `{ "tasks": "[{...}]" }`.',
+    "- Omitting `tools:` inherits the full agent set (`*`) \u2014 for both inline tasks and named agent files.",
     "- Subagents inherit all skills discovered in their `cwd` (via AgentSession's resource loader). Per-task skill filtering is not supported \u2014 curate the cwd's skill set instead.",
     `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
     "- `with-parent-transcript` injects your entire conversation. A 50k-token session means the subagent starts 50k tokens deep.",
@@ -1870,6 +2028,26 @@ function delegateExtension(pi) {
     parameters: delegateParameters,
     async execute(_id, params, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
+      if (typeof params.tasks === "string") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: 'Invalid delegate arguments: `tasks` must be an array of task objects, not a JSON string. Use `{ "tasks": [{ "prompt": "...", "agent": "scout" }] }`, not `{ "tasks": "[{...}]" }`.'
+            }
+          ],
+          details: {
+            tasks: [],
+            results: [
+              {
+                error: "Invalid delegate arguments: tasks must be an array of task objects, not a JSON string."
+              }
+            ],
+            progress: [],
+            parentModel: parentModelId
+          }
+        };
+      }
       const tasks = params.tasks ?? [];
       if (params.action === "poll" || tasks.some((t) => t.action === "poll")) {
         return handlePoll(params, ctx);
@@ -2039,11 +2217,6 @@ function delegateExtension(pi) {
           if (unknownTools.length) {
             warnings.push(
               `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`
-            );
-          }
-          if (agent && agent.tools.length === 0 && !t.tools && !agentOverride?.tools) {
-            throw new Error(
-              `Task ${i}: agent "${t.agent}" has no \`tools:\` field. Declare one, e.g. \`tools: *\` (full) or \`tools: ro\` (read-only).`
             );
           }
           const thinkingRaw = t.thinking ?? agentOverride?.thinking ?? agent?.thinking ?? (isPoolHit ? pooledConfig?.thinking : void 0) ?? "off";
@@ -2618,8 +2791,6 @@ export {
   agentPool,
   buildParentTranscript,
   buildSubagentSystemPrompt,
-  clearAllModelOverrides,
-  clearModelOverride,
   closePooledAgent,
   delegateExtension as default,
   deliverTicketResults,
@@ -2645,27 +2816,17 @@ export {
   listPooledAgents,
   loadAgentFile,
   loadAgentsMdFiles,
+  loadClaudeAgentFile,
   loadDelegateConfig,
   loadDelegateSettings,
   loadSkill,
   parseFrontmatter,
   readDelegateSettingsFile,
-  removeConcurrencyModel,
-  removeConcurrencyProvider,
-  resetConcurrency,
-  resetSessionOverrides,
   resolveCwd,
   resolveModel,
   resolveModelSpec,
   resolveToolGroups,
   runAgentSession,
-  saveDelegateConfigAtomic,
-  setConcurrencyDefault,
-  setConcurrencyModel,
-  setConcurrencyProvider,
-  setDefaultModel,
-  setMaxConcurrent,
-  setModelOverride,
   shortenPath,
   sweepPool,
   sweepTickets,

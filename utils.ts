@@ -9,6 +9,25 @@ export function resolveCwd(cwd: string): string {
   return path.resolve(expanded);
 }
 
+export function validateResumeFromPath(resumeFrom: string): string | undefined {
+  if (!resumeFrom.trim()) {
+    return "expected an absolute .jsonl session file path copied from delegate retry output";
+  }
+
+  if (!resumeFrom.endsWith(".jsonl")) {
+    return "expected an absolute .jsonl session file path copied from delegate retry output";
+  }
+
+  const expanded = resumeFrom.startsWith("~")
+    ? path.join(os.homedir(), resumeFrom.slice(1))
+    : resumeFrom;
+  if (!path.isAbsolute(expanded)) {
+    return "expected an absolute .jsonl session file path copied from delegate retry output";
+  }
+
+  return undefined;
+}
+
 /** Extract text content from a partial tool result (tool_execution_update). */
 export function extractTextFromPartialResult(
   partialResult: unknown,
