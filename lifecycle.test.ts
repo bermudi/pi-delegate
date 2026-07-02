@@ -68,6 +68,10 @@ function mockStream(text: string) {
 function mockPiAiStream(factory: (orig: any) => Record<string, unknown>): void {
   mock.module("@mariozechner/pi-ai", factory as never);
   mock.module("@earendil-works/pi-ai", factory as never);
+  // pi-coding-agent 0.80+ imports streamSimple from "@earendil-works/pi-ai/compat"
+  // (not the main entry), so the compat subpath must be mocked too or the
+  // AgentSession streamFn calls the real, network-hitting streamSimple.
+  mock.module("@earendil-works/pi-ai/compat", factory as never);
 }
 
 /** Set up mock.module to intercept streamSimple with a canned response. */
