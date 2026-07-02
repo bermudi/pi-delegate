@@ -29,6 +29,9 @@ import { getGitChangedFiles } from "./file-tracking.ts";
 import { getHostDeps } from "./host.ts";
 import { resolveCwd, validateResumeFromPath } from "./utils.ts";
 
+const WHOLE_TASK_TRANSIENT_MAX_RETRIES = 1;
+const WHOLE_TASK_TRANSIENT_BASE_DELAY_MS = 1_000;
+
 /** Build a failed TaskResult. Used for early-failure paths (abort, busy, validation). */
 function failTask(
   task: ResolvedTask,
@@ -94,6 +97,58 @@ function finishTask(
   updateProgressFromResult(p, r);
   env.onStatusChange?.();
   return r;
+}
+
+function isClearlyTransientFinalError(error: string | undefined): boolean {
+  if (!error) return false;
+  const e = error.toLowerCase();
+  if (e.includes("abort")) return false;
+  return (
+    /\b429\b/.test(e) ||
+    /\b5\d\d\b/.test(e) ||
+    e.includes('"code":"1305"') ||
+    e.includes("temporarily overloaded") ||
+    e.includes("temporarily unavailable") ||
+    e.includes("overloaded") ||
+    e.includes("rate limit") ||
+    e.includes("too many requests") ||
+    e.includes("timeout") ||
+    e.includes("timed out") ||
+    e.includes("connection reset") ||
+    e.includes("econnreset") ||
+    e.includes("connection refused") ||
+    e.includes("network error")
+  );
+}
+
+function canRetryWholeTask(task: ResolvedTask, result: TaskResult): boolean {
+  // Whole-task retry can repeat tool side effects. Keep it to stateless fresh
+  // tasks, and only when our touched-file accounting says the failed attempt
+  // did not write/edit anything.
+  return (
+    !task.sessionId &&
+    !task.resumeFrom &&
+    result.touchedFiles.length === 0 &&
+    isClearlyTransientFinalError(result.error)
+  );
+}
+
+async function sleepForWholeTaskRetry(
+  signal: AbortSignal | undefined,
+  delayMs: number,
+): Promise<void> {
+  if (signal?.aborted) return;
+  await new Promise<void>((resolve) => {
+    let timeout: ReturnType<typeof setTimeout>;
+    const done = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    timeout = setTimeout(done, delayMs);
+    if (!signal) return;
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 /** Build the AgentSession for a fresh or resumed subagent via createAgentSession.
@@ -414,25 +469,21 @@ async function runResolvedTaskUnlocked(
       );
     }
 
-    // ── Pool / resume / fresh-agent resolution ────────────────────────
-    const acquired = await acquireAgentSession(env, task, p);
-    if ("error" in acquired) {
-      return finishTask(env, p, acquired.error);
-    }
+    const runAttempt = async (): Promise<TaskResult> => {
+      // ── Pool / resume / fresh-agent resolution ────────────────────────
+      const acquired = await acquireAgentSession(env, task, p);
+      if ("error" in acquired) return acquired.error;
 
-    // Re-check abort after acquisition. The pre-acquire check at the top can
-    // miss a signal that fires during getHostDeps/createAgentSession/git
-    // baseline. runAgentSession re-checks after attaching its listener, but a
-    // cancelled ticket should not even start the subagent (no file writes, no
-    // pool insert). Returning here keeps the just-acquired session out of the
-    // run path; pool hits leave the session in the pool untouched, fresh
-    // sessions simply never get inserted (insertion is success-only).
-    if (env.signal?.aborted) {
-      return finishTask(env, p, failTask(task, "Aborted"));
-    }
+      // Re-check abort after acquisition. The pre-acquire check at the top can
+      // miss a signal that fires during getHostDeps/createAgentSession/git
+      // baseline. runAgentSession re-checks after attaching its listener, but a
+      // cancelled ticket should not even start the subagent (no file writes, no
+      // pool insert). Returning here keeps the just-acquired session out of the
+      // run path; pool hits leave the session in the pool untouched, fresh
+      // sessions simply never get inserted (insertion is success-only).
+      if (env.signal?.aborted) return failTask(task, "Aborted");
 
-    // ── Run the agent ─────────────────────────────────────────────────
-    const doRun = async (): Promise<TaskResult> => {
+      // ── Run the agent ─────────────────────────────────────────────────
       try {
         // Snapshot git status before the run so touchedFiles can diff after.
         // AgentSession owns retry/compaction internally — runAgentSession just
@@ -482,9 +533,25 @@ async function runResolvedTaskUnlocked(
     };
 
     // The session lock is now taken at the top of runResolvedTask (covers the
-    // full acquire/run/close lifecycle), so doRun executes serially per sessionId
-    // without needing an inner lock here.
-    const result = await doRun();
+    // full acquire/run/close lifecycle), so attempts execute serially per
+    // sessionId without needing an inner lock here.
+    let result = await runAttempt();
+    for (
+      let retry = 0;
+      retry < WHOLE_TASK_TRANSIENT_MAX_RETRIES && canRetryWholeTask(task, result);
+      retry++
+    ) {
+      const delayMs = WHOLE_TASK_TRANSIENT_BASE_DELAY_MS * 2 ** retry;
+      await sleepForWholeTaskRetry(env.signal, delayMs);
+      if (env.signal?.aborted) {
+        result = failTask(task, "Aborted");
+        break;
+      }
+      p.status = "running";
+      p.error = undefined;
+      env.onStatusChange?.();
+      result = await runAttempt();
+    }
     return finishTask(env, p, result);
   } catch (err) {
     // If we synchronously claimed a sessionId before the error, clean it up.
