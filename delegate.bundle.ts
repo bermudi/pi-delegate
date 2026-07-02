@@ -1542,6 +1542,8 @@ function installFastRetry(sm, baseDelayMs) {
 }
 
 // lifecycle.ts
+var WHOLE_TASK_TRANSIENT_MAX_RETRIES = 1;
+var WHOLE_TASK_TRANSIENT_BASE_DELAY_MS = 1e3;
 function failTask(task, error, sessionFile) {
   return {
     agent: task.agentName,
@@ -1580,6 +1582,29 @@ function finishTask(env, p, r) {
   updateProgressFromResult(p, r);
   env.onStatusChange?.();
   return r;
+}
+function isClearlyTransientFinalError(error) {
+  if (!error) return false;
+  const e = error.toLowerCase();
+  if (e.includes("abort")) return false;
+  return /\b429\b/.test(e) || /\b5\d\d\b/.test(e) || e.includes('"code":"1305"') || e.includes("temporarily overloaded") || e.includes("temporarily unavailable") || e.includes("overloaded") || e.includes("rate limit") || e.includes("too many requests") || e.includes("timeout") || e.includes("timed out") || e.includes("connection reset") || e.includes("econnreset") || e.includes("connection refused") || e.includes("network error");
+}
+function canRetryWholeTask(task, result) {
+  return !task.sessionId && !task.resumeFrom && result.touchedFiles.length === 0 && isClearlyTransientFinalError(result.error);
+}
+async function sleepForWholeTaskRetry(signal, delayMs) {
+  if (signal?.aborted) return;
+  await new Promise((resolve5) => {
+    let timeout;
+    const done = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", done);
+      resolve5();
+    };
+    timeout = setTimeout(done, delayMs);
+    if (!signal) return;
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 async function buildDelegateSession(env, task, sessionManager) {
   const hostDeps = await getHostDeps({
@@ -1805,14 +1830,10 @@ ${listPooledAgents().join("\n")}`,
         )
       );
     }
-    const acquired = await acquireAgentSession(env, task, p);
-    if ("error" in acquired) {
-      return finishTask(env, p, acquired.error);
-    }
-    if (env.signal?.aborted) {
-      return finishTask(env, p, failTask(task, "Aborted"));
-    }
-    const doRun = async () => {
+    const runAttempt = async () => {
+      const acquired = await acquireAgentSession(env, task, p);
+      if ("error" in acquired) return acquired.error;
+      if (env.signal?.aborted) return failTask(task, "Aborted");
       try {
         const gitBaseline = await getGitChangedFiles(task.cwd);
         const r = await runAgentSession(
@@ -1848,7 +1869,19 @@ ${listPooledAgents().join("\n")}`,
         throw err;
       }
     };
-    const result = await doRun();
+    let result = await runAttempt();
+    for (let retry = 0; retry < WHOLE_TASK_TRANSIENT_MAX_RETRIES && canRetryWholeTask(task, result); retry++) {
+      const delayMs = WHOLE_TASK_TRANSIENT_BASE_DELAY_MS * 2 ** retry;
+      await sleepForWholeTaskRetry(env.signal, delayMs);
+      if (env.signal?.aborted) {
+        result = failTask(task, "Aborted");
+        break;
+      }
+      p.status = "running";
+      p.error = void 0;
+      env.onStatusChange?.();
+      result = await runAttempt();
+    }
     return finishTask(env, p, result);
   } catch (err) {
     return finishTask(

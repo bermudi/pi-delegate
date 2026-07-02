@@ -1098,6 +1098,49 @@ describe("delegate retry and error recovery", () => {
     expect(details.results[0]?.output).toContain("Rate limit cleared");
   });
 
+  test("transient final failure → fresh whole-task retry → success", async () => {
+    let callCount = 0;
+    mockPiAiStream((orig) => ({
+      ...orig,
+      streamSimple: () => {
+        callCount++;
+        // AgentSession consumes the first 4 calls (initial + 3 internal
+        // retries). The 5th call proves delegate started a fresh whole-task
+        // attempt after the final transient 429.
+        if (callCount <= 4) {
+          return mockStreamError(
+            '429: {"code":"1305","message":"The service may be temporarily overloaded"}',
+          );
+        }
+        return mockStream("Recovered on fresh task attempt.");
+      },
+    }));
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts);
+
+    const toolDef = getDelegateTool(ts);
+    const ctx = getExecContext(ts);
+
+    const result = await toolDef.execute(
+      "tc-whole-task-retry",
+      { tasks: [{ prompt: "do work" }] },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const details = (result as any).details as {
+      results: Array<{ output?: string; error?: string }>;
+    };
+
+    expect(callCount).toBe(5);
+    expect(details.results[0]?.error).toBeUndefined();
+    expect(details.results[0]?.output).toContain(
+      "Recovered on fresh task attempt",
+    );
+  });
+
   test("non-retryable error → immediate failure, no retry", async () => {
     let callCount = 0;
     mockPiAiStream((orig) => ({
