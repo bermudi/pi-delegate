@@ -1,5 +1,7 @@
 # pi-delegate
 
+Repository: https://github.com/bermudi/pi-delegate
+
 Delegate tool for the [Pi coding agent](https://github.com/earendil-works/pi) — spawn
 subagents to run tasks in parallel, with async ticketing, session pooling, retries,
 and per-model concurrency limits.
