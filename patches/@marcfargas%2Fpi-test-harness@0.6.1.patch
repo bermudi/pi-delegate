@@ -1,0 +1,13 @@
+diff --git a/dist/session.js b/dist/session.js
+index f7dc5de9be959c541ee4bab0ad1424656993bbe9..e515073926f0fbb0e2bc566a9b17f5f15f80a1a1 100644
+--- a/dist/session.js
++++ b/dist/session.js
+@@ -12,7 +12,7 @@ import * as fs from "node:fs";
+ import * as path from "node:path";
+ import * as os from "node:os";
+ import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
+-import { getModel } from "@earendil-works/pi-ai";
++import { getModel } from "@earendil-works/pi-ai/compat";
+ import { createPlaybookStreamFn } from "./playbook.js";
+ import { interceptToolExecution } from "./mock-tools.js";
+ import { createMockUIContext } from "./mock-ui.js";
