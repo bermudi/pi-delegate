@@ -13,7 +13,11 @@ TypeScript (strict), Bun, esbuild. Bundles into a single file that runs in Pi's 
 This is **not a standalone app** — it's a Pi extension. Entry points:
 
 - **`delegate.ts`** — public API surface (barrel re-exports). The build entry point.
-- **`extension.ts`** — tool definition, task resolution, render loop.
+- **`extension.ts`** — thin tool-definition orchestrator. Wires `registerTool` and dispatches `execute` to the focused modules below; owns only the poll/cancel/help short-circuits and the session-shutdown handler.
+- **`manual.ts`** — `delegateParameters` schema + `getSubagentManualMarkdown` help text.
+- **`task-resolution.ts`** — `validateTasks` (duplicate sessions, busy conflicts, unknown agents) and `resolveTasks` (agent/model/tools/system-prompt resolution per task).
+- **`dispatch.ts`** — `initProgress`, `makeFireUpdater`, `dispatchAsync`, `dispatchSync`. Sync/async execution orchestration.
+- **`render-result.ts`** + **`render-branches.ts`** — TUI rendering. `renderDelegateCall` (minimal call display) and `renderDelegateResult` (skeleton + spinner lifecycle) live in `render-result.ts`; the heavy partial/final progress trees live in `render-branches.ts`.
 - **`delegate.bundle.ts`** — esbuild output. Never edit by hand.
 
 **Key architectural decisions:**
