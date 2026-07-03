@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { TaskResult } from "./types.ts";
+import type { ResolvedTask, TaskResult } from "./types.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -341,6 +341,55 @@ export function formatFailedTask(r: TaskResult): string[] {
     );
   } else if (r.sessionFile) {
     parts.push(`[no resumable session — re-dispatch as a fresh task]`);
+  }
+  return parts;
+}
+
+/**
+ * Render a single completed task's result lines for LLM consumption.
+ *
+ * Single source of truth for the per-task text block used by both the sync
+ * (execute) and async (formatCompletedTicket) render paths. Encapsulates the
+ * header line, task warnings, and the success/failure body — delegating
+ * failure rendering to {@link formatFailedTask}.
+ *
+ * Emits:
+ *   === <agent>: <truncated prompt> ===
+ *   [WARNING: <w>]  (per warning, if any)
+ *   [FAILED: ...] / [OK | <duration> | <tokens> tokens · <sessionFile> · touched: <files>]
+ *
+ *   <output>  (success body only)
+ *
+ * The caller owns the ticket-level header ("X/Y tasks completed...") and any
+ * PENDING handling — those differ between the sync and async paths.
+ */
+export function formatCompletedTask(
+  task: ResolvedTask,
+  result: TaskResult,
+): string[] {
+  const parts: string[] = [];
+  // `|| task.action` covers action-only tasks (close/list/...) where prompt is
+  // empty. Async prompt tasks always set prompt, so this is a no-op there.
+  parts.push(
+    `=== ${result.agent}: ${trunc(task.prompt || task.action || "", 80)} ===`,
+  );
+  if (task.warnings?.length) {
+    for (const w of task.warnings) parts.push(`[WARNING: ${w}]`);
+  }
+  if (result.error) {
+    parts.push(...formatFailedTask(result));
+  } else {
+    const meta = [
+      `OK | ${fmtDuration(result.durationMs)} | ${fmtTokens(result.tokens)} tokens`,
+    ];
+    if (result.sessionFile) meta.push(shortenPath(result.sessionFile));
+    if (result.touchedFiles.length > 0) {
+      const rel = result.touchedFiles
+        .map((f) => path.relative(task.cwd, f))
+        .filter((f) => f && !f.startsWith(".."));
+      if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
+    }
+    parts.push(`[${meta.join(" · ")}]\n\n${result.output}`);
   }
   return parts;
 }

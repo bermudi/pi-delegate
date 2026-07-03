@@ -61,6 +61,7 @@ export {
   tree,
   indent,
   formatFailedTask,
+  formatCompletedTask,
 } from "./format.ts";
 export {
   parseFrontmatter,

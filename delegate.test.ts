@@ -28,6 +28,7 @@ import {
   indent,
   shortenPath,
   formatFailedTask,
+  formatCompletedTask,
   getActivityAge,
   DEFAULT_TOOLS,
   READONLY_TOOLS,
@@ -1693,6 +1694,129 @@ describe("formatFailedTask", () => {
       touchedFiles: [],
     };
     expect(formatFailedTask(r)).toEqual(["[FAILED: unknown error]"]);
+  });
+});
+
+// ── formatCompletedTask ──────────────────────────────────────────────────
+
+describe("formatCompletedTask", () => {
+  type TaskLike = Parameters<typeof formatCompletedTask>[0];
+  type ResultLike = Parameters<typeof formatCompletedTask>[1];
+
+  // `model` is the only field formatCompletedTask never reads; cast a stub so
+  // tests don't need to construct a full Model<Api>.
+  function makeTask(over: Partial<TaskLike> = {}): TaskLike {
+    return {
+      prompt: "do the thing",
+      model: {} as TaskLike["model"],
+      tools: [],
+      thinking: "low",
+      systemPrompt: "",
+      cwd: "/home/daniel/build/pi-delegate",
+      agentName: "scout",
+      warnings: [],
+      ...over,
+    } as TaskLike;
+  }
+
+  function makeResult(over: Partial<ResultLike> = {}): ResultLike {
+    return {
+      agent: "scout",
+      output: "all done",
+      durationMs: 1500,
+      tokens: 42,
+      touchedFiles: [],
+      ...over,
+    };
+  }
+
+  test("renders header + OK metadata + output for a successful task", () => {
+    const lines = formatCompletedTask(makeTask(), makeResult());
+    expect(lines[0]).toBe("=== scout: do the thing ===");
+    expect(lines[1]).toBe(`[OK | ${fmtDuration(1500)} | ${fmtTokens(42)} tokens]\n\nall done`);
+    expect(lines).toHaveLength(2);
+  });
+
+  test("emits a [WARNING:] line per task warning, before the body", () => {
+    const lines = formatCompletedTask(
+      makeTask({ warnings: ["unknown tool: foo", "model fallback"] }),
+      makeResult(),
+    );
+    expect(lines[0]).toBe("=== scout: do the thing ===");
+    expect(lines[1]).toBe("[WARNING: unknown tool: foo]");
+    expect(lines[2]).toBe("[WARNING: model fallback]");
+    expect(lines[3]).toBe(`[OK | ${fmtDuration(1500)} | ${fmtTokens(42)} tokens]\n\nall done`);
+  });
+
+  test("includes sessionFile (shortened) and touched files in OK metadata", () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "delegate-fct-"));
+    try {
+      mkdirSync(path.join(cwd, "src"), { recursive: true });
+      const touched = path.join(cwd, "src/a.ts");
+      const session = path.join(cwd, "2026-01-01T00-00-00Z.jsonl");
+      writeFileSync(touched, "");
+      writeFileSync(session, '{"type":"session"}\n');
+
+      const lines = formatCompletedTask(
+        makeTask({ cwd }),
+        makeResult({ sessionFile: session, touchedFiles: [touched] }),
+      );
+      const ok = lines[lines.length - 1]!;
+      // OK metadata includes the shortened session path (no "session:" label —
+      // that prefix is reserved for the FAILED line) and touched files.
+      expect(ok).toContain(shortenPath(session));
+      expect(ok).toContain("touched: src/a.ts");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("drops touched files outside the task cwd", () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "delegate-fct-"));
+    try {
+      const inside = path.join(cwd, "inside.ts");
+      const outside = path.join(tmpdir(), "delegate-fct-out", "outside.ts");
+      writeFileSync(inside, "");
+
+      const lines = formatCompletedTask(
+        makeTask({ cwd }),
+        makeResult({ touchedFiles: [inside, outside] }),
+      );
+      const ok = lines[lines.length - 1]!;
+      expect(ok).toContain("touched: inside.ts");
+      expect(ok).not.toContain("outside.ts");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("delegates failure rendering to formatFailedTask", () => {
+    const r = makeResult({
+      error: "524 cloudflare timeout",
+      output: "",
+      sessionFile: "/nonexistent/ghost.jsonl",
+    });
+    const lines = formatCompletedTask(makeTask(), r);
+    // Header first, then exactly what formatFailedTask would emit.
+    expect(lines[0]).toBe("=== scout: do the thing ===");
+    expect(lines.slice(1)).toEqual(formatFailedTask(r));
+  });
+
+  test("truncates the prompt in the header to 80 chars", () => {
+    const long = "x".repeat(120);
+    const lines = formatCompletedTask(makeTask({ prompt: long }), makeResult());
+    expect(lines[0]).toBe(`=== scout: ${trunc(long, 80)} ===`);
+    expect(lines[0]!.length).toBeLessThan(long.length);
+  });
+
+  test("falls back to action when prompt is empty (action-only tasks)", () => {
+    // Sync path uses `t.prompt || t.action` — action-only tasks (close/list)
+    // rely on this fallback. The helper preserves it.
+    const lines = formatCompletedTask(
+      makeTask({ prompt: "", action: "close" }),
+      makeResult(),
+    );
+    expect(lines[0]).toBe("=== scout: close ===");
   });
 });
 

@@ -9,7 +9,7 @@ import {
   fmtDuration,
   fmtTokens,
   formatToolCallShort,
-  formatFailedTask,
+  formatCompletedTask,
   shortenPath,
   trunc,
 } from "./format.ts";
@@ -115,25 +115,7 @@ export function formatCompletedTicket(
       parts.push(`[PENDING — result not available]`);
       continue;
     }
-    parts.push(`=== ${r.agent}: ${trunc(t.prompt || "", 80)} ===`);
-    if (t.warnings?.length) {
-      for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
-    }
-    if ("error" in r && r.error) {
-      parts.push(...formatFailedTask(r as TaskResult));
-    } else {
-      const meta = [
-        `OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`,
-      ];
-      if (r.sessionFile) meta.push(shortenPath(r.sessionFile));
-      if (r.touchedFiles.length > 0) {
-        const rel = r.touchedFiles
-          .map((f) => path.relative(t.cwd, f))
-          .filter((f) => f && !f.startsWith(".."));
-        if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
-      }
-      parts.push(`[${meta.join(" · ")}]\n\n${r.output}`);
-    }
+    parts.push(...formatCompletedTask(t, r));
   }
 
   return {
