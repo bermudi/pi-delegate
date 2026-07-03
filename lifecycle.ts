@@ -28,9 +28,31 @@ import { runAgentSession } from "./runner.ts";
 import { getGitChangedFiles } from "./file-tracking.ts";
 import { getHostDeps } from "./host.ts";
 import { resolveCwd, validateResumeFromPath } from "./utils.ts";
+import { getWholeTaskMaxRetries, getWholeTaskBaseDelayMs } from "./config.ts";
 
-const WHOLE_TASK_TRANSIENT_MAX_RETRIES = 1;
-const WHOLE_TASK_TRANSIENT_BASE_DELAY_MS = 1_000;
+/**
+ * Test-only overrides for whole-task retry settings. When set, these bypass
+ * the config-driven values so retry integration tests don't sleep real seconds.
+ * Set via `_setWholeTaskRetryForTesting`.
+ */
+let testWholeTaskMaxRetries: number | undefined;
+let testWholeTaskBaseDelayMs: number | undefined;
+
+/** @internal Test-only override for whole-task retry count and base delay. */
+export function _setWholeTaskRetryForTesting(opts: {
+  maxRetries?: number;
+  baseDelayMs?: number;
+} | undefined): void {
+  testWholeTaskMaxRetries = opts?.maxRetries;
+  testWholeTaskBaseDelayMs = opts?.baseDelayMs;
+}
+
+function resolvedWholeTaskMaxRetries(): number {
+  return testWholeTaskMaxRetries ?? getWholeTaskMaxRetries();
+}
+function resolvedWholeTaskBaseDelayMs(): number {
+  return testWholeTaskBaseDelayMs ?? getWholeTaskBaseDelayMs();
+}
 
 /** Build a failed TaskResult. Used for early-failure paths (abort, busy, validation). */
 function failTask(
@@ -536,12 +558,14 @@ async function runResolvedTaskUnlocked(
     // full acquire/run/close lifecycle), so attempts execute serially per
     // sessionId without needing an inner lock here.
     let result = await runAttempt();
+    const maxRetries = resolvedWholeTaskMaxRetries();
+    const baseDelayMs = resolvedWholeTaskBaseDelayMs();
     for (
       let retry = 0;
-      retry < WHOLE_TASK_TRANSIENT_MAX_RETRIES && canRetryWholeTask(task, result);
+      retry < maxRetries && canRetryWholeTask(task, result);
       retry++
     ) {
-      const delayMs = WHOLE_TASK_TRANSIENT_BASE_DELAY_MS * 2 ** retry;
+      const delayMs = baseDelayMs * 2 ** retry;
       await sleepForWholeTaskRetry(env.signal, delayMs);
       if (env.signal?.aborted) {
         result = failTask(task, "Aborted");

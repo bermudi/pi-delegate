@@ -26,6 +26,7 @@ import { createTestSession } from "@marcfargas/pi-test-harness";
 // createAgentSession). We clear them in afterEach to avoid leaking between runs.
 import { agentPool, ticketRegistry } from "./delegate.ts";
 import { _setHostRetryBaseMsForTesting } from "./host.ts";
+import { _setWholeTaskRetryForTesting } from "./lifecycle.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
 
@@ -1030,6 +1031,9 @@ describe("delegate retry and error recovery", () => {
     // sleep real seconds; zero jitter via Math.random stub.
     Math.random = () => 0;
     _setHostRetryBaseMsForTesting(1);
+    // Shrink whole-task retry delay too (1ms base) so multi-retry tests don't
+    // sleep real seconds in the delegate-level backoff loop.
+    _setWholeTaskRetryForTesting({ maxRetries: 3, baseDelayMs: 1 });
   });
 
   afterEach(() => {
@@ -1040,6 +1044,7 @@ describe("delegate retry and error recovery", () => {
     ts?.dispose();
     ts = undefined;
     _setHostRetryBaseMsForTesting(undefined);
+    _setWholeTaskRetryForTesting(undefined);
   });
 
   test("transient error → retry → success", async () => {
@@ -1205,7 +1210,8 @@ describe("delegate retry and error recovery", () => {
       results: Array<{ output?: string; error?: string }>;
     };
 
-    // Default maxRetries is 3, so 1 initial + 3 retries = 4 calls
+    // AgentSession internal retry (4 calls/attempt) × whole-task retries (4
+    // attempts at default maxRetries=3) = up to 16 calls. Just verify > 1.
     expect(callCount).toBeGreaterThan(1);
     expect(details.results[0]?.error).toContain("connection refused");
   });
