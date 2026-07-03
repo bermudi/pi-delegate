@@ -47,6 +47,8 @@ import {
   getMaxAsyncTickets,
   type AgentConfig,
   type DelegateConfig,
+  type TaskProgress,
+  type TaskResult,
   ticketRegistry,
   type AsyncTicket,
   sweepTickets,
@@ -54,6 +56,8 @@ import {
   handlePoll,
   handleCancel,
   deliverTicketResults,
+  resolveFinalTicketStatus,
+  formatCompletedTicket,
   resolveCwd,
 } from "./delegate.ts";
 import {
@@ -4209,8 +4213,11 @@ describe("async delegate integration", () => {
     const result = handlePoll({ ticket: "partial1" }, {} as any);
     const text = result.content[0].text;
 
-    // Header shows partial completion
-    expect(text).toContain("2/3 done");
+    // Header shows partial completion — succeeded only, failed called out
+    // separately. (Previously this read "2/3 done" because failed tasks were
+    // counted as done — the same mislabeling class as the final-status bug.)
+    expect(text).toContain("1/3 done");
+    expect(text).toContain("1 failed");
     // Completed task output is present
     expect(text).toContain("found it");
     // Failed task error is present
@@ -4226,6 +4233,37 @@ describe("async delegate integration", () => {
       error: "PENDING — result not available",
     });
     expect(result.details.results![2]!.agent).toBe("runner");
+  });
+
+  test("poll running-ticket header distinguishes succeeded from failed counts", () => {
+    // A running ticket with 2 succeeded, 2 failed, 1 still running.
+    // The header must not count failed tasks toward the "done" tally.
+    const ticket: AsyncTicket = {
+      id: "mixed-running",
+      created: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [
+        mkResult(),
+        mkResult(),
+        mkResult("err-a"),
+        mkResult("err-b"),
+        undefined,
+      ],
+      progress: mkProgress(["done", "done", "failed", "failed", "running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("mixed-running", ticket);
+
+    const result = handlePoll({ ticket: "mixed-running" }, {} as any);
+    const text = result.content[0].text;
+
+    // 2 succeeded out of 5 — not "4/5 done" (which would count failures)
+    expect(text).toContain("2/5 done");
+    expect(text).toContain("2 failed");
+    expect(text).not.toContain("4/5 done");
   });
 
   test("poll with unknown ticket returns not found", () => {
@@ -4458,6 +4496,217 @@ describe("async delegate integration", () => {
     expect(sent[0].message.details.ticketId).toBe("done2");
     expect(sent[0].message.details.status).toBe("done");
     expect(sent[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
+  });
+
+  // ── resolveFinalTicketStatus: status resolution for settled batches ──────
+  // Regression coverage for the bug where partial/failed tickets were
+  // mislabeled as "done" (the dead `else` branch in execute()'s .then()).
+  // A ticket is "done" only when every task settled successfully.
+  const mkProgress = (
+    statuses: Array<"done" | "failed" | "running" | "pending">,
+  ): TaskProgress[] =>
+    statuses.map((status, index) => ({
+      index,
+      agent: "scout",
+      task: `task-${index}`,
+      status,
+      durationMs: 100,
+      tokens: 10,
+      toolUses: 0,
+      activities: [],
+    }));
+
+  const mkResult = (
+    error?: string,
+  ): TaskResult => ({
+    agent: "scout",
+    output: error ? "" : "ok",
+    error,
+    durationMs: 100,
+    tokens: 10,
+    touchedFiles: [],
+  });
+
+  test("resolveFinalTicketStatus: all tasks succeed => done", () => {
+    const ticket: AsyncTicket = {
+      id: "all-ok",
+      created: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [mkResult(), mkResult()],
+      progress: mkProgress(["done", "done"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    expect(resolveFinalTicketStatus(ticket)).toBe("done");
+  });
+
+  test("resolveFinalTicketStatus: one task failed => failed", () => {
+    const ticket: AsyncTicket = {
+      id: "one-fail",
+      created: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [mkResult(), mkResult("timeout")],
+      progress: mkProgress(["done", "failed"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    expect(resolveFinalTicketStatus(ticket)).toBe("failed");
+  });
+
+  test("resolveFinalTicketStatus: partial (not all settled) => failed, not done", () => {
+    // Reproduces the original bug: a partially-settled batch (e.g. aborted
+    // mid-flight, leaving a progress row still "running") was labeled "done".
+    // It must be "failed" so incomplete work is never masked as complete.
+    const ticket: AsyncTicket = {
+      id: "partial",
+      created: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [mkResult(), undefined],
+      progress: mkProgress(["done", "running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    expect(resolveFinalTicketStatus(ticket)).toBe("failed");
+  });
+
+  test("resolveFinalTicketStatus: all pending (nothing ran) => failed", () => {
+    const ticket: AsyncTicket = {
+      id: "nothing-ran",
+      created: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [undefined, undefined],
+      progress: mkProgress(["pending", "pending"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    expect(resolveFinalTicketStatus(ticket)).toBe("failed");
+  });
+
+  test("resolveFinalTicketStatus: empty batch => done (vacuously all settled)", () => {
+    const ticket: AsyncTicket = {
+      id: "empty",
+      created: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [],
+      progress: [],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    expect(resolveFinalTicketStatus(ticket)).toBe("done");
+  });
+
+  test("formatCompletedTicket surfaces FAILED status tag for failed ticket", () => {
+    const ticket: AsyncTicket = {
+      id: "failed-ticket",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "worker",
+          warnings: [],
+        },
+      ],
+      status: "failed",
+      results: [mkResult(), mkResult("boom")],
+      progress: mkProgress(["done", "failed"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    const result = formatCompletedTicket(ticket);
+    const text = result.content[0]!.text;
+    // Header must announce failure, not just "1/2 tasks completed"
+    expect(text).toContain("FAILED");
+    expect(text).toContain("1/2 tasks completed");
+    // Failed task body is still present
+    expect(text).toContain("boom");
+  });
+
+  test("formatCompletedTicket surfaces CANCELLED status tag for cancelled ticket", () => {
+    const ticket: AsyncTicket = {
+      id: "cancelled-ticket",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "cancelled",
+      results: [mkResult()],
+      progress: mkProgress(["done"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    const result = formatCompletedTicket(ticket);
+    const text = result.content[0]!.text;
+    expect(text).toContain("CANCELLED");
+  });
+
+  test("formatCompletedTicket omits status tag for done ticket", () => {
+    const ticket: AsyncTicket = {
+      id: "done-ticket",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "done",
+      results: [mkResult()],
+      progress: mkProgress(["done"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    const result = formatCompletedTicket(ticket);
+    const text = result.content[0]!.text;
+    // No status tag for a successful ticket — header stays as before
+    expect(text).not.toContain("FAILED");
+    expect(text).not.toContain("CANCELLED");
+    expect(text).toContain("1/1 tasks completed");
   });
 
   test("help text includes async mode section", async () => {
