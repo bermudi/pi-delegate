@@ -56,7 +56,13 @@ After install or rebuild, `/reload` in Pi.
 
 ## Tracking work
 
-Open work is tracked in GitHub Issues, not in-repo markdown plans. See the tracker and linked issues at https://github.com/bermudi/pi-delegate/issues/19. Do not create new `*-PLAN.md` or `UX-REVIEW.md` documents; file an issue instead.
+Open work is tracked in GitHub Issues, not in-repo markdown plans. Feature work, refactors, bugs, and follow-ups are tracked as issues — no `*-PLAN.md` or `UX-REVIEW.md` files. See the tracker and linked issues at https://github.com/bermudi/pi-delegate/issues/19.
+
+## Security
+
+Dependency vulnerabilities are tracked via GitHub Dependabot, which auto-files alerts when affected versions are detected. Alerts are closed when dependencies are bumped past the patched version. Example: CVE-2026-54328 (GHSA-jfgx-wxx8-mp94) closed by bumping `pi-coding-agent` from `^0.75.3` to `^0.80.3` (commit 991f6b6).
+
+External issues (e.g., test-harness bugs, upstream library problems) are filed in their respective repos and optionally linked from our issues for tracking. See https://github.com/marcfargas/pi-test-harness/issues/8 for an example.
 
 ## Constraints & Red Lines
 
