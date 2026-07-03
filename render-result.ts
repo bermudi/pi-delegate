@@ -1,0 +1,193 @@
+import { Text } from "@mariozechner/pi-tui";
+import type { Theme } from "@mariozechner/pi-coding-agent";
+import {
+  fmtDuration,
+  spinnerFrame,
+  getTermWidth,
+  truncLine,
+  formatToolCallShort,
+  applyLineBudget,
+} from "./format.ts";
+import {
+  renderPartialBranch,
+  renderFinalBranch,
+  type RenderState,
+  type RenderHelpers,
+} from "./render-branches.ts";
+import type { DelegateDetails, TaskProgress } from "./types.ts";
+
+/** Build the shared helpers bound to a theme, width, and the lines sink.
+ *  Both render branches consume one bound set so warning/activity formatting
+ *  stays consistent across the partial and final views. */
+function makeRenderHelpers(
+  theme: Theme,
+  w: number,
+  lines: string[],
+): RenderHelpers {
+  const statJoin = (parts: string[]) =>
+    parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
+  const modelLabel = (p: TaskProgress) =>
+    p.model ? ` ${theme.fg("accent", p.model)}` : "";
+
+  // ── Helper: format the "current activity" line (collapsed or expanded fallback) ─────
+  const compactActivity = (p: TaskProgress): string => {
+    const current = p.activities.findLast((a) => !a.result);
+    if (current) {
+      const call = formatToolCallShort(current.name, current.args);
+      const toolAge = fmtDuration(Date.now() - current.startTime);
+      return `${call} | ${toolAge}`;
+    }
+    // No current tool — show the last completed one, or "thinking…"
+    if (p.activities.length > 0) {
+      const last = p.activities[p.activities.length - 1]!;
+      const call = formatToolCallShort(last.name, last.args);
+      return `${call} ✓`;
+    }
+    return "thinking…";
+  };
+
+  // Push muted warning lines for a task under its status row. Rendered in
+  // both partial and final views so a human watching the TUI sees that tools
+  // were silently dropped — the LLM already gets this in `content`.
+  const pushWarnings = (p: TaskProgress, ind: string) => {
+    if (!p.warnings?.length) return;
+    for (const wn of p.warnings) {
+      lines.push(truncLine(`${ind}${theme.fg("warning", `⚠ ${wn}`)}`, w));
+    }
+  };
+
+  return { statJoin, modelLabel, compactActivity, pushWarnings };
+}
+
+/** Minimal structural view of Pi's `ToolRenderContext` used by the delegate
+ *  renderers. The real context is wider; we only depend on these fields. */
+interface RenderCtx {
+  state: RenderState;
+  lastComponent: unknown;
+  invalidate: () => void;
+  executionStarted: boolean;
+  isPartial: boolean;
+}
+
+interface RenderResultOptions {
+  isPartial: boolean;
+  expanded: boolean;
+}
+
+/** Minimal structural view of `AgentToolResult<DelegateDetails>` for rendering.
+ *  `content` items are loosely typed — Pi may include image parts that lack
+ *  `text`, which we simply filter out. */
+interface RenderResult {
+  content?: Array<{ type: string; text?: string }>;
+  details?: DelegateDetails;
+}
+
+/** Custom rendering for the tool *call* display — minimal by design; the result
+ *  renderer shows all detail. Only animates a spinner while still running. */
+export function renderDelegateCall(
+  args: { tasks?: unknown },
+  theme: Theme,
+  ctx: RenderCtx,
+): Text {
+  const state = ctx.state;
+  const rawTasks = args.tasks;
+  const tasks = Array.isArray(rawTasks) ? rawTasks : [];
+  const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  if (typeof rawTasks === "string") {
+    text.setText(theme.fg("toolTitle", theme.bold("delegate invalid tasks")));
+    return text;
+  }
+  if (!tasks.length) {
+    text.setText(theme.fg("toolTitle", theme.bold("delegate")));
+    return text;
+  }
+  // Minimal call rendering — renderResult handles all detail.
+  // ToolExecutionComponent stacks call + result, so duplication
+  // happens if both show task trees.
+  // Only show spinner while still running (ctx.isPartial).
+  if (ctx.executionStarted && ctx.isPartial) {
+    if (state.startedAt === undefined) state.startedAt = Date.now();
+    const elapsed = fmtDuration(Date.now() - state.startedAt);
+    text.setText(
+      theme.fg(
+        "toolTitle",
+        theme.bold(
+          `${spinnerFrame()} delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`,
+        ),
+      ),
+    );
+    return text;
+  }
+  text.setText(
+    theme.fg(
+      "toolTitle",
+      theme.bold(`delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""}`),
+    ),
+  );
+  return text;
+}
+
+/** Custom rendering for the tool *result* display — delegates the heavy
+ *  lifting (progress trees, activity lines, output previews, markdown) to the
+ *  partial/final branch renderers. Owns only the spinner-interval lifecycle,
+ *  the no-progress fallback, and the line-budget pass. */
+export function renderDelegateResult(
+  result: RenderResult,
+  options: RenderResultOptions,
+  theme: Theme,
+  ctx: RenderCtx,
+): Text {
+  const state = ctx.state;
+  // Use a faster animation cadence for spinner (80ms) vs the old 1s
+  const tickMs = 80;
+  if (options.isPartial && !state.interval)
+    state.interval = setInterval(() => ctx.invalidate(), tickMs);
+  if (!options.isPartial && state.interval) {
+    clearInterval(state.interval);
+    state.interval = undefined;
+  }
+  const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+
+  const details = result.details;
+  if (!details?.progress?.length) {
+    const content =
+      result.content
+        ?.filter((c) => c.type === "text")
+        .map((c) => c.text)
+        .join("\n") ?? "";
+    text.setText(content ? `\n${content}` : "");
+    return text;
+  }
+
+  const { progress, results: taskResults, ticketId } = details;
+  const total = progress.length;
+  const w = getTermWidth() - 4;
+  const lines: string[] = [""];
+  const helpers = makeRenderHelpers(theme, w, lines);
+
+  const branchCtx = {
+    progress,
+    taskResults,
+    total,
+    w,
+    expanded: options.expanded,
+    state,
+    theme,
+    lines,
+    ticketId,
+  };
+
+  if (options.isPartial) {
+    renderPartialBranch(branchCtx, helpers);
+  } else {
+    renderFinalBranch(branchCtx, helpers);
+  }
+
+  // The partial branch historically filtered empty lines before budgeting so
+  // blank separators didn't count against the row budget; the final branch
+  // preserves blanks for visual spacing. Keep that asymmetry intact.
+  const toBudget = options.isPartial ? lines.filter(Boolean) : lines;
+  const budgeted = applyLineBudget(toBudget, options.expanded ?? false);
+  text.setText(budgeted.join("\n"));
+  return text;
+}

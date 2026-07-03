@@ -4,6 +4,7 @@ import type {
   AgentSession,
   ModelRegistry,
   SessionManager,
+  SessionEntry,
 } from "@mariozechner/pi-coding-agent";
 
 export interface AgentConfig {
@@ -158,6 +159,34 @@ export interface TaskRunEnv {
   onProgress: (p: TaskProgress, u: AgentProgressUpdate) => void;
   /** Called after every TaskProgress mutation (early-returns, completion). Sync uses this to fire onUpdate. */
   onStatusChange?: () => void;
+}
+
+/** Structural subset of Pi's `ExtensionContext` used by delegate's
+ *  task-resolution and dispatch modules. Kept loose so the orchestrator can
+ *  pass the real ctx through without re-typing every Pi field. The
+ *  `sessionManager` mirrors Pi's `ReadonlySessionManager` (not re-exported
+ *  from the package index) — only the members delegate actually touches are
+ *  listed. */
+export interface DelegateToolCtx {
+  cwd: string;
+  model: Model<Api> | undefined;
+  modelRegistry: ModelRegistry;
+  sessionManager:
+    | {
+        getEntries(): SessionEntry[];
+        getLeafId(): string | null;
+        getSessionFile?(): string | undefined;
+      }
+    | undefined;
+  /** Optional hook Pi exposes for extensions to read the live system prompt. */
+  getSystemPrompt?: () => string | undefined;
+}
+
+/** Shape returned by the delegate tool's `execute`. Mirrors Pi's
+ *  `AgentToolResult<DelegateDetails>` without depending on the generic. */
+export interface DelegateToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  details: DelegateDetails;
 }
 
 export interface AcquiredSession {
