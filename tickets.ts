@@ -58,6 +58,33 @@ export function isSessionBusy(sessionId: string): string | null {
   return null;
 }
 
+/**
+ * Determine the final status for a ticket whose task batch has settled.
+ *
+ * A ticket is "done" only when every task settled successfully. A
+ * partially-settled ticket (e.g. aborted mid-flight, leaving some progress
+ * rows still "running"/"pending") is "failed" — never "done" — so incomplete
+ * work is never masked as complete. Any ticket with at least one failed task
+ * is also "failed".
+ *
+ * Callers are expected to have already handled "cancelled" (set by
+ * handleCancel) and the runtime timeout (set by sweepTickets) before invoking
+ * this; those paths set `ticket.status` directly and skip this function via
+ * the `if (ticket.status === "running")` guard in execute().
+ */
+export function resolveFinalTicketStatus(
+  ticket: AsyncTicket,
+): "done" | "failed" {
+  const anyFailed = ticket.results.some(
+    (r) => r && "error" in r && r.error,
+  );
+  const allSettled = ticket.progress.every(
+    (p) => p.status === "done" || p.status === "failed",
+  );
+  if (allSettled && !anyFailed) return "done";
+  return "failed";
+}
+
 /** Format a completed ticket for LLM consumption. Reuses sync result formatting. */
 export function formatCompletedTicket(
   ticket: AsyncTicket,
@@ -69,8 +96,15 @@ export function formatCompletedTicket(
   const elapsedTotal = ticket.completedAt
     ? ticket.completedAt - ticket.created
     : 0;
+  // Surface the overall ticket status so a failed/cancelled batch is not
+  // mistaken for success. "done" tickets keep the original header; others
+  // get an explicit status tag up front.
+  const statusTag =
+    ticket.status === "done"
+      ? ""
+      : `${ticket.status.toUpperCase()} · `;
   parts.push(
-    `${succeeded}/${ticket.results.length} tasks completed · ${fmtDuration(elapsedTotal)} wall time\n`,
+    `${statusTag}${succeeded}/${ticket.results.length} tasks completed · ${fmtDuration(elapsedTotal)} wall time\n`,
   );
 
   for (let i = 0; i < ticket.results.length; i++) {
@@ -239,9 +273,14 @@ export function handlePoll(
   }
 
   if (ticket.status === "running") {
-    const doneCount = ticket.progress.filter(
-      (p) => p.status === "done" || p.status === "failed",
+    const succeededCount = ticket.progress.filter(
+      (p) => p.status === "done",
     ).length;
+    const failedCount = ticket.progress.filter(
+      (p) => p.status === "failed",
+    ).length;
+    // Settled = done + failed. Used for the "all finished" guidance check.
+    const settledCount = succeededCount + failedCount;
     const totalCount = ticket.progress.length;
     const lines: string[] = [];
     // Index-aligned sparse array — same shape as ticket.results, so consumers
@@ -290,11 +329,11 @@ export function handlePoll(
       }
     }
 
-    const header = `Ticket ${ticket.id}: RUNNING · ${doneCount}/${totalCount} done (${fmtDuration(Date.now() - ticket.created)})`;
+    const header = `Ticket ${ticket.id}: RUNNING · ${succeededCount}/${totalCount} done${failedCount > 0 ? ` · ${failedCount} failed` : ""} (${fmtDuration(Date.now() - ticket.created)})`;
     const guidance =
-      doneCount === totalCount
+      settledCount === totalCount
         ? ""
-        : doneCount > 0
+        : settledCount > 0
           ? "Tasks are progressing. Do other work while remaining tasks finish — results will be delivered automatically when all complete."
           : "Tasks are still running. Do other work while you wait — polling again immediately will not speed them up. Results are delivered automatically when all tasks complete.";
 

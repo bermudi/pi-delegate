@@ -18,6 +18,7 @@ import {
   deliverTicketResults,
   sweepTickets,
   isSessionBusy,
+  resolveFinalTicketStatus,
 } from "./tickets.ts";
 import {
   getConcurrencyLimit,
@@ -660,16 +661,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             // All tasks settled — determine final ticket status.
             // Use progress (set by runResolvedTask) for settled-ness so the
             // status reflects work completion, not just result-array density.
-            const anyFailed = ticket.results.some(
-              (r) => r && "error" in r && r.error,
-            );
-            const allSettled = ticket.progress.every(
-              (p) => p.status === "done" || p.status === "failed",
-            );
+            // A partial ticket (not all settled, e.g. aborted mid-flight) must
+            // NOT be marked "done" — that would mask incomplete work as
+            // complete. resolveFinalTicketStatus returns "failed" for that
+            // case and for any case with a failed task.
             if (ticket.status === "running") {
-              if (allSettled && anyFailed) ticket.status = "failed";
-              else if (allSettled) ticket.status = "done";
-              else ticket.status = "done"; // partial — report what we have
+              ticket.status = resolveFinalTicketStatus(ticket);
               ticket.completedAt = Date.now();
             }
             deliverTicketResults(pi, ticket);

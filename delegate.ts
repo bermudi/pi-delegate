@@ -45,6 +45,8 @@ export {
   handlePoll,
   handleCancel,
   deliverTicketResults,
+  resolveFinalTicketStatus,
+  formatCompletedTicket,
 } from "./tickets.ts";
 export { runAgentSession } from "./runner.ts";
 export { getHostDeps } from "./host.ts";
