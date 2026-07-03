@@ -23,6 +23,13 @@ export interface DelegateConfig {
   maxConcurrent?: number;
   /** Max concurrent async tickets. */
   maxAsyncTickets?: number;
+  /** Whole-task transient-error retry settings. */
+  retry?: {
+    /** Max whole-task retries after the initial attempt (0 = no retry). */
+    wholeTaskMaxRetries?: number;
+    /** Base delay (ms) for exponential backoff between whole-task retries. */
+    wholeTaskBaseDelayMs?: number;
+  };
 }
 
 const DELEGATE_CONFIG_DIR = path.join(os.homedir(), ".pi", "agent");
@@ -32,6 +39,10 @@ const DEFAULT_DELEGATE_CONFIG: DelegateConfig = {
   agent: { default: null },
   concurrency: { default: MAX_CONCURRENCY },
   maxConcurrent: MAX_CONCURRENCY,
+  retry: {
+    wholeTaskMaxRetries: 3,
+    wholeTaskBaseDelayMs: 1_000,
+  },
 };
 
 /** Module-level config singleton. Loaded lazily, mutated by setters. */
@@ -57,6 +68,7 @@ export function loadDelegateConfig(): DelegateConfig {
         ...DEFAULT_DELEGATE_CONFIG.concurrency,
         ...(parsed.concurrency ?? {}),
       },
+      retry: { ...DEFAULT_DELEGATE_CONFIG.retry, ...(parsed.retry ?? {}) },
     } as DelegateConfig;
   } catch {
     return structuredClone(DEFAULT_DELEGATE_CONFIG);
@@ -103,6 +115,16 @@ export function getMaxAsyncTickets(): number {
 /** Get the hard ceiling on total concurrent agents. */
 export function getMaxConcurrent(): number {
   return __delegateConfig.maxConcurrent ?? MAX_CONCURRENCY;
+}
+
+/** Get the max whole-task retries after the initial attempt. */
+export function getWholeTaskMaxRetries(): number {
+  return __delegateConfig.retry?.wholeTaskMaxRetries ?? 3;
+}
+
+/** Get the base delay (ms) for whole-task retry exponential backoff. */
+export function getWholeTaskBaseDelayMs(): number {
+  return __delegateConfig.retry?.wholeTaskBaseDelayMs ?? 1_000;
 }
 
 /**
