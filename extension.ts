@@ -1,4 +1,3 @@
-import * as path from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
@@ -43,8 +42,7 @@ import {
   spinnerFrame,
   applyLineBudget,
   formatToolCallShort,
-  formatFailedTask,
-  shortenPath,
+  formatCompletedTask,
   getTermWidth,
   previewOutputLine,
 } from "./format.ts";
@@ -741,27 +739,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       for (let i = 0; i < finalResults.length; i++) {
         const r = finalResults[i]!;
         const t = resolved[i]!;
-        parts.push(
-          `=== ${r.agent}: ${trunc(t.prompt || t.action || "", 80)} ===`,
-        );
-        if (t.warnings?.length) {
-          for (const w of t.warnings) parts.push(`[WARNING: ${w}]`);
-        }
-        if (r.error) {
-          parts.push(...formatFailedTask(r));
-        } else {
-          const meta = [
-            `OK | ${fmtDuration(r.durationMs)} | ${fmtTokens(r.tokens)} tokens`,
-          ];
-          if (r.sessionFile) meta.push(shortenPath(r.sessionFile));
-          if (r.touchedFiles.length > 0) {
-            const rel = r.touchedFiles
-              .map((f) => path.relative(t.cwd, f))
-              .filter((f) => f && !f.startsWith(".."));
-            if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
-          }
-          parts.push(`[${meta.join(" · ")}]\n\n${r.output}`);
-        }
+        parts.push(...formatCompletedTask(t, r));
       }
 
       return {
