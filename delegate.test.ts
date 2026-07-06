@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { _setClockForTesting, _resetPoolForTesting } from "./pool.ts";
 
 import {
   parseFrontmatter,
@@ -36,7 +37,9 @@ import {
   TOOL_FACTORIES,
   resolveToolGroups,
   extractTouchedFromActivities,
-  agentPool,
+  checkout,
+  commit,
+  configFor,
   closePooledAgent,
   sweepPool,
   listPooledAgents,
@@ -3770,7 +3773,7 @@ describe("delegate pool", () => {
   let ts: TestSession | undefined;
 
   afterEach(() => {
-    agentPool.clear();
+    _resetPoolForTesting();
     ts?.dispose();
     ts = undefined;
   });
@@ -3839,98 +3842,92 @@ describe("delegate pool", () => {
   });
 
   test("closePooledAgent removes agent from pool", () => {
-    // Inject a fake pooled agent
-    agentPool.set("test-session", {
+    // Insert via the public mutator — the raw Map is private. commit on a fresh
+    // sessionId stores the frozen config + material.
+    commit("test-session", {
       session: {} as any,
       sessionManager: {} as any,
       sessionFile: "/tmp/test.jsonl",
-      config: {
+      frozen: {
         systemPrompt: "test",
         model: {} as any,
         thinking: "off" as any,
         tools: [],
         cwd: "/tmp",
       },
-      lastUsed: Date.now(),
-      createdAt: Date.now(),
-      totalTokens: 0,
-      promptCount: 0,
+      tokens: 0,
     });
-    expect(agentPool.has("test-session")).toBe(true);
+    expect(configFor("test-session")).toBeDefined();
     expect(closePooledAgent("test-session")).toBe(true);
-    expect(agentPool.has("test-session")).toBe(false);
+    expect(configFor("test-session")).toBeUndefined();
     expect(closePooledAgent("test-session")).toBe(false);
   });
 
   test("sweepPool evicts idle agents", () => {
-    const now = Date.now();
-    agentPool.set("fresh", {
-      session: {} as any,
-      sessionManager: {} as any,
-      sessionFile: "/tmp/fresh.jsonl",
-      config: {
-        systemPrompt: "test",
-        model: {} as any,
-        thinking: "off" as any,
-        tools: [],
-        cwd: "/tmp",
-      },
-      lastUsed: now,
-      createdAt: now,
-      totalTokens: 0,
-      promptCount: 0,
-    });
-    agentPool.set("stale", {
+    // Drive the clock so one entry is past TTL without sleeping. commit stamps
+    // lastUsed = now(); advancing the clock then sweeping evicts the stale one.
+    const sweepTime = 1_000_000_000;
+    _setClockForTesting(() => sweepTime - 11 * 60 * 1000);
+    commit("stale", {
       session: {} as any,
       sessionManager: {} as any,
       sessionFile: "/tmp/stale.jsonl",
-      config: {
+      frozen: {
         systemPrompt: "test",
         model: {} as any,
         thinking: "off" as any,
         tools: [],
         cwd: "/tmp",
       },
-      lastUsed: now - 11 * 60 * 1000, // 11 minutes ago
-      createdAt: now - 11 * 60 * 1000,
-      totalTokens: 0,
-      promptCount: 0,
+      tokens: 0,
+    });
+    _setClockForTesting(() => sweepTime);
+    commit("fresh", {
+      session: {} as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/fresh.jsonl",
+      frozen: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      tokens: 0,
     });
     sweepPool();
-    expect(agentPool.has("fresh")).toBe(true);
-    expect(agentPool.has("stale")).toBe(false);
-    // cleanup
-    agentPool.delete("fresh");
+    expect(configFor("fresh")).toBeDefined();
+    expect(configFor("stale")).toBeUndefined();
   });
 
   test("listPooledAgents shows stats and sweeps stale", () => {
-    agentPool.clear();
+    _resetPoolForTesting();
     expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
 
-    const now = Date.now();
-    agentPool.set("session-a", {
+    // Three commits → promptCount 3, totalTokens 1234 ("1.2k"). The first
+    // inserts; the next two are pool hits that bump stats via commit's
+    // map-presence rule (insert-vs-recordUse decided internally).
+    const base = {
       session: {} as any,
       sessionManager: {} as any,
       sessionFile: "/home/user/.pi/agent/sessions/test.jsonl",
-      config: {
+      frozen: {
         systemPrompt: "test",
         model: { id: "test-model" } as any,
         thinking: "off" as any,
         tools: ["read"],
         cwd: "/tmp",
       },
-      lastUsed: now,
-      createdAt: now - 5000,
-      totalTokens: 1234,
-      promptCount: 3,
-    });
+    };
+    commit("session-a", { ...base, tokens: 412 });
+    commit("session-a", { ...base, tokens: 412 });
+    commit("session-a", { ...base, tokens: 410 });
     const lines = listPooledAgents();
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("session-a");
     expect(lines[0]).toContain("3 prompts");
     expect(lines[0]).toContain("1.2k tokens");
     expect(lines[0]).toContain("test.jsonl"); // shortened path
-    agentPool.clear();
   });
 
   test("withSessionLock serializes concurrent access", async () => {
@@ -3998,7 +3995,7 @@ describe("async ticket registry", () => {
 
   afterEach(() => {
     ticketRegistry.clear();
-    agentPool.clear();
+    _resetPoolForTesting();
     ts?.dispose();
     ts = undefined;
   });
@@ -4129,7 +4126,7 @@ describe("async delegate integration", () => {
 
   afterEach(() => {
     ticketRegistry.clear();
-    agentPool.clear();
+    _resetPoolForTesting();
     ts?.dispose();
     ts = undefined;
   });

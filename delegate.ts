@@ -32,11 +32,20 @@ export {
   resolveModelSpec,
 } from "./config.ts";
 export {
-  agentPool,
-  withSessionLock,
+  checkout,
+  commit,
+  configFor,
   closePooledAgent,
   sweepPool,
   listPooledAgents,
+  withSessionLock,
+} from "./pool.ts";
+export type {
+  FrozenConfig,
+  ConfigCandidate,
+  ConfigMismatch,
+  CheckoutResult,
+  CommitPayload,
 } from "./pool.ts";
 export {
   ticketRegistry,

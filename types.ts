@@ -194,11 +194,6 @@ export interface AcquiredSession {
   session: AgentSession;
   sessionManager: SessionManager | undefined;
   sessionFile: string | undefined;
-  /** True if session came from the pool (stateful multi-turn). */
-  isPoolHit: boolean;
-  /** True if this is a fresh session that should be inserted into the pool after a successful run. */
-  shouldPoolAfter: boolean;
-  /** True if we synchronously inserted the session into the pool (race protection).
-   *  If the run fails, we may need to remove the empty entry to let a retry try fresh. */
-  syncInserted: boolean;
 }
+
+

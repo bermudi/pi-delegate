@@ -17,6 +17,8 @@ This is **not a standalone app** — it's a Pi extension. Entry points:
 - **`manual.ts`** — `delegateParameters` schema + `getSubagentManualMarkdown` help text.
 - **`task-resolution.ts`** — `validateTasks` (duplicate sessions, busy conflicts, unknown agents) and `resolveTasks` (agent/model/tools/system-prompt resolution per task).
 - **`dispatch.ts`** — `initProgress`, `makeFireUpdater`, `dispatchAsync`, `dispatchSync`. Sync/async execution orchestration.
+- **`lifecycle.ts`** — per-task execution: resolves a usable `AgentSession` (pool hit / resume-from-`.jsonl` / fresh), runs the prompt via `runner.ts`, and commits the outcome. Owns session **materialization** and the whole-task retry loop.
+- **`pool.ts`** — the **SessionPool**: a deep module owning pooled-session state + policy (freeze-on-insert, validate-on-reuse, insert-on-success, stats, TTL eviction, per-`sessionId` lock) behind `checkout` / `commit` / `configFor`. The raw `Map` is private; the public barrel exposes behavior, not state. See `docs/adr/0001` + `CONTEXT.md`.
 - **`render-result.ts`** + **`render-branches.ts`** — TUI rendering. `renderDelegateCall` (minimal call display) and `renderDelegateResult` (skeleton + spinner lifecycle) live in `render-result.ts`; the heavy partial/final progress trees live in `render-branches.ts`.
 - **`delegate.bundle.ts`** — esbuild output. Never edit by hand.
 
@@ -24,7 +26,7 @@ This is **not a standalone app** — it's a Pi extension. Entry points:
 
 - **Subagents run without extensions.** Host deps are built with `noExtensions: true`. Subagents must not run the parent's interactive extensions — this closes cross-wiring risks and keeps headless workers headless.
 - **Host deps are cached** per `(cwd, systemPrompt)`. `AuthStorage`, `SettingsManager`, and `ResourceLoader` are built once and shared across subagents with the same profile. `ModelRegistry` is threaded from the parent.
-- **Session pooling** keeps live `AgentSession` objects in memory keyed by `sessionId`. Subsequent delegate calls with the same `sessionId` reuse the session. Pool TTL: 10 min idle.
+- **Session pooling** is a deep module (`pool.ts`): live `AgentSession`s keyed by `sessionId`, behind a small interface (`checkout` / `commit` / `configFor`). The pool owns **policy** (freeze-on-insert, validate-on-reuse, insert-on-success, stats, TTL eviction); **session materialization** (pool-hit reuse / resume / fresh-create) lives in `lifecycle.ts`. Pool TTL: 10 min idle. See `docs/adr/0001` + `CONTEXT.md` — don't fold materialization into the pool.
 - **Async tickets are fire-and-forget.** `async: true` spawns background execution and returns a ticket ID immediately. Results are pushed via `sendMessage({deliverAs:"followUp"})`. Poll/cancel with top-level `action: "poll"` or `action: "cancel"`.
 - **Named agents have layered discovery.** `discoverAgents()` walks sources in order, first definition wins: project `.pi/agents/` → global `~/.pi/agent/agents/` → legacy `~/.agents/` → project `.claude/agents/` → global `~/.claude/agents/` → built-in defaults. A same-named `.md` in a higher-priority dir supersedes anything below it.
 - **Three built-in agents** (`scout`, `reviewer`, `workhorse`) are seeded last and superseded by any same-named user markdown. Defined in `builtin-agents.ts`. They omit `model` so they inherit the parent model — user markdown can pin one by setting frontmatter `model:`.

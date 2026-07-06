@@ -12,12 +12,7 @@ import type {
   TaskResult,
   TaskRunEnv,
 } from "./types.ts";
-import {
-  agentPool,
-  closePooledAgent,
-  listPooledAgents,
-  withSessionLock,
-} from "./pool.ts";
+import * as pool from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
 import {
   createSubagentSessionManager,
@@ -215,43 +210,49 @@ async function acquireAgentSession(
 ): Promise<AcquiredSession | { error: TaskResult }> {
   let sessionManager: SessionManager | undefined;
   let sessionFile: string | undefined;
-  let isPoolHit = false;
-  let shouldPoolAfter = false;
 
   // ── Pool hit (reuse live stateful session) ───────────────────────────────
+  // The SessionPool owns the freeze compare — checkout returns a structured
+  // mismatch; lifecycle only formats the error. checkout is pure (no lastUsed
+  // bump), so a speculative checkout that bails leaves no trace; lastUsed is
+  // bumped by commit() on a successful run.
   if (task.sessionId) {
-    const pooled = agentPool.get(task.sessionId);
-    if (pooled) {
-      // Validate frozen config matches the new task's request.
-      const frozen = pooled.config;
-      const mismatches: string[] = [];
-      if (frozen.cwd !== task.cwd)
-        mismatches.push(`cwd: '${frozen.cwd}' vs '${task.cwd}'`);
-      if (frozen.thinking !== task.thinking)
-        mismatches.push(`thinking: '${frozen.thinking}' vs '${task.thinking}'`);
-      const frozenToolSet = [...frozen.tools].sort().join(",");
-      const newToolSet = [...task.tools].sort().join(",");
-      if (frozenToolSet !== newToolSet)
-        mismatches.push(`tools: [${frozenToolSet}] vs [${newToolSet}]`);
-      if (mismatches.length) {
+    const co = pool.checkout(task.sessionId, {
+      cwd: task.cwd,
+      thinking: task.thinking,
+      tools: task.tools,
+    });
+    if (co.status === "mismatch") {
+      const detail = co.mismatches
+        .map((m) => `${m.field}: '${m.frozen}' vs '${m.requested}'`)
+        .join("; ");
+      return {
+        error: failTask(
+          task,
+          `Session '${task.sessionId}' config mismatch. Close and recreate: ${detail}`,
+        ),
+      };
+    }
+    if (co.status === "hit") {
+      // A pooled session has its own accumulated context — resumeFrom pointing
+      // elsewhere is contradictory. This folds the old defensive agentPool.has
+      // precheck: checkout already told us the session is live.
+      if (task.resumeFrom) {
         return {
           error: failTask(
             task,
-            `Session '${task.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`,
+            `resumeFrom conflicts with active sessionId '${task.sessionId}'. The pooled session has its own accumulated context. Close the session first if you want to resume from a different point.`,
           ),
         };
       }
-      pooled.lastUsed = Date.now();
-      p.model = frozen.model.id;
+      p.model = co.modelId;
       return {
-        session: pooled.session,
-        sessionManager: pooled.sessionManager,
-        sessionFile: pooled.sessionFile,
-        isPoolHit: true,
-        shouldPoolAfter: false,
-        syncInserted: false,
+        session: co.session,
+        sessionManager: co.sessionManager,
+        sessionFile: co.sessionFile,
       };
     }
+    // status === "miss" → fall through to resume / fresh materialization.
   }
 
   // ── Resume from a previous session file ──────────────────────────────────
@@ -259,16 +260,6 @@ async function acquireAgentSession(
   // concrete prior conversation we must continue, whereas a sessionId miss just
   // means "create a new pooled session under this id".
   if (task.resumeFrom) {
-    if (task.sessionId && agentPool.has(task.sessionId)) {
-      // Defensive — the pool-hit branch above returns early, so reaching here
-      // with a live pooled session is unreachable. Kept for clarity.
-      return {
-        error: failTask(
-          task,
-          `resumeFrom conflicts with active sessionId '${task.sessionId}'. The pooled session has its own accumulated context. Close the session first if you want to resume from a different point.`,
-        ),
-      };
-    }
     const resumeFromPathError = validateResumeFromPath(task.resumeFrom);
     if (resumeFromPathError) {
       return {
@@ -323,10 +314,6 @@ async function acquireAgentSession(
       session,
       sessionManager: resumed,
       sessionFile: resolvedPath,
-      isPoolHit: false,
-      // A resumed session under a sessionId becomes poolable after success.
-      shouldPoolAfter: Boolean(task.sessionId),
-      syncInserted: false,
     };
   }
 
@@ -346,46 +333,7 @@ async function acquireAgentSession(
     session,
     sessionManager,
     sessionFile,
-    isPoolHit: false,
-    shouldPoolAfter: Boolean(task.sessionId),
-    syncInserted: false,
   };
-}
-
-/** Insert a freshly-run session into the pool. Called after a successful run for
- *  a new pooled session (first use of a sessionId, or a resumed session). */
-function commitPoolInsert(
-  sessionId: string,
-  task: ResolvedTask,
-  acquired: AcquiredSession,
-  result: { tokens: number },
-): void {
-  if (!acquired.sessionManager || !acquired.sessionFile) return;
-  agentPool.set(sessionId, {
-    session: acquired.session,
-    sessionManager: acquired.sessionManager,
-    sessionFile: acquired.sessionFile,
-    config: {
-      systemPrompt: task.systemPrompt,
-      model: task.model,
-      thinking: task.thinking,
-      tools: task.tools,
-      cwd: task.cwd,
-    },
-    lastUsed: Date.now(),
-    createdAt: Date.now(),
-    totalTokens: result.tokens,
-    promptCount: 1,
-  });
-}
-
-/** Update pool stats for a subsequent prompt on an existing pooled session. */
-function commitPoolStats(sessionId: string, result: { tokens: number }): void {
-  const pooled = agentPool.get(sessionId);
-  if (!pooled) return;
-  pooled.lastUsed = Date.now();
-  pooled.totalTokens += result.tokens;
-  pooled.promptCount++;
 }
 
 /**
@@ -423,7 +371,7 @@ export async function runResolvedTask(
   taskIndex: number,
 ): Promise<TaskResult> {
   if (task.sessionId) {
-    return withSessionLock(task.sessionId, () =>
+    return pool.withSessionLock(task.sessionId, () =>
       runResolvedTaskUnlocked(env, task, p, taskIndex),
     );
   }
@@ -465,7 +413,7 @@ async function runResolvedTaskUnlocked(
           failTask(task, "action='close' requires sessionId."),
         );
       }
-      const closed = closePooledAgent(task.sessionId);
+      const closed = pool.closePooledAgent(task.sessionId);
       return finishTask(
         env,
         p,
@@ -485,7 +433,7 @@ async function runResolvedTaskUnlocked(
         p,
         completeSessionAction(
           task,
-          `Active sessions:\n${listPooledAgents().join("\n")}`,
+          `Active sessions:\n${pool.listPooledAgents().join("\n")}`,
           Date.now() - env.delegateStartedAt,
         ),
       );
@@ -521,17 +469,24 @@ async function runResolvedTaskUnlocked(
           Date.now(),
         );
 
-        // Pool bookkeeping. With synchronous pool-insertion removed (the session
-        // lock serializes same-sessionId tasks), a fresh session is inserted only
-        // after success; pool hits just bump stats. On failure, nothing was
-        // inserted, so there is nothing to clean up.
+        // Pool bookkeeping. commit() is the sole mutator: it decides
+        // insert-vs-recordUse by map presence (sound because the session lock
+        // serializes same-sessionId tasks). Skipped on failure — insert-only-
+        // on-success — so there is nothing to clean up.
         if (task.sessionId && !r.error) {
-          if (acquired.shouldPoolAfter) {
-            commitPoolInsert(task.sessionId, task, acquired, r);
-          } else {
-            // Pool hit: session is already in pool, just bump stats.
-            commitPoolStats(task.sessionId, r);
-          }
+          pool.commit(task.sessionId, {
+            session: acquired.session,
+            sessionManager: acquired.sessionManager,
+            sessionFile: acquired.sessionFile,
+            frozen: {
+              systemPrompt: task.systemPrompt,
+              model: task.model,
+              thinking: task.thinking,
+              tools: task.tools,
+              cwd: task.cwd,
+            },
+            tokens: r.tokens,
+          });
         }
 
         return {
