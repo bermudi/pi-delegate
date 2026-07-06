@@ -11,6 +11,7 @@ import {
   spinnerFrame,
   formatToolCallShort,
   previewOutputLine,
+  waitingLabel,
 } from "./format.ts";
 import { stripAnsi, resolveCarriageReturn } from "./utils.ts";
 import { getMaxConcurrent } from "./config.ts";
@@ -196,11 +197,10 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       default: // Pending / waiting. When the concurrency cap is the reason, show
       // how many slots are occupied so a human sees throttling, not a stall.
       {
-        const ahead = running;
-        const queuedTag =
-          ahead >= getMaxConcurrent()
-            ? theme.fg("muted", ` queued (${ahead} running)`)
-            : theme.fg("muted", " waiting…");
+        const queuedTag = theme.fg(
+          "muted",
+          ` ${waitingLabel(running, getMaxConcurrent())}`,
+        );
         lines.push(
           truncLine(
             `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelLabel(p)} ${queuedTag}`,
@@ -280,9 +280,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
         : p.status === "pending"
           ? theme.fg(
               "muted",
-              runningNow >= getMaxConcurrent()
-                ? ` queued (${runningNow} running)`
-                : " waiting…",
+              ` ${waitingLabel(runningNow, getMaxConcurrent())}`,
             )
           : "";
     lines.push(

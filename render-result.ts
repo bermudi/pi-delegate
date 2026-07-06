@@ -7,6 +7,7 @@ import {
   truncLine,
   formatToolCallShort,
   applyLineBudget,
+  inFlightActivity,
 } from "./format.ts";
 import {
   renderPartialBranch,
@@ -31,7 +32,7 @@ function makeRenderHelpers(
 
   // ── Helper: format the "current activity" line (collapsed or expanded fallback) ─────
   const compactActivity = (p: TaskProgress): string => {
-    const current = p.activities.findLast((a) => !a.result);
+    const current = inFlightActivity(p);
     if (current) {
       const call = formatToolCallShort(current.name, current.args);
       const toolAge = fmtDuration(Date.now() - current.startTime);
