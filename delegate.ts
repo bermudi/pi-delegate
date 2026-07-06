@@ -78,8 +78,6 @@ export {
   loadAgentFile,
   loadClaudeAgentFile,
   discoverAgents,
-  loadSkill,
-  loadAgentsMdFiles,
   buildSubagentSystemPrompt,
   DEFAULT_SUBAGENT_SYSTEM_PROMPT,
 } from "./agents.ts";
