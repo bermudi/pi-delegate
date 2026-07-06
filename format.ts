@@ -1,7 +1,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ResolvedTask, TaskResult } from "./types.ts";
+import type {
+  ResolvedTask,
+  TaskProgress,
+  TaskResult,
+  ToolActivity,
+} from "./types.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -383,13 +388,49 @@ export function formatCompletedTask(
       `OK | ${fmtDuration(result.durationMs)} | ${fmtTokens(result.tokens)} tokens`,
     ];
     if (result.sessionFile) meta.push(shortenPath(result.sessionFile));
-    if (result.touchedFiles.length > 0) {
-      const rel = result.touchedFiles
-        .map((f) => path.relative(task.cwd, f))
-        .filter((f) => f && !f.startsWith(".."));
-      if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
-    }
+    const touched = relativeTouchedSummary(result.touchedFiles, task.cwd);
+    if (touched) meta.push(`touched: ${touched}`);
     parts.push(`[${meta.join(" · ")}]\n\n${result.output}`);
   }
   return parts;
+}
+
+// ── Shared live-progress row helpers ───────────────────────────────────────
+// These dedupe the per-task computations the LLM-facing poll view
+// (tickets.handlePoll) and the TUI branches (render-branches) both need. Each is
+// pure over TaskProgress/TaskResult, so it tests without a renderer.
+
+/** The in-flight tool activity (no result yet), or null — the "current thing
+ *  this task is doing". Shared by the poll view's running line and the TUI's
+ *  compact activity line. */
+export function inFlightActivity(p: TaskProgress): ToolActivity | null {
+  return p.activities.findLast((a) => !a.result) ?? null;
+}
+
+/** Per-task stats core: [duration, tokens]. Callers append medium-specific
+ *  extras (touched files; themed join). */
+export function taskMetaBase(r: TaskResult): string[] {
+  return [fmtDuration(r.durationMs), `${fmtTokens(r.tokens)} tokens`];
+}
+
+/** Pending-task waiting label: "queued (N running)" at the concurrency cap,
+ *  else "waiting…". Shared by the two TUI branches. */
+export function waitingLabel(runningCount: number, cap: number): string {
+  return runningCount >= cap
+    ? `queued (${runningCount} running)`
+    : "waiting…";
+}
+
+/** Touched-files summary relative to cwd ("src/a.ts, src/b.ts"), or null when
+ *  none resolve under cwd. Was byte-for-byte duplicated in formatCompletedTask
+ *  and tickets.handlePoll. */
+export function relativeTouchedSummary(
+  files: string[],
+  cwd: string,
+): string | null {
+  if (!files.length) return null;
+  const rel = files
+    .map((f) => path.relative(cwd, f))
+    .filter((f) => f && !f.startsWith(".."));
+  return rel.length ? rel.join(", ") : null;
 }

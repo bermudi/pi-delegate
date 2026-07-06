@@ -1,4 +1,3 @@
-import * as path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type {
   ExtensionAPI,
@@ -12,6 +11,9 @@ import {
   formatCompletedTask,
   shortenPath,
   trunc,
+  inFlightActivity,
+  taskMetaBase,
+  relativeTouchedSummary,
 } from "./format.ts";
 import type { AsyncTicket, DelegateDetails, TaskResult } from "./types.ts";
 
@@ -276,16 +278,11 @@ export function handlePoll(
       const r = ticket.results[i];
 
       if (p.status === "done" && r) {
-        const meta = [
-          fmtDuration(r.durationMs),
-          `${fmtTokens(r.tokens)} tokens`,
-        ];
+        const meta = taskMetaBase(r);
         if (r.touchedFiles.length > 0) {
           const t = ticket.resolved[i]!;
-          const rel = r.touchedFiles
-            .map((f) => path.relative(t.cwd, f))
-            .filter((f) => f && !f.startsWith(".."));
-          if (rel.length) meta.push(`touched: ${rel.join(", ")}`);
+          const touched = relativeTouchedSummary(r.touchedFiles, t.cwd);
+          if (touched) meta.push(`touched: ${touched}`);
         }
         lines.push(`✓ ${r.agent} · ${meta.join(" · ")}`);
         if (r.output && r.output !== "(no output)") {
@@ -299,7 +296,7 @@ export function handlePoll(
         if (r.output) lines.push(r.output);
         completedResults[i] = r;
       } else if (p.status === "running") {
-        const activity = p.activities.findLast((a) => !a.result);
+        const activity = inFlightActivity(p);
         const currentTool = activity
           ? ` · ${formatToolCallShort(activity.name, activity.args)}`
           : "";

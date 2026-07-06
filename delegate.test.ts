@@ -5,6 +5,12 @@ import * as path from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { _setClockForTesting, _resetPoolForTesting } from "./pool.ts";
+import {
+  inFlightActivity,
+  taskMetaBase,
+  waitingLabel,
+  relativeTouchedSummary,
+} from "./format.ts";
 
 import {
   parseFrontmatter,
@@ -4897,5 +4903,48 @@ describe("getHostDeps disables extensions for subagents", () => {
     // extensions means no handlers bind to the shared runtime.
     expect(b.resourceLoader).toBe(a.resourceLoader);
     expect(b.resourceLoader.getExtensions().extensions).toHaveLength(0);
+  });
+});
+
+// ── shared live-progress row helpers (format.ts) ─────────────────────────
+// Pure helpers deduped across the LLM poll view (tickets.handlePoll) and the
+// TUI branches (render-branches). Tested directly so the dedup is verified at
+// the helper level even where the renderers themselves aren't.
+
+describe("shared live-progress row helpers", () => {
+  test("relativeTouchedSummary relativizes under cwd, drops outsiders", () => {
+    const cwd = "/home/user/proj";
+    expect(
+      relativeTouchedSummary([`${cwd}/src/a.ts`, `${cwd}/src/b.ts`], cwd),
+    ).toBe("src/a.ts, src/b.ts");
+    // outsider (../../etc) is dropped; insider survives
+    expect(relativeTouchedSummary([`${cwd}/src/a.ts`, "/etc/passwd"], cwd)).toBe(
+      "src/a.ts",
+    );
+    expect(relativeTouchedSummary(["/etc/passwd"], cwd)).toBeNull();
+    expect(relativeTouchedSummary([], cwd)).toBeNull();
+  });
+
+  test("taskMetaBase returns [duration, tokens]", () => {
+    const r = { durationMs: 1500, tokens: 42 } as any;
+    expect(taskMetaBase(r)).toEqual([
+      fmtDuration(1500),
+      `${fmtTokens(42)} tokens`,
+    ]);
+  });
+
+  test("waitingLabel queues at/over the cap, waits below", () => {
+    expect(waitingLabel(0, 4)).toBe("waiting…");
+    expect(waitingLabel(3, 4)).toBe("waiting…");
+    expect(waitingLabel(4, 4)).toBe("queued (4 running)");
+    expect(waitingLabel(5, 4)).toBe("queued (5 running)");
+  });
+
+  test("inFlightActivity returns the last activity lacking a result", () => {
+    const done = { id: "1", result: { content: [], isError: false } } as any;
+    const live = { id: "2" } as any;
+    expect(inFlightActivity({ activities: [done, live] } as any)).toBe(live);
+    expect(inFlightActivity({ activities: [done] } as any)).toBeNull();
+    expect(inFlightActivity({ activities: [] } as any)).toBeNull();
   });
 });
