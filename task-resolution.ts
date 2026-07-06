@@ -2,7 +2,7 @@ import type { Api, Model } from "@mariozechner/pi-ai";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
 import { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
-import { agentPool } from "./pool.ts";
+import { configFor } from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
 import { buildSubagentSystemPrompt } from "./agents.ts";
 import { buildParentTranscript } from "./parent-context.ts";
@@ -124,7 +124,7 @@ export function resolveTasks(
     // win; ad-hoc subagents inherit the parent prompt when Pi exposes it,
     // then get explicit skills/AGENTS.md injection below.
     const pooledConfig = t.sessionId
-      ? agentPool.get(t.sessionId)?.config
+      ? configFor(t.sessionId)
       : undefined;
 
     // Prompt is required for fresh tasks. ResumeFrom provides context already.
@@ -184,8 +184,8 @@ export function resolveTasks(
 
     if (t.action !== "close" && t.action !== "list") {
       // For pool hits, the model is already baked into the agent — skip resolution.
-      if (t.sessionId && agentPool.has(t.sessionId)) {
-        model = agentPool.get(t.sessionId)!.config.model;
+      if (pooledConfig) {
+        model = pooledConfig.model;
       } else {
         // Resolve an explicit model spec (precedence: task > session > config >
         // frontmatter). resolveModelSpec returns undefined when none is set, so
@@ -229,7 +229,7 @@ export function resolveTasks(
       // For active pooled sessions, fall back to the frozen pooled config so
       // "continue with only sessionId" works without re-supplying tools.
       // Explicit overrides that don't match get rejected by acquireAgentSession.
-      const isPoolHit = t.sessionId ? agentPool.has(t.sessionId) : false;
+      const isPoolHit = pooledConfig !== undefined;
       tools = resolveToolGroups(
         t.tools ??
           agentOverride?.tools ??

@@ -19,14 +19,16 @@ import * as path from "node:path";
 import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { createTestSession } from "@marcfargas/pi-test-harness";
 // The test harness loads the extension via jiti. Under bun, jiti shares its
-// module graph with native imports, so the `agentPool`/`ticketRegistry`/
-// `_setHostRetryBaseMsForTesting` imported below are the SAME instances the
-// extension uses — verified empirically (imported agentPool sees sessions
-// created via execute(); the retry-base override reaches the extension's
-// createAgentSession). We clear them in afterEach to avoid leaking between runs.
-import { agentPool, ticketRegistry } from "./delegate.ts";
+// module graph with native imports, so the `ticketRegistry`/
+// `_setHostRetryBaseMsForTesting`/`_resetPoolForTesting` imported below are the
+// SAME instances the extension uses — verified empirically (an inserted pooled
+// session is visible to execute()'s list action; the retry-base override reaches
+// the extension's createAgentSession). We clear them in afterEach to avoid
+// leaking between runs.
+import { ticketRegistry } from "./delegate.ts";
 import { _setHostRetryBaseMsForTesting } from "./host.ts";
 import { _setWholeTaskRetryForTesting } from "./lifecycle.ts";
+import { _resetPoolForTesting } from "./pool.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
 
@@ -118,13 +120,13 @@ describe("delegate task lifecycle integration", () => {
   let ts: TestSession | undefined;
 
   beforeEach(() => {
-    agentPool.clear();
+    _resetPoolForTesting();
     ticketRegistry.clear();
   });
 
   afterEach(() => {
     mock.restore();
-    agentPool.clear();
+    _resetPoolForTesting();
     ticketRegistry.clear();
     ts?.dispose();
     ts = undefined;
@@ -491,7 +493,7 @@ describe("delegate task lifecycle integration", () => {
     expect(details.results[0]?.error).toBeUndefined();
     expect(details.results[0]?.output).toContain("Pooled task done");
 
-    // Verify pool state via the list action (goes through the extension's own agentPool)
+    // Verify pool state via the list action (goes through the extension's own pool)
     const listResult = await toolDef.execute(
       "tc-pool-create-1-list",
       { tasks: [{ action: "list" }] },
@@ -1038,7 +1040,7 @@ describe("delegate retry and error recovery", () => {
 
   afterEach(() => {
     mock.restore();
-    agentPool.clear();
+    _resetPoolForTesting();
     ticketRegistry.clear();
     Math.random = realRandom;
     ts?.dispose();
@@ -1336,7 +1338,7 @@ describe("delegate abort behavior", () => {
 
   afterEach(() => {
     mock.restore();
-    agentPool.clear();
+    _resetPoolForTesting();
     ticketRegistry.clear();
     ts?.dispose();
     ts = undefined;
@@ -1395,7 +1397,7 @@ describe("delegate pool-miss with resumeFrom and sessionId", () => {
 
   afterEach(() => {
     mock.restore();
-    agentPool.clear();
+    _resetPoolForTesting();
     ticketRegistry.clear();
     ts?.dispose();
     ts = undefined;
