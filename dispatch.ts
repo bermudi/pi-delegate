@@ -11,7 +11,6 @@ import {
 import {
   getConcurrencyLimit,
   getMaxAsyncTickets,
-  getMaxConcurrent,
 } from "./config.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
@@ -159,7 +158,6 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       return result;
     },
     ticketSignal,
-    getMaxConcurrent(),
   )
     .then(() => {
       // All tasks settled — determine final ticket status.
@@ -237,7 +235,6 @@ export async function dispatchSync(
     getConcurrencyLimit,
     async (t, i) => runResolvedTask(syncEnv, t, progress[i]!, i),
     signal,
-    getMaxConcurrent(),
   );
 
   // ── Format for LLM ────────────────────────────────────────────
