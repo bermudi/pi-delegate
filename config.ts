@@ -1,7 +1,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MAX_ASYNC_TICKETS, MAX_CONCURRENCY } from "./constants.ts";
+import {
+  MAX_ASYNC_TICKETS,
+  MAX_CONCURRENCY,
+  OUTPUT_SPILL_TAIL_CHARS,
+  OUTPUT_SPILL_THRESHOLD_CHARS,
+} from "./constants.ts";
 
 export interface DelegateConfig {
   agent: {
@@ -30,6 +35,14 @@ export interface DelegateConfig {
     /** Base delay (ms) for exponential backoff between whole-task retries. */
     wholeTaskBaseDelayMs?: number;
   };
+  /** LLM-facing output bounding: over-threshold final output is spilled to a
+   *  temp file with a tail kept in-context. See `spill.ts`. */
+  output?: {
+    /** Over this many chars (strictly), spill. Default 8000. */
+    spillThresholdChars?: number;
+    /** Tail length (chars) kept in-context when spilled. Default 2000. */
+    spillTailChars?: number;
+  };
 }
 
 const DELEGATE_CONFIG_DIR = path.join(os.homedir(), ".pi", "agent");
@@ -42,6 +55,10 @@ const DEFAULT_DELEGATE_CONFIG: DelegateConfig = {
   retry: {
     wholeTaskMaxRetries: 3,
     wholeTaskBaseDelayMs: 1_000,
+  },
+  output: {
+    spillThresholdChars: OUTPUT_SPILL_THRESHOLD_CHARS,
+    spillTailChars: OUTPUT_SPILL_TAIL_CHARS,
   },
 };
 
@@ -69,6 +86,7 @@ export function loadDelegateConfig(): DelegateConfig {
         ...(parsed.concurrency ?? {}),
       },
       retry: { ...DEFAULT_DELEGATE_CONFIG.retry, ...(parsed.retry ?? {}) },
+      output: { ...DEFAULT_DELEGATE_CONFIG.output, ...(parsed.output ?? {}) },
     } as DelegateConfig;
   } catch {
     return structuredClone(DEFAULT_DELEGATE_CONFIG);
@@ -125,6 +143,18 @@ export function getWholeTaskMaxRetries(): number {
 /** Get the base delay (ms) for whole-task retry exponential backoff. */
 export function getWholeTaskBaseDelayMs(): number {
   return __delegateConfig.retry?.wholeTaskBaseDelayMs ?? 1_000;
+}
+
+/** Get the output-spill threshold (chars). Over this, final output is spilled. */
+export function getOutputSpillThreshold(): number {
+  return (
+    __delegateConfig.output?.spillThresholdChars ?? OUTPUT_SPILL_THRESHOLD_CHARS
+  );
+}
+
+/** Get the output-spill tail length (chars) kept in-context when spilled. */
+export function getOutputSpillTail(): number {
+  return __delegateConfig.output?.spillTailChars ?? OUTPUT_SPILL_TAIL_CHARS;
 }
 
 /**
