@@ -15,6 +15,7 @@ import {
   taskMetaBase,
   relativeTouchedSummary,
 } from "./format.ts";
+import { renderOutputForPoll } from "./spill.ts";
 import type { AsyncTicket, DelegateDetails, TaskResult } from "./types.ts";
 
 export const ticketRegistry = new Map<string, AsyncTicket>();
@@ -286,14 +287,14 @@ export function handlePoll(
         }
         lines.push(`✓ ${r.agent} · ${meta.join(" · ")}`);
         if (r.output && r.output !== "(no output)") {
-          lines.push(r.output);
+          lines.push(renderOutputForPoll(r.output));
         }
         completedResults[i] = r;
       } else if (p.status === "failed" && r) {
         lines.push(`✗ ${r.agent} · ${r.error ?? "unknown error"}`);
         if (r.sessionFile)
           lines.push(`  session: ${shortenPath(r.sessionFile)}`);
-        if (r.output) lines.push(r.output);
+        if (r.output) lines.push(renderOutputForPoll(r.output));
         completedResults[i] = r;
       } else if (p.status === "running") {
         const activity = inFlightActivity(p);

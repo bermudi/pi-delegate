@@ -1626,6 +1626,91 @@ describe("formatCompletedTask", () => {
   });
 });
 
+// ── output spill (integration via formatCompletedTask / formatCompletedTicket) ──
+// The spill mechanism (spill.ts) is unit-tested in spill.test.ts. Here we
+// verify the wiring: the LLM-facing `content` is bounded (head spilled, tail
+// kept) while `details.results[i].output` still carries the FULL output — the
+// one-source-two-projections invariant. Production thresholds come from config
+// (default 8000/2000), so fixtures exceed them.
+
+describe("output spill integration", () => {
+  type TaskLike = Parameters<typeof formatCompletedTask>[0];
+  type ResultLike = Parameters<typeof formatCompletedTask>[1];
+
+  function makeTask(over: Partial<TaskLike> = {}): TaskLike {
+    return {
+      prompt: "do the thing",
+      model: {} as TaskLike["model"],
+      tools: [],
+      thinking: "low",
+      systemPrompt: "",
+      cwd: "/home/daniel/build/pi-delegate",
+      agentName: "scout",
+      warnings: [],
+      ...over,
+    } as TaskLike;
+  }
+  function makeResult(over: Partial<ResultLike> = {}): ResultLike {
+    return {
+      agent: "scout",
+      output: "all done",
+      durationMs: 1500,
+      tokens: 42,
+      touchedFiles: [],
+      ...over,
+    } as ResultLike;
+  }
+
+  afterEach(() => {
+    // Clean spill files dropped in the system tmpdir by production code.
+    const dir = os.tmpdir();
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (name.startsWith("delegate-output-")) {
+        try {
+          fs.rmSync(path.join(dir, name), { force: true });
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+  });
+
+  test("formatCompletedTask: over-threshold output → content has tail + pointer, NOT the head", () => {
+    const head = "HEADMARKER" + "a".repeat(4000);
+    const tail = "b".repeat(4000) + "TAILMARKER"; // total > 8000 default threshold
+    const output = head + tail;
+
+    const lines = formatCompletedTask(makeTask(), makeResult({ output }));
+    const content = lines.join("\n");
+
+    // Tail kept, head spilled away.
+    expect(content).toContain("…");
+    expect(content).toContain("TAILMARKER");
+    expect(content).not.toContain("HEADMARKER");
+    expect(content).toContain("spilled to");
+    expect(content).toContain("above is the tail");
+    // The pointer names a real file containing the FULL output.
+    const m = content.match(/spilled to (.+?) —/);
+    expect(m).not.toBeNull();
+    expect(fs.existsSync(m![1]!)).toBe(true);
+    expect(fs.readFileSync(m![1]!, "utf8")).toBe(output);
+  });
+
+  test("formatCompletedTask: under-threshold output is unchanged (no spill)", () => {
+    const output = "small result, well under threshold";
+    const lines = formatCompletedTask(makeTask(), makeResult({ output }));
+    const content = lines.join("\n");
+    expect(content).toContain(output);
+    expect(content).not.toContain("spilled to");
+  });
+});
+
 // ── getActivityAge ───────────────────────────────────────────────────────
 
 describe("resolveCwd", () => {
@@ -4631,6 +4716,56 @@ describe("async delegate integration", () => {
     expect(text).not.toContain("FAILED");
     expect(text).not.toContain("CANCELLED");
     expect(text).toContain("1/1 tasks completed");
+  });
+
+  test("formatCompletedTicket keeps FULL output in details.results[i].output even when spilled from content", () => {
+    // The one-source-two-projections invariant: the LLM-facing `content` is
+    // bounded (tail + pointer), but `details.results[i].output` still carries
+    // the full unmodified output for the human's expanded TUI view.
+    const head = "HEADMARKER" + "a".repeat(4000);
+    const tail = "b".repeat(4000) + "TAILMARKER"; // total > 8000 default threshold
+    const fullOutput = head + tail;
+    const ticket: AsyncTicket = {
+      id: "spill-invariant-ticket",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "big-task" }],
+      resolved: [
+        {
+          prompt: "big-task",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "done",
+      results: [{ agent: "scout", output: fullOutput, durationMs: 100, tokens: 10, touchedFiles: [] }],
+      progress: mkProgress(["done"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    const result = formatCompletedTicket(ticket);
+    const text = result.content[0]!.text;
+    // Content is bounded: tail present, head absent, pointer present.
+    expect(text).toContain("TAILMARKER");
+    expect(text).not.toContain("HEADMARKER");
+    expect(text).toContain("spilled to");
+    // THE INVARIANT: details carries the full, unmodified output.
+    const detailResult = result.details.results[0] as TaskResult;
+    expect(detailResult.output).toBe(fullOutput);
+    // Clean up the spill file the production path wrote.
+    const m = text.match(/spilled to (.+?) —/);
+    if (m) {
+      try {
+        fs.rmSync(m[1]!, { force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
   });
 
   test("help text includes async mode section", async () => {

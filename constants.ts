@@ -20,6 +20,13 @@ export const ASYNC_TICKET_TTL_MS = 30 * 60 * 1000;
 /** Hard timeout per async ticket. 30 minutes. */
 export const ASYNC_MAX_RUNTIME_MS = 30 * 60 * 1000;
 
+/** Subagent final output longer than this (chars) is spilled to a temp file,
+ *  keeping only a tail in the LLM-facing context. See `spill.ts`. */
+export const OUTPUT_SPILL_THRESHOLD_CHARS = 8000;
+
+/** Tail length (chars) kept in-context when an output is spilled. */
+export const OUTPUT_SPILL_TAIL_CHARS = 2000;
+
 export const VALID_THINKING = new Set([
   "off",
   "minimal",

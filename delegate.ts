@@ -30,6 +30,8 @@ export {
   getMaxAsyncTickets,
   getMaxConcurrent,
   resolveModelSpec,
+  getOutputSpillThreshold,
+  getOutputSpillTail,
 } from "./config.ts";
 export {
   checkout,
@@ -86,3 +88,10 @@ export { extractTouchedFromActivities } from "./file-tracking.ts";
 export { resolveModel, findAvailableAlternative } from "./model.ts";
 export { readDelegateSettingsFile, loadDelegateSettings } from "./settings.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";
+export {
+  decideSpill,
+  spillToTempFile,
+  renderOutputForLLM,
+  renderOutputForPoll,
+} from "./spill.ts";
+export type { SpillDecision } from "./spill.ts";

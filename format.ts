@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { renderOutputForLLM } from "./spill.ts";
 import type {
   ResolvedTask,
   TaskProgress,
@@ -390,7 +391,7 @@ export function formatCompletedTask(
     if (result.sessionFile) meta.push(shortenPath(result.sessionFile));
     const touched = relativeTouchedSummary(result.touchedFiles, task.cwd);
     if (touched) meta.push(`touched: ${touched}`);
-    parts.push(`[${meta.join(" · ")}]\n\n${result.output}`);
+    parts.push(`[${meta.join(" · ")}]\n\n${renderOutputForLLM(result.output, result.agent)}`);
   }
   return parts;
 }
