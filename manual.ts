@@ -1,5 +1,11 @@
 import { Type } from "@sinclair/typebox";
-import { DEFAULT_TOOLS, VALID_THINKING, POOL_TTL_MS } from "./constants.ts";
+import {
+  DEFAULT_TOOLS,
+  VALID_THINKING,
+  POOL_TTL_MS,
+  OUTPUT_SPILL_THRESHOLD_CHARS,
+  OUTPUT_SPILL_TAIL_CHARS,
+} from "./constants.ts";
 import { getMaxAsyncTickets, getMaxConcurrent } from "./config.ts";
 import type { AgentConfig } from "./types.ts";
 
@@ -179,5 +185,7 @@ export function getSubagentManualMarkdown(
     "## Config",
     "",
     "Tunables live in `~/.pi/agent/delegate.json`: `maxConcurrent` (sync ceiling), `maxAsyncTickets` (background ticket cap), per-model/per-provider concurrency limits, and global model overrides.",
+    "",
+    `Output bounding: subagent outputs longer than ${OUTPUT_SPILL_THRESHOLD_CHARS} characters are spilled to a temp file, and only the last ${OUTPUT_SPILL_TAIL_CHARS} characters stay in the LLM-facing result. Adjust with \`output.spillThresholdChars\` and \`output.spillTailChars\`. Spill files are written to the system temp directory with owner-only permissions; the full output is always available in the expanded TUI view and the spilled file.`,
   ].join("\n");
 }
