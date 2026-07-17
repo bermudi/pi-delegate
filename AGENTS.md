@@ -25,8 +25,9 @@ This is **not a standalone app** — it's a Pi extension. Entry points:
 **Key architectural decisions:**
 
 - **Subagents run without extensions.** Host deps are built with `noExtensions: true`. Subagents must not run the parent's interactive extensions — this closes cross-wiring risks and keeps headless workers headless.
-- **Host deps are cached** per `(cwd, systemPrompt)`. `AuthStorage`, `SettingsManager`, and `ResourceLoader` are built once and shared across subagents with the same profile. `ModelRegistry` is threaded from the parent.
+- **Host deps are cached** per `(cwd, systemPrompt)`. `ModelRuntime` (the unified model+auth runtime), `SettingsManager`, and `ResourceLoader` are built once and shared across subagents with the same profile. The `ModelRuntime` is built with `allowModelNetwork: false` — subagents receive an explicit model (resolved by the parent) and never need remote catalog discovery, so the first call per cwd skips the network availability refresh (faster, offline-safe); auth (`getAuth`) still reads `~/.pi/agent/auth.json` directly. Since pi 0.80.8, `createAgentSession` takes a single `modelRuntime` in place of the removed `authStorage`/`modelRegistry` options; the parent's `ctx.modelRegistry` (a sync facade over its own runtime) is still threaded, but only for *model selection* in task-resolution — not for `createAgentSession`.
 - **Session pooling** is a deep module (`pool.ts`): live `AgentSession`s keyed by `sessionId`, behind a small interface (`checkout` / `commit` / `configFor`). The pool owns **policy** (freeze-on-insert, validate-on-reuse, insert-on-success, stats, TTL eviction); **session materialization** (pool-hit reuse / resume / fresh-create) lives in `lifecycle.ts`. Pool TTL: 10 min idle. See `docs/adr/0001` + `CONTEXT.md` — don't fold materialization into the pool.
+- **Host-compat guard** (`host-compat.ts`): the bundle imports pi internals from the package root, and pi can drop/rename a symbol on any bump — jiti then silently turns the named import into `undefined`, crashing as a cryptic `Cannot read properties of undefined (reading 'create')` (this is exactly what broke delegation across pi 0.80.3→0.80.8). `hostCompatError()` runs once per process (cached) at the top of `execute`'s dispatch path and returns a clear, actionable tool result naming any missing symbol instead. The bundle runs against the *installed* pi (via jiti's alias), which may differ from the repo's pinned/typecheck target — keep `REQUIRED_SYMBOLS` in sync with the import sites.
 - **Async tickets are fire-and-forget.** `async: true` spawns background execution and returns a ticket ID immediately. Results are pushed via `sendMessage({deliverAs:"followUp"})`. Poll/cancel with top-level `action: "poll"` or `action: "cancel"`.
 - **Named agents have layered discovery.** `discoverAgents()` walks sources in order, first definition wins: project `.pi/agents/` → global `~/.pi/agent/agents/` → legacy `~/.agents/` → project `.claude/agents/` → global `~/.claude/agents/` → built-in defaults. A same-named `.md` in a higher-priority dir supersedes anything below it.
 - **Three built-in agents** (`scout`, `reviewer`, `workhorse`) are seeded last and superseded by any same-named user markdown. Defined in `builtin-agents.ts`. They omit `model` so they inherit the parent model — user markdown can pin one by setting frontmatter `model:`.
@@ -51,6 +52,21 @@ bun test
 ```
 
 After install or rebuild, `/reload` in Pi.
+
+### End-to-end verification (Herdr)
+
+Unit tests stub the host-deps / `modelRuntime` path, so they can't catch a regression where pi drops or renames a symbol the bundle imports (the class of bug that broke delegation in the 0.80.3→0.80.8 `authStorage`/`modelRegistry`→`modelRuntime` refactor — it surfaced as a lying `0/1 completed · ~4ms` with `Cannot read properties of undefined (reading 'create')`). The only real proof is firing a `delegate` call inside a running pi. This agent runs in Herdr, so drive one from a sibling pane:
+
+```bash
+herdr pane split --current --direction right --no-focus      # capture result.pane.pane_id
+herdr pane run <pane> "pi --model '<authed-provider/model>'"  # e.g. openrouter/tencent/hy3:free
+herdr wait agent-status <pane> --status idle --timeout 30000
+herdr pane run <pane> "Use delegate to spawn one workhorse task with model <authed-provider/model> and prompt: Reply with exactly CONNECTIVITY OK. Report the output verbatim."
+herdr wait agent-status <pane> --status idle --timeout 180000
+herdr pane read <pane> --source recent-unwrapped --lines 50
+```
+
+Green = `1/1 completed · … · ✓ workhorse … ⎿ CONNECTIVITY OK`. **Pin the task `model` to an authenticated provider** (e.g. the parent's) — builtin agents may resolve to a provider with no key and fail at auth with a clean `No API key found for <provider>`, which is a config issue, not a delegate bug. A fresh pi launch picks up a rebuilt bundle automatically; a long-running pi needs `/reload`.
 
 ## Stable Reference Facts
 

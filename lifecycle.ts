@@ -171,9 +171,8 @@ async function sleepForWholeTaskRetry(
 /** Build the AgentSession for a fresh or resumed subagent via createAgentSession.
  *  Reuses the caller-supplied sessionManager (so parent-linking + per-task .jsonl
  *  files stay under our control) and the shared host deps (cached per-cwd
- *  resourceLoader/settingsManager/authStorage). */
+ *  resourceLoader/settingsManager/modelRuntime). */
 async function buildDelegateSession(
-  env: TaskRunEnv,
   task: ResolvedTask,
   sessionManager: SessionManager,
 ): Promise<AgentSession> {
@@ -192,10 +191,12 @@ async function buildDelegateSession(
     thinkingLevel: task.thinking,
     tools: task.tools,
     sessionManager,
-    // Reuse the extension's shared registry (parent's) for consistent auth/model resolution.
-    modelRegistry: env.modelRegistry,
-    // Shared, read-only heavy deps (resourceLoader.reload() runs once per cwd, cached).
-    authStorage: hostDeps.authStorage,
+    // Shared, read-only heavy deps (cached per cwd+prompt): the canonical
+    // model/auth runtime (reads the same ~/.pi/agent files as the parent),
+    // settings manager, and resource loader (reload() runs once per cwd).
+    // Since pi 0.80.8 `createAgentSession` takes `modelRuntime` in place of
+    // the removed `authStorage`/`modelRegistry` options.
+    modelRuntime: hostDeps.modelRuntime,
     settingsManager: hostDeps.settingsManager,
     resourceLoader: hostDeps.resourceLoader,
   });
@@ -309,7 +310,7 @@ async function acquireAgentSession(
     const parentFile = env.parentSessionManager?.getSessionFile?.();
     if (parentFile) setParentSession(resumed, parentFile);
 
-    const session = await buildDelegateSession(env, task, resumed);
+    const session = await buildDelegateSession(task, resumed);
     return {
       session,
       sessionManager: resumed,
@@ -328,7 +329,7 @@ async function acquireAgentSession(
   sessionManager = fresh.manager;
   sessionFile = fresh.file;
 
-  const session = await buildDelegateSession(env, task, sessionManager);
+  const session = await buildDelegateSession(task, sessionManager);
   return {
     session,
     sessionManager,

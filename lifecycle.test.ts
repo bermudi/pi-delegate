@@ -26,7 +26,10 @@ import { createTestSession } from "@marcfargas/pi-test-harness";
 // the extension's createAgentSession). We clear them in afterEach to avoid
 // leaking between runs.
 import { ticketRegistry } from "./delegate.ts";
-import { _setHostRetryBaseMsForTesting } from "./host.ts";
+import {
+  _setHostRetryBaseMsForTesting,
+  _setModelRuntimeFactoryForTesting,
+} from "./host.ts";
 import { _setWholeTaskRetryForTesting } from "./lifecycle.ts";
 import { _resetPoolForTesting } from "./pool.ts";
 
@@ -62,40 +65,63 @@ function mockStream(text: string) {
   return stream;
 }
 
-/** Set up mock.module to intercept streamSimple with a canned response.
- *  Mocks BOTH module specifiers: pi-delegate's own code imports from
- *  "@mariozechner/pi-ai", but pi-coding-agent's internal createAgentSession
- *  imports streamSimple from "@earendil-works/pi-ai" (the package's real name —
- *  @mariozechner/pi-ai is a renamed copy). Both must be patched or the
- *  AgentSession streamFn calls the real, network-hitting streamSimple. */
-function mockPiAiStream(factory: (orig: any) => Record<string, unknown>): void {
+/** A streamSimple override installed on a model runtime to intercept subagent
+ *  streaming. pi 0.80.9 AgentSession streams via `modelRuntime.streamSimple` (a
+ *  bound method hitting the real provider SDK), NOT the module-level streamSimple
+ *  these mocks replace — so `patchAuth` installs the returned override on the
+ *  runtime. Passed explicitly (not via a module global) so every `patchAuth`
+ *  call is provably paired with the stream mock it applies. */
+type StreamFn = (...args: unknown[]) => unknown;
+
+/** Set up mock.module to intercept streamSimple, and return the factory's
+ *  streamSimple override (for `patchAuth` to install on the runtime). Mocks BOTH
+ *  module specifiers: pi-delegate's own code imports from "@mariozechner/pi-ai",
+ *  but pi-coding-agent's internal createAgentSession imports streamSimple from
+ *  "@earendil-works/pi-ai" (the package's real name — @mariozechner/pi-ai is a
+ *  renamed copy). The module mock covers any path still using the module-level
+ *  streamSimple; the returned override covers the runtime path (0.80.9+). */
+function mockPiAiStream(
+  factory: (orig: any) => Record<string, unknown>,
+): StreamFn {
   mock.module("@mariozechner/pi-ai", factory as never);
   mock.module("@earendil-works/pi-ai", factory as never);
   // pi-coding-agent 0.80+ imports streamSimple from "@earendil-works/pi-ai/compat"
   // (not the main entry), so the compat subpath must be mocked too or the
   // AgentSession streamFn calls the real, network-hitting streamSimple.
   mock.module("@earendil-works/pi-ai/compat", factory as never);
+  return factory({}).streamSimple as StreamFn;
 }
 
-/** Set up mock.module to intercept streamSimple with a canned response. */
-function installStreamMock(responseText: string) {
-  mockPiAiStream((orig) => ({
+/** Install a stream mock returning a canned response; returns the override. */
+function installStreamMock(responseText: string): StreamFn {
+  return mockPiAiStream((orig) => ({
     ...orig,
     streamSimple: () => mockStream(responseText),
   }));
 }
 
-/** Patch model registry auth so sub-agents skip real auth.
- *  AgentSession (unlike the old createAgent) checks hasConfiguredAuth + isUsingOAuth
- *  before calling getApiKeyAndHeaders, so all three must be patched. */
-function patchAuth(ts: TestSession) {
-  const reg = (ts.session as any)._modelRegistry;
-  reg.getApiKeyAndHeaders = async () => ({
-    ok: true,
-    apiKey: "test-key",
-  });
-  reg.hasConfiguredAuth = () => true;
-  reg.isUsingOAuth = () => false;
+/** Patch model-runtime auth so sub-agents skip real auth.
+ *  Since pi 0.80.8, AgentSession consults a `modelRuntime` (not the old
+ *  `_modelRegistry`): it calls `hasConfiguredAuth`/`checkAuth` before streaming
+ *  and `getAuth` to resolve credentials. We patch all of them on the parent
+ *  session's runtime, then install it as the subagent runtime via the host deps
+ *  test seam — subagents no longer share the parent's registry by default. */
+function patchAuth(ts: TestSession, stream: StreamFn): void {
+  const rt = ts.session.modelRuntime as {
+    getAuth: (...a: unknown[]) => Promise<unknown>;
+    hasConfiguredAuth: (...a: unknown[]) => boolean;
+    isUsingOAuth: (...a: unknown[]) => boolean;
+    checkAuth: (...a: unknown[]) => Promise<unknown>;
+    streamSimple: (...a: unknown[]) => unknown;
+  };
+  rt.getAuth = async () => ({ auth: { apiKey: "test-key" } });
+  rt.hasConfiguredAuth = () => true;
+  rt.isUsingOAuth = () => false;
+  rt.checkAuth = async () => ({ type: "api_key" }) as never;
+  // pi 0.80.9 streams via modelRuntime.streamSimple; install the passed mock so
+  // the subagent (reusing this runtime via the host seam) skips real providers.
+  rt.streamSimple = stream;
+  _setModelRuntimeFactoryForTesting(async () => ts.session.modelRuntime);
 }
 
 /** Get delegate tool definition from the test session. */
@@ -128,15 +154,16 @@ describe("delegate task lifecycle integration", () => {
     mock.restore();
     _resetPoolForTesting();
     ticketRegistry.clear();
+    _setModelRuntimeFactoryForTesting(undefined);
     ts?.dispose();
     ts = undefined;
   });
 
   test("fresh task (no sessionId, no resumeFrom) creates agent and returns output", async () => {
-    installStreamMock("I completed the task successfully.");
+    const stream = installStreamMock("I completed the task successfully.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -171,7 +198,7 @@ describe("delegate task lifecycle integration", () => {
   test("ad-hoc prompt inherits parent system prompt and appends AGENTS.md", async () => {
     const projectInstruction = "SPAWN_PROMPT_HYGIENE_PROJECT_CONTEXT";
     let capturedSystemPrompt = "";
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: (_model: unknown, context: { systemPrompt?: string }) => {
         capturedSystemPrompt = context.systemPrompt ?? "";
@@ -180,7 +207,7 @@ describe("delegate task lifecycle integration", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-prompt-"));
     try {
@@ -221,10 +248,10 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("fresh task with systemPrompt override", async () => {
-    installStreamMock("Reviewed. All good.");
+    const stream = installStreamMock("Reviewed. All good.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -252,7 +279,7 @@ describe("delegate task lifecycle integration", () => {
 
   test("named agent prompt overrides inherited parent system prompt", async () => {
     let capturedSystemPrompt = "";
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: (_model: unknown, context: { systemPrompt?: string }) => {
         capturedSystemPrompt = context.systemPrompt ?? "";
@@ -261,7 +288,7 @@ describe("delegate task lifecycle integration", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-named-"));
     try {
@@ -312,10 +339,10 @@ describe("delegate task lifecycle integration", () => {
   test("named agent discovery is parent-scoped, not per-task cwd", async () => {
     // Agent discovery uses ctx.cwd (parent session), not the per-task cwd.
     // A .pi/agents/ghost.md placed in the per-task cwd must NOT be discovered.
-    installStreamMock("Should never run.");
+    const stream = installStreamMock("Should never run.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const perTaskCwd = fs.mkdtempSync(
       path.join(os.tmpdir(), "delegate-discovery-"),
@@ -358,7 +385,7 @@ describe("delegate task lifecycle integration", () => {
   test("parent model with no auth falls back to available alternative", async () => {
     // Track which model the sub-agent actually used.
     let usedModelId: string | undefined;
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: (model: any) => {
         usedModelId = model.id;
@@ -367,11 +394,18 @@ describe("delegate task lifecycle integration", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
+    // Stub the runtime's auth + stream so the sub-agent runs without real
+    // credentials or network. This is separate from the facade patching below,
+    // which only governs model *selection* in task-resolution.
+    patchAuth(ts, stream);
 
     // Set up the parent model: same id as the alternative, but with
     // a provider that has no configured auth. The registry should
     // have a fallback model with the same id under a different provider.
-    const reg = (ts.session as any)._modelRegistry;
+    // ctx.modelRegistry is the facade task-resolution reads (pi 0.80.9 dropped
+    // the old `session._modelRegistry` field for `session.modelRuntime`).
+    const ctx = getExecContext(ts);
+    const reg = (ctx as any).modelRegistry;
 
     // Patch hasConfiguredAuth: the parent model has no auth, the alt does.
     reg.hasConfiguredAuth = (m: any) => {
@@ -406,7 +440,6 @@ describe("delegate task lifecycle integration", () => {
     // The parent's model has no auth (provider is "openai", not "opencode-go").
     // The alternative has auth. The sub-agent should use the alternative.
     const toolDef = getDelegateTool(ts);
-    const ctx = getExecContext(ts);
 
     const result = await toolDef.execute(
       "tc-model-fallback",
@@ -428,7 +461,7 @@ describe("delegate task lifecycle integration", () => {
 
   test("multiple fresh tasks run in parallel and all succeed", async () => {
     let callCount = 0;
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -437,7 +470,7 @@ describe("delegate task lifecycle integration", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -469,10 +502,10 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("task with sessionId creates pooled session on first use", async () => {
-    installStreamMock("Pooled task done.");
+    const stream = installStreamMock("Pooled task done.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -509,7 +542,7 @@ describe("delegate task lifecycle integration", () => {
 
   test("task with sessionId reuses pooled session on second call", async () => {
     let callCount = 0;
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -518,7 +551,7 @@ describe("delegate task lifecycle integration", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -567,10 +600,10 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("close action tears down pooled session", async () => {
-    installStreamMock("Done.");
+    const stream = installStreamMock("Done.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -625,10 +658,10 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("list action shows active sessions", async () => {
-    installStreamMock("Done.");
+    const stream = installStreamMock("Done.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -659,10 +692,10 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("async task completes and results are pollable", async () => {
-    installStreamMock("Async task done.");
+    const stream = installStreamMock("Async task done.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -730,10 +763,10 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("named agent without tools field inherits the full agent set (*)", async () => {
-    installStreamMock("Inherited tools, ran fine.");
+    const stream = installStreamMock("Inherited tools, ran fine.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-notools-"));
     try {
@@ -793,10 +826,10 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("resumeFrom rehydrates from a previous session file", async () => {
-    installStreamMock("Resumed and continued.");
+    const stream = installStreamMock("Resumed and continued.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     // Create a minimal session file with a prior conversation.
     const sessionFile = path.resolve(ts.cwd, "resume-test.jsonl");
@@ -937,10 +970,10 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("session config mismatch rejects with actionable message", async () => {
-    installStreamMock("Init.");
+    const stream = installStreamMock("Init.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1004,14 +1037,15 @@ function mockStreamError(message: string) {
   return stream;
 }
 
-/** Mock that errors on the first N calls, then returns a success stream. */
+/** Mock that errors on the first N calls, then returns a success stream.
+ *  Returns the override (for `patchAuth`). */
 function installFailingThenSuccess(
   failCount: number,
   failMessage: string,
   successText: string,
-) {
+): StreamFn {
   let callCount = 0;
-  mockPiAiStream((orig) => ({
+  return mockPiAiStream((orig) => ({
     ...orig,
     streamSimple: () => {
       callCount++;
@@ -1042,6 +1076,7 @@ describe("delegate retry and error recovery", () => {
     mock.restore();
     _resetPoolForTesting();
     ticketRegistry.clear();
+    _setModelRuntimeFactoryForTesting(undefined);
     Math.random = realRandom;
     ts?.dispose();
     ts = undefined;
@@ -1050,14 +1085,14 @@ describe("delegate retry and error recovery", () => {
   });
 
   test("transient error → retry → success", async () => {
-    installFailingThenSuccess(
+    const stream = installFailingThenSuccess(
       1,
       "connection refused",
       "Recovered successfully.",
     );
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1081,14 +1116,14 @@ describe("delegate retry and error recovery", () => {
   });
 
   test("rate-limit error → retry → success", async () => {
-    installFailingThenSuccess(
+    const stream = installFailingThenSuccess(
       1,
       "rate limit exceeded, try again later",
       "Rate limit cleared.",
     );
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1111,7 +1146,7 @@ describe("delegate retry and error recovery", () => {
 
   test("transient final failure → fresh whole-task retry → success", async () => {
     let callCount = 0;
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -1128,7 +1163,7 @@ describe("delegate retry and error recovery", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1154,7 +1189,7 @@ describe("delegate retry and error recovery", () => {
 
   test("non-retryable error → immediate failure, no retry", async () => {
     let callCount = 0;
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -1163,7 +1198,7 @@ describe("delegate retry and error recovery", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1186,7 +1221,7 @@ describe("delegate retry and error recovery", () => {
 
   test("max retries exhausted → returns last error", async () => {
     let callCount = 0;
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -1195,7 +1230,7 @@ describe("delegate retry and error recovery", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1225,7 +1260,7 @@ describe("delegate retry and error recovery", () => {
     // roughly flat across retries — it does NOT grow by the failed response each
     // time. If strip were broken, counts would grow by 1-2 per retry.
     const messageCounts: number[] = [];
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: (_model: unknown, context: any) => {
         callCount++;
@@ -1238,7 +1273,7 @@ describe("delegate retry and error recovery", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1281,7 +1316,7 @@ describe("delegate retry and error recovery", () => {
     // against a nonexistent path. Now the failure path force-flushes the
     // header so the path is real and resumable.
     let callCount = 0;
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         callCount++;
@@ -1293,7 +1328,7 @@ describe("delegate retry and error recovery", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1340,13 +1375,14 @@ describe("delegate abort behavior", () => {
     mock.restore();
     _resetPoolForTesting();
     ticketRegistry.clear();
+    _setModelRuntimeFactoryForTesting(undefined);
     ts?.dispose();
     ts = undefined;
   });
 
   test("abort signal stops all tasks and returns Aborted status (no undefined holes)", async () => {
     // Mock that hangs so the abort signal has time to fire.
-    mockPiAiStream((orig) => ({
+    const stream = mockPiAiStream((orig) => ({
       ...orig,
       streamSimple: () => {
         const stream = createAssistantMessageEventStream();
@@ -1356,7 +1392,7 @@ describe("delegate abort behavior", () => {
     }));
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1399,12 +1435,13 @@ describe("delegate pool-miss with resumeFrom and sessionId", () => {
     mock.restore();
     _resetPoolForTesting();
     ticketRegistry.clear();
+    _setModelRuntimeFactoryForTesting(undefined);
     ts?.dispose();
     ts = undefined;
   });
 
   test("sessionId not in pool + resumeFrom set → resumes and pools for reuse", async () => {
-    installStreamMock("Resumed and pooled.");
+    const stream = installStreamMock("Resumed and pooled.");
 
     const tmpDir = fs.mkdtempSync("/tmp/delegate-pool-resume-");
     const sessionFile = path.resolve(tmpDir, "pool-resume.jsonl");
@@ -1460,7 +1497,7 @@ describe("delegate pool-miss with resumeFrom and sessionId", () => {
     fs.writeFileSync(sessionFile, lines.join("\n") + "\n");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
-    patchAuth(ts);
+    patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
