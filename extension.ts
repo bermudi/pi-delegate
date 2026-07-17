@@ -12,6 +12,7 @@ import {
   type SyncDispatchInput,
 } from "./dispatch.ts";
 import { renderDelegateCall, renderDelegateResult } from "./render-result.ts";
+import { hostCompatError } from "./host-compat.ts";
 import type { DelegateParams } from "./types.ts";
 
 export default function delegateExtension(pi: ExtensionAPI): void {
@@ -65,6 +66,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           },
         };
       }
+
+      // ── Host compatibility ────────────────────────────────────────
+      // Guard against pi dropping/renaming a symbol this extension imports
+      // (version skew between the installed pi and the bundle's build target).
+      // Surfaces a clear, actionable error instead of a cryptic
+      // `undefined.create` deep in dispatch. Cached after the first call.
+      const compatError = hostCompatError();
+      if (compatError) return compatError;
 
       // ── Validate ──────────────────────────────────────────────────
       const validationError = validateTasks(tasks, agents, parentModelId);

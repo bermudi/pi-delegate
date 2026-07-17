@@ -25,22 +25,26 @@
  * (cwd + systemPrompt) and hand the same instances to every subagent with
  * that combo.
  *
- * The `authStorage` / `settingsManager` / `resourceLoader` are pi-delegate-
+ * The `modelRuntime` / `settingsManager` / `resourceLoader` are pi-delegate-
  * owned siblings reading the same on-disk files under `~/.pi/agent` as the
- * parent. The `modelRegistry` is *not* built here — it is the extension's
- * `ctx.modelRegistry` (shared with the parent), threaded through to
- * `createAgentSession` directly by the caller.
+ * parent. Since pi 0.80.8, `createAgentSession` takes a single `modelRuntime`
+ * (the unified model + auth runtime) in place of the removed `authStorage` /
+ * `modelRegistry` options, so the runtime is built and cached here from
+ * `~/.pi/agent/{auth,models}.json`. The parent's `ctx.modelRegistry` is still
+ * threaded by the caller, but only for *model selection* in task-resolution —
+ * not for `createAgentSession`.
  */
+import { join } from "node:path";
 import {
-  AuthStorage,
   DefaultResourceLoader,
+  ModelRuntime,
   SettingsManager,
   getAgentDir,
   type ResourceLoader,
 } from "@mariozechner/pi-coding-agent";
 
 export interface HostDeps {
-  authStorage: AuthStorage;
+  modelRuntime: ModelRuntime;
   settingsManager: SettingsManager;
   resourceLoader: ResourceLoader;
 }
@@ -74,6 +78,16 @@ const hostDepsInflight = new Map<string, Promise<HostDeps>>();
 let testRetryBaseMs: number | undefined;
 
 /**
+ * Test-only override for the ModelRuntime factory. When set, `getHostDeps`
+ * uses it instead of `ModelRuntime.create` — so integration tests can feed
+ * subagents a pre-authenticated runtime (e.g. the parent session's
+ * `modelRuntime`) and stub auth. Since pi 0.80.8, subagents build their own
+ * `modelRuntime` rather than sharing the parent's registry, so without this
+ * seam a test can't reach the subagent's auth path.
+ */
+let testModelRuntimeFactory: (() => Promise<ModelRuntime>) | undefined;
+
+/**
  * Lazily build and cache the shared host deps for a (cwd + systemPrompt) combo.
  * The first call pays the `resourceLoader.reload()` cost (~1.2s). Concurrent
  * calls for the same key await the same in-flight promise rather than racing a
@@ -90,7 +104,23 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
 
   const promise = (async (): Promise<HostDeps> => {
     const agentDir = options.agentDir ?? getAgentDir();
-    const authStorage = AuthStorage.create();
+    // Canonical model/auth runtime — the 0.80.8+ successor to the separate
+    // `authStorage` + `modelRegistry` options. Built once per (cwd + systemPrompt)
+    // and shared across concurrent subagents, exactly like the resource loader.
+    // Reads the same ~/.pi/agent/{auth,models}.json the parent uses, so auth
+    // resolution stays consistent without threading the parent's registry.
+    // In tests, `_setModelRuntimeFactoryForTesting` can substitute a runtime.
+    const modelRuntime = testModelRuntimeFactory
+      ? await testModelRuntimeFactory()
+      : await ModelRuntime.create({
+          authPath: join(agentDir, "auth.json"),
+          modelsPath: join(agentDir, "models.json"),
+          // Subagents receive an explicit model (resolved by the parent), so they
+          // never need remote model-catalog discovery. Skipping the network
+          // availability refresh makes the first call per cwd faster and
+          // offline-safe; auth (getAuth) still reads auth.json directly.
+          allowModelNetwork: false,
+        });
     const settingsManager = SettingsManager.create(options.cwd, agentDir);
     if (testRetryBaseMs !== undefined) {
       installFastRetry(settingsManager, testRetryBaseMs);
@@ -114,7 +144,7 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
     });
     await resourceLoader.reload();
 
-    const deps: HostDeps = { authStorage, settingsManager, resourceLoader };
+    const deps: HostDeps = { modelRuntime, settingsManager, resourceLoader };
     hostDepsCache.set(key, deps);
     return deps;
   })();
@@ -140,6 +170,21 @@ function installFastRetry(sm: SettingsManager, baseDelayMs: number): void {
 
 /** Test-only: clear the cache so a fresh (cwd, prompt) gets re-built. */
 export function _resetHostDepsCacheForTesting(): void {
+  hostDepsCache.clear();
+  hostDepsInflight.clear();
+}
+
+/**
+ * Test-only: substitute the ModelRuntime factory. Pass a factory returning a
+ * pre-authenticated runtime (e.g. the parent session's `modelRuntime`) so
+ * subagents reuse it and a test can stub auth; pass `undefined` to restore the
+ * real `ModelRuntime.create` path. Clears the deps cache either way so the
+ * next build respects the change.
+ */
+export function _setModelRuntimeFactoryForTesting(
+  factory: (() => Promise<ModelRuntime>) | undefined,
+): void {
+  testModelRuntimeFactory = factory;
   hostDepsCache.clear();
   hostDepsInflight.clear();
 }
