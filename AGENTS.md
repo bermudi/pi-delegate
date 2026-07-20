@@ -60,19 +60,19 @@ Unit tests stub the host-deps / `modelRuntime` path, so they can't catch a regre
 herdr pane split --current --direction right --no-focus      # capture result.pane.pane_id
 herdr pane run <pane> "pi --model '<authed-provider/model>'"  # e.g. openrouter/tencent/hy3:free
 herdr wait agent-status <pane> --status idle --timeout 30000
-herdr pane run <pane> "Use delegate to spawn one task with model <authed-provider/model>, tools read/write/edit/bash, and prompt: Reply with exactly CONNECTIVITY OK. Report the output verbatim."
+herdr pane run <pane> "Use delegate to spawn one task with tools read/write/edit/bash and prompt: Reply with exactly CONNECTIVITY OK. Report the output verbatim."
 herdr wait agent-status <pane> --status idle --timeout 180000
 herdr pane read <pane> --source recent-unwrapped --lines 50
 ```
 
-Green = `1/1 completed · … · ✓ ad-hoc … ⎿ CONNECTIVITY OK`. **Pin the task `model` to an authenticated provider** (e.g. the parent's). A fresh pi launch picks up a rebuilt bundle automatically; a long-running pi needs `/reload`.
+Green = `1/1 completed · … · ✓ ad-hoc … ⎿ CONNECTIVITY OK`. The subagent inherits the parent model, so the parent `pi --model` must be authenticated. A fresh pi launch picks up a rebuilt bundle automatically; a long-running pi needs `/reload`.
 
 ## Stable Reference Facts
 
 - **Extension dir:** `~/.pi/agent/extensions/`
 - **Delegate config:** `~/.pi/agent/delegate.json` (user-edited; `config.ts` reads it — no programmatic mutators)
 - **Custom agents** are defined either inline in a task or persisted as Markdown files in `.pi/agents/` (project) and `~/.pi/agent/agents/` (global). Markdown agents are examples of custom agents.
-- **Markdown agents** are Markdown files with YAML frontmatter — required fields `name`, `description`; optional `model`, `thinking`, `tools`
+- **Markdown agents** are Markdown files with YAML frontmatter — required fields `name`, `description`; optional `thinking`, `tools`, and rarely `model` (subagents inherit the parent model by default)
 - **Settings:** `~/.pi/agent/settings.json` — `delegate.agentOverrides` key for per-agent model/thinking/tool/skill overrides
 
 ## Tracking work

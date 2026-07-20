@@ -7,9 +7,10 @@ deepened module or seam gets a name, so future explorers share the vocabulary.
 ## Agents
 
 **Custom agent** — a subagent profile defined by the parent. It can be shaped
-inline in a delegate task (`systemPrompt`, `tools`, `model`, `thinking`) or
-persisted as a Markdown file. The model chooses the subagent it needs for each
-call; Markdown agents are examples of custom agents.
+inline in a delegate task (`systemPrompt`, `tools`, and `thinking`) or persisted
+as a Markdown file. The model chooses the subagent it needs for each call;
+Markdown agents are examples of custom agents. The subagent inherits the parent
+model by default; a custom `model` override is a rare, deliberate escape hatch.
 
 **Markdown agent** / **Named agent** — a custom agent persisted as a Markdown
 file with YAML frontmatter. Discovered from `.pi/agents/` (project),

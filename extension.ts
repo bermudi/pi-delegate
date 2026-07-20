@@ -20,7 +20,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     name: "delegate",
     label: "Delegate to Subagents",
     description:
-      "Spawn subagents to run tasks in parallel — each with its own model, tools, and context. " +
+      "Spawn subagents to run tasks in parallel — each with inherited or overridden model, tools, and context. " +
       "Supports custom agent profiles (inline or Markdown-defined), persistent multi-turn sessions, async background tickets, " +
       "and resuming interrupted runs. Call with an empty tasks array for the full manual and list " +
       "of configured agents.",

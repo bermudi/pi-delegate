@@ -34,13 +34,14 @@ The unbundled entry is `delegate.ts`; `extension.ts` holds the tool implementati
 ## Glossary
 
 - **Delegate task** — One item in `delegate({ tasks: [...] })`. This is the
-  core unit of work: a prompt plus optional overrides such as `agent`, `model`,
-  `tools`, `skills`, `systemPrompt`, `cwd`, `context`, `sessionId`, or
-  `resumeFrom`.
+  core unit of work: a prompt plus optional overrides such as `agent`, `tools`,
+  `systemPrompt`, `thinking`, `cwd`, `context`, `sessionId`, or `resumeFrom`.
+  `model` is also accepted but should be rare — subagents inherit the parent
+  model by default.
 - **Custom agent** — A subagent profile defined by the parent, either inline in
-  a delegate task (`systemPrompt`, `tools`, `model`, `thinking`) or persisted as
-  a Markdown file. The model shapes the subagent it needs on each call; Markdown
-  agents are examples of custom agents.
+  a delegate task (`systemPrompt`, `tools`, and `thinking`) or persisted as a
+  Markdown file. The subagent inherits the parent model by default; `model` is a
+  rare override. Markdown agents are examples of custom agents.
 - **Named agent** / **Markdown agent** — A reusable custom agent persisted as a
   Markdown file in `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`. The frontmatter
   defines its name, description, model, tools, thinking level, and skills; the
