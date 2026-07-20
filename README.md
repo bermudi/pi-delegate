@@ -37,13 +37,16 @@ The unbundled entry is `delegate.ts`; `extension.ts` holds the tool implementati
   core unit of work: a prompt plus optional overrides such as `agent`, `model`,
   `tools`, `skills`, `systemPrompt`, `cwd`, `context`, `sessionId`, or
   `resumeFrom`.
-- **Named agent** / **agent profile** — A reusable Markdown-defined preset from
-  `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`. The frontmatter defines its
-  name, description, model, tools, thinking level, and skills; the Markdown body
-  is its system prompt. A named agent is a configuration template, not a
-  persistent worker by itself.
+- **Custom agent** — A subagent profile defined by the parent, either inline in
+  a delegate task (`systemPrompt`, `tools`, `model`, `thinking`) or persisted as
+  a Markdown file. The model shapes the subagent it needs on each call; Markdown
+  agents are examples of custom agents.
+- **Named agent** / **Markdown agent** — A reusable custom agent persisted as a
+  Markdown file in `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`. The frontmatter
+  defines its name, description, model, tools, thinking level, and skills; the
+  Markdown body is its system prompt.
 - **Ad-hoc subagent** — A subagent created from inline task fields instead of a
-  named Markdown agent profile. In current output this is labeled `inline`.
+  named Markdown agent profile. In current output this is labeled `ad-hoc`.
 - **Inline task** — The task object itself when its configuration is supplied
   directly in the delegate call. Prefer this term over “inline agent” when
   talking about the API shape.

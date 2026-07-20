@@ -75,9 +75,7 @@ export function getSubagentManualMarkdown(
                 ? " [global]"
                 : a.scope === "claude"
                   ? " [claude]"
-                  : a.scope === "builtin"
-                    ? " [builtin]"
-                    : "";
+                  : "";
           return `- **${n}**${model}${thinking}${tools}${scope}: ${a.description}`;
         })
         .join("\n")
@@ -86,13 +84,13 @@ export function getSubagentManualMarkdown(
   return [
     "# Delegate Tool Manual",
     "",
-    "Delegate subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, and thinking level.",
+    "Delegate subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, and thinking level. Custom agents can be defined inline in a task or persisted as Markdown files.",
     "",
-    "## Available Agents",
+    "## Available Custom Agents",
     "",
     agentList,
     "",
-    "Agents live in `.pi/agents/*.md` (project-local), `~/.pi/agent/agents/` (global), and `.claude/agents/` (interchange with Claude Code). Each agent file is Markdown with YAML-ish frontmatter:",
+    "Custom agents are defined either inline in a task (using `systemPrompt`, `tools`, `model`, and `thinking`) or persisted as Markdown files in `.pi/agents/*.md` (project-local), `~/.pi/agent/agents/` (global), and `.claude/agents/` (interchange with Claude Code). Markdown agents are examples of custom agents — the parent model can shape the subagent it needs on each call. Each Markdown file is an agent with YAML-ish frontmatter:",
     "",
     "```markdown",
     "---",
@@ -108,12 +106,12 @@ export function getSubagentManualMarkdown(
     "## Task Fields",
     "",
     "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to a continuation prompt).",
-    "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
+    "- `agent` — Custom agent name from the list above, or omit for an ad-hoc subagent shaped inline.",
     "- `systemPrompt` — System prompt. Falls back to agent definition, then parent session system prompt.",
     "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
     "- `tools` — Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Omitted → inherit `*`. Claude Code tool names (Read/Glob/…) are mapped automatically; unmappable tools are dropped.",
     "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
-    "- `cwd` — Working directory for the subagent (settings, AGENTS.md resolution). Default: parent session cwd. Named-agent discovery is always parent-session-scoped regardless of per-task cwd.",
+    "- `cwd` — Working directory for the subagent (settings, AGENTS.md resolution). Default: parent session cwd. Custom-agent discovery is always parent-session-scoped regardless of per-task cwd.",
     "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
     "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
     "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
@@ -126,8 +124,8 @@ export function getSubagentManualMarkdown(
     "Subsequent calls with the same `sessionId` continue the conversation — the agent remembers prior context.",
     "",
     "```json",
-    "// First call — creates and runs",
-    '{ "prompt": "Investigate the auth module", "agent": "scout", "sessionId": "auth-research" }',
+    "// First call — creates and runs an inline custom agent",
+    '{ "prompt": "Investigate the auth module", "systemPrompt": "You are a focused investigator. Map files and dependencies.", "tools": ["read", "grep", "find", "ls"], "sessionId": "auth-research" }',
     "",
     "// Second call — continues the same agent",
     '{ "prompt": "Now check the tests for that module", "sessionId": "auth-research" }',
@@ -163,7 +161,7 @@ export function getSubagentManualMarkdown(
     "Set `async: true` on the top-level call to fire tasks in the background:",
     "",
     "```json",
-    'delegate({ async: true, tasks: [{ agent: "scout", prompt: "Investigate auth" }] })',
+    'delegate({ async: true, tasks: [{ prompt: "Investigate auth", "systemPrompt": "You are a focused investigator.", "tools": ["read", "grep", "find", "ls"] }] })',
     "```",
     "\u2192 Returns ticket ID immediately. Parent keeps working.",
     "",
