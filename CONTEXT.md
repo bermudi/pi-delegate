@@ -4,6 +4,17 @@ Names for the concepts that draw good seams in pi-delegate. Architecture
 reviews and design discussions use these terms; add a term here when a
 deepened module or seam gets a name, so future explorers share the vocabulary.
 
+## Agents
+
+**Custom agent** — a subagent profile defined by the parent. It can be shaped
+inline in a delegate task (`systemPrompt`, `tools`, `model`, `thinking`) or
+persisted as a Markdown file. The model chooses the subagent it needs for each
+call; Markdown agents are examples of custom agents.
+
+**Markdown agent** / **Named agent** — a custom agent persisted as a Markdown
+file with YAML frontmatter. Discovered from `.pi/agents/` (project),
+`~/.pi/agent/agents/` (global), legacy `~/.agents/`, and `.claude/agents/`.
+
 ## Sessions & the pool
 
 **Pooled session** — a live `AgentSession` retained for reuse across prompts,

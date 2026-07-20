@@ -4,7 +4,6 @@ import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
 import { resolveToolGroups } from "./tools.ts";
-import { BUILTIN_AGENTS } from "./builtin-agents.ts";
 import type { AgentConfig } from "./types.ts";
 
 export function parseFrontmatter(content: string): {
@@ -162,17 +161,18 @@ export function loadClaudeAgentFile(filePath: string): AgentConfig | null {
 }
 
 export function discoverAgents(cwd: string): Map<string, AgentConfig> {
-  // Discovery order (first definition wins; later dirs cannot overwrite):
+  // Discovery order for persisted Markdown agents (first definition wins;
+  // later dirs cannot overwrite):
   //   1. project  .pi/agents            (highest priority)
   //   2. global   ~/.pi/agent/agents
   //   3. global   ~/.agents             (legacy)
   //   4. project  .claude/agents        (Claude Code interchange)
   //   5. global   ~/.claude/agents
-  //   6. built-in scout/reviewer/workhorse  (lowest — superseded by any .md)
   //
-  // Built-ins are seeded last so any same-named user markdown silently
-  // supersedes them. That is the customization contract: a user who dislikes
-  // a built-in drops a same-named .md anywhere above and wins.
+  // Custom agents are defined by the parent either inline in a task or as a
+  // Markdown file in one of the directories above. Markdown agents are
+  // examples of custom agents; the parent model can shape the subagent it
+  // needs on each call.
   const projectRoot = findProjectRoot(cwd);
   const nativeDirs: { dir: string; scope: "project" | "global" }[] = [];
   if (projectRoot)
@@ -222,12 +222,6 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
   for (const d of nativeDirs) loadDir(d, loadAgentFile);
   for (const d of claudeDirs) loadDir(d, loadClaudeAgentFile);
 
-  // Built-ins seeded last — superseded by any same-named user .md above.
-  for (const builtin of BUILTIN_AGENTS) {
-    if (!agents.has(builtin.name)) {
-      agents.set(builtin.name, { ...builtin, scope: "builtin" });
-    }
-  }
   return agents;
 }
 

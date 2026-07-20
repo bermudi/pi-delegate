@@ -29,8 +29,7 @@ This is **not a standalone app** — it's a Pi extension. Entry points:
 - **Session pooling** is a deep module (`pool.ts`): live `AgentSession`s keyed by `sessionId`, behind a small interface (`checkout` / `commit` / `configFor`). The pool owns **policy** (freeze-on-insert, validate-on-reuse, insert-on-success, stats, TTL eviction); **session materialization** (pool-hit reuse / resume / fresh-create) lives in `lifecycle.ts`. Pool TTL: 10 min idle. See `docs/adr/0001` + `CONTEXT.md` — don't fold materialization into the pool.
 - **Host-compat guard** (`host-compat.ts`): the bundle imports pi internals from the package root, and pi can drop/rename a symbol on any bump — jiti then silently turns the named import into `undefined`, crashing as a cryptic `Cannot read properties of undefined (reading 'create')` (this is exactly what broke delegation across pi 0.80.3→0.80.8). `hostCompatError()` runs once per process (cached) at the top of `execute`'s dispatch path and returns a clear, actionable tool result naming any missing symbol instead. The bundle runs against the *installed* pi (via jiti's alias), which may differ from the repo's pinned/typecheck target — keep `REQUIRED_SYMBOLS` in sync with the import sites.
 - **Async tickets are fire-and-forget.** `async: true` spawns background execution and returns a ticket ID immediately. Results are pushed via `sendMessage({deliverAs:"followUp"})`. Poll/cancel with top-level `action: "poll"` or `action: "cancel"`.
-- **Named agents have layered discovery.** `discoverAgents()` walks sources in order, first definition wins: project `.pi/agents/` → global `~/.pi/agent/agents/` → legacy `~/.agents/` → project `.claude/agents/` → global `~/.claude/agents/` → built-in defaults. A same-named `.md` in a higher-priority dir supersedes anything below it.
-- **Three built-in agents** (`scout`, `reviewer`, `workhorse`) are seeded last and superseded by any same-named user markdown. Defined in `builtin-agents.ts`. They omit `model` so they inherit the parent model — user markdown can pin one by setting frontmatter `model:`.
+- **Custom agents are discovered from Markdown files.** `discoverAgents()` walks sources in order, first definition wins: project `.pi/agents/` → global `~/.pi/agent/agents/` → legacy `~/.agents/` → project `.claude/agents/` → global `~/.claude/agents`. A same-named `.md` in a higher-priority dir supersedes anything below it. Custom agents can also be defined inline in a task; Markdown agents are examples of custom agents.
 - **Claude Code interchange.** `.claude/agents/*.md` files are imported with field adaptation: capitalized tool names are mapped (`Read`→`read`, `Glob`→`find`, …), unmappable tools dropped, `disallowedTools` honored as a denylist layered on the resolved set, and `model: inherit` stripped to mean parent-inherit. See `loadClaudeAgentFile` in `agents.ts`.
 
 ## Conventions
@@ -61,19 +60,19 @@ Unit tests stub the host-deps / `modelRuntime` path, so they can't catch a regre
 herdr pane split --current --direction right --no-focus      # capture result.pane.pane_id
 herdr pane run <pane> "pi --model '<authed-provider/model>'"  # e.g. openrouter/tencent/hy3:free
 herdr wait agent-status <pane> --status idle --timeout 30000
-herdr pane run <pane> "Use delegate to spawn one workhorse task with model <authed-provider/model> and prompt: Reply with exactly CONNECTIVITY OK. Report the output verbatim."
+herdr pane run <pane> "Use delegate to spawn one task with model <authed-provider/model>, tools read/write/edit/bash, and prompt: Reply with exactly CONNECTIVITY OK. Report the output verbatim."
 herdr wait agent-status <pane> --status idle --timeout 180000
 herdr pane read <pane> --source recent-unwrapped --lines 50
 ```
 
-Green = `1/1 completed · … · ✓ workhorse … ⎿ CONNECTIVITY OK`. **Pin the task `model` to an authenticated provider** (e.g. the parent's) — builtin agents may resolve to a provider with no key and fail at auth with a clean `No API key found for <provider>`, which is a config issue, not a delegate bug. A fresh pi launch picks up a rebuilt bundle automatically; a long-running pi needs `/reload`.
+Green = `1/1 completed · … · ✓ ad-hoc … ⎿ CONNECTIVITY OK`. **Pin the task `model` to an authenticated provider** (e.g. the parent's). A fresh pi launch picks up a rebuilt bundle automatically; a long-running pi needs `/reload`.
 
 ## Stable Reference Facts
 
 - **Extension dir:** `~/.pi/agent/extensions/`
 - **Delegate config:** `~/.pi/agent/delegate.json` (user-edited; `config.ts` reads it — no programmatic mutators)
-- **Named agent dirs:** `.pi/agents/` (project) and `~/.pi/agent/agents/` (global)
-- **Named agents** are Markdown files with YAML frontmatter — required fields `name`, `description`; optional `model`, `thinking`, `tools`
+- **Custom agents** are defined either inline in a task or persisted as Markdown files in `.pi/agents/` (project) and `~/.pi/agent/agents/` (global). Markdown agents are examples of custom agents.
+- **Markdown agents** are Markdown files with YAML frontmatter — required fields `name`, `description`; optional `model`, `thinking`, `tools`
 - **Settings:** `~/.pi/agent/settings.json` — `delegate.agentOverrides` key for per-agent model/thinking/tool/skill overrides
 
 ## Tracking work

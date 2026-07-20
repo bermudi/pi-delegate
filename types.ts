@@ -14,9 +14,8 @@ export interface AgentConfig {
   thinking: ThinkingLevel;
   tools: string[];
   systemPrompt: string;
-  /** Origin of the profile. Built-ins are seeded last and superseded by any
-   *  same-named user markdown. `claude` denotes imported .claude/agents files. */
-  scope?: "project" | "global" | "claude" | "builtin";
+  /** Origin of the profile. `claude` denotes imported .claude/agents files. */
+  scope?: "project" | "global" | "claude";
 }
 
 export type SessionAction = "prompt" | "close" | "list" | "poll" | "cancel";

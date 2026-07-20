@@ -505,14 +505,11 @@ Global prompt.
     expect(agents.get("shared-agent")!.scope).toBe("project");
   });
 
-  test("returns built-in defaults when no .pi/agents directory exists", () => {
+  test("returns empty map when no agent directories exist", () => {
     const agents = discoverAgents("/nonexistent");
-    // No user agents, but the three built-ins (scout/reviewer/workhorse) are
-    // always seeded so the tool works out of the box.
-    expect(agents.has("scout")).toBe(true);
-    expect(agents.has("reviewer")).toBe(true);
-    expect(agents.has("workhorse")).toBe(true);
-    for (const a of agents.values()) expect(a.scope).toBe("builtin");
+    // Custom agents are defined inline or persisted as Markdown files. There
+    // are no built-in defaults.
+    expect(agents.size).toBe(0);
   });
 
   test("skips .chain.md files", () => {
@@ -546,15 +543,14 @@ Prompt.
     expect(agents.has("txt")).toBe(false);
   });
 
-  test("returns only built-in defaults when no user agents found", () => {
+  test("returns empty map when no user agents found", () => {
     const agents = discoverAgents(tmpDir);
-    expect(agents.size).toBe(3);
-    expect(agents.has("scout")).toBe(true);
+    expect(agents.size).toBe(0);
   });
 
-  // ── Built-in supersession ──────────────────────────────────────────────
+  // ── Project Markdown discovery ─────────────────────────────────────────
 
-  test("user markdown supersedes a same-named built-in", () => {
+  test("discovers a user Markdown custom agent by name", () => {
     const projectDir = path.join(tmpDir, "project");
     writeAgent(
       path.join(projectDir, ".pi", "agents"),
@@ -572,9 +568,6 @@ Custom scout body.
     expect(scout.description).toBe("My custom scout");
     expect(scout.systemPrompt).toBe("Custom scout body.");
     expect(scout.scope).toBe("project");
-    // The other built-ins survive untouched.
-    expect(agents.get("reviewer")!.scope).toBe("builtin");
-    expect(agents.get("workhorse")!.scope).toBe("builtin");
   });
 
   // ── Claude Code interchange ────────────────────────────────────────────
@@ -2048,7 +2041,7 @@ describe("delegate extension integration", () => {
 
     const text = result.content[0].text;
     expect(text).toContain("Delegate Tool Manual");
-    expect(text).toContain("Available Agents");
+    expect(text).toContain("Available Custom Agents");
     expect(text).toContain("Task Fields");
     expect(text).toContain("```markdown");
   });
