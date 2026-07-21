@@ -18,7 +18,58 @@ import {
 import { renderOutputForPoll } from "./spill.ts";
 import type { AsyncTicket, DelegateDetails, TaskResult } from "./types.ts";
 
-export const ticketRegistry = new Map<string, AsyncTicket>();
+const busySessionIds = new Map<string, string>();
+const busySessionsByTicket = new Map<string, Set<string>>();
+
+function sessionIdsFor(ticket: AsyncTicket): string[] {
+  return ticket.resolved
+    .map((t) => t.sessionId)
+    .filter((s): s is string => typeof s === "string" && s.length > 0);
+}
+
+/** Add/remove a ticket's session IDs from the O(1) busy index. */
+export function syncTicketBusyIndex(ticket: AsyncTicket): void {
+  const existing = busySessionsByTicket.get(ticket.id);
+  if (existing) {
+    for (const sid of existing) busySessionIds.delete(sid);
+    busySessionsByTicket.delete(ticket.id);
+  }
+  if (ticket.status !== "running") return;
+  const sids = new Set<string>();
+  for (const sid of sessionIdsFor(ticket)) {
+    busySessionIds.set(sid, ticket.id);
+    sids.add(sid);
+  }
+  if (sids.size) busySessionsByTicket.set(ticket.id, sids);
+}
+
+class TicketRegistry extends Map<string, AsyncTicket> {
+  set(key: string, value: AsyncTicket): this {
+    super.set(key, value);
+    syncTicketBusyIndex(value);
+    return this;
+  }
+
+  delete(key: string): boolean {
+    const ok = super.delete(key);
+    if (ok) {
+      const existing = busySessionsByTicket.get(key);
+      if (existing) {
+        for (const sid of existing) busySessionIds.delete(sid);
+        busySessionsByTicket.delete(key);
+      }
+    }
+    return ok;
+  }
+
+  clear(): void {
+    super.clear();
+    busySessionIds.clear();
+    busySessionsByTicket.clear();
+  }
+}
+
+export const ticketRegistry = new TicketRegistry();
 
 export function generateTicketId(): string {
   // 8-char alphanumeric, no lookalikes
@@ -38,6 +89,7 @@ export function sweepTickets(): void {
       ticket.status = "failed";
       ticket.error = "Exceeded maximum runtime";
       ticket.completedAt = now;
+      syncTicketBusyIndex(ticket);
     }
     // TTL cleanup for completed/failed/cancelled
     if (
@@ -50,15 +102,10 @@ export function sweepTickets(): void {
   }
 }
 
-/** Check if any running async ticket holds a given sessionId. */
+/** Check if any running async ticket holds a given sessionId.
+ *  Backed by an O(1) map updated when tickets start/complete. */
 export function isSessionBusy(sessionId: string): string | null {
-  for (const ticket of ticketRegistry.values()) {
-    if (ticket.status !== "running") continue;
-    if (ticket.resolved.some((t) => t.sessionId === sessionId)) {
-      return ticket.id;
-    }
-  }
-  return null;
+  return busySessionIds.get(sessionId) ?? null;
 }
 
 /**
@@ -377,6 +424,7 @@ export function handleCancel(params: {
   ticket.controller.abort();
   ticket.status = "cancelled";
   ticket.completedAt = Date.now();
+  syncTicketBusyIndex(ticket);
   return {
     content: [{ type: "text", text: `Ticket '${ticketId}' cancelled.` }],
     details: { tasks: [], results: [], progress: [] },
