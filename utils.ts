@@ -79,16 +79,46 @@ export function extractOutput(messages: AgentMessage[]): string {
   return parts.join("\n\n");
 }
 
+interface UsageLike {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  total?: number;
+  totalTokens?: number;
+}
+
+function isUsageLike(u: unknown): u is UsageLike {
+  if (u === null || typeof u !== "object") return false;
+  const r = u as Record<string, unknown>;
+  const numericKeys: (keyof UsageLike)[] = [
+    "input",
+    "output",
+    "cacheRead",
+    "total",
+    "totalTokens",
+  ];
+  let hasNumeric = false;
+  for (const k of numericKeys) {
+    const v = r[k as string];
+    if (v !== undefined) {
+      if (typeof v !== "number") return false;
+      hasNumeric = true;
+    }
+  }
+  return hasNumeric;
+}
+
 export function extractUsage(messages: AgentMessage[]) {
   const usage = { input: 0, output: 0, cacheRead: 0, total: 0 };
   for (const msg of messages) {
-    if (msg.role !== "assistant" || !msg.usage) continue;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const u = msg.usage as any;
+    if (msg.role !== "assistant") continue;
+    const rawUsage: unknown = msg.usage;
+    if (!isUsageLike(rawUsage)) continue;
+    const u = rawUsage;
     usage.input += u.input ?? 0;
     usage.output += u.output ?? 0;
     usage.cacheRead += u.cacheRead ?? 0;
-    usage.total += u.total ?? (u.input ?? 0) + (u.output ?? 0);
+    usage.total += u.total ?? u.totalTokens ?? (u.input ?? 0) + (u.output ?? 0);
   }
   return usage;
 }
