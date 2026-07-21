@@ -263,7 +263,9 @@ export function resolveTasks(
       model: model!,
       tools,
       thinking,
-      prompt,
+      // Empty only for close/list actions (validated above) — downstream
+      // display code treats "" and absent alike (`t.prompt || …`).
+      prompt: prompt ?? "",
       // Display label for ad-hoc subagents (no named profile). NOTE: the
       // config-namespace key at resolveModelSpec stays "inline" — that's a
       // delegate.json/settings contract, not a display string (friction #4).

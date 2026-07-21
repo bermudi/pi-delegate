@@ -93,20 +93,6 @@ function getToolDef(ts: TestSession, name: string) {
   return runner.getToolDefinition(name);
 }
 
-function collectSchemaDescriptions(schema: unknown): string[] {
-  const descriptions: string[] = [];
-  const visit = (value: unknown) => {
-    if (!value || typeof value !== "object") return;
-    const record = value as Record<string, unknown>;
-    if (typeof record.description === "string") {
-      descriptions.push(record.description);
-    }
-    for (const child of Object.values(record)) visit(child);
-  };
-  visit(schema);
-  return descriptions;
-}
-
 function getTasksArraySchema(schema: any): any {
   const tasks = schema.properties.tasks;
   if (tasks.type === "array") return tasks;
@@ -2019,12 +2005,49 @@ describe("delegate extension integration", () => {
     expect(tasksArraySchema.minItems).toBe(0);
   });
 
-  test("uses stealth registration metadata and schema", async () => {
+  test("wires prepareArguments to recover stringified tasks arrays", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
+    const prepare = toolDef!.prepareArguments;
+    expect(prepare).toBeDefined();
+
+    // Stringified JSON array (the documented gotcha) → recovered to a real array.
+    const recovered = prepare!({ tasks: '[{"prompt":"hi"}]', async: true });
+    expect(recovered).toEqual({ tasks: [{ prompt: "hi" }], async: true });
+
+    // Already-correct arguments pass through unchanged (same reference).
+    const good = { tasks: [{ prompt: "hi" }] };
+    expect(prepare!(good)).toBe(good as never);
+
+    // Non-JSON string and non-array JSON are left for schema validation to reject.
+    const notJson = { tasks: "not json" };
+    expect(prepare!(notJson)).toBe(notJson as never);
+    const notArray = { tasks: '{"prompt":"hi"}' };
+    expect(prepare!(notArray)).toBe(notArray as never);
+
+    // Non-object inputs pass through untouched.
+    expect(prepare!(null)).toBe(null as never);
+  });
+
+  test("stays out of the system prompt but self-describes in the schema", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    // System-prompt stealth: no snippet, no guidelines.
     expect(toolDef!.promptSnippet).toBeUndefined();
     expect(toolDef!.promptGuidelines ?? []).toEqual([]);
-    expect(collectSchemaDescriptions(toolDef!.parameters)).toEqual([]);
+    // Schema self-description: every top-level property and every task
+    // field carries a description so the model can call correctly without
+    // fetching the manual first.
+    const schema = toolDef!.parameters as any;
+    for (const [key, prop] of Object.entries<any>(schema.properties)) {
+      expect(typeof prop.description, `top-level '${key}'`).toBe("string");
+    }
+    const tasksArraySchema = getTasksArraySchema(schema);
+    for (const [key, prop] of Object.entries<any>(
+      tasksArraySchema.items.properties,
+    )) {
+      expect(typeof prop.description, `task field '${key}'`).toBe("string");
+    }
   });
 
   test("execute returns help when tasks is empty", async () => {

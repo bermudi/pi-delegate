@@ -1,7 +1,11 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { handleCancel, handlePoll, ticketRegistry } from "./tickets.ts";
 import { discoverAgents } from "./agents.ts";
-import { delegateParameters, getSubagentManualMarkdown } from "./manual.ts";
+import {
+  delegateParameters,
+  getSubagentManualMarkdown,
+  prepareDelegateArguments,
+} from "./manual.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
 import {
   initProgress,
@@ -25,6 +29,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       "and resuming interrupted runs. Call with an empty tasks array for the full manual and list " +
       "of configured agents.",
     parameters: delegateParameters,
+    // Runs before schema validation — recovers stringified `tasks` arrays
+    // (a common model mistake that would otherwise be rejected upstream).
+    prepareArguments: prepareDelegateArguments,
 
     async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
