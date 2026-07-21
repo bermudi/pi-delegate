@@ -1286,6 +1286,59 @@ describe("truncLine", () => {
     expect(stripped.length).toBeLessThanOrEqual(5);
     expect(stripped).toContain("…");
   });
+
+  test("handles ZWJ emoji sequences (family and skin tone)", () => {
+    const family = "👨‍👩‍👧‍👦"; // single ZWJ family grapheme, width 2
+    expect(truncLine(family, 2)).toBe(family);
+    expect(truncLine(family, 1)).toBe("…");
+
+    const thumbs = "👍🏻"; // base emoji + skin-tone modifier, width 2
+    expect(truncLine(thumbs, 2)).toBe(thumbs);
+    expect(truncLine(thumbs, 1)).toBe("…");
+  });
+
+  test("handles variation selectors as a single grapheme", () => {
+    const heart = "❤️"; // U+2764 + U+FE0F variation selector
+    expect(truncLine(heart, 1)).toBe(heart);
+    expect(truncLine(heart, 0)).toBe("");
+  });
+
+  test("handles ANSI reset and active-style edge cases", () => {
+    // Active style is re-applied to the ellipsis; trailing reset is dropped.
+    const red = "\x1b[31mhello\x1b[0m";
+    const redResult = truncLine(red, 2);
+    expect(redResult).toContain("\x1b[31m");
+    expect(redResult).toContain("…");
+    expect(redResult).not.toContain("\x1b[0m");
+    const redStripped = redResult.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(redStripped).toBe("h…");
+
+    // Multiple active styles accumulate and are re-applied.
+    const multi = "\x1b[31m\x1b[1mbold red\x1b[0m";
+    const multiResult = truncLine(multi, 5);
+    expect(multiResult).toContain("\x1b[31m");
+    expect(multiResult).toContain("\x1b[1m");
+    const multiStripped = multiResult.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(multiStripped).toBe("bold…");
+
+    // A reset before the truncation point clears active styles.
+    const cleared = "\x1b[31mred\x1b[0mgreen";
+    const clearedResult = truncLine(cleared, 6);
+    const clearedStripped = clearedResult.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(clearedStripped).toBe("redgr…");
+    expect(clearedResult.indexOf("\x1b[0m")).toBeLessThan(
+      clearedResult.indexOf("…"),
+    );
+  });
+
+  test("handles width boundaries correctly", () => {
+    expect(truncLine("hello", 1)).toBe("…");
+    expect(truncLine("hello", 2)).toBe("h…");
+    expect(truncLine("h", 2)).toBe("h");
+    expect(truncLine("", 1)).toBe("");
+    expect(truncLine("你", 1)).toBe("…");
+    expect(truncLine("你", 2)).toBe("你");
+  });
 });
 
 describe("trunc", () => {
