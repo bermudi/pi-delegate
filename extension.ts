@@ -1,5 +1,10 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { handleCancel, handlePoll, ticketRegistry } from "./tickets.ts";
+import {
+  handleCancel,
+  handlePoll,
+  syncTicketBusyIndex,
+  ticketRegistry,
+} from "./tickets.ts";
 import { discoverAgents } from "./agents.ts";
 import {
   delegateParameters,
@@ -137,6 +142,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         ticket.controller.abort();
         ticket.status = "cancelled";
         ticket.completedAt = Date.now();
+        syncTicketBusyIndex(ticket);
       }
     }
     // Do NOT clear the entire registry here — only abort running tickets.

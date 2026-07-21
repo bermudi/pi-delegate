@@ -7,6 +7,7 @@ import {
   deliverTicketResults,
   sweepTickets,
   resolveFinalTicketStatus,
+  syncTicketBusyIndex,
 } from "./tickets.ts";
 import {
   getConcurrencyLimit,
@@ -170,6 +171,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       if (ticket.status === "running") {
         ticket.status = resolveFinalTicketStatus(ticket);
         ticket.completedAt = Date.now();
+        syncTicketBusyIndex(ticket);
       }
       deliverTicketResults(pi, ticket);
     })
@@ -178,6 +180,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       ticket.status = "failed";
       ticket.error = err instanceof Error ? err.message : String(err);
       ticket.completedAt = Date.now();
+      syncTicketBusyIndex(ticket);
       deliverTicketResults(pi, ticket);
     });
 
