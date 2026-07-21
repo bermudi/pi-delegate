@@ -27,11 +27,20 @@ export const OUTPUT_SPILL_THRESHOLD_CHARS = 8000;
 /** Tail length (chars) kept in-context when an output is spilled. */
 export const OUTPUT_SPILL_TAIL_CHARS = 2000;
 
-export const VALID_THINKING = new Set([
+/** Literal union of valid thinking levels. Source of truth for both the
+ *  runtime Set (below) and the TypeBox schema's static type — the `as const`
+ *  tuple keeps `StringEnum`'s `T[number]` narrow so `DelegateParams["tasks"]`
+ *  projects `thinking` to the literal union rather than `string`. */
+export const VALID_THINKING_LEVELS = [
   "off",
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
-]);
+] as const;
+
+/** Runtime membership check for thinking levels. Kept as `Set<string>` (not
+ *  `Set<VALID_THINKING_LEVELS[number]>`) so the `.has(string)` call sites in
+ *  task-resolution.ts and agents.ts stay ergonomic under strict typing. */
+export const VALID_THINKING: Set<string> = new Set(VALID_THINKING_LEVELS);

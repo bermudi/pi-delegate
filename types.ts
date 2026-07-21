@@ -6,6 +6,8 @@ import type {
   SessionManager,
   SessionEntry,
 } from "@mariozechner/pi-coding-agent";
+import type { Static } from "@sinclair/typebox";
+import type { delegateParameters } from "./manual.ts";
 
 export interface AgentConfig {
   name: string;
@@ -18,32 +20,19 @@ export interface AgentConfig {
   scope?: "project" | "global" | "claude";
 }
 
-export type SessionAction = "prompt" | "close" | "list" | "poll" | "cancel";
-export type DelegateAction = "poll" | "cancel";
+// ── Tool parameter types — derived from the TypeBox schema ────────────────
+// `delegateParameters` in manual.ts is the single source of truth; these are
+// projections of it, so schema and types cannot drift. Field semantics live
+// in the schema's `description`s (which the calling model also sees).
+// The import is type-only, so the manual.ts ↔ types.ts cycle is erased at
+// compile time.
 
-export interface DelegateParams {
-  action?: DelegateAction;
-  async?: boolean;
-  ticket?: string;
-  tasks?: TaskDef[];
-}
-
-export interface TaskDef {
-  prompt: string;
-  agent?: string;
-  model?: string;
-  tools?: string[];
-  thinking?: string;
-  systemPrompt?: string;
-  cwd?: string;
-  context?: "fresh" | "with-parent-transcript";
-  /** Name for a persistent subagent session. First use creates it, subsequent calls reuse it. Each session handles one task at a time — duplicate sessionIds in the same call are rejected. */
-  sessionId?: string;
-  /** Action for session management. Default: "prompt". "close" tears down a pooled agent. "list" shows active sessions. "poll" checks async tickets. "cancel" aborts async ticket. */
-  action?: SessionAction;
-  /** Absolute path to a previous subagent session .jsonl to continue from. The agent resumes with full conversation context. */
-  resumeFrom?: string;
-}
+export type DelegateParams = Static<typeof delegateParameters>;
+export type TaskDef = NonNullable<DelegateParams["tasks"]>[number];
+/** Top-level async ticket action: "poll" | "cancel". */
+export type DelegateAction = NonNullable<DelegateParams["action"]>;
+/** Per-task session action: "prompt" | "close" | "list" | "poll" | "cancel". */
+export type SessionAction = NonNullable<TaskDef["action"]>;
 
 // ── Async Ticket Types ─────────────────────────────────────────────────────
 
