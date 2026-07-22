@@ -181,6 +181,107 @@ description: desc
     const result = parseFrontmatter(content);
     expect(result.body).toBe("");
   });
+
+  test("values containing colons parse correctly", () => {
+    const content = `---
+name: scout
+description: Fix the bug in agents.ts:42 and retry
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.description).toBe(
+      "Fix the bug in agents.ts:42 and retry",
+    );
+  });
+
+  test("handles colon-space in unquoted scalar values", () => {
+    const content = `---
+name: scout
+description: Use when: X, not for: Y
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.description).toBe("Use when: X, not for: Y");
+  });
+
+  test("multiline block scalars parse", () => {
+    const content = `---
+name: scout
+description: |
+  line one
+  line two: with a colon
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.description).toBe("line one\nline two: with a colon\n");
+  });
+
+  test("quoted strings with special chars parse verbatim", () => {
+    const content = `---
+name: scout
+description: "a: b [c] {d}"
+model: "anthropic/claude-sonnet-4:beta"
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.description).toBe("a: b [c] {d}");
+    expect(result.data.model).toBe("anthropic/claude-sonnet-4:beta");
+  });
+
+  test("drops keys with an empty value", () => {
+    const content = `---
+name: agent
+empty key without colon:
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.name).toBe("agent");
+    expect(result.data["empty key without colon"]).toBeUndefined();
+  });
+
+  test("logs and skips a genuinely malformed frontmatter block", () => {
+    const content = `---
+name: a
+  : b
+  c
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.name).toBeUndefined();
+    expect(result.body).toBe(content.trim());
+  });
+
+  test("bare `tools: *` is recovered as the full-agent shorthand", () => {
+    const content = `---
+name: star
+description: All tools
+tools: *
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.tools).toBe("*");
+  });
+
+  test("nested map values are JSON-stringified, not '[object Object]'", () => {
+    const content = `---
+name: nested
+description: Has a nested block
+meta:
+  k: v
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.name).toBe("nested");
+    expect(result.data.meta).toBe('{"k":"v"}');
+  });
 });
 
 // ── findProjectRoot ───────────────────────────────────────────────────────
@@ -1183,6 +1284,48 @@ describe("extractUsage", () => {
       total: 0,
     });
   });
+
+  test("rejects NaN usage values", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input: NaN, output: 2 },
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input: 5, output: 3 },
+      },
+    ] as any;
+    expect(extractUsage(messages)).toEqual({
+      input: 5,
+      output: 3,
+      cacheRead: 0,
+      total: 8,
+    });
+  });
+
+  test("rejects infinite usage values", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input: Infinity, output: 2 },
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input: 1, output: 1 },
+      },
+    ] as any;
+    expect(extractUsage(messages)).toEqual({
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      total: 2,
+    });
+  });
 });
 
 // ── Formatting utilities ──────────────────────────────────────────────────
@@ -1306,12 +1449,12 @@ describe("truncLine", () => {
   });
 
   test("handles ANSI reset and active-style edge cases", () => {
-    // Active style is re-applied to the ellipsis; trailing reset is dropped.
+    // Active styles are re-applied to the ellipsis and then closed.
     const red = "\x1b[31mhello\x1b[0m";
     const redResult = truncLine(red, 2);
     expect(redResult).toContain("\x1b[31m");
     expect(redResult).toContain("…");
-    expect(redResult).not.toContain("\x1b[0m");
+    expect(redResult.endsWith("\x1b[0m")).toBe(true);
     const redStripped = redResult.replace(/\x1b\[[0-9;]*m/g, "");
     expect(redStripped).toBe("h…");
 
@@ -1320,6 +1463,7 @@ describe("truncLine", () => {
     const multiResult = truncLine(multi, 5);
     expect(multiResult).toContain("\x1b[31m");
     expect(multiResult).toContain("\x1b[1m");
+    expect(multiResult.endsWith("\x1b[0m")).toBe(true);
     const multiStripped = multiResult.replace(/\x1b\[[0-9;]*m/g, "");
     expect(multiStripped).toBe("bold…");
 
@@ -1573,7 +1717,9 @@ describe("formatCompletedTask", () => {
   test("renders header + OK metadata + output for a successful task", () => {
     const lines = formatCompletedTask(makeTask(), makeResult());
     expect(lines[0]).toBe("=== scout: do the thing ===");
-    expect(lines[1]).toBe(`[OK | ${fmtDuration(1500)} | ${fmtTokens(42)} tokens]\n\nall done`);
+    expect(lines[1]).toBe(
+      `[OK | ${fmtDuration(1500)} | ${fmtTokens(42)} tokens]\n\nall done`,
+    );
     expect(lines).toHaveLength(2);
   });
 
@@ -1585,7 +1731,9 @@ describe("formatCompletedTask", () => {
     expect(lines[0]).toBe("=== scout: do the thing ===");
     expect(lines[1]).toBe("[WARNING: unknown tool: foo]");
     expect(lines[2]).toBe("[WARNING: model fallback]");
-    expect(lines[3]).toBe(`[OK | ${fmtDuration(1500)} | ${fmtTokens(42)} tokens]\n\nall done`);
+    expect(lines[3]).toBe(
+      `[OK | ${fmtDuration(1500)} | ${fmtTokens(42)} tokens]\n\nall done`,
+    );
   });
 
   test("includes sessionFile (shortened) and touched files in OK metadata", () => {
@@ -3470,9 +3618,7 @@ describe("delegate renderers", () => {
       content: [{ type: "text", text: "Done" }],
       details: {
         tasks: [{ prompt: "task" }],
-        results: [
-          { agent: "ad-hoc", output: "ok", durationMs: 0, tokens: 0 },
-        ],
+        results: [{ agent: "ad-hoc", output: "ok", durationMs: 0, tokens: 0 }],
         progress: [
           {
             index: 0,
@@ -4596,9 +4742,7 @@ describe("async delegate integration", () => {
       activities: [],
     }));
 
-  const mkResult = (
-    error?: string,
-  ): TaskResult => ({
+  const mkResult = (error?: string): TaskResult => ({
     agent: "scout",
     output: error ? "" : "ok",
     error,
@@ -4814,7 +4958,15 @@ describe("async delegate integration", () => {
         },
       ],
       status: "done",
-      results: [{ agent: "scout", output: fullOutput, durationMs: 100, tokens: 10, touchedFiles: [] }],
+      results: [
+        {
+          agent: "scout",
+          output: fullOutput,
+          durationMs: 100,
+          tokens: 10,
+          touchedFiles: [],
+        },
+      ],
       progress: mkProgress(["done"]),
       controller: new AbortController(),
       parentModelId: "m",
@@ -4921,9 +5073,9 @@ describe("shared live-progress row helpers", () => {
       relativeTouchedSummary([`${cwd}/src/a.ts`, `${cwd}/src/b.ts`], cwd),
     ).toBe("src/a.ts, src/b.ts");
     // outsider (../../etc) is dropped; insider survives
-    expect(relativeTouchedSummary([`${cwd}/src/a.ts`, "/etc/passwd"], cwd)).toBe(
-      "src/a.ts",
-    );
+    expect(
+      relativeTouchedSummary([`${cwd}/src/a.ts`, "/etc/passwd"], cwd),
+    ).toBe("src/a.ts");
     expect(relativeTouchedSummary(["/etc/passwd"], cwd)).toBeNull();
     expect(relativeTouchedSummary([], cwd)).toBeNull();
   });

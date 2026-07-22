@@ -108,7 +108,13 @@ export function truncLine(text: string, maxWidth: number): string {
     for (const segment of _segmenter.segment(part)) {
       const seg = segment.segment;
       const w = charWidth(seg);
-      if (vis + w > target) return result + activeStyles.join("") + "…";
+      if (vis + w > target)
+        return (
+          result +
+          activeStyles.join("") +
+          "…" +
+          (activeStyles.length ? "\x1b[0m" : "")
+        );
       result += seg;
       vis += w;
     }
@@ -391,7 +397,9 @@ export function formatCompletedTask(
     if (result.sessionFile) meta.push(shortenPath(result.sessionFile));
     const touched = relativeTouchedSummary(result.touchedFiles, task.cwd);
     if (touched) meta.push(`touched: ${touched}`);
-    parts.push(`[${meta.join(" · ")}]\n\n${renderOutputForLLM(result.output, result.agent)}`);
+    parts.push(
+      `[${meta.join(" · ")}]\n\n${renderOutputForLLM(result.output, result.agent)}`,
+    );
   }
   return parts;
 }
@@ -417,9 +425,7 @@ export function taskMetaBase(r: TaskResult): string[] {
 /** Pending-task waiting label: "queued (N running)" at the concurrency cap,
  *  else "waiting…". Shared by the two TUI branches. */
 export function waitingLabel(runningCount: number, cap: number): string {
-  return runningCount >= cap
-    ? `queued (${runningCount} running)`
-    : "waiting…";
+  return runningCount >= cap ? `queued (${runningCount} running)` : "waiting…";
 }
 
 /** Touched-files summary relative to cwd ("src/a.ts, src/b.ts"), or null when
