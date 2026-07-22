@@ -77,7 +77,7 @@ Green = `1/1 completed · … · ✓ ad-hoc … ⎿ CONNECTIVITY OK`. The subage
 
 ## Tracking work
 
-Open work is tracked in GitHub Issues, not in-repo markdown plans. Feature work, refactors, bugs, and follow-ups are tracked as issues — no `*-PLAN.md` or `UX-REVIEW.md` files. See the tracker and linked issues at https://github.com/bermudi/pi-delegate/issues/19.
+Open work is tracked in GitHub Issues, not in-repo markdown plans. Feature work, refactors, bugs, and follow-ups are tracked as issues — no `*-PLAN.md` or `UX-REVIEW.md` files. Priorities are labels (`P0`/`P1`/`P2`/`P3`), not a tracker issue. Triage with `gh issue list --state open --label P1` (or P0/P2/P3); theme grouping uses the existing labels (`architecture`, `refactor`, `tooling`, `tests`, `perf`, `quality`, `enhancement`, `bug`). See https://github.com/bermudi/pi-delegate/issues.
 
 ## Security
 
