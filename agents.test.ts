@@ -225,4 +225,20 @@ Body.
     const result = parseFrontmatter(content);
     expect(result.data.tools).toBe("*");
   });
+
+  test("nested map values are JSON-stringified, not '[object Object]'", () => {
+    // The agent frontmatter schema is flat by convention, but a stray nested
+    // map must not silently degrade to the useless String() output.
+    const content = `---
+name: nested
+description: Has a nested block
+meta:
+  k: v
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.name).toBe("nested");
+    expect(result.data.meta).toBe('{"k":"v"}');
+  });
 });
