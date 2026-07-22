@@ -2,23 +2,76 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@mariozechner/pi-agent-core";
+import { parseFrontmatter as parsePiFrontmatter } from "@mariozechner/pi-coding-agent";
 import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
 import { resolveToolGroups } from "./tools.ts";
 import type { AgentConfig } from "./types.ts";
 
-export function parseFrontmatter(content: string): {
+// Frontmatter fence: `---\n … \n---\n body`. CRLF-tolerant. Captures the
+// YAML block (group 1) and the body (group 2). The YAML itself is parsed by
+// pi-coding-agent's `parseFrontmatter` (built on the `yaml` package, which is
+// a guaranteed dependency of the host pi) — we only use this regex to split
+// the fence from the body and to detect the no-frontmatter case.
+const FRONTMATTER_FENCE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
+
+/** Coerce a parsed YAML frontmatter object into the flat
+ *  `Record<string, string>` shape the rest of the loader expects. Arrays
+ *  (e.g. `tools: [read, write]`) are joined with ", " so the downstream
+ *  comma-split in `resolveFrontmatterTools` still works; other scalars are
+ *  `String()`-ified. `null`/`undefined` are dropped. */
+function frontmatterToData(
+  fm: Record<string, unknown>,
+): Record<string, string> {
+  const data: Record<string, string> = {};
+  for (const [k, v] of Object.entries(fm)) {
+    if (v === null || v === undefined) continue;
+    data[k] = Array.isArray(v) ? v.map(String).join(", ") : String(v);
+  }
+  return data;
+}
+
+export function parseFrontmatter(
+  content: string,
+  filePath?: string,
+): {
   data: Record<string, string>;
   body: string;
 } {
-  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  const m = content.match(FRONTMATTER_FENCE);
   if (!m) return { data: {}, body: content.trim() };
-  const data: Record<string, string> = {};
-  for (const line of m[1]!.split("\n")) {
-    const idx = line.indexOf(":");
-    if (idx === -1) continue;
-    data[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+  const yamlString = m[1]!;
+  const body = m[2]!.trim();
+
+  // A bare `*` is a YAML alias indicator and is invalid as a scalar, so
+  // `tools: *` (the full-agent shorthand) would throw. Quote any value that is
+  // exactly `*` so it parses as the string "*", which resolveFrontmatterTools
+  // then expands via TOOL_GROUPS. (A `*` mid-scalar, e.g. `use * here`, is a
+  // legal plain scalar and needs no quoting.)
+  const sanitized = yamlString.replace(
+    /^(\s*[\w-]+):\s*\*(?=\s*$)/gm,
+    '$1: "*"',
+  );
+
+  try {
+    // Re-wrap and let pi's parser (yaml under the hood) do the real work.
+    const { frontmatter, body: parsedBody } = parsePiFrontmatter(
+      `---\n${sanitized}\n---\n${body}`,
+    );
+    return {
+      data: frontmatterToData((frontmatter ?? {}) as Record<string, unknown>),
+      body: parsedBody,
+    };
+  } catch (e) {
+    // Malformed frontmatter is a user error, not a crash. Log a clear,
+    // actionable message (with the file path when available) and return empty
+    // data so the caller's `!data.name || !data.description` check skips the
+    // file rather than importing a half-parsed agent.
+    const where = filePath ? ` (${filePath})` : "";
+    console.warn(
+      `[delegate] malformed agent frontmatter${where}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`,
+    );
+    return { data: {}, body: content.trim() };
   }
-  return { data, body: m[2]!.trim() };
 }
 
 // ── Agent Discovery ───────────────────────────────────────────────────────
@@ -97,7 +150,7 @@ export function loadAgentFile(filePath: string): AgentConfig | null {
   } catch {
     return null;
   }
-  const { data, body } = parseFrontmatter(content);
+  const { data, body } = parseFrontmatter(content, filePath);
   if (!data.name || !data.description) return null;
   return {
     name: data.name,
@@ -135,7 +188,7 @@ export function loadClaudeAgentFile(filePath: string): AgentConfig | null {
   } catch {
     return null;
   }
-  const { data, body } = parseFrontmatter(content);
+  const { data, body } = parseFrontmatter(content, filePath);
   if (!data.name || !data.description) return null;
 
   let tools = resolveFrontmatterTools(data.tools, CLAUDE_TOOL_ALIASES);

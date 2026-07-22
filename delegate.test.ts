@@ -148,7 +148,10 @@ You are a scout.
     expect(result.body).toBe("Just body text.");
   });
 
-  test("ignores lines without colon", () => {
+  test("treats a stray non-key line as a parse error, not a crash", () => {
+    // A line that looks like an implicit map key with no value is malformed
+    // YAML. The real parser surfaces it (logged) instead of silently
+    // absorbing it; callers skip the file via the name/description check.
     const content = `---
 name: agent
 bad line without colon
@@ -156,8 +159,7 @@ bad line without colon
 Body.
 `;
     const result = parseFrontmatter(content);
-    expect(result.data.name).toBe("agent");
-    expect(result.data["bad line without colon"]).toBeUndefined();
+    expect(result.data.name).toBeUndefined();
   });
 
   test("trims keys and values", () => {
