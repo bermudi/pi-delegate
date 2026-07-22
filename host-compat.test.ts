@@ -12,6 +12,7 @@ const ALL_PRESENT = {
   DefaultResourceLoader: class {},
   createAgentSession: () => {},
   getAgentDir: () => "",
+  parseFrontmatter: () => ({}),
 };
 
 describe("host-compat guard", () => {
@@ -33,8 +34,10 @@ describe("host-compat guard", () => {
     const result = hostCompatResult({});
     expect(result).not.toBeNull();
     const text = (result!.content[0] as { text: string }).text;
-    // All six required symbols should be called out.
-    expect((text.match(/'/g) ?? []).length / 2).toBe(6);
+    // All seven required symbols should be called out (the count must stay
+    // in sync with REQUIRED_SYMBOLS in host-compat.ts — if you add a symbol
+    // there, bump this).
+    expect((text.match(/'/g) ?? []).length / 2).toBe(7);
     expect(result!.details.tasks).toEqual([]);
     expect(result!.details.results).toEqual([]);
   });

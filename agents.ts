@@ -17,15 +17,20 @@ const FRONTMATTER_FENCE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
 /** Coerce a parsed YAML frontmatter object into the flat
  *  `Record<string, string>` shape the rest of the loader expects. Arrays
  *  (e.g. `tools: [read, write]`) are joined with ", " so the downstream
- *  comma-split in `resolveFrontmatterTools` still works; other scalars are
- *  `String()`-ified. `null`/`undefined` are dropped. */
+ *  comma-split in `resolveFrontmatterTools` still works. Nested maps are
+ *  JSON-stringified rather than `String()`-ified (which would emit the
+ *  useless "[object Object]"). `null`/`undefined` are dropped. The agent
+ *  frontmatter schema is flat by convention, so the object branch only fires
+ *  on malformed input and keeps it debuggable instead of silently garbage. */
 function frontmatterToData(
   fm: Record<string, unknown>,
 ): Record<string, string> {
   const data: Record<string, string> = {};
   for (const [k, v] of Object.entries(fm)) {
     if (v === null || v === undefined) continue;
-    data[k] = Array.isArray(v) ? v.map(String).join(", ") : String(v);
+    if (Array.isArray(v)) data[k] = v.map(String).join(", ");
+    else if (typeof v === "object") data[k] = JSON.stringify(v);
+    else data[k] = String(v);
   }
   return data;
 }

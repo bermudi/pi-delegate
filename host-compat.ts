@@ -6,7 +6,7 @@ import type { DelegateToolResult } from "./types.ts";
  * bare call on any of these crashes with a cryptic
  * `Cannot read properties of undefined (reading '…')` if pi drops or renames it.
  * Keep this list in sync with the actual import sites (host.ts, sessions.ts,
- * lifecycle.ts).
+ * lifecycle.ts, agents.ts).
  */
 const REQUIRED_SYMBOLS = [
   "ModelRuntime",
@@ -15,6 +15,7 @@ const REQUIRED_SYMBOLS = [
   "DefaultResourceLoader",
   "createAgentSession",
   "getAgentDir",
+  "parseFrontmatter",
 ] as const;
 
 /**
