@@ -35,6 +35,23 @@ function frontmatterToData(
   return data;
 }
 
+function sanitizeYamlScalars(yaml: string): string {
+  return yaml
+    .split("\n")
+    .map((line) => {
+      const m = line.match(/^(\s*)([\w-]+)(\s*:\s*)(.*)$/);
+      if (!m) return line;
+      const [, leading, key, sep, rawValue] = m;
+      const value = rawValue.trim();
+      if (!value) return line;
+      if (/^["'|>\[{]/.test(value)) return line;
+      if (!/:\s/.test(value)) return line;
+      const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      return `${leading}${key}${sep}"${escaped}"`;
+    })
+    .join("\n");
+}
+
 export function parseFrontmatter(
   content: string,
   filePath?: string,
@@ -52,9 +69,8 @@ export function parseFrontmatter(
   // exactly `*` so it parses as the string "*", which resolveFrontmatterTools
   // then expands via TOOL_GROUPS. (A `*` mid-scalar, e.g. `use * here`, is a
   // legal plain scalar and needs no quoting.)
-  const sanitized = yamlString.replace(
-    /^(\s*[\w-]+):\s*\*(?=\s*$)/gm,
-    '$1: "*"',
+  const sanitized = sanitizeYamlScalars(
+    yamlString.replace(/^(\s*[\w-]+):\s*\*(?=\s*$)/gm, '$1: "*"'),
   );
 
   try {
@@ -207,9 +223,10 @@ export function loadClaudeAgentFile(filePath: string): AgentConfig | null {
     description: data.description,
     // `inherit` is Claude's "use parent" default — drop it so we fall through
     // to parent-model inheritance. Any other value passes through verbatim.
-    model: data.model && data.model.toLowerCase() === "inherit"
-      ? undefined
-      : data.model,
+    model:
+      data.model && data.model.toLowerCase() === "inherit"
+        ? undefined
+        : data.model,
     thinking: VALID_THINKING.has(data.thinking ?? "")
       ? (data.thinking as ThinkingLevel)
       : "off",

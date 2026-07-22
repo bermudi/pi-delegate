@@ -101,7 +101,7 @@ function isUsageLike(u: unknown): u is UsageLike {
   for (const k of numericKeys) {
     const v = r[k as string];
     if (v !== undefined) {
-      if (typeof v !== "number") return false;
+      if (typeof v !== "number" || !Number.isFinite(v)) return false;
       hasNumeric = true;
     }
   }

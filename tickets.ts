@@ -18,7 +18,7 @@ import {
 import { renderOutputForPoll } from "./spill.ts";
 import type { AsyncTicket, DelegateDetails, TaskResult } from "./types.ts";
 
-const busySessionIds = new Map<string, string>();
+const busyTicketIdsBySession = new Map<string, Set<string>>();
 const busySessionsByTicket = new Map<string, Set<string>>();
 
 function sessionIdsFor(ticket: AsyncTicket): string[] {
@@ -27,17 +27,26 @@ function sessionIdsFor(ticket: AsyncTicket): string[] {
     .filter((s): s is string => typeof s === "string" && s.length > 0);
 }
 
+function removeTicketBusySessions(ticketId: string): void {
+  const sessions = busySessionsByTicket.get(ticketId);
+  if (!sessions) return;
+  for (const sessionId of sessions) {
+    const ticketIds = busyTicketIdsBySession.get(sessionId);
+    ticketIds?.delete(ticketId);
+    if (ticketIds?.size === 0) busyTicketIdsBySession.delete(sessionId);
+  }
+  busySessionsByTicket.delete(ticketId);
+}
+
 /** Add/remove a ticket's session IDs from the O(1) busy index. */
 export function syncTicketBusyIndex(ticket: AsyncTicket): void {
-  const existing = busySessionsByTicket.get(ticket.id);
-  if (existing) {
-    for (const sid of existing) busySessionIds.delete(sid);
-    busySessionsByTicket.delete(ticket.id);
-  }
+  removeTicketBusySessions(ticket.id);
   if (ticket.status !== "running") return;
   const sids = new Set<string>();
   for (const sid of sessionIdsFor(ticket)) {
-    busySessionIds.set(sid, ticket.id);
+    const ticketIds = busyTicketIdsBySession.get(sid) ?? new Set<string>();
+    ticketIds.add(ticket.id);
+    busyTicketIdsBySession.set(sid, ticketIds);
     sids.add(sid);
   }
   if (sids.size) busySessionsByTicket.set(ticket.id, sids);
@@ -52,19 +61,13 @@ class TicketRegistry extends Map<string, AsyncTicket> {
 
   delete(key: string): boolean {
     const ok = super.delete(key);
-    if (ok) {
-      const existing = busySessionsByTicket.get(key);
-      if (existing) {
-        for (const sid of existing) busySessionIds.delete(sid);
-        busySessionsByTicket.delete(key);
-      }
-    }
+    if (ok) removeTicketBusySessions(key);
     return ok;
   }
 
   clear(): void {
     super.clear();
-    busySessionIds.clear();
+    busyTicketIdsBySession.clear();
     busySessionsByTicket.clear();
   }
 }
@@ -105,7 +108,7 @@ export function sweepTickets(): void {
 /** Check if any running async ticket holds a given sessionId.
  *  Backed by an O(1) map updated when tickets start/complete. */
 export function isSessionBusy(sessionId: string): string | null {
-  return busySessionIds.get(sessionId) ?? null;
+  return busyTicketIdsBySession.get(sessionId)?.values().next().value ?? null;
 }
 
 /**
@@ -125,9 +128,7 @@ export function isSessionBusy(sessionId: string): string | null {
 export function resolveFinalTicketStatus(
   ticket: AsyncTicket,
 ): "done" | "failed" {
-  const anyFailed = ticket.results.some(
-    (r) => r && "error" in r && r.error,
-  );
+  const anyFailed = ticket.results.some((r) => r && "error" in r && r.error);
   const allSettled = ticket.progress.every(
     (p) => p.status === "done" || p.status === "failed",
   );
@@ -150,9 +151,7 @@ export function formatCompletedTicket(
   // mistaken for success. "done" tickets keep the original header; others
   // get an explicit status tag up front.
   const statusTag =
-    ticket.status === "done"
-      ? ""
-      : `${ticket.status.toUpperCase()} · `;
+    ticket.status === "done" ? "" : `${ticket.status.toUpperCase()} · `;
   parts.push(
     `${statusTag}${succeeded}/${ticket.results.length} tasks completed · ${fmtDuration(elapsedTotal)} wall time\n`,
   );
