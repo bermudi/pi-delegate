@@ -1,154 +1,39 @@
-import { Type, type SchemaOptions } from "@sinclair/typebox";
 import {
   DEFAULT_TOOLS,
-  VALID_THINKING_LEVELS,
   POOL_TTL_MS,
   OUTPUT_SPILL_THRESHOLD_CHARS,
   OUTPUT_SPILL_TAIL_CHARS,
 } from "./constants.ts";
 import { getMaxAsyncTickets, getMaxConcurrent } from "./config.ts";
-import type { AgentConfig, DelegateParams } from "./types.ts";
+import type { TSchema } from "@sinclair/typebox";
+import { delegateParameters, delegateTaskParameters } from "./schema.ts";
+import type { AgentConfig } from "./types.ts";
 
-// JSON Schema string enum that keeps the literal union in `Static<>`.
-// `Type.String({ enum })` validates identically but widens to `string`;
-// `Type.Union([Type.Literal…])` keeps the literals but serializes as `anyOf`,
-// which some providers handle poorly. `Type.Unsafe` gives both: the wire
-// format stays `{ type: "string", enum: [...] }` and the type stays narrow.
-function StringEnum<const T extends readonly string[]>(
-  values: T,
-  options?: SchemaOptions,
-) {
-  return Type.Unsafe<T[number]>({
-    ...options,
-    type: "string",
-    enum: [...values],
-  });
+function schemaType(schema: TSchema): string {
+  if (Array.isArray(schema.enum)) {
+    return schema.enum.map((value) => JSON.stringify(value)).join(" | ");
+  }
+  if (schema.type === "array") return `${schemaType(schema.items)}[]`;
+  return typeof schema.type === "string" ? schema.type : "unknown";
 }
 
-// ── Extracted schema constant ───────────────────────────────────────────
-// Avoids inline `this` context issues and lets TypeScript infer params safely.
-// Single source of truth for the tool's parameter types — `DelegateParams`
-// and `TaskDef` in types.ts are derived from this schema via `Static<>`.
-export const delegateParameters = Type.Object({
-  action: Type.Optional(
-    StringEnum(["poll", "cancel"], {
-      description:
-        "Async ticket action: 'poll' lists tickets (or checks one when `ticket` is set), 'cancel' aborts a running ticket. Does not require `tasks`.",
-    }),
-  ),
-  async: Type.Optional(
-    Type.Boolean({
-      description:
-        "Run tasks in the background and return a ticket ID immediately. Results are delivered automatically when all tasks finish; check progress with action 'poll'.",
-    }),
-  ),
-  ticket: Type.Optional(
-    Type.String({
-      description: "Ticket ID for action 'poll' or 'cancel'.",
-    }),
-  ),
-  tasks: Type.Optional(
-    Type.Array(
-      Type.Object({
-        prompt: Type.Optional(
-          Type.String({
-            description:
-              "The task for this subagent. Required unless action is 'close'/'list' or resumeFrom is set.",
-          }),
-        ),
-        agent: Type.Optional(
-          Type.String({
-            description:
-              "Name of a configured custom agent. Omit for an ad-hoc subagent shaped inline via systemPrompt/tools/thinking.",
-          }),
-        ),
-        cwd: Type.Optional(
-          Type.String({
-            description:
-              "Working directory for the subagent (settings, AGENTS.md resolution). Default: parent session cwd.",
-          }),
-        ),
-        systemPrompt: Type.Optional(
-          Type.String({
-            description:
-              "System prompt for an ad-hoc subagent. Falls back to the agent definition, then the parent session's system prompt.",
-          }),
-        ),
-        context: Type.Optional(
-          StringEnum(["fresh", "with-parent-transcript"], {
-            description:
-              "'fresh' (default) starts with a clean context; 'with-parent-transcript' injects the full parent conversation (token-expensive).",
-          }),
-        ),
-        model: Type.Optional(
-          Type.String({
-            description:
-              "Model override, e.g. 'anthropic/claude-sonnet-4'. Rarely needed — omit to inherit the parent model.",
-          }),
-        ),
-        tools: Type.Optional(
-          Type.Array(Type.String(), {
-            description:
-              "Tool names or shorthands ('*' = full: read,write,edit,bash; 'ro' = read-only: read,grep,find,ls). Omit to inherit '*'.",
-          }),
-        ),
-        thinking: Type.Optional(
-          StringEnum(VALID_THINKING_LEVELS, {
-            description: "Thinking level. Default: agent setting or 'off'.",
-          }),
-        ),
-        sessionId: Type.Optional(
-          Type.String({
-            description:
-              "Name for a persistent subagent. First use creates it; subsequent calls with the same sessionId continue the conversation. One task per session at a time.",
-          }),
-        ),
-        action: Type.Optional(
-          StringEnum(["prompt", "close", "list", "poll", "cancel"], {
-            description:
-              "Per-task session action: 'prompt' (default) runs the task, 'close' tears down a pooled session, 'list' shows active sessions. ('poll'/'cancel' are legacy aliases for the top-level action.)",
-          }),
-        ),
-        resumeFrom: Type.Optional(
-          Type.String({
-            description:
-              "Absolute path to a previous subagent session .jsonl to continue from. The agent resumes with full conversation context. Not for async polling.",
-          }),
-        ),
-      }),
-      {
-        // Explicitly 0 (the JSON Schema default) — an empty array is the
-        // documented way to request the manual (help mode).
-        minItems: 0,
-        description:
-          "Tasks to run in parallel, each in its own subagent. Must be a real JSON array of objects, not a stringified array. Pass an empty array for the full manual and the list of configured agents.",
-      },
-    ),
-  ),
-});
+function markdownCell(value: string): string {
+  return value.replaceAll("|", "\\|").replaceAll("\n", " ");
+}
 
-/** Compatibility shim run by pi *before* schema validation (wired as the
- *  tool's `prepareArguments`). Some models send `tasks` as a JSON string
- *  instead of an array — the exact mistake the manual's gotchas warn about,
- *  but validation rejects the call before `execute` runs, so the manual
- *  never gets a chance to help. Recover the array here; anything else falls
- *  through to the normal schema-validation error. Same pattern as pi's own
- *  edit tool (`prepareEditArguments`). */
-export function prepareDelegateArguments(args: unknown): DelegateParams {
-  if (args && typeof args === "object") {
-    const record = args as Record<string, unknown>;
-    if (typeof record.tasks === "string") {
-      try {
-        const parsed: unknown = JSON.parse(record.tasks);
-        if (Array.isArray(parsed)) {
-          return { ...record, tasks: parsed } as DelegateParams;
-        }
-      } catch {
-        // Not JSON — leave as-is for schema validation to reject.
-      }
-    }
-  }
-  return args as DelegateParams;
+function schemaTable(properties: Record<string, TSchema>): string {
+  const rows = Object.entries(properties).map(([name, schema]) => {
+    const type = markdownCell(schemaType(schema));
+    const defaultValue =
+      "default" in schema ? JSON.stringify(schema.default) : "—";
+    const description = markdownCell(schema.description ?? "");
+    return `| \`${name}\` | \`${type}\` | \`${defaultValue}\` | ${description} |`;
+  });
+  return [
+    "| Field | Type | Default | Description |",
+    "| --- | --- | --- | --- |",
+    ...rows,
+  ].join("\n");
 }
 
 export function getSubagentManualMarkdown(
@@ -202,18 +87,11 @@ export function getSubagentManualMarkdown(
     "",
     "## Task Fields",
     "",
-    "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to a continuation prompt).",
-    "- `agent` — Custom agent name from the list above, or omit for an ad-hoc subagent shaped inline.",
-    "- `systemPrompt` — System prompt. Falls back to agent definition, then parent session system prompt.",
-    "- `tools` — Tool names or shorthands (`*` = full: read,write,edit,bash; `ro` = read-only: read,grep,find,ls). Omitted → inherit `*`. Claude Code tool names (Read/Glob/…) are mapped automatically; unmappable tools are dropped.",
-    "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
-    "- `model` — e.g. `anthropic/claude-sonnet-4`. **Rarely needed.** Omit to use the parent model; only set this if the subagent must use a different model.",
-    "- `cwd` — Working directory for the subagent (settings, AGENTS.md resolution). Default: parent session cwd. Custom-agent discovery is always parent-session-scoped regardless of per-task cwd.",
-    "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
-    "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
-    "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
-    "- top-level `action` — Async ticket action: 'poll' or 'cancel'. Does not require `tasks`.",
-    "- `tasks` must be a real JSON array of objects, not a quoted/stringified JSON array.",
+    schemaTable(delegateTaskParameters.properties),
+    "",
+    "## Top-level Fields",
+    "",
+    schemaTable(delegateParameters.properties),
     "",
     "## Session Reuse",
     "",

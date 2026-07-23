@@ -2191,11 +2191,8 @@ describe("delegate extension integration", () => {
     // label is human-facing; assert shape, not exact wording (copy can drift).
     expect(typeof toolDef!.label).toBe("string");
     expect(toolDef!.label!.trim().length).toBeGreaterThan(0);
-    // Description is a plain string — exact wording is not a contract.
-    // Stealth hygiene is enforced by the sibling test below (no schema
-    // descriptions, no prompt snippet).
-    expect(typeof toolDef!.description).toBe("string");
-    expect(toolDef!.description!.trim().length).toBeGreaterThan(0);
+    // Registration is schema-first: no redundant model-facing description.
+    expect(toolDef!.description).toBeUndefined();
   });
 
   test("has tasks array parameter with minItems 0 (allows help mode)", async () => {
@@ -2269,6 +2266,18 @@ describe("delegate extension integration", () => {
     expect(text).toContain("Delegate Tool Manual");
     expect(text).toContain("Available Custom Agents");
     expect(text).toContain("Task Fields");
+    expect(text).toContain("Top-level Fields");
+    const schema = toolDef!.parameters as any;
+    for (const key of Object.keys(schema.properties)) {
+      expect(text).toContain(`| \`${key}\` |`);
+    }
+    for (const key of Object.keys(getTasksArraySchema(schema).items.properties)) {
+      expect(text).toContain(`| \`${key}\` |`);
+    }
+    expect(text).toContain(
+      '| `context` | `"fresh" \\| "with-parent-transcript"` | `"fresh"` |',
+    );
+    expect(text).toContain("| `async` | `boolean` | `false` |");
     expect(text).toContain("```markdown");
   });
 
