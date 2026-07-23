@@ -6,11 +6,8 @@ import {
   ticketRegistry,
 } from "./tickets.ts";
 import { discoverAgents } from "./agents.ts";
-import {
-  delegateParameters,
-  getSubagentManualMarkdown,
-  prepareDelegateArguments,
-} from "./manual.ts";
+import { getSubagentManualMarkdown } from "./manual.ts";
+import { delegateParameters, prepareDelegateArguments } from "./schema.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
 import {
   initProgress,
@@ -25,14 +22,12 @@ import { hostCompatError } from "./host-compat.ts";
 import type { DelegateParams } from "./types.ts";
 
 export default function delegateExtension(pi: ExtensionAPI): void {
+  // Pi's ToolDefinition still requires `description`, but the parameter
+  // schema is the model-facing contract and the full guide is help mode.
+  // @ts-expect-error — intentionally omit the redundant description.
   pi.registerTool({
     name: "delegate",
     label: "Delegate to Subagents",
-    description:
-      "Spawn subagents to run tasks in parallel — each with inherited or overridden model, tools, and context. " +
-      "Supports custom agent profiles (inline or Markdown-defined), persistent multi-turn sessions, async background tickets, " +
-      "and resuming interrupted runs. Call with an empty tasks array for the full manual and list " +
-      "of configured agents.",
     parameters: delegateParameters,
     // Runs before schema validation — recovers stringified `tasks` arrays
     // (a common model mistake that would otherwise be rejected upstream).

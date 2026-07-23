@@ -7,7 +7,7 @@ import type {
   SessionEntry,
 } from "@mariozechner/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
-import type { delegateParameters } from "./manual.ts";
+import type { delegateParameters } from "./schema.ts";
 
 export interface AgentConfig {
   name: string;
@@ -21,10 +21,10 @@ export interface AgentConfig {
 }
 
 // ── Tool parameter types — derived from the TypeBox schema ────────────────
-// `delegateParameters` in manual.ts is the single source of truth; these are
+// `delegateParameters` in schema.ts is the single source of truth; these are
 // projections of it, so schema and types cannot drift. Field semantics live
 // in the schema's `description`s (which the calling model also sees).
-// The import is type-only, so the manual.ts ↔ types.ts cycle is erased at
+// The import is type-only, so the schema.ts ↔ types.ts cycle is erased at
 // compile time.
 
 export type DelegateParams = Static<typeof delegateParameters>;
@@ -183,5 +183,3 @@ export interface AcquiredSession {
   sessionManager: SessionManager | undefined;
   sessionFile: string | undefined;
 }
-
-
