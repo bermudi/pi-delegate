@@ -14,7 +14,8 @@ This is **not a standalone app** — it's a Pi extension. Entry points:
 
 - **`delegate.ts`** — public API surface (barrel re-exports). The build entry point.
 - **`extension.ts`** — thin tool-definition orchestrator. Wires `registerTool` and dispatches `execute` to the focused modules below; owns only the poll/cancel/help short-circuits and the session-shutdown handler.
-- **`manual.ts`** — `delegateParameters` schema (single source of truth — `DelegateParams`/`TaskDef` in `types.ts` are `Static<>` projections of it), `prepareDelegateArguments` (pre-validation shim recovering stringified `tasks` arrays), and `getSubagentManualMarkdown` help text.
+- **`schema.ts`** — `delegateParameters` schema (single source of truth — `DelegateParams`/`TaskDef` in `types.ts` are `Static<>` projections of it) and `prepareDelegateArguments` (pre-validation shim recovering stringified `tasks` arrays).
+- **`manual.ts`** — schema-driven help generation and the dynamic configured-agent list.
 - **`task-resolution.ts`** — `validateTasks` (duplicate sessions, busy conflicts, unknown agents) and `resolveTasks` (agent/model/tools/system-prompt resolution per task).
 - **`dispatch.ts`** — `initProgress`, `makeFireUpdater`, `dispatchAsync`, `dispatchSync`. Sync/async execution orchestration.
 - **`lifecycle.ts`** — per-task execution: resolves a usable `AgentSession` (pool hit / resume-from-`.jsonl` / fresh), runs the prompt via `runner.ts`, and commits the outcome. Owns session **materialization** and the whole-task retry loop.
