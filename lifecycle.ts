@@ -24,6 +24,7 @@ import { getGitChangedFiles } from "./file-tracking.ts";
 import { getHostDeps } from "./host.ts";
 import { resolveCwd, validateResumeFromPath } from "./utils.ts";
 import { getWholeTaskMaxRetries, getWholeTaskBaseDelayMs } from "./config.ts";
+import { addUsage, emptyUsage } from "./usage.ts";
 
 /**
  * Test-only overrides for whole-task retry settings. When set, these bypass
@@ -61,6 +62,7 @@ function failTask(
     error,
     durationMs: 0,
     tokens: 0,
+    usage: emptyUsage(),
     sessionFile,
     touchedFiles: [],
   };
@@ -78,6 +80,7 @@ function completeSessionAction(
     output,
     durationMs: elapsedMs ?? 0,
     tokens: 0,
+    usage: emptyUsage(),
     sessionFile: undefined,
     touchedFiles: [],
   };
@@ -496,6 +499,7 @@ async function runResolvedTaskUnlocked(
           error: r.error,
           durationMs: r.durationMs,
           tokens: r.tokens,
+          usage: r.usage,
           sessionFile: resolveResumableSessionFile(
             acquired.sessionFile,
             acquired.sessionManager,
@@ -514,6 +518,9 @@ async function runResolvedTaskUnlocked(
     // full acquire/run/close lifecycle), so attempts execute serially per
     // sessionId without needing an inner lock here.
     let result = await runAttempt();
+    // Accumulate usage across whole-task retries: the parent pays for every
+    // attempt, including the transient failures that retry.
+    let accumulatedUsage = result.usage;
     const maxRetries = resolvedWholeTaskMaxRetries();
     const baseDelayMs = resolvedWholeTaskBaseDelayMs();
     for (
@@ -525,12 +532,15 @@ async function runResolvedTaskUnlocked(
       await sleepForWholeTaskRetry(env.signal, delayMs);
       if (env.signal?.aborted) {
         result = failTask(task, "Aborted");
+        result.usage = accumulatedUsage;
         break;
       }
       p.status = "running";
       p.error = undefined;
       env.onStatusChange?.();
       result = await runAttempt();
+      accumulatedUsage = addUsage(accumulatedUsage, result.usage);
+      result.usage = accumulatedUsage;
     }
     return finishTask(env, p, result);
   } catch (err) {

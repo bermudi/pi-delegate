@@ -11,6 +11,8 @@ import {
   extractOutput,
   extractUsage,
 } from "./utils.ts";
+import { snapshotSessionUsage, usageDelta, emptyUsage } from "./usage.ts";
+import type { Usage } from "@mariozechner/pi-ai";
 import type { AgentProgressUpdate, ToolActivity } from "./types.ts";
 
 /**
@@ -43,6 +45,7 @@ export async function runAgentSession(
   error?: string;
   durationMs: number;
   tokens: number;
+  usage: Usage;
   touchedFiles: string[];
 }> {
   const startTime = start || Date.now();
@@ -54,6 +57,9 @@ export async function runAgentSession(
   // Snapshot usage before the prompt so we can report only the tokens consumed
   // by this call (not cumulative history on a pooled/resumed session).
   const usageBeforeTotal = extractUsage(session.messages).total;
+  // Cumulative session stats (cover compacted-away history) feed the full
+  // provider Usage reported up to the parent's session-total accounting.
+  const statsBefore = snapshotSessionUsage(session);
 
   const fireProgress = () => {
     if (!onProgress) return;
@@ -151,6 +157,7 @@ export async function runAgentSession(
       error: "Aborted",
       durationMs: Date.now() - startTime,
       tokens: 0,
+      usage: emptyUsage(),
       touchedFiles: [],
     };
   }
@@ -168,6 +175,7 @@ export async function runAgentSession(
     const output = extractOutput(messages.slice(messagesBefore));
     const usageAfterTotal = extractUsage(messages).total;
     const tokensThisCall = Math.max(0, usageAfterTotal - usageBeforeTotal);
+    const usage = usageDelta(statsBefore, snapshotSessionUsage(session));
 
     // Compute touched files: union of activity-based (edit/write) and git diff
     // against the pre-prompt baseline. Independent of the runner's event model.
@@ -181,6 +189,7 @@ export async function runAgentSession(
       error: errorMessage,
       durationMs: Date.now() - startTime,
       tokens: tokensThisCall,
+      usage,
       touchedFiles,
     };
   } catch (err) {
@@ -190,6 +199,7 @@ export async function runAgentSession(
       error: msg,
       durationMs: Date.now() - startTime,
       tokens: 0,
+      usage: emptyUsage(),
       touchedFiles: [],
     };
   } finally {

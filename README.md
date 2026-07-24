@@ -19,6 +19,17 @@ ln -s "$PWD/delegate.bundle.ts" ~/.pi/agent/extensions/delegate.ts
 
 Then `/reload` in Pi.
 
+### Token accounting
+
+Sync delegate calls report aggregate subagent `Usage` on the tool result, so Pi
+(0.81+) folds those tokens **and cost** into the parent footer and session
+total automatically — no manual addition needed.
+
+Async tickets can't be auto-counted: their results arrive as a follow-up message,
+which has no usage slot. The per-call aggregate (`Nk tokens`) is still shown in
+the delegate header for both modes. Use sync delegation when totals must roll
+into the session.
+
 ## Develop
 
 ```bash
