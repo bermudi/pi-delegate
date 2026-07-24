@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model, Usage } from "@mariozechner/pi-ai";
 import type {
   AgentSession,
   ModelRegistry,
@@ -110,7 +110,17 @@ export interface TaskResult {
   output: string;
   error?: string;
   durationMs: number;
+  /** Display token count for the task (cumulative-message delta). Distinct
+   *  from `usage`, the full provider breakdown reported to the parent for
+   *  session-total accounting. The two can differ when compaction occurred. */
   tokens: number;
+  /** Full provider Usage consumed by this task, including compacted-away
+   *  history. Always present (`emptyUsage()` on no-op/early-failure paths) so a
+   *  sync delegate call can fold subagent spend into the parent's session
+   *  total. Aggregate `cost.total` is accurate; the per-component cost fields
+   *  stay 0 because `getSessionStats()` exposes only the aggregate cost — and
+   *  Pi sums `cost.total` for nested usage anyway. */
+  usage: Usage;
   sessionFile?: string;
   touchedFiles: string[];
 }
@@ -171,10 +181,17 @@ export interface DelegateToolCtx {
 }
 
 /** Shape returned by the delegate tool's `execute`. Mirrors Pi's
- *  `AgentToolResult<DelegateDetails>` without depending on the generic. */
+ *  `AgentToolResult<DelegateDetails>` without depending on the generic.
+ *  `usage` (sync dispatch only) is the aggregate subagent spend; Pi 0.81+
+ *  persists it on the tool result and folds it into the parent's
+ *  session/footer totals. Older hosts ignore it. Async tickets can't attach
+ *  usage — their results arrive via a follow-up message with no usage slot. */
 export interface DelegateToolResult {
   content: Array<{ type: "text"; text: string }>;
   details: DelegateDetails;
+  /** Aggregate subagent usage for sync dispatch. Pi reads this for session
+   *  totals on 0.81+; harmless on older versions. */
+  usage?: Usage;
 }
 
 export interface AcquiredSession {

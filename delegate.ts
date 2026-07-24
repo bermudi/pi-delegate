@@ -63,6 +63,14 @@ export { runAgentSession } from "./runner.ts";
 export { getHostDeps } from "./host.ts";
 export type { HostDeps, HostDepsOptions } from "./host.ts";
 export {
+  emptyUsage,
+  snapshotSessionUsage,
+  usageDelta,
+  addUsage,
+  sumUsage,
+} from "./usage.ts";
+export type { SessionUsageSnapshot } from "./usage.ts";
+export {
   truncLine,
   shortenPath,
   getActivityAge,

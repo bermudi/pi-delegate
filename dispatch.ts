@@ -14,6 +14,7 @@ import {
   getMaxAsyncTickets,
 } from "./config.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
+import { sumUsage } from "./usage.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
 import { fmtDuration, formatCompletedTask, trunc } from "./format.ts";
 import type {
@@ -263,5 +264,9 @@ export async function dispatchSync(
       progress,
       parentModel: parentModelId,
     },
+    // Aggregate subagent spend so Pi folds it into the parent's
+    // session/footer totals. Sync dispatch only — async results arrive via a
+    // follow-up message that has no usage slot (see DelegateToolResult).
+    usage: sumUsage(finalResults.map((r) => r.usage)),
   };
 }
