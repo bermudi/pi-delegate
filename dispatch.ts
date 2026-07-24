@@ -9,10 +9,7 @@ import {
   resolveFinalTicketStatus,
   syncTicketBusyIndex,
 } from "./tickets.ts";
-import {
-  getConcurrencyLimit,
-  getMaxAsyncTickets,
-} from "./config.ts";
+import { getConcurrencyLimit, getMaxAsyncTickets } from "./config.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
 import { sumUsage } from "./usage.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";

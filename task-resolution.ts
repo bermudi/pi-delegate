@@ -123,9 +123,7 @@ export function resolveTasks(
     // Build system prompt. Explicit task prompts and named agent prompts
     // win; ad-hoc subagents inherit the parent prompt when Pi exposes it,
     // then get explicit skills/AGENTS.md injection below.
-    const pooledConfig = t.sessionId
-      ? configFor(t.sessionId)
-      : undefined;
+    const pooledConfig = t.sessionId ? configFor(t.sessionId) : undefined;
 
     // Prompt is required for fresh tasks. ResumeFrom provides context already.
     if (

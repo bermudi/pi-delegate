@@ -48,7 +48,9 @@ describe("mapConcurrentByModel", () => {
       return task.id;
     };
 
-    const items = Array.from({ length: 6 }, (_, i) => makeTask(i, "openai", "gpt-4"));
+    const items = Array.from({ length: 6 }, (_, i) =>
+      makeTask(i, "openai", "gpt-4"),
+    );
 
     // Two parallel invocations simulate two concurrent `delegate` calls.
     const [r1, r2] = await Promise.all([

@@ -802,7 +802,9 @@ describe("delegate task lifecycle integration", () => {
         results: Array<{ output?: string; error?: string }>;
       };
       expect(details.results[0]?.error).toBeUndefined();
-      expect(details.results[0]?.output).toContain("Inherited tools, ran fine.");
+      expect(details.results[0]?.output).toContain(
+        "Inherited tools, ran fine.",
+      );
     } finally {
       fs.rmSync(taskCwd, { recursive: true, force: true });
     }

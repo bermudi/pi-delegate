@@ -130,7 +130,12 @@ describe("spillToTempFile", () => {
   test("returns null (never throws) when the write target is unwritable", () => {
     // Point the file at a non-existent directory: writeFileSync throws ENOENT.
     // The lossless contract is "return null, do not throw".
-    const p = spillToTempFile("x", "scout", "fail", "/nonexistent-dir-delegate-spill-test");
+    const p = spillToTempFile(
+      "x",
+      "scout",
+      "fail",
+      "/nonexistent-dir-delegate-spill-test",
+    );
     expect(p).toBeNull();
   });
 });

@@ -67,10 +67,7 @@ export function spillToTempFile(
   dir: string = os.tmpdir(),
 ): string | null {
   const safeLabel = label.replace(/[^\w.-]+/g, "_");
-  const filePath = path.join(
-    dir,
-    `delegate-output-${safeLabel}-${suffix}.md`,
-  );
+  const filePath = path.join(dir, `delegate-output-${safeLabel}-${suffix}.md`);
   try {
     fs.writeFileSync(filePath, output, { mode: 0o600 });
     return filePath;
@@ -136,7 +133,11 @@ export function renderOutputForPoll(
 }
 
 /** Assemble the tail + pointer block emitted on a successful spill. */
-function spillPointer(tail: string, filePath: string, fullChars: number): string {
+function spillPointer(
+  tail: string,
+  filePath: string,
+  fullChars: number,
+): string {
   return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
 }
 

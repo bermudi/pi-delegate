@@ -2191,8 +2191,9 @@ describe("delegate extension integration", () => {
     // label is human-facing; assert shape, not exact wording (copy can drift).
     expect(typeof toolDef!.label).toBe("string");
     expect(toolDef!.label!.trim().length).toBeGreaterThan(0);
-    // Registration is schema-first: no redundant model-facing description.
-    expect(toolDef!.description).toBeUndefined();
+    // Tool-level description is concise and non-empty.
+    expect(typeof toolDef!.description).toBe("string");
+    expect(toolDef!.description!.trim().length).toBeGreaterThan(0);
   });
 
   test("has tasks array parameter with minItems 0 (allows help mode)", async () => {
@@ -2239,15 +2240,54 @@ describe("delegate extension integration", () => {
     // field carries a description so the model can call correctly without
     // fetching the manual first.
     const schema = toolDef!.parameters as any;
-    for (const [key, prop] of Object.entries<any>(schema.properties)) {
+    const topProperties = Object.entries<any>(schema.properties);
+    for (const [key, prop] of topProperties) {
       expect(typeof prop.description, `top-level '${key}'`).toBe("string");
     }
     const tasksArraySchema = getTasksArraySchema(schema);
-    for (const [key, prop] of Object.entries<any>(
+    const taskProperties = Object.entries<any>(
       tasksArraySchema.items.properties,
-    )) {
+    );
+    for (const [key, prop] of taskProperties) {
       expect(typeof prop.description, `task field '${key}'`).toBe("string");
     }
+
+    // Critical conditional semantics that JSON Schema cannot express cheaply
+    // remain available at call-time without restoring B's prose-heavy schema.
+    expect(toolDef!.description).toContain("parallel subagents");
+    expect(schema.properties.ticket.description).toContain(
+      "omit only when polling",
+    );
+    expect(tasksArraySchema.items.properties.context.description).toContain(
+      "token-expensive",
+    );
+    expect(tasksArraySchema.items.properties.tools.description).toContain(
+      "read/write/edit/bash",
+    );
+    expect(tasksArraySchema.items.properties.action.description).toContain(
+      "close requires sessionId",
+    );
+    expect(tasksArraySchema.items.properties.resumeFrom.description).toContain(
+      "not for async tickets",
+    );
+
+    // Descriptions are a tokenizer-independent proxy for the repeated provider
+    // tool-definition payload. Keep the complete model-facing guidance compact
+    // enough that a copy edit cannot quietly recreate the verbose B-state schema.
+    const descriptions = [
+      toolDef!.description!,
+      ...topProperties.map(([, prop]) => prop.description as string),
+      ...taskProperties.map(([, prop]) => prop.description as string),
+    ];
+    expect(
+      Math.max(...descriptions.map((description) => description.length)),
+    ).toBeLessThanOrEqual(100);
+    expect(
+      descriptions.reduce(
+        (total, description) => total + description.length,
+        0,
+      ),
+    ).toBeLessThanOrEqual(1_000);
   });
 
   test("execute returns help when tasks is empty", async () => {
@@ -2271,7 +2311,9 @@ describe("delegate extension integration", () => {
     for (const key of Object.keys(schema.properties)) {
       expect(text).toContain(`| \`${key}\` |`);
     }
-    for (const key of Object.keys(getTasksArraySchema(schema).items.properties)) {
+    for (const key of Object.keys(
+      getTasksArraySchema(schema).items.properties,
+    )) {
       expect(text).toContain(`| \`${key}\` |`);
     }
     expect(text).toContain(

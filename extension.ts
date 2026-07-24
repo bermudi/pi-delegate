@@ -22,12 +22,11 @@ import { hostCompatError } from "./host-compat.ts";
 import type { DelegateParams } from "./types.ts";
 
 export default function delegateExtension(pi: ExtensionAPI): void {
-  // Pi's ToolDefinition still requires `description`, but the parameter
-  // schema is the model-facing contract and the full guide is help mode.
-  // @ts-expect-error — intentionally omit the redundant description.
   pi.registerTool({
     name: "delegate",
     label: "Delegate to Subagents",
+    description:
+      "Delegate independent work to parallel subagents with separate context and tools.",
     parameters: delegateParameters,
     // Runs before schema validation — recovers stringified `tasks` arrays
     // (a common model mistake that would otherwise be rejected upstream).

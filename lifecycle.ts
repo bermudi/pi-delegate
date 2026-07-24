@@ -35,10 +35,14 @@ let testWholeTaskMaxRetries: number | undefined;
 let testWholeTaskBaseDelayMs: number | undefined;
 
 /** @internal Test-only override for whole-task retry count and base delay. */
-export function _setWholeTaskRetryForTesting(opts: {
-  maxRetries?: number;
-  baseDelayMs?: number;
-} | undefined): void {
+export function _setWholeTaskRetryForTesting(
+  opts:
+    | {
+        maxRetries?: number;
+        baseDelayMs?: number;
+      }
+    | undefined,
+): void {
   testWholeTaskMaxRetries = opts?.maxRetries;
   testWholeTaskBaseDelayMs = opts?.baseDelayMs;
 }
