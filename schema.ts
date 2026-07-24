@@ -41,7 +41,8 @@ export const delegateTaskParameters = Type.Object({
   ),
   context: Type.Optional(
     StringEnum(["fresh", "with-parent-transcript"], {
-      description: "Context mode; parent transcript is token-expensive.",
+      description:
+        "'with-parent-transcript' injects the full parent conversation (token-expensive).",
       default: "fresh",
     }),
   ),
@@ -52,7 +53,8 @@ export const delegateTaskParameters = Type.Object({
   ),
   tools: Type.Optional(
     Type.Array(Type.String(), {
-      description: "Tool names or '*' (full) / 'ro' (read-only).",
+      description:
+        "Tool names or '*' (read/write/edit/bash) / 'ro' (read/grep/find/ls).",
     }),
   ),
   thinking: Type.Optional(
@@ -67,13 +69,14 @@ export const delegateTaskParameters = Type.Object({
   ),
   action: Type.Optional(
     StringEnum(["prompt", "close", "list", "poll", "cancel"], {
-      description: "Session action; poll/cancel are legacy ticket aliases.",
+      description:
+        "Session action; close requires sessionId; poll/cancel are legacy.",
       default: "prompt",
     }),
   ),
   resumeFrom: Type.Optional(
     Type.String({
-      description: "Absolute previous session .jsonl path to resume.",
+      description: "Absolute prior session .jsonl path; not for async tickets.",
     }),
   ),
 });
@@ -94,7 +97,7 @@ export const delegateParameters = Type.Object({
   ),
   ticket: Type.Optional(
     Type.String({
-      description: "Ticket ID for poll or cancel.",
+      description: "Ticket ID; omit only when polling to list all.",
     }),
   ),
   tasks: Type.Optional(

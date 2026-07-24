@@ -48,8 +48,7 @@ export function createSubagentSessionManager(
   // Resolve parent session file path for linking.
   const parentFile = (
     parentSessionManager as
-      | { getSessionFile?(): string | undefined }
-      | undefined
+      { getSessionFile?(): string | undefined } | undefined
   )?.getSessionFile?.();
 
   // Always persist subagent work so the main agent can search it later.

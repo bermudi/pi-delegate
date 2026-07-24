@@ -194,9 +194,9 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
           }
         }
         break;
-      default: // Pending / waiting. When the concurrency cap is the reason, show
-      // how many slots are occupied so a human sees throttling, not a stall.
-      {
+      default: {
+        // how many slots are occupied so a human sees throttling, not a stall.
+        // Pending / waiting. When the concurrency cap is the reason, show
         const queuedTag = theme.fg(
           "muted",
           ` ${waitingLabel(running, getMaxConcurrent())}`,

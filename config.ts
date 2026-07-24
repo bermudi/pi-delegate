@@ -182,8 +182,12 @@ export function resolveModelSpec(options: {
   frontmatterModel?: string;
   config?: DelegateConfig;
 }): string | undefined {
-  const { taskModel, agentType, frontmatterModel, config = __delegateConfig } =
-    options;
+  const {
+    taskModel,
+    agentType,
+    frontmatterModel,
+    config = __delegateConfig,
+  } = options;
 
   const candidates: Array<string | null | undefined> = [
     taskModel,
