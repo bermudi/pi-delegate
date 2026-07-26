@@ -95,7 +95,7 @@ export function sweepTickets(): void {
     // settle before the hard cap.
     if (
       (ticket.status === "running" || ticket.status === "cancelling") &&
-      now - ticket.created > ASYNC_MAX_RUNTIME_MS
+      now - ticket.created >= ASYNC_MAX_RUNTIME_MS
     ) {
       ticket.controller.abort();
       ticket.status = "failed";
@@ -170,17 +170,21 @@ export function formatCompletedTicket(
     `${statusTag}${succeeded}/${ticket.results.length} ${completionLabel} · ${fmtDuration(elapsedTotal)} wall time\n`,
   );
 
-  const pendingLabel =
-    ticket.status === "cancelled"
+  const pendingLabelFor = (index: number): string => {
+    if (ticket.status !== "cancelled") {
+      return "PENDING — result not available";
+    }
+    return ticket.progress[index]?.status === "pending"
       ? "CANCELLED — task not started"
-      : "PENDING — result not available";
+      : "CANCELLED — task aborted mid-run, partial effects possible";
+  };
 
   for (let i = 0; i < ticket.results.length; i++) {
     const r = ticket.results[i];
     const t = ticket.resolved[i]!;
     if (!r) {
       parts.push(`=== ${t.agentName}: ${trunc(t.prompt || "", 80)} ===`);
-      parts.push(`[${pendingLabel}]`);
+      parts.push(`[${pendingLabelFor(i)}]`);
       continue;
     }
     parts.push(...formatCompletedTask(t, r));
@@ -197,7 +201,9 @@ export function formatCompletedTicket(
     content: [{ type: "text", text: parts.join("\n\n") }],
     details: {
       tasks: ticket.tasks,
-      results: [...ticket.results].map((r) => r ?? { error: pendingLabel }),
+      results: [...ticket.results].map(
+        (r, index) => r ?? { error: pendingLabelFor(index) },
+      ),
       progress: [...ticket.progress],
       parentModel: ticket.parentModelId,
       // Thread ticketId so renderResult can show the running-ticket banner and
@@ -296,10 +302,13 @@ function timeoutWaiter(
   timeoutMs: number,
 ): void {
   // If the ticket became terminal (e.g. runtime expired or completed just before
-  // this timer fired), do not resolve with a misleading "still running" timeout.
-  // deliverTicketResults will resolve the active waiter with the terminal result.
+  // this timer fired), return that snapshot. Workers may still be unwinding, so
+  // waiting for deliverTicketResults here could strand the caller indefinitely.
   sweepTickets();
-  if (ticket.status !== "running" && ticket.status !== "cancelling") return;
+  if (ticket.status !== "running" && ticket.status !== "cancelling") {
+    settleWaiter(w, formatCompletedTicket(ticket));
+    return;
+  }
   settleWaiter(w, buildWaitTimeoutResult(ticket, timeoutMs));
 }
 
@@ -435,7 +444,9 @@ export function handlePoll(
       // straight out of the TUI without retyping the ticket id.
       if (t.status === "running" || t.status === "cancelling") {
         line += `\n     poll:   delegate({ action: "poll", ticket: "${t.id}" })`;
-        line += `\n     cancel: delegate({ action: "cancel", ticket: "${t.id}", force: true })`;
+        if (t.status === "running") {
+          line += `\n     cancel: delegate({ action: "cancel", ticket: "${t.id}", force: true })`;
+        }
       }
       return line;
     });
@@ -757,19 +768,18 @@ export function handleWait(
       }, params.timeoutMs);
     }
 
-    // Runtime watchdog: trigger sweepTickets when the ticket's hard max
-    // runtime is reached so the failure becomes terminal and deliverTicketResults
-    // resolves the waiter. Cancel the user timeout so it cannot fire after the
-    // ticket is already terminal and misreport a "still running" timeout.
+    // Runtime watchdog: make the hard timeout observable even if an aborted
+    // worker is wedged in a tool call and therefore never reaches
+    // deliverTicketResults. The caller's timeout remains armed as an
+    // independent safety net; settleWaiter makes the timer race harmless.
     const runtimeRemaining =
       ASYNC_MAX_RUNTIME_MS - (Date.now() - ticket.created);
     if (runtimeRemaining > 0) {
       runtimeWatchdog = setTimeout(() => {
-        if (waiter.timeoutId !== undefined) {
-          clearTimeout(waiter.timeoutId);
-          waiter.timeoutId = undefined;
-        }
         sweepTickets();
+        if (ticket.status !== "running" && ticket.status !== "cancelling") {
+          settleWaiter(waiter, formatCompletedTicket(ticket));
+        }
       }, runtimeRemaining);
     }
 

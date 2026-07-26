@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { _setClockForTesting, _resetPoolForTesting } from "./pool.ts";
+import { ASYNC_MAX_RUNTIME_MS } from "./constants.ts";
 import {
   inFlightActivity,
   latestActivity,
@@ -4421,6 +4422,18 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain(
       'delegate({ action: "cancel", ticket: "abc12345", force: true })',
     );
+
+    ticket.status = "cancelling";
+    const cancellingResult = handlePoll(
+      { tasks: [], ticket: undefined },
+      {} as any,
+    );
+    expect(cancellingResult.content[0].text).toContain(
+      'delegate({ action: "poll", ticket: "abc12345" })',
+    );
+    expect(cancellingResult.content[0].text).not.toContain(
+      'delegate({ action: "cancel", ticket: "abc12345", force: true })',
+    );
   });
 
   test("poll with specific ticket returns progress", () => {
@@ -4853,7 +4866,7 @@ describe("async delegate integration", () => {
           index: 2,
           agent: "runner",
           task: "task-c",
-          status: "pending",
+          status: "running",
           durationMs: 0,
           tokens: 0,
           toolUses: 0,
@@ -4872,6 +4885,9 @@ describe("async delegate integration", () => {
     // Text output handles undefined results gracefully for cancelled tickets.
     expect(text).toContain("done early");
     expect(text).toContain("CANCELLED — task not started");
+    expect(text).toContain(
+      "CANCELLED — task aborted mid-run, partial effects possible",
+    );
 
     // details.results is index-aligned — same length as tasks
     // Undefined results are filled with error objects to match DelegateDetails type
@@ -4881,7 +4897,7 @@ describe("async delegate integration", () => {
       error: "CANCELLED — task not started",
     });
     expect(result.details.results![2]).toEqual({
-      error: "CANCELLED — task not started",
+      error: "CANCELLED — task aborted mid-run, partial effects possible",
     });
   });
 
@@ -5259,6 +5275,8 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("async: true");
     expect(result.content[0].text).toContain("poll");
     expect(result.content[0].text).toContain("cancel");
+    expect(result.content[0].text).toContain("timeoutMs: 600000");
+    expect(result.content[0].text).not.toContain("timeoutMs: 600_000");
   });
 
   test("poll running ticket exposes activity, tool and token counts", () => {
@@ -5693,6 +5711,46 @@ describe("async delegate integration", () => {
       {} as any,
     );
     expect(result.content[0].text).toContain("FAILED");
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  test("wait settles at the runtime cap without waiting for a wedged worker", async () => {
+    const controller = new AbortController();
+    const ticket: AsyncTicket = {
+      id: "watchdog-wait",
+      // Leave enough time for handleWait to register its watchdog, but no
+      // dispatch continuation will call deliverTicketResults in this test.
+      created: Date.now() - ASYNC_MAX_RUNTIME_MS + 20,
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller,
+      parentModelId: "m",
+    };
+    ticketRegistry.set("watchdog-wait", ticket);
+
+    const result = await handleWait(
+      { ticket: "watchdog-wait" },
+      undefined,
+      undefined,
+      {} as any,
+    );
+
+    expect(result.content[0].text).toContain("FAILED");
+    expect(ticket.status).toBe("failed");
     expect(controller.signal.aborted).toBe(true);
   });
 
