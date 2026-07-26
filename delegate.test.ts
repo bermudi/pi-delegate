@@ -5393,9 +5393,14 @@ describe("async delegate integration", () => {
   // ── wait tests ───────────────────────────────────────────────────────────
 
   test("wait requires a ticket ID", async () => {
-    const result = await handleWait({ ticket: undefined }, undefined, undefined, {
-      model: { id: "test-model" },
-    } as any);
+    const result = await handleWait(
+      { ticket: undefined },
+      undefined,
+      undefined,
+      {
+        model: { id: "test-model" },
+      } as any,
+    );
     expect(result.content[0].text).toContain("requires a ticket ID");
   });
 
@@ -5682,12 +5687,103 @@ describe("async delegate integration", () => {
     await promise;
     expect(updates.length).toBeGreaterThanOrEqual(2);
     expect(updates[0]!.details.ticketId).toBe("progress-wait");
-    expect(updates.some((u) => u.details.progress[0]!.toolUses === 3)).toBe(true);
+    expect(updates.some((u) => u.details.progress[0]!.toolUses === 3)).toBe(
+      true,
+    );
+  });
+
+  test("notifyWaiters progress frame counts finalized as done + failed", () => {
+    const ticket: AsyncTicket = {
+      id: "finalized-count",
+      created: Date.now(),
+      tasks: [{ prompt: "a" }, { prompt: "b" }],
+      resolved: [
+        {
+          prompt: "a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          prompt: "b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "runner",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [mkResult(), mkResult("boom")],
+      progress: mkProgress(["done", "failed"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+
+    const updates: any[] = [];
+    const waiter = {
+      settled: false,
+      onUpdate: (update: any) => updates.push(update),
+    };
+    ticket.waiters = [waiter as any];
+    notifyWaiters(ticket);
+
+    expect(updates[0]!.content[0]!.text).toContain("2/2 finalized");
+    expect(updates[0]!.content[0]!.text).toContain("1 failed");
+    expect(updates[0]!.content[0]!.text).not.toContain("1/2 finalized");
+  });
+
+  test("notifyWaiters does not emit RUNNING updates for terminal tickets", () => {
+    for (const status of ["done", "failed", "cancelled"] as const) {
+      const ticket: AsyncTicket = {
+        id: `terminal-${status}`,
+        created: Date.now(),
+        tasks: [{ prompt: "task-a" }],
+        resolved: [
+          {
+            prompt: "task-a",
+            model: {} as any,
+            tools: [],
+            thinking: "off",
+            systemPrompt: "",
+            cwd: "/tmp",
+            agentName: "scout",
+            warnings: [],
+          },
+        ],
+        status,
+        results: [status === "failed" ? mkResult("boom") : mkResult()],
+        progress: mkProgress([status === "failed" ? "failed" : "done"]),
+        controller: new AbortController(),
+        parentModelId: "m",
+      };
+
+      const updates: any[] = [];
+      ticket.waiters = [
+        {
+          settled: false,
+          onUpdate: (update: any) => updates.push(update),
+        } as any,
+      ];
+      notifyWaiters(ticket);
+
+      expect(updates).toHaveLength(0);
+      expect(ticket.waiters.length).toBe(1);
+    }
   });
 
   test("wait resolves with terminal result and suppresses automatic follow-up", async () => {
     const sent: any[] = [];
-    const pi = { sendMessage: (message: any, options: any) => sent.push({ message, options }) } as any;
+    const pi = {
+      sendMessage: (message: any, options: any) =>
+        sent.push({ message, options }),
+    } as any;
     const ticket: AsyncTicket = {
       id: "suppressed-wait",
       created: Date.now(),
@@ -5734,7 +5830,10 @@ describe("async delegate integration", () => {
 
   test("deliverTicketResults sends follow-up when no caller waits", async () => {
     const sent: any[] = [];
-    const pi = { sendMessage: (message: any, options: any) => sent.push({ message, options }) } as any;
+    const pi = {
+      sendMessage: (message: any, options: any) =>
+        sent.push({ message, options }),
+    } as any;
     const ticket: AsyncTicket = {
       id: "followup-wait",
       created: Date.now() - 1000,

@@ -213,9 +213,10 @@ function buildWaitRunningUpdate(
   const failed = ticket.progress.filter((p) => p.status === "failed").length;
   const running = ticket.progress.filter((p) => p.status === "running").length;
   const pending = ticket.progress.filter((p) => p.status === "pending").length;
+  const finalized = done + failed;
 
   const parts: string[] = [`Waiting for ticket ${ticket.id}: RUNNING`];
-  parts.push(`${done}/${total} finalized`);
+  parts.push(`${finalized}/${total} finalized`);
   if (running > 0) parts.push(`${running} active`);
   if (failed > 0) parts.push(`${failed} failed`);
   if (pending > 0) parts.push(`${pending} queued`);
@@ -274,6 +275,11 @@ function timeoutWaiter(
   ticket: AsyncTicket,
   timeoutMs: number,
 ): void {
+  // If the ticket became terminal (e.g. runtime expired or completed just before
+  // this timer fired), do not resolve with a misleading "still running" timeout.
+  // deliverTicketResults will resolve the active waiter with the terminal result.
+  sweepTickets();
+  if (ticket.status !== "running") return;
   settleWaiter(w, buildWaitTimeoutResult(ticket, timeoutMs));
 }
 
@@ -287,6 +293,9 @@ function cleanWaiters(ticket: AsyncTicket): void {
  *  async task reports a progress or status change. */
 export function notifyWaiters(ticket: AsyncTicket): void {
   if (!ticket.waiters?.length) return;
+  // Progress frames only make sense while the ticket is still running.
+  // Terminal tickets are resolved by deliverTicketResults, not by onUpdate.
+  if (ticket.status !== "running") return;
   const active: TicketWaiter[] = [];
   for (const w of ticket.waiters) {
     if (w.settled) continue;
@@ -664,10 +673,16 @@ export function handleWait(
 
     // Runtime watchdog: trigger sweepTickets when the ticket's hard max
     // runtime is reached so the failure becomes terminal and deliverTicketResults
-    // resolves the waiter.
-    const runtimeRemaining = ASYNC_MAX_RUNTIME_MS - (Date.now() - ticket.created);
+    // resolves the waiter. Cancel the user timeout so it cannot fire after the
+    // ticket is already terminal and misreport a "still running" timeout.
+    const runtimeRemaining =
+      ASYNC_MAX_RUNTIME_MS - (Date.now() - ticket.created);
     if (runtimeRemaining > 0) {
       runtimeWatchdog = setTimeout(() => {
+        if (waiter.timeoutId !== undefined) {
+          clearTimeout(waiter.timeoutId);
+          waiter.timeoutId = undefined;
+        }
         sweepTickets();
       }, runtimeRemaining);
     }
