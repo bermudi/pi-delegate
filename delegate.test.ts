@@ -67,6 +67,8 @@ import {
   isSessionBusy,
   handlePoll,
   handleCancel,
+  handleWait,
+  notifyWaiters,
   deliverTicketResults,
   resolveFinalTicketStatus,
   formatCompletedTicket,
@@ -5370,14 +5372,441 @@ describe("async delegate integration", () => {
     expect(actionEnum).toContain("cancel");
   });
 
+  test("top-level action enum includes wait", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const schema = toolDef!.parameters as any;
+    expect(schema.properties.action.enum).toContain("wait");
+  });
+
   test("parameter schema includes top-level async ticket controls", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const schema = toolDef!.parameters as any;
-    expect(schema.properties.action.enum).toEqual(["poll", "cancel"]);
+    expect(schema.properties.action.enum).toEqual(["poll", "cancel", "wait"]);
     expect(schema.properties.async).toBeDefined();
     expect(schema.properties.ticket).toBeDefined();
+    expect(schema.properties.timeoutMs).toBeDefined();
     expect(schema.required ?? []).not.toContain("tasks");
+  });
+
+  // ── wait tests ───────────────────────────────────────────────────────────
+
+  test("wait requires a ticket ID", async () => {
+    const result = await handleWait({ ticket: undefined }, undefined, undefined, {
+      model: { id: "test-model" },
+    } as any);
+    expect(result.content[0].text).toContain("requires a ticket ID");
+  });
+
+  test("wait on unknown ticket returns not found", async () => {
+    const result = await handleWait(
+      { ticket: "missing" },
+      undefined,
+      undefined,
+      { model: { id: "test-model" } } as any,
+    );
+    expect(result.content[0].text).toContain("not found");
+  });
+
+  test("wait on already-done ticket returns immediately", async () => {
+    const ticket: AsyncTicket = {
+      id: "done-wait",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "done",
+      results: [mkResult()],
+      progress: mkProgress(["done"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("done-wait", ticket);
+
+    const result = await handleWait(
+      { ticket: "done-wait" },
+      undefined,
+      undefined,
+      {} as any,
+    );
+    expect(result.content[0].text).toContain("1/1 tasks completed");
+  });
+
+  test("wait on already-failed ticket returns immediately", async () => {
+    const ticket: AsyncTicket = {
+      id: "failed-wait",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "failed",
+      results: [mkResult("boom")],
+      progress: mkProgress(["failed"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("failed-wait", ticket);
+
+    const result = await handleWait(
+      { ticket: "failed-wait" },
+      undefined,
+      undefined,
+      {} as any,
+    );
+    expect(result.content[0].text).toContain("FAILED");
+    expect(result.content[0].text).toContain("boom");
+  });
+
+  test("wait on runtime-expired ticket returns failed immediately", async () => {
+    const controller = new AbortController();
+    const ticket: AsyncTicket = {
+      id: "expired-wait",
+      created: Date.now() - 31 * 60 * 1000,
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller,
+      parentModelId: "m",
+    };
+    ticketRegistry.set("expired-wait", ticket);
+
+    const result = await handleWait(
+      { ticket: "expired-wait" },
+      undefined,
+      undefined,
+      {} as any,
+    );
+    expect(result.content[0].text).toContain("FAILED");
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  test("wait resolves when ticket completes", async () => {
+    const ticket: AsyncTicket = {
+      id: "complete-wait",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("complete-wait", ticket);
+
+    // Complete the ticket after a brief delay, mimicking the async dispatch path.
+    setTimeout(() => {
+      ticket.results = [mkResult()];
+      ticket.progress = mkProgress(["done"]);
+      ticket.status = "done";
+      ticket.completedAt = Date.now();
+      deliverTicketResults({ sendMessage: () => {} } as any, ticket);
+    }, 10);
+
+    const result = await handleWait(
+      { ticket: "complete-wait" },
+      undefined,
+      undefined,
+      {} as any,
+    );
+    expect(result.content[0].text).toContain("1/1 tasks completed");
+  });
+
+  test("wait timeout returns running status and does not cancel ticket", async () => {
+    const controller = new AbortController();
+    const ticket: AsyncTicket = {
+      id: "timeout-wait",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller,
+      parentModelId: "m",
+    };
+    ticketRegistry.set("timeout-wait", ticket);
+
+    const result = await handleWait(
+      { ticket: "timeout-wait", timeoutMs: 10 },
+      undefined,
+      undefined,
+      {} as any,
+    );
+    expect(result.content[0].text).toContain("still running");
+    expect(result.content[0].text).toContain("timed out");
+    expect(ticket.status).toBe("running");
+    expect(controller.signal.aborted).toBe(false);
+  });
+
+  test("wait parent abort returns running status and does not cancel ticket", async () => {
+    const controller = new AbortController();
+    const parentController = new AbortController();
+    const ticket: AsyncTicket = {
+      id: "abort-wait",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller,
+      parentModelId: "m",
+    };
+    ticketRegistry.set("abort-wait", ticket);
+
+    setTimeout(() => {
+      parentController.abort();
+    }, 10);
+
+    const result = await handleWait(
+      { ticket: "abort-wait" },
+      parentController.signal,
+      undefined,
+      {} as any,
+    );
+    expect(result.content[0].text).toContain("aborted");
+    expect(ticket.status).toBe("running");
+    expect(controller.signal.aborted).toBe(false);
+  });
+
+  test("wait forwards progress updates via onUpdate", async () => {
+    const ticket: AsyncTicket = {
+      id: "progress-wait",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("progress-wait", ticket);
+
+    const updates: any[] = [];
+    const onUpdate = (update: any) => updates.push(update);
+
+    const promise = handleWait(
+      { ticket: "progress-wait", timeoutMs: 50 },
+      undefined,
+      onUpdate,
+      {} as any,
+    );
+
+    // Simulate a progress update from the async dispatch path.
+    ticket.progress[0]!.toolUses = 3;
+    ticket.progress[0]!.tokens = 150;
+    notifyWaiters(ticket);
+
+    await promise;
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+    expect(updates[0]!.details.ticketId).toBe("progress-wait");
+    expect(updates.some((u) => u.details.progress[0]!.toolUses === 3)).toBe(true);
+  });
+
+  test("wait resolves with terminal result and suppresses automatic follow-up", async () => {
+    const sent: any[] = [];
+    const pi = { sendMessage: (message: any, options: any) => sent.push({ message, options }) } as any;
+    const ticket: AsyncTicket = {
+      id: "suppressed-wait",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("suppressed-wait", ticket);
+
+    const promise = handleWait(
+      { ticket: "suppressed-wait" },
+      undefined,
+      undefined,
+      {} as any,
+    );
+
+    setTimeout(() => {
+      ticket.results = [mkResult()];
+      ticket.progress = mkProgress(["done"]);
+      ticket.status = "done";
+      ticket.completedAt = Date.now();
+      deliverTicketResults(pi, ticket);
+    }, 10);
+
+    const result = await promise;
+    expect(result.content[0].text).toContain("1/1 tasks completed");
+    expect(sent).toHaveLength(0);
+  });
+
+  test("deliverTicketResults sends follow-up when no caller waits", async () => {
+    const sent: any[] = [];
+    const pi = { sendMessage: (message: any, options: any) => sent.push({ message, options }) } as any;
+    const ticket: AsyncTicket = {
+      id: "followup-wait",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "done",
+      results: [mkResult()],
+      progress: mkProgress(["done"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("followup-wait", ticket);
+
+    deliverTicketResults(pi, ticket);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
+  });
+
+  test("wait resolves when completion races waiter registration", async () => {
+    const ticket: AsyncTicket = {
+      id: "race-wait",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("race-wait", ticket);
+
+    const promise = handleWait(
+      { ticket: "race-wait" },
+      undefined,
+      undefined,
+      {} as any,
+    );
+
+    // Complete synchronously in the same event-loop turn as handleWait returned.
+    ticket.results = [mkResult()];
+    ticket.progress = mkProgress(["done"]);
+    ticket.status = "done";
+    ticket.completedAt = Date.now();
+    deliverTicketResults({ sendMessage: () => {} } as any, ticket);
+
+    const result = await promise;
+    expect(result.content[0].text).toContain("1/1 tasks completed");
   });
 });
 

@@ -1,4 +1,7 @@
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type {
+  AgentToolResult,
+  AgentToolUpdateCallback,
+} from "@mariozechner/pi-agent-core";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -16,7 +19,12 @@ import {
   relativeTouchedSummary,
 } from "./format.ts";
 import { renderOutputForPoll } from "./spill.ts";
-import type { AsyncTicket, DelegateDetails, TaskResult } from "./types.ts";
+import type {
+  AsyncTicket,
+  DelegateDetails,
+  TaskResult,
+  TicketWaiter,
+} from "./types.ts";
 
 const busyTicketIdsBySession = new Map<string, Set<string>>();
 const busySessionsByTicket = new Map<string, Set<string>>();
@@ -183,7 +191,118 @@ export function formatCompletedTicket(
   };
 }
 
-/** Push results into parent session via sendMessage when background ticket completes. */
+// ── Waiter helpers ─────────────────────────────────────────────────────────
+
+function buildWaitDetails(ticket: AsyncTicket): DelegateDetails {
+  return {
+    tasks: ticket.tasks,
+    results: ticket.results.map(
+      (r) => r ?? { error: "PENDING — result not available" },
+    ),
+    progress: [...ticket.progress],
+    parentModel: ticket.parentModelId,
+    ticketId: ticket.id,
+  };
+}
+
+function buildWaitRunningUpdate(
+  ticket: AsyncTicket,
+): AgentToolResult<DelegateDetails> {
+  const total = ticket.progress.length;
+  const done = ticket.progress.filter((p) => p.status === "done").length;
+  const failed = ticket.progress.filter((p) => p.status === "failed").length;
+  const running = ticket.progress.filter((p) => p.status === "running").length;
+  const pending = ticket.progress.filter((p) => p.status === "pending").length;
+
+  const parts: string[] = [`Waiting for ticket ${ticket.id}: RUNNING`];
+  parts.push(`${done}/${total} finalized`);
+  if (running > 0) parts.push(`${running} active`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (pending > 0) parts.push(`${pending} queued`);
+
+  return {
+    content: [{ type: "text", text: parts.join(" · ") }],
+    details: buildWaitDetails(ticket),
+  };
+}
+
+function buildWaitTimeoutResult(
+  ticket: AsyncTicket,
+  timeoutMs: number,
+): AgentToolResult<DelegateDetails> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Ticket ${ticket.id} still running after ${fmtDuration(timeoutMs)} · wait timed out (ticket continues in background)`,
+      },
+    ],
+    details: buildWaitDetails(ticket),
+  };
+}
+
+function buildWaitAbortResult(
+  ticket: AsyncTicket,
+): AgentToolResult<DelegateDetails> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Wait for ticket ${ticket.id} aborted · ticket continues running in the background`,
+      },
+    ],
+    details: buildWaitDetails(ticket),
+  };
+}
+
+function settleWaiter(
+  w: TicketWaiter,
+  result: AgentToolResult<DelegateDetails>,
+): void {
+  if (w.settled) return;
+  w.settled = true;
+  if (w.timeoutId !== undefined) clearTimeout(w.timeoutId);
+  w.resolve(result);
+}
+
+function abortWaiter(w: TicketWaiter, ticket: AsyncTicket): void {
+  settleWaiter(w, buildWaitAbortResult(ticket));
+}
+
+function timeoutWaiter(
+  w: TicketWaiter,
+  ticket: AsyncTicket,
+  timeoutMs: number,
+): void {
+  settleWaiter(w, buildWaitTimeoutResult(ticket, timeoutMs));
+}
+
+function cleanWaiters(ticket: AsyncTicket): void {
+  if (!ticket.waiters) return;
+  const active = ticket.waiters.filter((w) => !w.settled && !w.signal?.aborted);
+  ticket.waiters = active.length ? active : undefined;
+}
+
+/** Forward current progress to all active blocking waiters. Called whenever an
+ *  async task reports a progress or status change. */
+export function notifyWaiters(ticket: AsyncTicket): void {
+  if (!ticket.waiters?.length) return;
+  const active: TicketWaiter[] = [];
+  for (const w of ticket.waiters) {
+    if (w.settled) continue;
+    if (w.signal?.aborted) {
+      abortWaiter(w, ticket);
+      continue;
+    }
+    active.push(w);
+    if (w.onUpdate) w.onUpdate(buildWaitRunningUpdate(ticket));
+  }
+  ticket.waiters = active.length ? active : undefined;
+}
+
+/** Push results into parent session via sendMessage when background ticket completes.
+ *  If there are active blocking waiters, resolve them directly and suppress the
+ *  automatic follow-up so completion is delivered exactly once. */
 export function deliverTicketResults(
   pi: ExtensionAPI,
   ticket: AsyncTicket,
@@ -191,6 +310,20 @@ export function deliverTicketResults(
   if (!ticket.completedAt) return;
 
   const formatted = formatCompletedTicket(ticket);
+
+  // Resolve active blocking waiters directly. Stale/aborted waiters are
+  // cleaned but not resolved here (their abort handlers already returned).
+  if (ticket.waiters?.length) {
+    let hadActive = false;
+    for (const w of ticket.waiters) {
+      if (w.settled || w.signal?.aborted) continue;
+      settleWaiter(w, formatted);
+      hadActive = true;
+    }
+    cleanWaiters(ticket);
+    if (hadActive) return;
+  }
+
   const text = formatted.content
     .filter(
       (c): c is { type: "text"; text: string } =>
@@ -445,4 +578,104 @@ export function handleCancel(params: {
     content: [{ type: "text", text: `Ticket '${ticketId}' cancelled.` }],
     details: { tasks: [], results: [], progress: [] },
   };
+}
+
+/** Block until a ticket reaches a terminal state or `timeoutMs` expires.
+ *  Progress is streamed through `onUpdate` without consuming model turns.
+ *  Parent-tool abort or timeout detaches the waiter and leaves the ticket
+ *  running; cancellation remains explicit (`action: "cancel"`). */
+export function handleWait(
+  params: { ticket?: string; timeoutMs?: number },
+  signal: AbortSignal | undefined,
+  onUpdate: AgentToolUpdateCallback<DelegateDetails> | undefined,
+  ctx: ExtensionContext,
+): Promise<AgentToolResult<DelegateDetails>> {
+  sweepTickets();
+  const parentModelId = ctx.model?.id;
+
+  const ticketId = params.ticket;
+  if (!ticketId) {
+    return Promise.resolve({
+      content: [{ type: "text", text: "action='wait' requires a ticket ID." }],
+      details: {
+        tasks: [],
+        results: [],
+        progress: [],
+        parentModel: parentModelId,
+      },
+    });
+  }
+
+  const ticket = ticketRegistry.get(ticketId);
+  if (!ticket) {
+    return Promise.resolve({
+      content: [{ type: "text", text: `Ticket '${ticketId}' not found.` }],
+      details: {
+        tasks: [],
+        results: [],
+        progress: [],
+        parentModel: parentModelId,
+      },
+    });
+  }
+
+  if (ticket.status !== "running") {
+    return Promise.resolve(formatCompletedTicket(ticket));
+  }
+
+  // Already aborted parent signal → detach immediately.
+  if (signal?.aborted) {
+    return Promise.resolve(buildWaitAbortResult(ticket));
+  }
+
+  return new Promise((resolve, reject) => {
+    let runtimeWatchdog: ReturnType<typeof setTimeout> | undefined;
+
+    const waiter: TicketWaiter = {
+      signal,
+      onUpdate,
+      resolve: (result) => {
+        if (runtimeWatchdog) clearTimeout(runtimeWatchdog);
+        resolve(result);
+      },
+      reject,
+      settled: false,
+    };
+
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          abortWaiter(waiter, ticket);
+        },
+        { once: true },
+      );
+    }
+
+    if (
+      params.timeoutMs !== undefined &&
+      params.timeoutMs >= 0 &&
+      Number.isFinite(params.timeoutMs)
+    ) {
+      waiter.timeoutId = setTimeout(() => {
+        timeoutWaiter(waiter, ticket, params.timeoutMs!);
+      }, params.timeoutMs);
+    }
+
+    // Runtime watchdog: trigger sweepTickets when the ticket's hard max
+    // runtime is reached so the failure becomes terminal and deliverTicketResults
+    // resolves the waiter.
+    const runtimeRemaining = ASYNC_MAX_RUNTIME_MS - (Date.now() - ticket.created);
+    if (runtimeRemaining > 0) {
+      runtimeWatchdog = setTimeout(() => {
+        sweepTickets();
+      }, runtimeRemaining);
+    }
+
+    ticket.waiters = ticket.waiters ?? [];
+    ticket.waiters.push(waiter);
+
+    // Immediate progress frame so the TUI shows the current state.
+    notifyWaiters(ticket);
+  });
 }

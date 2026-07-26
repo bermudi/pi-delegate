@@ -1,4 +1,8 @@
-import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type {
+  ThinkingLevel,
+  AgentToolResult,
+  AgentToolUpdateCallback,
+} from "@mariozechner/pi-agent-core";
 import type { Api, Model, Usage } from "@mariozechner/pi-ai";
 import type {
   AgentSession,
@@ -29,12 +33,21 @@ export interface AgentConfig {
 
 export type DelegateParams = Static<typeof delegateParameters>;
 export type TaskDef = NonNullable<DelegateParams["tasks"]>[number];
-/** Top-level async ticket action: "poll" | "cancel". */
+/** Top-level async ticket action: "poll" | "cancel" | "wait". */
 export type DelegateAction = NonNullable<DelegateParams["action"]>;
 /** Per-task session action: "prompt" | "close" | "list" | "poll" | "cancel". */
 export type SessionAction = NonNullable<TaskDef["action"]>;
 
 // ── Async Ticket Types ─────────────────────────────────────────────────────
+
+export interface TicketWaiter {
+  signal?: AbortSignal;
+  onUpdate?: AgentToolUpdateCallback<DelegateDetails>;
+  resolve: (result: AgentToolResult<DelegateDetails>) => void;
+  reject: (reason: unknown) => void;
+  timeoutId?: ReturnType<typeof setTimeout>;
+  settled: boolean;
+}
 
 export interface AsyncTicket {
   id: string;
@@ -48,6 +61,8 @@ export interface AsyncTicket {
   controller: AbortController;
   error?: string;
   parentModelId?: string;
+  /** Active blocking waiters. Resolved by terminal delivery or timeout/abort. */
+  waiters?: TicketWaiter[];
 }
 
 export interface ResolvedTask {

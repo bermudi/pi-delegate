@@ -55,6 +55,8 @@ export {
   isSessionBusy,
   handlePoll,
   handleCancel,
+  handleWait,
+  notifyWaiters,
   deliverTicketResults,
   resolveFinalTicketStatus,
   formatCompletedTicket,

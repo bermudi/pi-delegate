@@ -85,8 +85,8 @@ export const delegateTaskParameters = Type.Object({
 // DelegateParams/TaskDef projections in types.ts.
 export const delegateParameters = Type.Object({
   action: Type.Optional(
-    StringEnum(["poll", "cancel"], {
-      description: "Poll or cancel an async ticket.",
+    StringEnum(["poll", "cancel", "wait"], {
+      description: "Poll, cancel, or wait on an async ticket.",
     }),
   ),
   async: Type.Optional(
@@ -98,6 +98,12 @@ export const delegateParameters = Type.Object({
   ticket: Type.Optional(
     Type.String({
       description: "Ticket ID; omit only when polling to list all.",
+    }),
+  ),
+  timeoutMs: Type.Optional(
+    Type.Number({
+      description:
+        "Wait timeout in milliseconds. A timeout returns current running status; the ticket keeps running.",
     }),
   ),
   tasks: Type.Optional(

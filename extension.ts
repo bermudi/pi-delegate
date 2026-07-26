@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   handleCancel,
   handlePoll,
+  handleWait,
   syncTicketBusyIndex,
   ticketRegistry,
 } from "./tickets.ts";
@@ -51,6 +52,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         tasks.some((t) => t.action === "cancel")
       ) {
         return handleCancel(params);
+      }
+
+      // ── Wait action ────────────────────────────────────────────────────
+      if (params.action === "wait") {
+        return handleWait(params, signal, onUpdate, ctx);
       }
 
       // Agent discovery is intentionally parent-cwd-scoped: agent profiles are a

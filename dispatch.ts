@@ -8,6 +8,7 @@ import {
   sweepTickets,
   resolveFinalTicketStatus,
   syncTicketBusyIndex,
+  notifyWaiters,
 } from "./tickets.ts";
 import { getConcurrencyLimit, getMaxAsyncTickets } from "./config.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
@@ -140,6 +141,10 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     delegateStartedAt: ticket.created,
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
+      notifyWaiters(ticket);
+    },
+    onStatusChange: () => {
+      notifyWaiters(ticket);
     },
   };
 
