@@ -2,7 +2,8 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   handleCancel,
   handlePoll,
-  syncTicketBusyIndex,
+  handleWait,
+  cancelTicketForShutdown,
   ticketRegistry,
 } from "./tickets.ts";
 import { discoverAgents } from "./agents.ts";
@@ -26,7 +27,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     name: "delegate",
     label: "Delegate to Subagents",
     description:
-      "Delegate independent work to parallel subagents with separate context and tools.",
+      "Spawn parallel subagents. Sync blocks for results; async for detached work.",
     parameters: delegateParameters,
     // Runs before schema validation — recovers stringified `tasks` arrays
     // (a common model mistake that would otherwise be rejected upstream).
@@ -37,20 +38,18 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       const tasks = params.tasks ?? [];
 
       // ── Poll action ───────────────────────────────────────────────────
-      // Top-level action is the public API. Per-task action is accepted for
-      // backward compatibility with early async builds.
-      if (params.action === "poll" || tasks.some((t) => t.action === "poll")) {
+      if (params.action === "poll") {
         return handlePoll(params, ctx);
       }
 
       // ── Cancel action ─────────────────────────────────────────────────
-      // Top-level action is the public API. Per-task action is accepted for
-      // backward compatibility with early async builds.
-      if (
-        params.action === "cancel" ||
-        tasks.some((t) => t.action === "cancel")
-      ) {
+      if (params.action === "cancel") {
         return handleCancel(params);
+      }
+
+      // ── Wait action ────────────────────────────────────────────────────
+      if (params.action === "wait") {
+        return handleWait(params, signal, onUpdate, ctx);
       }
 
       // Agent discovery is intentionally parent-cwd-scoped: agent profiles are a
@@ -129,17 +128,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     renderResult: renderDelegateResult,
   });
 
-  // ── Session shutdown: abort all running async tickets ───────────────
+  // ── Session shutdown: abort all active async tickets ────────────────
   pi.on("session_shutdown", () => {
     for (const ticket of ticketRegistry.values()) {
-      if (ticket.status === "running") {
-        ticket.controller.abort();
-        ticket.status = "cancelled";
-        ticket.completedAt = Date.now();
-        syncTicketBusyIndex(ticket);
-      }
+      cancelTicketForShutdown(ticket);
     }
-    // Do NOT clear the entire registry here — only abort running tickets.
-    // Cleared tickets are cleaned up by sweepTickets() TTL.
+    // Do NOT clear the entire registry here — completed tickets are cleaned up
+    // by sweepTickets() TTL.
   });
 }

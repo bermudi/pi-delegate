@@ -52,9 +52,12 @@ export type {
 export {
   ticketRegistry,
   sweepTickets,
+  cancelTicketForShutdown,
   isSessionBusy,
   handlePoll,
   handleCancel,
+  handleWait,
+  notifyWaiters,
   deliverTicketResults,
   resolveFinalTicketStatus,
   formatCompletedTicket,

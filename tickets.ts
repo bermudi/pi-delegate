@@ -1,4 +1,7 @@
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type {
+  AgentToolResult,
+  AgentToolUpdateCallback,
+} from "@mariozechner/pi-agent-core";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -7,16 +10,21 @@ import { ASYNC_MAX_RUNTIME_MS, ASYNC_TICKET_TTL_MS } from "./constants.ts";
 import {
   fmtDuration,
   fmtTokens,
-  formatToolCallShort,
   formatCompletedTask,
   shortenPath,
   trunc,
-  inFlightActivity,
+  getActivityAge,
+  formatActivityLabel,
   taskMetaBase,
   relativeTouchedSummary,
 } from "./format.ts";
 import { renderOutputForPoll } from "./spill.ts";
-import type { AsyncTicket, DelegateDetails, TaskResult } from "./types.ts";
+import type {
+  AsyncTicket,
+  DelegateDetails,
+  TaskResult,
+  TicketWaiter,
+} from "./types.ts";
 
 const busyTicketIdsBySession = new Map<string, Set<string>>();
 const busySessionsByTicket = new Map<string, Set<string>>();
@@ -41,7 +49,7 @@ function removeTicketBusySessions(ticketId: string): void {
 /** Add/remove a ticket's session IDs from the O(1) busy index. */
 export function syncTicketBusyIndex(ticket: AsyncTicket): void {
   removeTicketBusySessions(ticket.id);
-  if (ticket.status !== "running") return;
+  if (ticket.status !== "running" && ticket.status !== "cancelling") return;
   const sids = new Set<string>();
   for (const sid of sessionIdsFor(ticket)) {
     const ticketIds = busyTicketIdsBySession.get(sid) ?? new Set<string>();
@@ -83,10 +91,11 @@ export function generateTicketId(): string {
 export function sweepTickets(): void {
   const now = Date.now();
   for (const [id, ticket] of ticketRegistry) {
-    // Hard runtime timeout
+    // Hard runtime timeout. Cancelling still consumes runtime — the batch must
+    // settle before the hard cap.
     if (
-      ticket.status === "running" &&
-      now - ticket.created > ASYNC_MAX_RUNTIME_MS
+      (ticket.status === "running" || ticket.status === "cancelling") &&
+      now - ticket.created >= ASYNC_MAX_RUNTIME_MS
     ) {
       ticket.controller.abort();
       ticket.status = "failed";
@@ -97,12 +106,26 @@ export function sweepTickets(): void {
     // TTL cleanup for completed/failed/cancelled
     if (
       ticket.status !== "running" &&
+      ticket.status !== "cancelling" &&
       ticket.completedAt &&
       now - ticket.completedAt > ASYNC_TICKET_TTL_MS
     ) {
       ticketRegistry.delete(id);
     }
   }
+}
+
+/**
+ * Finalize an active ticket during host shutdown and resolve any blocking
+ * waiters. This intentionally does not send a follow-up: the host is exiting.
+ */
+export function cancelTicketForShutdown(ticket: AsyncTicket): void {
+  if (ticket.status !== "running" && ticket.status !== "cancelling") return;
+  ticket.controller.abort();
+  ticket.status = "cancelled";
+  ticket.completedAt = Date.now();
+  syncTicketBusyIndex(ticket);
+  settleTicketWaiters(ticket);
 }
 
 /** Check if any running async ticket holds a given sessionId.
@@ -120,10 +143,10 @@ export function isSessionBusy(sessionId: string): string | null {
  * work is never masked as complete. Any ticket with at least one failed task
  * is also "failed".
  *
- * Callers are expected to have already handled "cancelled" (set by
- * handleCancel) and the runtime timeout (set by sweepTickets) before invoking
- * this; those paths set `ticket.status` directly and skip this function via
- * the `if (ticket.status === "running")` guard in execute().
+ * Callers are expected to have already handled "cancelled" / "cancelling"
+ * (set by handleCancel) and the runtime timeout (set by sweepTickets) before
+ * invoking this; those paths set `ticket.status` directly and skip this
+ * function via the `if (ticket.status === "running")` guard in execute().
  */
 export function resolveFinalTicketStatus(
   ticket: AsyncTicket,
@@ -152,19 +175,39 @@ export function formatCompletedTicket(
   // get an explicit status tag up front.
   const statusTag =
     ticket.status === "done" ? "" : `${ticket.status.toUpperCase()} · `;
+  const completionLabel =
+    ticket.status === "cancelled"
+      ? "tasks completed before abort"
+      : "tasks completed";
   parts.push(
-    `${statusTag}${succeeded}/${ticket.results.length} tasks completed · ${fmtDuration(elapsedTotal)} wall time\n`,
+    `${statusTag}${succeeded}/${ticket.results.length} ${completionLabel} · ${fmtDuration(elapsedTotal)} wall time\n`,
   );
+
+  const pendingLabelFor = (index: number): string => {
+    if (ticket.status !== "cancelled") {
+      return "PENDING — result not available";
+    }
+    return ticket.progress[index]?.status === "pending"
+      ? "CANCELLED — task not started"
+      : "CANCELLED — task aborted mid-run, partial effects possible";
+  };
 
   for (let i = 0; i < ticket.results.length; i++) {
     const r = ticket.results[i];
     const t = ticket.resolved[i]!;
     if (!r) {
       parts.push(`=== ${t.agentName}: ${trunc(t.prompt || "", 80)} ===`);
-      parts.push(`[PENDING — result not available]`);
+      parts.push(`[${pendingLabelFor(i)}]`);
       continue;
     }
     parts.push(...formatCompletedTask(t, r));
+  }
+
+  if (ticket.status === "cancelled") {
+    parts.push(
+      "",
+      "WARNING: Cancellation stopped the remaining work. Files already written or shell commands already executed by the subagents were NOT rolled back. Review the touched files and session files above before deciding whether to retry.",
+    );
   }
 
   return {
@@ -172,23 +215,170 @@ export function formatCompletedTicket(
     details: {
       tasks: ticket.tasks,
       results: [...ticket.results].map(
-        (r) => r ?? { error: "PENDING — result not available" },
+        (r, index) => r ?? { error: pendingLabelFor(index) },
       ),
       progress: [...ticket.progress],
       parentModel: ticket.parentModelId,
       // Thread ticketId so renderResult can show the running-ticket banner and
       // the human sees which ticket they polled, even in the rich tree path.
       ticketId: ticket.id,
+      status: ticket.status,
     },
   };
 }
 
-/** Push results into parent session via sendMessage when background ticket completes. */
+// ── Waiter helpers ─────────────────────────────────────────────────────────
+
+function buildWaitDetails(ticket: AsyncTicket): DelegateDetails {
+  return {
+    tasks: ticket.tasks,
+    results: ticket.results.map(
+      (r) => r ?? { error: "PENDING — result not available" },
+    ),
+    progress: [...ticket.progress],
+    parentModel: ticket.parentModelId,
+    ticketId: ticket.id,
+    status: ticket.status,
+  };
+}
+
+function buildWaitRunningUpdate(
+  ticket: AsyncTicket,
+): AgentToolResult<DelegateDetails> {
+  const total = ticket.progress.length;
+  const done = ticket.progress.filter((p) => p.status === "done").length;
+  const failed = ticket.progress.filter((p) => p.status === "failed").length;
+  const running = ticket.progress.filter((p) => p.status === "running").length;
+  const pending = ticket.progress.filter((p) => p.status === "pending").length;
+  const finalized = done + failed;
+
+  const parts: string[] = [
+    `Waiting for ticket ${ticket.id}: ${ticket.status.toUpperCase()}`,
+  ];
+  parts.push(`${finalized}/${total} finalized`);
+  if (running > 0) parts.push(`${running} active`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (pending > 0) parts.push(`${pending} queued`);
+
+  return {
+    content: [{ type: "text", text: parts.join(" · ") }],
+    details: buildWaitDetails(ticket),
+  };
+}
+
+function buildWaitTimeoutResult(
+  ticket: AsyncTicket,
+  timeoutMs: number,
+): AgentToolResult<DelegateDetails> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Ticket ${ticket.id} still ${ticket.status} after ${fmtDuration(timeoutMs)} · wait timed out (ticket continues in background)`,
+      },
+    ],
+    details: buildWaitDetails(ticket),
+  };
+}
+
+function buildWaitAbortResult(
+  ticket: AsyncTicket,
+): AgentToolResult<DelegateDetails> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Wait for ticket ${ticket.id} aborted · ticket continues ${ticket.status} in the background`,
+      },
+    ],
+    details: buildWaitDetails(ticket),
+  };
+}
+
+function settleWaiter(
+  w: TicketWaiter,
+  result: AgentToolResult<DelegateDetails>,
+): void {
+  if (w.settled) return;
+  w.settled = true;
+  if (w.timeoutId !== undefined) clearTimeout(w.timeoutId);
+  w.resolve(result);
+}
+
+function abortWaiter(w: TicketWaiter, ticket: AsyncTicket): void {
+  settleWaiter(w, buildWaitAbortResult(ticket));
+}
+
+function timeoutWaiter(
+  w: TicketWaiter,
+  ticket: AsyncTicket,
+  timeoutMs: number,
+): void {
+  // If the ticket became terminal (e.g. runtime expired or completed just before
+  // this timer fired), return that snapshot. Workers may still be unwinding, so
+  // waiting for deliverTicketResults here could strand the caller indefinitely.
+  sweepTickets();
+  if (ticket.status !== "running" && ticket.status !== "cancelling") {
+    settleWaiter(w, formatCompletedTicket(ticket));
+    return;
+  }
+  settleWaiter(w, buildWaitTimeoutResult(ticket, timeoutMs));
+}
+
+function cleanWaiters(ticket: AsyncTicket): void {
+  if (!ticket.waiters) return;
+  const active = ticket.waiters.filter((w) => !w.settled && !w.signal?.aborted);
+  ticket.waiters = active.length ? active : undefined;
+}
+
+/** Resolve active waiters for a terminal ticket. Returns whether any waiter was
+ * resolved, so callers can avoid also delivering a duplicate follow-up. */
+function settleTicketWaiters(ticket: AsyncTicket): boolean {
+  if (!ticket.waiters?.length) return false;
+
+  const formatted = formatCompletedTicket(ticket);
+  let hadActive = false;
+  for (const w of ticket.waiters) {
+    if (w.settled || w.signal?.aborted) continue;
+    settleWaiter(w, formatted);
+    hadActive = true;
+  }
+  cleanWaiters(ticket);
+  return hadActive;
+}
+
+/** Forward current progress to all active blocking waiters. Called whenever an
+ *  async task reports a progress or status change. */
+export function notifyWaiters(ticket: AsyncTicket): void {
+  if (!ticket.waiters?.length) return;
+  // Progress frames make sense while the ticket is running or cancelling.
+  // Terminal tickets (done/failed/cancelled) are resolved by deliverTicketResults.
+  if (ticket.status !== "running" && ticket.status !== "cancelling") return;
+  const active: TicketWaiter[] = [];
+  for (const w of ticket.waiters) {
+    if (w.settled) continue;
+    if (w.signal?.aborted) {
+      abortWaiter(w, ticket);
+      continue;
+    }
+    active.push(w);
+    if (w.onUpdate) w.onUpdate(buildWaitRunningUpdate(ticket));
+  }
+  ticket.waiters = active.length ? active : undefined;
+}
+
+/** Push results into parent session via sendMessage when background ticket completes.
+ *  If there are active blocking waiters, resolve them directly and suppress the
+ *  automatic follow-up so completion is delivered exactly once. */
 export function deliverTicketResults(
   pi: ExtensionAPI,
   ticket: AsyncTicket,
 ): void {
   if (!ticket.completedAt) return;
+
+  // Resolve active blocking waiters directly. Stale/aborted waiters are
+  // cleaned but not resolved here (their abort handlers already returned).
+  if (settleTicketWaiters(ticket)) return;
 
   const formatted = formatCompletedTicket(ticket);
   const text = formatted.content
@@ -253,7 +443,11 @@ export function handlePoll(
     }
     const lines = tickets.map((t) => {
       const icon =
-        t.status === "running" ? "⏳" : t.status === "done" ? "✓" : "✗";
+        t.status === "running" || t.status === "cancelling"
+          ? "⏳"
+          : t.status === "done"
+            ? "✓"
+            : "✗";
       const done = t.progress.filter((p) => p.status === "done").length;
       const age = fmtDuration(Date.now() - t.created);
       // Agent roster — compact, deduplicated (a ticket may run the same agent
@@ -265,11 +459,13 @@ export function handlePoll(
         ? ` · ${agentSet.slice(0, 3).join(", ")}${agentSet.length > 3 ? ` +${agentSet.length - 3}` : ""}`
         : "";
       let line = `${icon} ${t.id}${agents} · ${done}/${t.progress.length} tasks · ${t.status} · ${age}`;
-      // Copy-pasteable controls for running tickets — a human can grab these
+      // Copy-pasteable controls for running/cancelling tickets — a human can grab these
       // straight out of the TUI without retyping the ticket id.
-      if (t.status === "running") {
+      if (t.status === "running" || t.status === "cancelling") {
         line += `\n     poll:   delegate({ action: "poll", ticket: "${t.id}" })`;
-        line += `\n     cancel: delegate({ action: "cancel", ticket: "${t.id}" })`;
+        if (t.status === "running") {
+          line += `\n     cancel: delegate({ action: "cancel", ticket: "${t.id}", force: true })`;
+        }
       }
       return line;
     });
@@ -303,16 +499,23 @@ export function handlePoll(
     };
   }
 
-  if (ticket.status === "running") {
-    const succeededCount = ticket.progress.filter(
-      (p) => p.status === "done",
-    ).length;
+  if (ticket.status === "running" || ticket.status === "cancelling") {
     const failedCount = ticket.progress.filter(
       (p) => p.status === "failed",
     ).length;
     // Settled = done + failed. Used for the "all finished" guidance check.
-    const settledCount = succeededCount + failedCount;
+    const settledCount = ticket.progress.filter(
+      (p) => p.status === "done" || p.status === "failed",
+    ).length;
     const totalCount = ticket.progress.length;
+    const runningCount = ticket.progress.filter(
+      (p) => p.status === "running",
+    ).length;
+    const pendingCount = ticket.progress.filter(
+      (p) => p.status === "pending",
+    ).length;
+    const totalTools = ticket.progress.reduce((sum, p) => sum + p.toolUses, 0);
+    const totalTokens = ticket.progress.reduce((sum, p) => sum + p.tokens, 0);
     const lines: string[] = [];
     // Index-aligned sparse array — same shape as ticket.results, so consumers
     // can correlate results[i] with progress[i] and tasks[i].
@@ -337,31 +540,53 @@ export function handlePoll(
         }
         completedResults[i] = r;
       } else if (p.status === "failed" && r) {
-        lines.push(`✗ ${r.agent} · ${r.error ?? "unknown error"}`);
+        const meta = taskMetaBase(r);
+        if (r.touchedFiles.length > 0) {
+          const t = ticket.resolved[i]!;
+          const touched = relativeTouchedSummary(r.touchedFiles, t.cwd);
+          if (touched) meta.push(`touched: ${touched}`);
+        }
+        const errorText = r.error ?? "unknown error";
+        lines.push(`✗ ${r.agent} · ${errorText} · ${meta.join(" · ")}`);
         if (r.sessionFile)
           lines.push(`  session: ${shortenPath(r.sessionFile)}`);
-        if (r.output) lines.push(renderOutputForPoll(r.output));
+        if (r.output && r.output !== "(no output)")
+          lines.push(renderOutputForPoll(r.output));
         completedResults[i] = r;
       } else if (p.status === "running") {
-        const activity = inFlightActivity(p);
-        const currentTool = activity
-          ? ` · ${formatToolCallShort(activity.name, activity.args)}`
-          : "";
-        lines.push(
-          `⏳ ${p.agent}${currentTool} · ${fmtDuration(Date.now() - ticket.created)}`,
-        );
+        const parts: string[] = [formatActivityLabel(p)];
+        if (p.toolUses > 0)
+          parts.push(`${p.toolUses} tool${p.toolUses === 1 ? "" : "s"}`);
+        if (p.tokens > 0) parts.push(`${fmtTokens(p.tokens)} tokens`);
+        const age = getActivityAge(p.lastActivityAt);
+        if (age) parts.push(age);
+        lines.push(`⏳ ${p.agent} · ${parts.join(" · ")}`);
       } else {
         lines.push(`○ ${p.agent} · waiting…`);
       }
     }
 
-    const header = `Ticket ${ticket.id}: RUNNING · ${succeededCount}/${totalCount} done${failedCount > 0 ? ` · ${failedCount} failed` : ""} (${fmtDuration(Date.now() - ticket.created)})`;
+    const headerStatus =
+      ticket.status === "cancelling" ? "CANCELLING" : "RUNNING";
+    const headerParts: string[] = [
+      `Ticket ${ticket.id}: ${headerStatus}`,
+      `${settledCount}/${totalCount} finalized`,
+    ];
+    if (runningCount > 0) headerParts.push(`${runningCount} active`);
+    if (pendingCount > 0) headerParts.push(`${pendingCount} queued`);
+    if (failedCount > 0) headerParts.push(`${failedCount} failed`);
+    headerParts.push(`${totalTools} tool${totalTools === 1 ? "" : "s"}`);
+    headerParts.push(`${fmtTokens(totalTokens)} tokens`);
+    headerParts.push(`(${fmtDuration(Date.now() - ticket.created)})`);
+    const header = headerParts.join(" · ");
     const guidance =
-      settledCount === totalCount
-        ? ""
-        : settledCount > 0
-          ? "Tasks are progressing. Do other work while remaining tasks finish — results will be delivered automatically when all complete."
-          : "Tasks are still running. Do other work while you wait — polling again immediately will not speed them up. Results are delivered automatically when all tasks complete.";
+      ticket.status === "cancelling"
+        ? "Cancellation requested. Active subagents are aborting and returning partial results; poll again for the final status."
+        : settledCount === totalCount
+          ? ""
+          : settledCount > 0
+            ? "Tasks are progressing. Do other work while remaining tasks finish — results will be delivered automatically when all complete."
+            : "Tasks are still running. Do other work while you wait — polling again immediately will not speed them up. Results are delivered automatically when all tasks complete.";
 
     return {
       content: [
@@ -380,6 +605,7 @@ export function handlePoll(
         // Thread ticketId so the rich renderResult path shows the ticket banner
         // (friction #2). The LLM-facing content still names the ticket id too.
         ticketId: ticket.id,
+        status: ticket.status,
       },
     };
   }
@@ -388,8 +614,47 @@ export function handlePoll(
   return formatCompletedTicket(ticket);
 }
 
+function buildCancelPreview(ticket: AsyncTicket): string {
+  const finalized = ticket.progress.filter(
+    (p) => p.status === "done" || p.status === "failed",
+  ).length;
+  const running = ticket.progress.filter((p) => p.status === "running").length;
+  const pending = ticket.progress.filter((p) => p.status === "pending").length;
+  const lines: string[] = [
+    `Ticket ${ticket.id}: cancellation preview`,
+    `${finalized}/${ticket.progress.length} finalized · ${running} active · ${pending} queued`,
+  ];
+
+  for (let i = 0; i < ticket.progress.length; i++) {
+    const p = ticket.progress[i]!;
+    if (p.status === "done") {
+      lines.push(`✓ ${p.agent} · completed`);
+    } else if (p.status === "failed") {
+      lines.push(`✗ ${p.agent} · ${p.error ?? "failed"}`);
+    } else if (p.status === "running") {
+      const parts: string[] = [formatActivityLabel(p)];
+      if (p.toolUses > 0)
+        parts.push(`${p.toolUses} tool${p.toolUses === 1 ? "" : "s"}`);
+      if (p.tokens > 0) parts.push(`${fmtTokens(p.tokens)} tokens`);
+      const age = getActivityAge(p.lastActivityAt);
+      if (age) parts.push(age);
+      lines.push(`⏳ ${p.agent} · ${parts.join(" · ")}`);
+    } else {
+      lines.push(`○ ${p.agent} · waiting…`);
+    }
+  }
+
+  lines.push(
+    "",
+    "WARNING: Cancelling now will abort active subagents. Files already written or shell commands already executed are NOT rolled back.",
+    `To proceed, call delegate({ action: "cancel", ticket: "${ticket.id}", force: true }).`,
+  );
+  return lines.join("\n");
+}
+
 export function handleCancel(params: {
   ticket?: string;
+  force?: boolean;
 }): AgentToolResult<DelegateDetails> {
   sweepTickets();
   const ticketId = params.ticket;
@@ -420,12 +685,128 @@ export function handleCancel(params: {
       details: { tasks: [], results: [], progress: [] },
     };
   }
+  if (!params.force) {
+    return {
+      content: [{ type: "text", text: buildCancelPreview(ticket) }],
+      details: buildWaitDetails(ticket),
+    };
+  }
   ticket.controller.abort();
-  ticket.status = "cancelled";
-  ticket.completedAt = Date.now();
+  ticket.status = "cancelling";
   syncTicketBusyIndex(ticket);
   return {
-    content: [{ type: "text", text: `Ticket '${ticketId}' cancelled.` }],
-    details: { tasks: [], results: [], progress: [] },
+    content: [
+      {
+        type: "text",
+        text: `Ticket '${ticketId}' is cancelling; workers are settling. Poll for final status.`,
+      },
+    ],
+    details: buildWaitDetails(ticket),
   };
+}
+
+/** Block until a ticket reaches a terminal state or `timeoutMs` expires.
+ *  Progress is streamed through `onUpdate` without consuming model turns.
+ *  Parent-tool abort or timeout detaches the waiter and leaves the ticket
+ *  running; cancellation remains explicit (`action: "cancel"`). */
+export function handleWait(
+  params: { ticket?: string; timeoutMs?: number },
+  signal: AbortSignal | undefined,
+  onUpdate: AgentToolUpdateCallback<DelegateDetails> | undefined,
+  ctx: ExtensionContext,
+): Promise<AgentToolResult<DelegateDetails>> {
+  sweepTickets();
+  const parentModelId = ctx.model?.id;
+
+  const ticketId = params.ticket;
+  if (!ticketId) {
+    return Promise.resolve({
+      content: [{ type: "text", text: "action='wait' requires a ticket ID." }],
+      details: {
+        tasks: [],
+        results: [],
+        progress: [],
+        parentModel: parentModelId,
+      },
+    });
+  }
+
+  const ticket = ticketRegistry.get(ticketId);
+  if (!ticket) {
+    return Promise.resolve({
+      content: [{ type: "text", text: `Ticket '${ticketId}' not found.` }],
+      details: {
+        tasks: [],
+        results: [],
+        progress: [],
+        parentModel: parentModelId,
+      },
+    });
+  }
+
+  if (ticket.status !== "running" && ticket.status !== "cancelling") {
+    return Promise.resolve(formatCompletedTicket(ticket));
+  }
+
+  // Already aborted parent signal → detach immediately.
+  if (signal?.aborted) {
+    return Promise.resolve(buildWaitAbortResult(ticket));
+  }
+
+  return new Promise((resolve, reject) => {
+    let runtimeWatchdog: ReturnType<typeof setTimeout> | undefined;
+
+    const waiter: TicketWaiter = {
+      signal,
+      onUpdate,
+      resolve: (result) => {
+        if (runtimeWatchdog) clearTimeout(runtimeWatchdog);
+        resolve(result);
+      },
+      reject,
+      settled: false,
+    };
+
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          abortWaiter(waiter, ticket);
+        },
+        { once: true },
+      );
+    }
+
+    if (
+      params.timeoutMs !== undefined &&
+      params.timeoutMs >= 0 &&
+      Number.isFinite(params.timeoutMs) &&
+      params.timeoutMs <= ASYNC_MAX_RUNTIME_MS
+    ) {
+      waiter.timeoutId = setTimeout(() => {
+        timeoutWaiter(waiter, ticket, params.timeoutMs!);
+      }, params.timeoutMs);
+    }
+
+    // Runtime watchdog: make the hard timeout observable even if an aborted
+    // worker is wedged in a tool call and therefore never reaches
+    // deliverTicketResults. The caller's timeout remains armed as an
+    // independent safety net; settleWaiter makes the timer race harmless.
+    const runtimeRemaining =
+      ASYNC_MAX_RUNTIME_MS - (Date.now() - ticket.created);
+    if (runtimeRemaining > 0) {
+      runtimeWatchdog = setTimeout(() => {
+        sweepTickets();
+        if (ticket.status !== "running" && ticket.status !== "cancelling") {
+          settleWaiter(waiter, formatCompletedTicket(ticket));
+        }
+      }, runtimeRemaining);
+    }
+
+    ticket.waiters = ticket.waiters ?? [];
+    ticket.waiters.push(waiter);
+
+    // Immediate progress frame so the TUI shows the current state.
+    notifyWaiters(ticket);
+  });
 }
