@@ -416,6 +416,23 @@ export function inFlightActivity(p: TaskProgress): ToolActivity | null {
   return p.activities.findLast((a) => !a.result) ?? null;
 }
 
+/** The latest activity for a task, whether in-flight or completed. */
+export function latestActivity(p: TaskProgress): ToolActivity | null {
+  return p.activities.at(-1) ?? null;
+}
+
+/** Human-readable label for the latest activity.
+ *  - "write src/foo.ts" when a tool is in-flight
+ *  - "last: read src/bar.ts" after a tool completes and the model is thinking
+ *  - "thinking" when no activity has been recorded yet */
+export function formatActivityLabel(p: TaskProgress): string {
+  const activity = latestActivity(p);
+  if (!activity) return "thinking";
+  const call = formatToolCallShort(activity.name, activity.args);
+  if (!activity.result) return call;
+  return `last: ${call}`;
+}
+
 /** Per-task stats core: [duration, tokens]. Callers append medium-specific
  *  extras (touched files; themed join). */
 export function taskMetaBase(r: TaskResult): string[] {

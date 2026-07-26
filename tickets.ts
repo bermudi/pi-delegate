@@ -7,11 +7,11 @@ import { ASYNC_MAX_RUNTIME_MS, ASYNC_TICKET_TTL_MS } from "./constants.ts";
 import {
   fmtDuration,
   fmtTokens,
-  formatToolCallShort,
   formatCompletedTask,
   shortenPath,
   trunc,
-  inFlightActivity,
+  getActivityAge,
+  formatActivityLabel,
   taskMetaBase,
   relativeTouchedSummary,
 } from "./format.ts";
@@ -313,6 +313,11 @@ export function handlePoll(
     // Settled = done + failed. Used for the "all finished" guidance check.
     const settledCount = succeededCount + failedCount;
     const totalCount = ticket.progress.length;
+    const totalTools = ticket.progress.reduce(
+      (sum, p) => sum + p.toolUses,
+      0,
+    );
+    const totalTokens = ticket.progress.reduce((sum, p) => sum + p.tokens, 0);
     const lines: string[] = [];
     // Index-aligned sparse array — same shape as ticket.results, so consumers
     // can correlate results[i] with progress[i] and tasks[i].
@@ -343,19 +348,20 @@ export function handlePoll(
         if (r.output) lines.push(renderOutputForPoll(r.output));
         completedResults[i] = r;
       } else if (p.status === "running") {
-        const activity = inFlightActivity(p);
-        const currentTool = activity
-          ? ` · ${formatToolCallShort(activity.name, activity.args)}`
-          : "";
-        lines.push(
-          `⏳ ${p.agent}${currentTool} · ${fmtDuration(Date.now() - ticket.created)}`,
-        );
+        const parts: string[] = [formatActivityLabel(p)];
+        if (p.toolUses > 0)
+          parts.push(`${p.toolUses} tool${p.toolUses === 1 ? "" : "s"}`);
+        if (p.tokens > 0)
+          parts.push(`${fmtTokens(p.tokens)} tokens`);
+        const age = getActivityAge(p.lastActivityAt);
+        if (age) parts.push(age);
+        lines.push(`⏳ ${p.agent} · ${parts.join(" · ")}`);
       } else {
         lines.push(`○ ${p.agent} · waiting…`);
       }
     }
 
-    const header = `Ticket ${ticket.id}: RUNNING · ${succeededCount}/${totalCount} done${failedCount > 0 ? ` · ${failedCount} failed` : ""} (${fmtDuration(Date.now() - ticket.created)})`;
+    const header = `Ticket ${ticket.id}: RUNNING · ${succeededCount}/${totalCount} done${failedCount > 0 ? ` · ${failedCount} failed` : ""} · ${totalTools} tool${totalTools === 1 ? "" : "s"} · ${fmtTokens(totalTokens)} tokens (${fmtDuration(Date.now() - ticket.created)})`;
     const guidance =
       settledCount === totalCount
         ? ""
