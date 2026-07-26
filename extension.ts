@@ -27,7 +27,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     name: "delegate",
     label: "Delegate to Subagents",
     description:
-      "Delegate independent work to parallel subagents with separate context and tools.",
+      "Spawn parallel subagents. Sync blocks for results; async for detached work.",
     parameters: delegateParameters,
     // Runs before schema validation — recovers stringified `tasks` arrays
     // (a common model mistake that would otherwise be rejected upstream).
@@ -38,19 +38,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       const tasks = params.tasks ?? [];
 
       // ── Poll action ───────────────────────────────────────────────────
-      // Top-level action is the public API. Per-task action is accepted for
-      // backward compatibility with early async builds.
-      if (params.action === "poll" || tasks.some((t) => t.action === "poll")) {
+      if (params.action === "poll") {
         return handlePoll(params, ctx);
       }
 
       // ── Cancel action ─────────────────────────────────────────────────
-      // Top-level action is the public API. Per-task action is accepted for
-      // backward compatibility with early async builds.
-      if (
-        params.action === "cancel" ||
-        tasks.some((t) => t.action === "cancel")
-      ) {
+      if (params.action === "cancel") {
         return handleCancel(params);
       }
 

@@ -35,7 +35,7 @@ export type DelegateParams = Static<typeof delegateParameters>;
 export type TaskDef = NonNullable<DelegateParams["tasks"]>[number];
 /** Top-level async ticket action: "poll" | "cancel" | "wait". */
 export type DelegateAction = NonNullable<DelegateParams["action"]>;
-/** Per-task session action: "prompt" | "close" | "list" | "poll" | "cancel". */
+/** Per-task session action: "prompt" | "close" | "list". */
 export type SessionAction = NonNullable<TaskDef["action"]>;
 
 // ── Async Ticket Types ─────────────────────────────────────────────────────

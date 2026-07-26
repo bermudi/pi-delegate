@@ -2293,6 +2293,20 @@ describe("delegate extension integration", () => {
       "not for async tickets",
     );
 
+    // Orchestration invariants from #27 are model-visible in the schema.
+    expect(toolDef!.description).toContain("Sync");
+    expect(toolDef!.description).toContain("async");
+    expect(schema.properties.tasks.description).toContain("independent");
+    expect(schema.properties.async.description).toContain("automatically");
+    expect(schema.properties.async.description).toContain("wait");
+    expect(schema.properties.action.description).toContain("zero results");
+    expect(schema.properties.force.description).toContain("partial effects");
+    expect(tasksArraySchema.items.properties.action.enum).toEqual([
+      "prompt",
+      "close",
+      "list",
+    ]);
+
     // Descriptions are a tokenizer-independent proxy for the repeated provider
     // tool-definition payload. Keep the complete model-facing guidance compact
     // enough that a copy edit cannot quietly recreate the verbose B-state schema.
@@ -5522,14 +5536,15 @@ describe("async delegate integration", () => {
     expect(text).toContain("150 tokens");
   });
 
-  test("action enum includes poll and cancel", async () => {
+  test("per-task action enum does not advertise poll or cancel", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
     const taskSchema = tasksArraySchema.items;
     const actionEnum = taskSchema.properties.action.enum;
-    expect(actionEnum).toContain("poll");
-    expect(actionEnum).toContain("cancel");
+    expect(actionEnum).not.toContain("poll");
+    expect(actionEnum).not.toContain("cancel");
+    expect(actionEnum).toEqual(["prompt", "close", "list"]);
   });
 
   test("top-level action enum includes wait", async () => {

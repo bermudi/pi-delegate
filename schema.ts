@@ -26,7 +26,7 @@ export const delegateTaskParameters = Type.Object({
   ),
   agent: Type.Optional(
     Type.String({
-      description: "Configured agent name; omit for an inline custom agent.",
+      description: "Agent name; omit for custom inline agent.",
     }),
   ),
   cwd: Type.Optional(
@@ -36,25 +36,25 @@ export const delegateTaskParameters = Type.Object({
   ),
   systemPrompt: Type.Optional(
     Type.String({
-      description: "Inline system prompt; otherwise agent or parent prompt.",
+      description: "System prompt; inherits from agent or parent.",
     }),
   ),
   context: Type.Optional(
     StringEnum(["fresh", "with-parent-transcript"], {
       description:
-        "'with-parent-transcript' injects the full parent conversation (token-expensive).",
+        "'with-parent-transcript' includes parent history (token-expensive).",
       default: "fresh",
     }),
   ),
   model: Type.Optional(
     Type.String({
-      description: "Model override; omit to inherit the parent model.",
+      description: "Model override; omit to inherit parent model.",
     }),
   ),
   tools: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        "Tool names or '*' (read/write/edit/bash) / 'ro' (read/grep/find/ls).",
+        "Tool set: '*' (read/write/edit/bash) or 'ro' (read/grep/find/ls).",
     }),
   ),
   thinking: Type.Optional(
@@ -68,15 +68,15 @@ export const delegateTaskParameters = Type.Object({
     }),
   ),
   action: Type.Optional(
-    StringEnum(["prompt", "close", "list", "poll", "cancel"], {
+    StringEnum(["prompt", "close", "list"], {
       description:
-        "Session action; close requires sessionId; poll/cancel are legacy.",
+        "Session action; close requires sessionId. list shows history.",
       default: "prompt",
     }),
   ),
   resumeFrom: Type.Optional(
     Type.String({
-      description: "Absolute prior session .jsonl path; not for async tickets.",
+      description: "Absolute prior .jsonl path; not for async tickets.",
     }),
   ),
 });
@@ -86,12 +86,14 @@ export const delegateTaskParameters = Type.Object({
 export const delegateParameters = Type.Object({
   action: Type.Optional(
     StringEnum(["poll", "cancel", "wait"], {
-      description: "Poll, cancel, or wait on an async ticket.",
+      description:
+        "Poll, cancel, or wait on an async ticket. Prefer wait; do not cancel for time or zero results.",
     }),
   ),
   async: Type.Optional(
     Type.Boolean({
-      description: "Run in the background and return a ticket ID.",
+      description:
+        "Background work returns a ticket ID. Results delivered automatically; use wait, not polling.",
       default: false,
     }),
   ),
@@ -103,20 +105,21 @@ export const delegateParameters = Type.Object({
   force: Type.Optional(
     Type.Boolean({
       description:
-        "Required for action='cancel'. Set true to abort; omit for a preview.",
+        "Set true to cancel; omit for preview. May leave partial effects.",
       default: false,
     }),
   ),
   timeoutMs: Type.Optional(
     Type.Number({
       description:
-        "Wait timeout in milliseconds. A timeout returns current running status; the ticket keeps running.",
+        "Wait timeout in ms. Returns current status; ticket keeps running.",
     }),
   ),
   tasks: Type.Optional(
     Type.Array(delegateTaskParameters, {
       minItems: 0,
-      description: "Parallel subagent tasks. Pass an empty array for help.",
+      description:
+        "Subagent tasks are independent; shared files/dependencies need sequential calls. Pass [] for help.",
       default: [],
     }),
   ),
