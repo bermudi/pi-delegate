@@ -304,19 +304,21 @@ export function handlePoll(
   }
 
   if (ticket.status === "running") {
-    const succeededCount = ticket.progress.filter(
-      (p) => p.status === "done",
-    ).length;
     const failedCount = ticket.progress.filter(
       (p) => p.status === "failed",
     ).length;
     // Settled = done + failed. Used for the "all finished" guidance check.
-    const settledCount = succeededCount + failedCount;
+    const settledCount = ticket.progress.filter(
+      (p) => p.status === "done" || p.status === "failed",
+    ).length;
     const totalCount = ticket.progress.length;
-    const totalTools = ticket.progress.reduce(
-      (sum, p) => sum + p.toolUses,
-      0,
-    );
+    const runningCount = ticket.progress.filter(
+      (p) => p.status === "running",
+    ).length;
+    const pendingCount = ticket.progress.filter(
+      (p) => p.status === "pending",
+    ).length;
+    const totalTools = ticket.progress.reduce((sum, p) => sum + p.toolUses, 0);
     const totalTokens = ticket.progress.reduce((sum, p) => sum + p.tokens, 0);
     const lines: string[] = [];
     // Index-aligned sparse array — same shape as ticket.results, so consumers
@@ -351,8 +353,7 @@ export function handlePoll(
         const parts: string[] = [formatActivityLabel(p)];
         if (p.toolUses > 0)
           parts.push(`${p.toolUses} tool${p.toolUses === 1 ? "" : "s"}`);
-        if (p.tokens > 0)
-          parts.push(`${fmtTokens(p.tokens)} tokens`);
+        if (p.tokens > 0) parts.push(`${fmtTokens(p.tokens)} tokens`);
         const age = getActivityAge(p.lastActivityAt);
         if (age) parts.push(age);
         lines.push(`⏳ ${p.agent} · ${parts.join(" · ")}`);
@@ -361,7 +362,17 @@ export function handlePoll(
       }
     }
 
-    const header = `Ticket ${ticket.id}: RUNNING · ${succeededCount}/${totalCount} done${failedCount > 0 ? ` · ${failedCount} failed` : ""} · ${totalTools} tool${totalTools === 1 ? "" : "s"} · ${fmtTokens(totalTokens)} tokens (${fmtDuration(Date.now() - ticket.created)})`;
+    const headerParts: string[] = [
+      `Ticket ${ticket.id}: RUNNING`,
+      `${settledCount}/${totalCount} finalized`,
+    ];
+    if (runningCount > 0) headerParts.push(`${runningCount} active`);
+    if (pendingCount > 0) headerParts.push(`${pendingCount} queued`);
+    if (failedCount > 0) headerParts.push(`${failedCount} failed`);
+    headerParts.push(`${totalTools} tool${totalTools === 1 ? "" : "s"}`);
+    headerParts.push(`${fmtTokens(totalTokens)} tokens`);
+    headerParts.push(`(${fmtDuration(Date.now() - ticket.created)})`);
+    const header = headerParts.join(" · ");
     const guidance =
       settledCount === totalCount
         ? ""

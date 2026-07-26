@@ -227,6 +227,10 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
   // this branch must render every status. A ticket banner is shown when
   // details.ticketId is present so the human sees this is background work.
   const succeeded = progress.filter((p) => p.status === "done").length;
+  const failed = progress.filter((p) => p.status === "failed").length;
+  const finalized = succeeded + failed;
+  const running = progress.filter((p) => p.status === "running").length;
+  const pending = progress.filter((p) => p.status === "pending").length;
   const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
   const hasLiveTasks = progress.some(
     (p) => p.status === "running" || p.status === "pending",
@@ -238,9 +242,13 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
 
   if (ticketId && hasLiveTasks) {
     // Background ticket — frame it as in-progress, not a finished result.
-    const running = progress.filter((p) => p.status === "running").length;
-    const ticketParts = [`ticket ${ticketId}`, `${succeeded}/${total} done`];
-    if (running > 0) ticketParts.push(`${running} running`);
+    const ticketParts = [
+      `ticket ${ticketId}`,
+      `${finalized}/${total} finalized`,
+    ];
+    if (running > 0) ticketParts.push(`${running} active`);
+    if (pending > 0) ticketParts.push(`${pending} queued`);
+    if (failed > 0) ticketParts.push(`${failed} failed`);
     ticketParts.push("running in background");
     lines.push(theme.fg("warning", `⏳ ${ticketParts.join(" · ")}`), "");
   } else {
@@ -253,9 +261,6 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     );
   }
 
-  // Invariant across tasks: compute once, not per iteration (mirrors the
-  // partial branch's `running`).
-  const runningNow = progress.filter((q) => q.status === "running").length;
   for (let i = 0; i < total; i++) {
     const p = progress[i]!;
     const r = taskResults[i];
@@ -278,10 +283,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       p.status === "running"
         ? theme.fg("muted", ` · ${compactActivity(p)}`)
         : p.status === "pending"
-          ? theme.fg(
-              "muted",
-              ` ${waitingLabel(runningNow, getMaxConcurrent())}`,
-            )
+          ? theme.fg("muted", ` ${waitingLabel(running, getMaxConcurrent())}`)
           : "";
     lines.push(
       truncLine(
@@ -318,7 +320,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     }
 
     // Surface errors even when output exists (agent may have emitted text before failing).
-    if (r && "error" in r && r.error) {
+    // Live tasks carry placeholder { error: "PENDING..." } results; do not render those as errors.
+    if (!isLive && r && "error" in r && r.error) {
       lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
     }
     // Collapsed: one-line output preview so a human scanning the TUI sees

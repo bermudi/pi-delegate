@@ -421,16 +421,32 @@ export function latestActivity(p: TaskProgress): ToolActivity | null {
   return p.activities.at(-1) ?? null;
 }
 
-/** Human-readable label for the latest activity.
- *  - "write src/foo.ts" when a tool is in-flight
+/** Human-readable label for the current or latest activity.
+ *  - "write src/foo.ts" when a tool is in-flight (even if a later-started tool
+ *    already finished under parallel execution)
  *  - "last: read src/bar.ts" after a tool completes and the model is thinking
  *  - "thinking" when no activity has been recorded yet */
 export function formatActivityLabel(p: TaskProgress): string {
-  const activity = latestActivity(p);
+  const activity = inFlightActivity(p) ?? latestActivity(p);
   if (!activity) return "thinking";
   const call = formatToolCallShort(activity.name, activity.args);
   if (!activity.result) return call;
   return `last: ${call}`;
+}
+
+/** Compact TUI activity label. Uses the same current/latest-activity selection
+ *  as {@link formatActivityLabel} but adds elapsed time for in-flight tools and
+ *  a completion/error icon for finished ones. */
+export function compactActivity(p: TaskProgress): string {
+  const activity = inFlightActivity(p) ?? latestActivity(p);
+  if (!activity) return "thinking…";
+  const call = formatToolCallShort(activity.name, activity.args);
+  if (!activity.result) {
+    const toolAge = fmtDuration(Date.now() - activity.startTime);
+    return `${call} | ${toolAge}`;
+  }
+  const icon = activity.result.isError ? "✗" : "✓";
+  return `${call} ${icon}`;
 }
 
 /** Per-task stats core: [duration, tokens]. Callers append medium-specific

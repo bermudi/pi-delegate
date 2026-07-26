@@ -7,6 +7,9 @@ import { tmpdir } from "node:os";
 import { _setClockForTesting, _resetPoolForTesting } from "./pool.ts";
 import {
   inFlightActivity,
+  latestActivity,
+  formatActivityLabel,
+  compactActivity,
   taskMetaBase,
   waitingLabel,
   relativeTouchedSummary,
@@ -57,6 +60,7 @@ import {
   type DelegateConfig,
   type TaskProgress,
   type TaskResult,
+  type ToolActivity,
   ticketRegistry,
   type AsyncTicket,
   sweepTickets,
@@ -3826,6 +3830,10 @@ describe("delegate renderers", () => {
       expect(rendered).toContain("⏳");
       expect(rendered).toContain("ticket poll45678");
       expect(rendered).toContain("running in background");
+      // Live tasks use placeholder { error: "PENDING..." } results for index
+      // alignment; the renderer must not surface that placeholder as an error.
+      expect(rendered).not.toContain("PENDING");
+      expect(rendered).not.toContain("result not available");
     } finally {
       ticketRegistry.delete("poll45678");
     }
@@ -4490,10 +4498,10 @@ describe("async delegate integration", () => {
     const result = handlePoll({ ticket: "partial1" }, {} as any);
     const text = result.content[0].text;
 
-    // Header shows partial completion — succeeded only, failed called out
-    // separately. (Previously this read "2/3 done" because failed tasks were
-    // counted as done — the same mislabeling class as the final-status bug.)
-    expect(text).toContain("1/3 done");
+    // Header shows finalized count (done + failed) and active count for the
+    // still-running task; failed tasks are also called out separately.
+    expect(text).toContain("2/3 finalized");
+    expect(text).toContain("1 active");
     expect(text).toContain("1 failed");
     // Completed task output is present
     expect(text).toContain("found it");
@@ -4537,10 +4545,12 @@ describe("async delegate integration", () => {
     const result = handlePoll({ ticket: "mixed-running" }, {} as any);
     const text = result.content[0].text;
 
-    // 2 succeeded out of 5 — not "4/5 done" (which would count failures)
-    expect(text).toContain("2/5 done");
+    // 4 finalized out of 5 (2 succeeded + 2 failed), with 1 still active.
+    // The header must not report only the 2 succeeded tasks.
+    expect(text).toContain("4/5 finalized");
+    expect(text).toContain("1 active");
     expect(text).toContain("2 failed");
-    expect(text).not.toContain("4/5 done");
+    expect(text).not.toContain("2/5 finalized");
   });
 
   test("poll with unknown ticket returns not found", () => {
@@ -4802,6 +4812,23 @@ describe("async delegate integration", () => {
     touchedFiles: [],
   });
 
+  const mkActivity = (
+    name: string,
+    args: Record<string, unknown>,
+    result?: {
+      content: Array<{ type: string; text?: string }>;
+      isError: boolean;
+    },
+    startOffset = 0,
+  ): ToolActivity => ({
+    id: Math.random().toString(36).slice(2, 10),
+    name,
+    args,
+    startTime: Date.now() - startOffset,
+    endTime: result ? Date.now() - startOffset + 100 : undefined,
+    result,
+  });
+
   test("resolveFinalTicketStatus: all tasks succeed => done", () => {
     const ticket: AsyncTicket = {
       id: "all-ok",
@@ -5058,6 +5085,281 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("cancel");
   });
 
+  test("poll running ticket exposes activity, tool and token counts", () => {
+    const now = Date.now();
+    const ticket: AsyncTicket = {
+      id: "active-tool",
+      created: now - 60_000,
+      tasks: [{ prompt: "work" }],
+      resolved: [
+        {
+          prompt: "work",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "work",
+          status: "running",
+          durationMs: 5000,
+          tokens: 1234,
+          toolUses: 3,
+          lastActivityAt: now - 2000,
+          activities: [
+            mkActivity(
+              "read",
+              { path: "/tmp/foo" },
+              { content: [], isError: false },
+              5000,
+            ),
+            mkActivity("bash", { command: "echo hi" }, undefined, 2000),
+          ],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("active-tool", ticket);
+
+    const result = handlePoll({ ticket: "active-tool" }, {} as any);
+    const text = result.content[0].text;
+
+    // Header: finalized/active counts plus aggregate work performed.
+    expect(text).toContain("0/1 finalized");
+    expect(text).toContain("1 active");
+    expect(text).toContain("3 tools");
+    expect(text).toContain("1.2k tokens");
+    // Running row: current in-flight tool, counts, and activity freshness.
+    expect(text).toContain("$ echo hi");
+    expect(text).not.toContain("last:");
+    expect(text).toMatch(/active \d+s ago/);
+  });
+
+  test("poll running ticket shows last completed tool when reasoning", () => {
+    const now = Date.now();
+    const ticket: AsyncTicket = {
+      id: "reasoning",
+      created: now - 60_000,
+      tasks: [{ prompt: "think" }],
+      resolved: [
+        {
+          prompt: "think",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "think",
+          status: "running",
+          durationMs: 3000,
+          tokens: 500,
+          toolUses: 2,
+          lastActivityAt: now - 500,
+          activities: [
+            mkActivity(
+              "write",
+              { path: "/tmp/bar", content: "x" },
+              { content: [], isError: false },
+              500,
+            ),
+          ],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("reasoning", ticket);
+
+    const result = handlePoll({ ticket: "reasoning" }, {} as any);
+    const text = result.content[0].text;
+
+    // Between tool calls the latest completed activity is surfaced, not blank.
+    expect(text).toContain("0/1 finalized");
+    expect(text).toContain("1 active");
+    expect(text).toContain("last: write /tmp/bar");
+    expect(text).toContain("2 tools");
+    expect(text).toContain("500 tokens");
+  });
+
+  test("poll running ticket shows genuinely inactive task", () => {
+    const now = Date.now();
+    const ticket: AsyncTicket = {
+      id: "inactive",
+      created: now - 60_000,
+      tasks: [{ prompt: "stuck" }],
+      resolved: [
+        {
+          prompt: "stuck",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "stuck",
+          status: "running",
+          durationMs: 60_000,
+          tokens: 0,
+          toolUses: 0,
+          lastActivityAt: now - 5 * 60 * 1000,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("inactive", ticket);
+
+    const result = handlePoll({ ticket: "inactive" }, {} as any);
+    const text = result.content[0].text;
+
+    // No tool has ever started, but the row still reports the stale activity age.
+    expect(text).toContain("0/1 finalized");
+    expect(text).toContain("thinking");
+    expect(text).toMatch(/active \d+m ago/);
+    expect(text).not.toContain("last:");
+  });
+
+  test("poll running ticket header counts finalized, active, queued, and failed", () => {
+    const now = Date.now();
+    const ticket: AsyncTicket = {
+      id: "mixed-phases",
+      created: now - 60_000,
+      tasks: [
+        { prompt: "a" },
+        { prompt: "b" },
+        { prompt: "c" },
+        { prompt: "d" },
+      ],
+      resolved: [
+        {
+          prompt: "a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          prompt: "b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          prompt: "c",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          prompt: "d",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [mkResult(), mkResult("boom"), undefined, undefined],
+      progress: [
+        {
+          ...mkProgress(["done"])[0]!,
+          toolUses: 2,
+          tokens: 100,
+          activities: [
+            mkActivity(
+              "read",
+              { path: "/tmp/a" },
+              { content: [], isError: false },
+              10_000,
+            ),
+          ],
+        },
+        {
+          ...mkProgress(["failed"])[0]!,
+          toolUses: 1,
+          tokens: 50,
+          activities: [
+            mkActivity(
+              "bash",
+              { command: "x" },
+              { content: [], isError: true },
+              5000,
+            ),
+          ],
+        },
+        {
+          ...mkProgress(["running"])[0]!,
+          tokens: 0,
+          toolUses: 0,
+          lastActivityAt: now - 1000,
+          activities: [],
+        },
+        {
+          ...mkProgress(["pending"])[0]!,
+          tokens: 0,
+          toolUses: 0,
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("mixed-phases", ticket);
+
+    const result = handlePoll({ ticket: "mixed-phases" }, {} as any);
+    const text = result.content[0].text;
+
+    expect(text).toContain("2/4 finalized");
+    expect(text).toContain("1 active");
+    expect(text).toContain("1 queued");
+    expect(text).toContain("1 failed");
+    expect(text).toContain("3 tools");
+    expect(text).toContain("150 tokens");
+  });
+
   test("action enum includes poll and cancel", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
@@ -5149,8 +5451,146 @@ describe("shared live-progress row helpers", () => {
   test("inFlightActivity returns the last activity lacking a result", () => {
     const done = { id: "1", result: { content: [], isError: false } } as any;
     const live = { id: "2" } as any;
+    const liveFirst = { id: "3" } as any;
+    const doneLast = {
+      id: "4",
+      result: { content: [], isError: false },
+    } as any;
     expect(inFlightActivity({ activities: [done, live] } as any)).toBe(live);
+    // Parallel execution: an earlier-started tool can still be in-flight after
+    // a later-started one finishes. findLast must skip completed entries.
+    expect(inFlightActivity({ activities: [liveFirst, doneLast] } as any)).toBe(
+      liveFirst,
+    );
     expect(inFlightActivity({ activities: [done] } as any)).toBeNull();
     expect(inFlightActivity({ activities: [] } as any)).toBeNull();
+  });
+
+  test("latestActivity returns the last activity, in-flight or completed", () => {
+    const a = { id: "1", result: { content: [], isError: false } } as any;
+    const b = { id: "2" } as any;
+    const c = { id: "3", result: { content: [], isError: false } } as any;
+    expect(latestActivity({ activities: [a, b] } as any)).toBe(b);
+    expect(latestActivity({ activities: [a, c] } as any)).toBe(c);
+    expect(latestActivity({ activities: [c] } as any)).toBe(c);
+    expect(latestActivity({ activities: [] } as any)).toBeNull();
+  });
+
+  test("formatActivityLabel shows in-flight tool call", () => {
+    const p = {
+      activities: [{ id: "1", name: "bash", args: { command: "ls" } }],
+    } as any;
+    expect(formatActivityLabel(p)).toBe("$ ls");
+  });
+
+  test("formatActivityLabel prefers an earlier in-flight tool over a later completed one", () => {
+    const p = {
+      activities: [
+        { id: "1", name: "bash", args: { command: "a" } },
+        {
+          id: "2",
+          name: "read",
+          args: { path: "/tmp/foo" },
+          result: { content: [], isError: false },
+        },
+      ],
+    } as any;
+    // Under parallel execution the first tool may still be running when the
+    // second one finishes. The label must show the in-flight tool, not "last:".
+    expect(formatActivityLabel(p)).toBe("$ a");
+    expect(formatActivityLabel(p)).not.toContain("last:");
+  });
+
+  test("formatActivityLabel shows last completed tool with prefix", () => {
+    const p = {
+      activities: [
+        {
+          id: "1",
+          name: "bash",
+          args: { command: "a" },
+          result: { content: [], isError: false },
+        },
+        {
+          id: "2",
+          name: "read",
+          args: { path: "/tmp/foo" },
+          result: { content: [], isError: false },
+        },
+      ],
+    } as any;
+    expect(formatActivityLabel(p)).toBe("last: read /tmp/foo");
+  });
+
+  test("formatActivityLabel returns thinking when no activity", () => {
+    expect(formatActivityLabel({ activities: [] } as any)).toBe("thinking");
+  });
+
+  test("compactActivity shows in-flight tool with elapsed time", () => {
+    const p = {
+      activities: [
+        {
+          id: "1",
+          name: "bash",
+          args: { command: "sleep" },
+          startTime: Date.now() - 500,
+        },
+      ],
+    } as any;
+    expect(compactActivity(p)).toMatch(/^\$ sleep \| \d+ms$/);
+  });
+
+  test("compactActivity prefers an earlier in-flight tool over a later completed one", () => {
+    const p = {
+      activities: [
+        {
+          id: "1",
+          name: "bash",
+          args: { command: "a" },
+          startTime: Date.now() - 500,
+        },
+        {
+          id: "2",
+          name: "read",
+          args: { path: "/tmp/foo" },
+          result: { content: [], isError: false },
+        },
+      ],
+    } as any;
+    // Parallel execution: the first tool is still running when the second
+    // finishes. compactActivity must show the in-flight tool and its age.
+    expect(compactActivity(p)).toMatch(/^\$ a \| \d+ms$/);
+    expect(compactActivity(p)).not.toContain("✓");
+  });
+
+  test("compactActivity shows completed tool with success icon", () => {
+    const p = {
+      activities: [
+        {
+          id: "1",
+          name: "read",
+          args: { path: "/tmp/foo" },
+          result: { content: [], isError: false },
+        },
+      ],
+    } as any;
+    expect(compactActivity(p)).toBe("read /tmp/foo ✓");
+  });
+
+  test("compactActivity shows error icon for failed tool", () => {
+    const p = {
+      activities: [
+        {
+          id: "1",
+          name: "bash",
+          args: { command: "fail" },
+          result: { content: [], isError: true },
+        },
+      ],
+    } as any;
+    expect(compactActivity(p)).toBe("$ fail ✗");
+  });
+
+  test("compactActivity returns thinking when no activity", () => {
+    expect(compactActivity({ activities: [] } as any)).toBe("thinking…");
   });
 });
