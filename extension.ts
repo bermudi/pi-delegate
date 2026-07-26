@@ -3,7 +3,7 @@ import {
   handleCancel,
   handlePoll,
   handleWait,
-  syncTicketBusyIndex,
+  cancelTicketForShutdown,
   ticketRegistry,
 } from "./tickets.ts";
 import { discoverAgents } from "./agents.ts";
@@ -128,17 +128,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     renderResult: renderDelegateResult,
   });
 
-  // ── Session shutdown: abort all running async tickets ───────────────
+  // ── Session shutdown: abort all active async tickets ────────────────
   pi.on("session_shutdown", () => {
     for (const ticket of ticketRegistry.values()) {
-      if (ticket.status === "running") {
-        ticket.controller.abort();
-        ticket.status = "cancelled";
-        ticket.completedAt = Date.now();
-        syncTicketBusyIndex(ticket);
-      }
+      cancelTicketForShutdown(ticket);
     }
-    // Do NOT clear the entire registry here — only abort running tickets.
-    // Cleared tickets are cleaned up by sweepTickets() TTL.
+    // Do NOT clear the entire registry here — completed tickets are cleaned up
+    // by sweepTickets() TTL.
   });
 }

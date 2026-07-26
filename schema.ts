@@ -1,5 +1,5 @@
 import { Type, type SchemaOptions } from "@sinclair/typebox";
-import { VALID_THINKING_LEVELS } from "./constants.ts";
+import { ASYNC_MAX_RUNTIME_MS, VALID_THINKING_LEVELS } from "./constants.ts";
 import type { DelegateParams } from "./types.ts";
 
 // JSON Schema string enum that keeps the literal union in `Static<>`.
@@ -111,8 +111,9 @@ export const delegateParameters = Type.Object({
   ),
   timeoutMs: Type.Optional(
     Type.Number({
-      description:
-        "Wait timeout in ms. Returns current status; ticket keeps running.",
+      minimum: 0,
+      maximum: ASYNC_MAX_RUNTIME_MS,
+      description: "Wait timeout (ms), max ticket runtime.",
     }),
   ),
   tasks: Type.Optional(

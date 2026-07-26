@@ -115,6 +115,19 @@ export function sweepTickets(): void {
   }
 }
 
+/**
+ * Finalize an active ticket during host shutdown and resolve any blocking
+ * waiters. This intentionally does not send a follow-up: the host is exiting.
+ */
+export function cancelTicketForShutdown(ticket: AsyncTicket): void {
+  if (ticket.status !== "running" && ticket.status !== "cancelling") return;
+  ticket.controller.abort();
+  ticket.status = "cancelled";
+  ticket.completedAt = Date.now();
+  syncTicketBusyIndex(ticket);
+  settleTicketWaiters(ticket);
+}
+
 /** Check if any running async ticket holds a given sessionId.
  *  Backed by an O(1) map updated when tickets start/complete. */
 export function isSessionBusy(sessionId: string): string | null {
@@ -318,6 +331,22 @@ function cleanWaiters(ticket: AsyncTicket): void {
   ticket.waiters = active.length ? active : undefined;
 }
 
+/** Resolve active waiters for a terminal ticket. Returns whether any waiter was
+ * resolved, so callers can avoid also delivering a duplicate follow-up. */
+function settleTicketWaiters(ticket: AsyncTicket): boolean {
+  if (!ticket.waiters?.length) return false;
+
+  const formatted = formatCompletedTicket(ticket);
+  let hadActive = false;
+  for (const w of ticket.waiters) {
+    if (w.settled || w.signal?.aborted) continue;
+    settleWaiter(w, formatted);
+    hadActive = true;
+  }
+  cleanWaiters(ticket);
+  return hadActive;
+}
+
 /** Forward current progress to all active blocking waiters. Called whenever an
  *  async task reports a progress or status change. */
 export function notifyWaiters(ticket: AsyncTicket): void {
@@ -347,21 +376,11 @@ export function deliverTicketResults(
 ): void {
   if (!ticket.completedAt) return;
 
-  const formatted = formatCompletedTicket(ticket);
-
   // Resolve active blocking waiters directly. Stale/aborted waiters are
   // cleaned but not resolved here (their abort handlers already returned).
-  if (ticket.waiters?.length) {
-    let hadActive = false;
-    for (const w of ticket.waiters) {
-      if (w.settled || w.signal?.aborted) continue;
-      settleWaiter(w, formatted);
-      hadActive = true;
-    }
-    cleanWaiters(ticket);
-    if (hadActive) return;
-  }
+  if (settleTicketWaiters(ticket)) return;
 
+  const formatted = formatCompletedTicket(ticket);
   const text = formatted.content
     .filter(
       (c): c is { type: "text"; text: string } =>
@@ -761,7 +780,8 @@ export function handleWait(
     if (
       params.timeoutMs !== undefined &&
       params.timeoutMs >= 0 &&
-      Number.isFinite(params.timeoutMs)
+      Number.isFinite(params.timeoutMs) &&
+      params.timeoutMs <= ASYNC_MAX_RUNTIME_MS
     ) {
       waiter.timeoutId = setTimeout(() => {
         timeoutWaiter(waiter, ticket, params.timeoutMs!);

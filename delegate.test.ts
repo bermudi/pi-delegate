@@ -65,6 +65,7 @@ import {
   ticketRegistry,
   type AsyncTicket,
   sweepTickets,
+  cancelTicketForShutdown,
   isSessionBusy,
   handlePoll,
   handleCancel,
@@ -5580,6 +5581,8 @@ describe("async delegate integration", () => {
     expect(schema.properties.async).toBeDefined();
     expect(schema.properties.ticket).toBeDefined();
     expect(schema.properties.timeoutMs).toBeDefined();
+    expect(schema.properties.timeoutMs.minimum).toBe(0);
+    expect(schema.properties.timeoutMs.maximum).toBe(ASYNC_MAX_RUNTIME_MS);
     expect(schema.required ?? []).not.toContain("tasks");
   });
 
@@ -5797,7 +5800,7 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("1/1 tasks completed");
   });
 
-  test("wait on cancelling ticket waits and resolves when cancelled", async () => {
+  test("wait on cancelling ticket resolves when shutdown finalizes it", async () => {
     const ticket: AsyncTicket = {
       id: "cancel-wait",
       created: Date.now(),
@@ -5863,9 +5866,7 @@ describe("async delegate integration", () => {
     ticketRegistry.set("cancel-wait", ticket);
 
     setTimeout(() => {
-      ticket.status = "cancelled";
-      ticket.completedAt = Date.now();
-      deliverTicketResults({ sendMessage: () => {} } as any, ticket);
+      cancelTicketForShutdown(ticket);
     }, 10);
 
     const result = await handleWait(
@@ -5877,6 +5878,8 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("CANCELLED");
     expect(result.content[0].text).toContain("CANCELLED — task not started");
     expect(result.details.status).toBe("cancelled");
+    expect(ticket.completedAt).toBeDefined();
+    expect(ticket.controller.signal.aborted).toBe(true);
   });
 
   test("wait timeout returns running status and does not cancel ticket", async () => {
