@@ -55,7 +55,7 @@ export interface AsyncTicket {
   completedAt?: number;
   tasks: TaskDef[];
   resolved: ResolvedTask[];
-  status: "running" | "done" | "failed" | "cancelled";
+  status: "running" | "cancelling" | "done" | "failed" | "cancelled";
   results: (TaskResult | undefined)[];
   progress: TaskProgress[];
   controller: AbortController;
@@ -118,6 +118,8 @@ export interface DelegateDetails {
   progress: TaskProgress[];
   parentModel?: string;
   ticketId?: string;
+  /** Terminal/live ticket status when this result comes from an async ticket. */
+  status?: AsyncTicket["status"];
 }
 
 export interface TaskResult {

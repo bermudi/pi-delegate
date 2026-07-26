@@ -535,8 +535,13 @@ async function runResolvedTaskUnlocked(
       const delayMs = baseDelayMs * 2 ** retry;
       await sleepForWholeTaskRetry(env.signal, delayMs);
       if (env.signal?.aborted) {
-        result = failTask(task, "Aborted");
-        result.usage = accumulatedUsage;
+        // Preserve any partial output/session path from the last failed attempt
+        // while recording that the retry loop was aborted.
+        result = {
+          ...result,
+          error: "Aborted",
+          usage: accumulatedUsage,
+        };
         break;
       }
       p.status = "running";

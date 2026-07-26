@@ -1685,6 +1685,21 @@ describe("formatFailedTask", () => {
     };
     expect(formatFailedTask(r)).toEqual(["[FAILED: unknown error]"]);
   });
+
+  test("labels aborts as ABORTED and surfaces touched files + partial output", () => {
+    const r: ResultLike = {
+      agent: "scout",
+      output: "partial output here",
+      error: "Aborted",
+      durationMs: 1000,
+      tokens: 42,
+      touchedFiles: ["/home/daniel/build/pi-delegate/src/foo.ts"],
+    };
+    const lines = formatFailedTask(r, "/home/daniel/build/pi-delegate");
+    expect(lines[0]).toContain("[ABORTED: Aborted");
+    expect(lines[0]).toContain("touched: src/foo.ts");
+    expect(lines.some((l) => l.includes("partial output here"))).toBe(true);
+  });
 });
 
 // ── formatCompletedTask ──────────────────────────────────────────────────
@@ -1790,10 +1805,11 @@ describe("formatCompletedTask", () => {
       output: "",
       sessionFile: "/nonexistent/ghost.jsonl",
     });
-    const lines = formatCompletedTask(makeTask(), r);
+    const task = makeTask();
+    const lines = formatCompletedTask(task, r);
     // Header first, then exactly what formatFailedTask would emit.
     expect(lines[0]).toBe("=== scout: do the thing ===");
-    expect(lines.slice(1)).toEqual(formatFailedTask(r));
+    expect(lines.slice(1)).toEqual(formatFailedTask(r, task.cwd));
   });
 
   test("truncates the prompt in the header to 80 chars", () => {
@@ -2293,7 +2309,7 @@ describe("delegate extension integration", () => {
         (total, description) => total + description.length,
         0,
       ),
-    ).toBeLessThanOrEqual(1_000);
+    ).toBeLessThanOrEqual(1_100);
   });
 
   test("execute returns help when tasks is empty", async () => {
@@ -3731,6 +3747,7 @@ describe("delegate renderers", () => {
       details: {
         tasks: [{ prompt: "investigate" }, { prompt: "build" }],
         results: [],
+        status: "running",
         progress: [
           {
             index: 0,
@@ -4257,6 +4274,34 @@ describe("async ticket registry", () => {
     expect(isSessionBusy("other")).toBeNull();
   });
 
+  test("isSessionBusy treats cancelling tickets as still in use", () => {
+    const ticket: AsyncTicket = {
+      id: "tkt1",
+      created: Date.now(),
+      tasks: [],
+      resolved: [
+        {
+          prompt: "test",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "inline",
+          warnings: [],
+          sessionId: "auth",
+        },
+      ],
+      status: "cancelling",
+      results: [],
+      progress: [],
+      controller: new AbortController(),
+      parentModelId: undefined,
+    };
+    ticketRegistry.set("tkt1", ticket);
+    expect(isSessionBusy("auth")).toBe("tkt1");
+  });
+
   test("isSessionBusy ignores non-running tickets", () => {
     const ticket: AsyncTicket = {
       id: "tkt1",
@@ -4360,7 +4405,7 @@ describe("async delegate integration", () => {
     // Enriched list: agent roster + copy-pasteable poll/cancel controls.
     expect(result.content[0].text).toContain("scout");
     expect(result.content[0].text).toContain(
-      'delegate({ action: "cancel", ticket: "abc12345" })',
+      'delegate({ action: "cancel", ticket: "abc12345", force: true })',
     );
   });
 
@@ -4402,6 +4447,99 @@ describe("async delegate integration", () => {
     const result = handlePoll({ tasks: [], ticket: "xyz98765" }, {} as any);
     expect(result.content[0].text).toContain("xyz98765");
     expect(result.content[0].text).toContain("RUNNING");
+  });
+
+  test("poll with cancelling ticket returns CANCELLING status", () => {
+    const ticket: AsyncTicket = {
+      id: "cancelling1",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "cancelling",
+      results: [undefined],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "task-a",
+          status: "running",
+          durationMs: 1000,
+          tokens: 500,
+          toolUses: 2,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "test-model",
+    };
+    ticketRegistry.set("cancelling1", ticket);
+    const result = handlePoll({ tasks: [], ticket: "cancelling1" }, {} as any);
+    expect(result.content[0].text).toContain("cancelling1");
+    expect(result.content[0].text).toContain("CANCELLING");
+    expect(result.content[0].text).toContain("Cancellation requested");
+  });
+
+  test("poll running ticket suppresses the (no output) placeholder for failed tasks", () => {
+    const ticket: AsyncTicket = {
+      id: "failed-no-output",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [
+        {
+          agent: "scout",
+          output: "(no output)",
+          error: "Aborted",
+          durationMs: 1000,
+          tokens: 0,
+          touchedFiles: [],
+        },
+      ],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "task-a",
+          status: "failed",
+          durationMs: 1000,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "test-model",
+    };
+    ticketRegistry.set("failed-no-output", ticket);
+    const result = handlePoll(
+      { tasks: [], ticket: "failed-no-output" },
+      {} as any,
+    );
+    expect(result.content[0].text).toContain("Aborted");
+    expect(result.content[0].text).not.toContain("(no output)");
   });
 
   test("poll returns completed results for running ticket", () => {
@@ -4560,7 +4698,7 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("not found");
   });
 
-  test("cancel aborts a running ticket", () => {
+  test("cancel without force returns a non-destructive preview", () => {
     const controller = new AbortController();
     const ticket: AsyncTicket = {
       id: "cancel1",
@@ -4575,9 +4713,31 @@ describe("async delegate integration", () => {
     };
     ticketRegistry.set("cancel1", ticket);
     const result = handleCancel({ tasks: [], ticket: "cancel1" });
-    expect(result.content[0].text).toContain("cancelled");
-    expect(ticket.status).toBe("cancelled");
-    expect(ticket.completedAt).toBeDefined();
+    expect(result.content[0].text).toContain("cancellation preview");
+    expect(result.content[0].text).toContain("NOT rolled back");
+    expect(result.content[0].text).toContain("force: true");
+    expect(ticket.status).toBe("running");
+    expect(controller.signal.aborted).toBe(false);
+  });
+
+  test("cancel with force aborts a running ticket and transitions to cancelling", () => {
+    const controller = new AbortController();
+    const ticket: AsyncTicket = {
+      id: "cancel1",
+      created: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [],
+      progress: [],
+      controller,
+      parentModelId: undefined,
+    };
+    ticketRegistry.set("cancel1", ticket);
+    const result = handleCancel({ tasks: [], ticket: "cancel1", force: true });
+    expect(result.content[0].text).toContain("cancelling");
+    expect(ticket.status).toBe("cancelling");
+    expect(ticket.completedAt).toBeUndefined();
     expect(controller.signal.aborted).toBe(true);
   });
 
@@ -4695,19 +4855,19 @@ describe("async delegate integration", () => {
     const result = handlePoll({ ticket: "cancelled-partial" }, {} as any);
     const text = result.content[0].text;
 
-    // Text output handles undefined results gracefully
+    // Text output handles undefined results gracefully for cancelled tickets.
     expect(text).toContain("done early");
-    expect(text).toContain("PENDING — result not available");
+    expect(text).toContain("CANCELLED — task not started");
 
     // details.results is index-aligned — same length as tasks
     // Undefined results are filled with error objects to match DelegateDetails type
     expect(result.details.results).toHaveLength(3);
     expect(result.details.results![0]!.agent).toBe("scout");
     expect(result.details.results![1]).toEqual({
-      error: "PENDING — result not available",
+      error: "CANCELLED — task not started",
     });
     expect(result.details.results![2]).toEqual({
-      error: "PENDING — result not available",
+      error: "CANCELLED — task not started",
     });
   });
 
@@ -5564,6 +5724,88 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("1/1 tasks completed");
   });
 
+  test("wait on cancelling ticket waits and resolves when cancelled", async () => {
+    const ticket: AsyncTicket = {
+      id: "cancel-wait",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "worker",
+          warnings: [],
+        },
+      ],
+      status: "cancelling",
+      results: [
+        {
+          agent: "scout",
+          output: "done early",
+          durationMs: 500,
+          tokens: 10,
+          touchedFiles: [],
+        },
+        undefined,
+      ],
+      progress: [
+        {
+          index: 0,
+          agent: "scout",
+          task: "task-a",
+          status: "done",
+          durationMs: 500,
+          tokens: 10,
+          toolUses: 0,
+          activities: [],
+        },
+        {
+          index: 1,
+          agent: "worker",
+          task: "task-b",
+          status: "pending",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("cancel-wait", ticket);
+
+    setTimeout(() => {
+      ticket.status = "cancelled";
+      ticket.completedAt = Date.now();
+      deliverTicketResults({ sendMessage: () => {} } as any, ticket);
+    }, 10);
+
+    const result = await handleWait(
+      { ticket: "cancel-wait" },
+      undefined,
+      undefined,
+      {} as any,
+    );
+    expect(result.content[0].text).toContain("CANCELLED");
+    expect(result.content[0].text).toContain("CANCELLED — task not started");
+    expect(result.details.status).toBe("cancelled");
+  });
+
   test("wait timeout returns running status and does not cancel ticket", async () => {
     const controller = new AbortController();
     const ticket: AsyncTicket = {
@@ -5776,6 +6018,43 @@ describe("async delegate integration", () => {
       expect(updates).toHaveLength(0);
       expect(ticket.waiters.length).toBe(1);
     }
+  });
+
+  test("notifyWaiters emits a CANCELLING update for a cancelling ticket", () => {
+    const ticket: AsyncTicket = {
+      id: "cancelling-notify",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "cancelling",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+
+    const updates: any[] = [];
+    ticket.waiters = [
+      {
+        settled: false,
+        onUpdate: (update: any) => updates.push(update),
+      } as any,
+    ];
+    notifyWaiters(ticket);
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.content[0]!.text).toContain("CANCELLING");
   });
 
   test("wait resolves with terminal result and suppresses automatic follow-up", async () => {

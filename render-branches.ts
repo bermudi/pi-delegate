@@ -37,6 +37,8 @@ export interface BranchCtx {
   lines: string[];
   /** Async ticket id (only present for background-ticket results). */
   ticketId?: string;
+  /** Async ticket status, when known, so the renderer can show cancelling/cancelled. */
+  ticketStatus?: "running" | "cancelling" | "done" | "failed" | "cancelled";
 }
 
 /** Helpers shared across both branches. `pushWarnings` mutates `lines`.
@@ -67,6 +69,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
   // tool-scoped in Pi, so a single header hint suffices — one per running
   // task just repeats the same line N times.
   const headerParts: string[] = [];
+  if (ctx.ticketStatus === "cancelling") headerParts.push("CANCELLING");
   if (running > 0) headerParts.push(`${running} running`);
   headerParts.push(`${done}/${total} done`);
   if (!expanded && running > 0)
@@ -232,15 +235,14 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
   const running = progress.filter((p) => p.status === "running").length;
   const pending = progress.filter((p) => p.status === "pending").length;
   const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
-  const hasLiveTasks = progress.some(
-    (p) => p.status === "running" || p.status === "pending",
-  );
   const ticketId = ctx.ticketId;
+  const ticketStatus = ctx.ticketStatus;
+  const isLive = ticketStatus === "running" || ticketStatus === "cancelling";
   const elapsed = state.startedAt
     ? fmtDuration(Date.now() - state.startedAt)
     : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
 
-  if (ticketId && hasLiveTasks) {
+  if (ticketId && isLive) {
     // Background ticket — frame it as in-progress, not a finished result.
     const ticketParts = [
       `ticket ${ticketId}`,
@@ -249,7 +251,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     if (running > 0) ticketParts.push(`${running} active`);
     if (pending > 0) ticketParts.push(`${pending} queued`);
     if (failed > 0) ticketParts.push(`${failed} failed`);
-    ticketParts.push("running in background");
+    ticketParts.push(
+      ticketStatus === "cancelling" ? "CANCELLING" : "running in background",
+    );
     lines.push(theme.fg("warning", `⏳ ${ticketParts.join(" · ")}`), "");
   } else {
     lines.push(
@@ -265,11 +269,15 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const p = progress[i]!;
     const r = taskResults[i];
     const ind = indent(i, total);
+    const isCancelledPending =
+      ticketStatus === "cancelled" && p.status === "pending";
+
     // Unified status glyphs: ✓ done, ✗ failed, ◐ running, ○ pending.
-    // (The live partial branch uses an animated spinner for running; this
-    // static final/ticket view can't animate, so a fixed glyph is right.)
-    const icon =
-      p.status === "done"
+    // Cancelled-but-not-started tasks show as failed so they are not mistaken
+    // for still-queued work.
+    const icon = isCancelledPending
+      ? theme.fg("error", "✗")
+      : p.status === "done"
         ? theme.fg("success", "✓")
         : p.status === "failed"
           ? theme.fg("error", "✗")
@@ -277,17 +285,21 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
             ? theme.fg("warning", "◐")
             : theme.fg("muted", "○");
     const taskPreview = theme.fg("muted", trunc(p.task, w - 30));
-    const isLive = p.status === "running" || p.status === "pending";
+    const isLive =
+      p.status === "running" || (p.status === "pending" && !isCancelledPending);
     // Live tasks show an activity/waiting hint instead of final stats.
     const liveTail =
       p.status === "running"
         ? theme.fg("muted", ` · ${compactActivity(p)}`)
-        : p.status === "pending"
+        : p.status === "pending" && !isCancelledPending
           ? theme.fg("muted", ` ${waitingLabel(running, getMaxConcurrent())}`)
           : "";
+    const cancelledTail = isCancelledPending
+      ? theme.fg("error", " · CANCELLED")
+      : "";
     lines.push(
       truncLine(
-        `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${isLive ? liveTail : statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
+        `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${isLive ? liveTail : cancelledTail || statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
         w,
       ),
     );
@@ -320,8 +332,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     }
 
     // Surface errors even when output exists (agent may have emitted text before failing).
-    // Live tasks carry placeholder { error: "PENDING..." } results; do not render those as errors.
-    if (!isLive && r && "error" in r && r.error) {
+    // Live tasks and cancelled-but-not-started tasks already show their status
+    // on the row, so don't duplicate it as an error line.
+    if (!isLive && !isCancelledPending && r && "error" in r && r.error) {
       lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
     }
     // Collapsed: one-line output preview so a human scanning the TUI sees

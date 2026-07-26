@@ -100,6 +100,13 @@ export const delegateParameters = Type.Object({
       description: "Ticket ID; omit only when polling to list all.",
     }),
   ),
+  force: Type.Optional(
+    Type.Boolean({
+      description:
+        "Required for action='cancel'. Set true to abort; omit for a preview.",
+      default: false,
+    }),
+  ),
   timeoutMs: Type.Optional(
     Type.Number({
       description:

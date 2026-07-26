@@ -142,7 +142,12 @@ export function renderDelegateResult(
     return text;
   }
 
-  const { progress, results: taskResults, ticketId } = details;
+  const {
+    progress,
+    results: taskResults,
+    ticketId,
+    status: ticketStatus,
+  } = details;
   const total = progress.length;
   const w = getTermWidth() - 4;
   const lines: string[] = [""];
@@ -158,6 +163,7 @@ export function renderDelegateResult(
     theme,
     lines,
     ticketId,
+    ticketStatus,
   };
 
   if (options.isPartial) {

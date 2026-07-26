@@ -99,14 +99,14 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
 
   sweepTickets();
   const runningCount = [...ticketRegistry.values()].filter(
-    (t) => t.status === "running",
+    (t) => t.status === "running" || t.status === "cancelling",
   ).length;
   if (runningCount >= getMaxAsyncTickets()) {
     return {
       content: [
         {
           type: "text",
-          text: `Too many async tickets running (${runningCount}/${getMaxAsyncTickets()}). Poll existing tickets or cancel one first.`,
+          text: `Too many async tickets running or cancelling (${runningCount}/${getMaxAsyncTickets()}). Poll existing tickets or cancel one first.`,
         },
       ],
       details: { tasks, results: [], progress: [], parentModel: parentModelId },
@@ -175,12 +175,23 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         ticket.status = resolveFinalTicketStatus(ticket);
         ticket.completedAt = Date.now();
         syncTicketBusyIndex(ticket);
+      } else if (ticket.status === "cancelling") {
+        // Cancellation was requested while tasks were still settling. The
+        // per-task results record what actually happened; the ticket state
+        // reports that the batch was aborted by the caller.
+        ticket.status = "cancelled";
+        ticket.completedAt = Date.now();
+        syncTicketBusyIndex(ticket);
       }
       deliverTicketResults(pi, ticket);
     })
     .catch((err) => {
       // Defense-in-depth — should not happen if individual tasks catch properly
-      ticket.status = "failed";
+      if (ticket.status === "cancelling") {
+        ticket.status = "cancelled";
+      } else if (ticket.status === "running") {
+        ticket.status = "failed";
+      }
       ticket.error = err instanceof Error ? err.message : String(err);
       ticket.completedAt = Date.now();
       syncTicketBusyIndex(ticket);
@@ -197,7 +208,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
           "",
           "Completed task results are available via poll. Final results delivered automatically when all tasks complete.",
           `Check progress: delegate({ action: "poll", ticket: "${ticketId}" }) — avoid polling in a tight loop`,
-          `Cancel if needed: delegate({ action: "cancel", ticket: "${ticketId}" })`,
+          `Cancel if needed: delegate({ action: "cancel", ticket: "${ticketId}", force: true }) — first call without force is a preview`,
         ].join("\n"),
       },
     ],
@@ -207,6 +218,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       progress: [...progress],
       parentModel: parentModelId,
       ticketId,
+      status: ticket.status,
     },
   };
 }
