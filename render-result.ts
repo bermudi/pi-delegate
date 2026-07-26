@@ -5,9 +5,8 @@ import {
   spinnerFrame,
   getTermWidth,
   truncLine,
-  formatToolCallShort,
   applyLineBudget,
-  inFlightActivity,
+  compactActivity,
 } from "./format.ts";
 import {
   renderPartialBranch,
@@ -29,23 +28,6 @@ function makeRenderHelpers(
     parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
   const modelLabel = (p: TaskProgress) =>
     p.model ? ` ${theme.fg("accent", p.model)}` : "";
-
-  // ── Helper: format the "current activity" line (collapsed or expanded fallback) ─────
-  const compactActivity = (p: TaskProgress): string => {
-    const current = inFlightActivity(p);
-    if (current) {
-      const call = formatToolCallShort(current.name, current.args);
-      const toolAge = fmtDuration(Date.now() - current.startTime);
-      return `${call} | ${toolAge}`;
-    }
-    // No current tool — show the last completed one, or "thinking…"
-    if (p.activities.length > 0) {
-      const last = p.activities[p.activities.length - 1]!;
-      const call = formatToolCallShort(last.name, last.args);
-      return `${call} ✓`;
-    }
-    return "thinking…";
-  };
 
   // Push muted warning lines for a task under its status row. Rendered in
   // both partial and final views so a human watching the TUI sees that tools
@@ -160,7 +142,12 @@ export function renderDelegateResult(
     return text;
   }
 
-  const { progress, results: taskResults, ticketId } = details;
+  const {
+    progress,
+    results: taskResults,
+    ticketId,
+    status: ticketStatus,
+  } = details;
   const total = progress.length;
   const w = getTermWidth() - 4;
   const lines: string[] = [""];
@@ -176,6 +163,7 @@ export function renderDelegateResult(
     theme,
     lines,
     ticketId,
+    ticketStatus,
   };
 
   if (options.isPartial) {

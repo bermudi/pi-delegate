@@ -324,7 +324,7 @@ function isResumableSessionFile(sessionFile: string): boolean {
 }
 
 /**
- * Render a failed task's result lines for LLM consumption.
+ * Render a failed or aborted task's result lines for LLM consumption.
  *
  * Single source of truth used by both the sync (execute) and async
  * (formatCompletedTicket) render paths — previously this logic was duplicated
@@ -332,7 +332,8 @@ function isResumableSessionFile(sessionFile: string): boolean {
  * path that didn't exist on disk.
  *
  * Emits:
- *   [FAILED: <error> · session: <shortpath>]
+ *   [FAILED|ABORTED: <error> · session: <shortpath> · touched: <files>]
+ *   <partial output, when available>
  *   → To retry: delegate({ tasks: [{ resumeFrom: "<path>", prompt: "continue" }] })
  *
  * When a sessionFile is present but not actually resumable (file absent, or a
@@ -340,12 +341,21 @@ function isResumableSessionFile(sessionFile: string): boolean {
  * notice instead of a retry hint — so the parent model is told to re-dispatch
  * fresh rather than left to fabricate a path or chase a dead resume.
  */
-export function formatFailedTask(r: TaskResult): string[] {
+export function formatFailedTask(r: TaskResult, cwd?: string): string[] {
   const parts: string[] = [];
+  const isAbort = /abort/i.test(r.error ?? "");
   // Empty string is falsy but not nullish — `||` covers both undefined and "".
   const failParts = [r.error || "unknown error"];
   if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
-  parts.push(`[FAILED: ${failParts.join(" · ")}]`);
+  const touched = cwd ? relativeTouchedSummary(r.touchedFiles, cwd) : null;
+  if (touched) failParts.push(`touched: ${touched}`);
+  parts.push(`[${isAbort ? "ABORTED" : "FAILED"}: ${failParts.join(" · ")}]`);
+
+  // Surface partial assistant output even when the task did not complete.
+  if (r.output && r.output !== "(no output)") {
+    parts.push(renderOutputForLLM(r.output, r.agent));
+  }
+
   if (r.sessionFile && isResumableSessionFile(r.sessionFile)) {
     const safePath = JSON.stringify(r.sessionFile);
     parts.push(
@@ -389,7 +399,7 @@ export function formatCompletedTask(
     for (const w of task.warnings) parts.push(`[WARNING: ${w}]`);
   }
   if (result.error) {
-    parts.push(...formatFailedTask(result));
+    parts.push(...formatFailedTask(result, task.cwd));
   } else {
     const meta = [
       `OK | ${fmtDuration(result.durationMs)} | ${fmtTokens(result.tokens)} tokens`,
@@ -414,6 +424,39 @@ export function formatCompletedTask(
  *  compact activity line. */
 export function inFlightActivity(p: TaskProgress): ToolActivity | null {
   return p.activities.findLast((a) => !a.result) ?? null;
+}
+
+/** The latest activity for a task, whether in-flight or completed. */
+export function latestActivity(p: TaskProgress): ToolActivity | null {
+  return p.activities.at(-1) ?? null;
+}
+
+/** Human-readable label for the current or latest activity.
+ *  - "write src/foo.ts" when a tool is in-flight (even if a later-started tool
+ *    already finished under parallel execution)
+ *  - "last: read src/bar.ts" after a tool completes and the model is thinking
+ *  - "thinking" when no activity has been recorded yet */
+export function formatActivityLabel(p: TaskProgress): string {
+  const activity = inFlightActivity(p) ?? latestActivity(p);
+  if (!activity) return "thinking";
+  const call = formatToolCallShort(activity.name, activity.args);
+  if (!activity.result) return call;
+  return `last: ${call}`;
+}
+
+/** Compact TUI activity label. Uses the same current/latest-activity selection
+ *  as {@link formatActivityLabel} but adds elapsed time for in-flight tools and
+ *  a completion/error icon for finished ones. */
+export function compactActivity(p: TaskProgress): string {
+  const activity = inFlightActivity(p) ?? latestActivity(p);
+  if (!activity) return "thinking…";
+  const call = formatToolCallShort(activity.name, activity.args);
+  if (!activity.result) {
+    const toolAge = fmtDuration(Date.now() - activity.startTime);
+    return `${call} | ${toolAge}`;
+  }
+  const icon = activity.result.isError ? "✗" : "✓";
+  return `${call} ${icon}`;
 }
 
 /** Per-task stats core: [duration, tokens]. Callers append medium-specific

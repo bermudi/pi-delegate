@@ -11,16 +11,38 @@
 import { describe, expect, test } from "bun:test";
 import { runAgentSession } from "./runner.ts";
 
-/** Minimal fake AgentSession — records whether prompt() was invoked. */
+/** Minimal fake AgentSession — records whether prompt() was invoked and allows
+ *  emitting tool events / mutating messages and stats. */
 function fakeSession(opts: {
-  prompt?: () => Promise<void>;
+  prompt?: (emit: (e: unknown) => void) => Promise<void>;
   messages?: unknown[];
   state?: unknown;
+  getStats?: () => {
+    sessionFile?: string;
+    sessionId?: string;
+    userMessages?: number;
+    assistantMessages?: number;
+    toolCalls?: number;
+    toolResults?: number;
+    totalMessages?: number;
+    tokens: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      total: number;
+    };
+    cost: number;
+  };
 }) {
   let prompted = false;
   const subscribers = new Set<(e: unknown) => void>();
+  const emit = (e: unknown) => {
+    for (const fn of subscribers) fn(e);
+  };
   return {
     prompted: () => prompted,
+    emit,
     session: {
       subscribe(fn: (e: unknown) => void) {
         subscribers.add(fn);
@@ -28,7 +50,7 @@ function fakeSession(opts: {
       },
       async prompt(_p: string) {
         prompted = true;
-        await opts.prompt?.();
+        await opts.prompt?.(emit);
       },
       async abort() {
         /* no-op */
@@ -40,25 +62,25 @@ function fakeSession(opts: {
         return opts.state ?? {};
       },
       getSessionStats() {
-        // Cumulative stats for usage-delta accounting. Zeroed so the delta
-        // is emptyUsage — these tests assert abort/error paths, not usage.
-        return {
-          sessionFile: undefined,
-          sessionId: "test",
-          userMessages: 0,
-          assistantMessages: 0,
-          toolCalls: 0,
-          toolResults: 0,
-          totalMessages: 0,
-          tokens: {
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-            total: 0,
-          },
-          cost: 0,
-        };
+        return (
+          opts.getStats?.() ?? {
+            sessionFile: undefined,
+            sessionId: "test",
+            userMessages: 0,
+            assistantMessages: 0,
+            toolCalls: 0,
+            toolResults: 0,
+            totalMessages: 0,
+            tokens: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+            cost: 0,
+          }
+        );
       },
     },
   };
@@ -113,5 +135,69 @@ describe("runAgentSession abort re-check", () => {
     expect(prompted()).toBe(true);
     expect(resolved).toBe(true);
     expect(result.error).toBeUndefined();
+  });
+
+  test("prompt failure preserves partial output, usage, and touched files", async () => {
+    const tmpDir = `/tmp/delegate-runner-partial-${Date.now()}`;
+    const messages: {
+      role: string;
+      content: { type: string; text?: string }[];
+      usage?: { totalTokens: number };
+    }[] = [];
+    let statsCall = 0;
+    const { session } = fakeSession({
+      messages,
+      getStats: () => {
+        statsCall++;
+        return {
+          tokens: {
+            input: statsCall === 1 ? 0 : 10,
+            output: statsCall === 1 ? 0 : 32,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: statsCall === 1 ? 0 : 42,
+          },
+          cost: statsCall === 1 ? 0 : 0.001,
+        } as never;
+      },
+      prompt: async (emit) => {
+        messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: "partial output before abort" }],
+          usage: { totalTokens: 42 },
+        });
+        emit({
+          type: "tool_execution_start",
+          toolCallId: "tc1",
+          toolName: "write",
+          args: { path: "file.txt", content: "hello" },
+        });
+        emit({
+          type: "tool_execution_end",
+          toolCallId: "tc1",
+          toolName: "write",
+          result: { content: [] },
+          isError: false,
+        });
+        throw new Error("Aborted");
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: tmpDir },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.error).toBe("Aborted");
+    expect(result.output).toContain("partial output before abort");
+    expect(result.tokens).toBe(42);
+    expect(result.usage.totalTokens).toBe(42);
+    expect(result.touchedFiles.length).toBeGreaterThan(0);
+    expect(result.touchedFiles[0]).toContain("file.txt");
   });
 });

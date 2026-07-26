@@ -162,11 +162,12 @@ export async function runAgentSession(
     };
   }
 
-  try {
-    // Remember how many messages existed before the prompt so we can extract
-    // only the new assistant output (not cumulative history).
-    const messagesBefore = session.messages.length;
+  // Remember how many messages existed before the prompt so we can extract
+  // only the new assistant output (not cumulative history) on both success and
+  // abort/failure paths.
+  const messagesBefore = session.messages.length;
 
+  try {
     await session.prompt(prompt);
 
     const messages = session.messages;
@@ -193,14 +194,27 @@ export async function runAgentSession(
       touchedFiles,
     };
   } catch (err) {
+    // Preserve partial-work evidence: whatever assistant output, token spend,
+    // and touched files accumulated before the failure/abort.
+    const messages = session.messages;
+    const partialOutput = extractOutput(messages.slice(messagesBefore));
+    const usageAfterTotal = extractUsage(messages).total;
+    const tokensThisCall = Math.max(0, usageAfterTotal - usageBeforeTotal);
+    const usage = usageDelta(statsBefore, snapshotSessionUsage(session));
+
+    const fromActivities = extractTouchedFromActivities(activities, config.cwd);
+    const gitAfter = await getGitChangedFiles(config.cwd);
+    const fromGit = [...gitAfter].filter((f) => !gitBaseline.has(f));
+    const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
+
     const msg = err instanceof Error ? err.message : String(err);
     return {
-      output: "",
+      output: partialOutput || "(no output)",
       error: msg,
       durationMs: Date.now() - startTime,
-      tokens: 0,
-      usage: emptyUsage(),
-      touchedFiles: [],
+      tokens: tokensThisCall,
+      usage,
+      touchedFiles,
     };
   } finally {
     if (signal && abortHandler)
