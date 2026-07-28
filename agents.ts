@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@mariozechner/pi-agent-core";
-import { parseFrontmatter as parsePiFrontmatter } from "@mariozechner/pi-coding-agent";
+import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { parseFrontmatter as parsePiFrontmatter } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
 import { resolveToolGroups } from "./tools.ts";
 import type { AgentConfig } from "./types.ts";

@@ -1,5 +1,5 @@
-import { Markdown } from "@mariozechner/pi-tui";
-import { getMarkdownTheme, type Theme } from "@mariozechner/pi-coding-agent";
+import { Markdown } from "@earendil-works/pi-tui";
+import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   fmtDuration,
   fmtTokens,

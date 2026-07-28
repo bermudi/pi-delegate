@@ -1,9 +1,9 @@
-import type { Api, Model } from "@mariozechner/pi-ai";
-import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type {
   AgentSession,
   SessionManager,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { POOL_TTL_MS } from "./constants.ts";
 import { fmtDuration, fmtTokens, shortenPath } from "./format.ts";
 

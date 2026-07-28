@@ -1,5 +1,5 @@
-import type { Api, Model } from "@mariozechner/pi-ai";
-import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
 import { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
 import { configFor } from "./pool.ts";

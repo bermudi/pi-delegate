@@ -1,4 +1,4 @@
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   createBashTool,
   createEditTool,
@@ -7,7 +7,7 @@ import {
   createLsTool,
   createReadTool,
   createWriteTool,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { DEFAULT_TOOLS, READONLY_TOOLS } from "./constants.ts";
 
 /** Shorthand → concrete tool list. `*` = full agent (bash subsumes search);

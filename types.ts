@@ -2,14 +2,14 @@ import type {
   ThinkingLevel,
   AgentToolResult,
   AgentToolUpdateCallback,
-} from "@mariozechner/pi-agent-core";
-import type { Api, Model, Usage } from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-agent-core";
+import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import type {
   AgentSession,
   ModelRegistry,
   SessionManager,
   SessionEntry,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
 import type { delegateParameters } from "./schema.ts";
 

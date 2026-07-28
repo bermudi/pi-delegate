@@ -1,7 +1,7 @@
 import type {
   AgentSession,
   AgentSessionEvent,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   getGitChangedFiles,
   extractTouchedFromActivities,
@@ -12,7 +12,7 @@ import {
   extractUsage,
 } from "./utils.ts";
 import { snapshotSessionUsage, usageDelta, emptyUsage } from "./usage.ts";
-import type { Usage } from "@mariozechner/pi-ai";
+import type { Usage } from "@earendil-works/pi-ai";
 import type { AgentProgressUpdate, ToolActivity } from "./types.ts";
 
 /**

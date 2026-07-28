@@ -1,4 +1,4 @@
-import * as piCodingAgent from "@mariozechner/pi-coding-agent";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import type { DelegateToolResult } from "./types.ts";
 
 /**
@@ -36,7 +36,7 @@ export function hostCompatResult(
         text: [
           "delegate extension: host compatibility check failed.",
           "",
-          `pi no longer exports ${listed} from @mariozechner/pi-coding-agent.`,
+          `pi no longer exports ${listed} from @earendil-works/pi-coding-agent.`,
           "This is a version mismatch — the delegate bundle was built against a",
           "pi version that has since removed or renamed these symbols (the same",
           "class of regression that broke delegation across pi 0.80.3→0.80.8,",
