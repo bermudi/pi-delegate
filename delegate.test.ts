@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { _setClockForTesting, _resetPoolForTesting } from "./pool.ts";
+import { _resetDelegateConfigForTesting } from "./config.ts";
 import { ASYNC_MAX_RUNTIME_MS } from "./constants.ts";
 import {
   inFlightActivity,
@@ -2519,7 +2520,16 @@ describe("delegate extension integration", () => {
 describe("delegate renderers", () => {
   let ts: TestSession | undefined;
 
+  beforeEach(() => {
+    // `__delegateConfig` auto-loads from the developer's on-disk
+    // `~/.pi/agent/delegate.json`, whose `maxConcurrent` (e.g. 6) would
+    // otherwise defeat the cap-sensitive `queued (N running)` assertions.
+    // Reset to compiled defaults so the renderers are deterministic.
+    _resetDelegateConfigForTesting();
+  });
+
   afterEach(() => {
+    _resetDelegateConfigForTesting();
     ts?.dispose();
     ts = undefined;
   });

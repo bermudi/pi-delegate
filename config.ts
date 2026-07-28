@@ -101,6 +101,21 @@ function initDelegateConfig(): void {
 // Auto-init on module load
 initDelegateConfig();
 
+/**
+ * Test-only seam: reset the module config singleton to compiled defaults.
+ *
+ * `__delegateConfig` is auto-initialized from `~/.pi/agent/delegate.json` at
+ * import time, so any test that exercises the config-dependent renderers
+ * (e.g. the `queued (N running)` label, which reads `getMaxConcurrent()`) is
+ * otherwise at the mercy of the developer's on-disk `maxConcurrent`. There are
+ * no production mutators (the file is the only write path); this restores the
+ * deterministic default baseline for tests, mirroring `_resetPoolForTesting` /
+ * `_resetGlobalConcurrencyForTesting`.
+ */
+export function _resetDelegateConfigForTesting(): void {
+  __delegateConfig = structuredClone(DEFAULT_DELEGATE_CONFIG);
+}
+
 // ── Config Getters ───────────────────────────────────────────────────────
 
 /**
