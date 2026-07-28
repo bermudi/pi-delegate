@@ -1,5 +1,5 @@
-import type { AgentSession } from "@mariozechner/pi-coding-agent";
-import type { Usage } from "@mariozechner/pi-ai";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { Usage } from "@earendil-works/pi-ai";
 
 /** Snapshot of the cumulative session usage fields we read for delta accounting. */
 export interface SessionUsageSnapshot {

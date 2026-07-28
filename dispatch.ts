@@ -1,5 +1,5 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { AgentToolUpdateCallback } from "@mariozechner/pi-agent-core";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import { sweepPool } from "./pool.ts";
 import {
   ticketRegistry,

@@ -41,7 +41,7 @@ import {
   SettingsManager,
   getAgentDir,
   type ResourceLoader,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 export interface HostDeps {
   modelRuntime: ModelRuntime;

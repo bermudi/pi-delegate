@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 export function setParentSession(sm: SessionManager, parentPath: string): void {
   const inner = sm as unknown as {

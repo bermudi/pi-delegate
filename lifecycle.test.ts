@@ -8,7 +8,7 @@
  * - Use pi-test-harness to create a real session with the delegate extension loaded.
  * - Use the runner's createContext() to get a proper ExtensionContext with model, registry, etc.
  * - Patch modelRegistry.getApiKeyAndHeaders to return fake auth.
- * - Mock @mariozechner/pi-ai's streamSimple to return canned responses.
+ * - Mock @earendil-works/pi-ai's streamSimple to return canned responses.
  * - This means the sub-agent's streamFn calls our mock instead of hitting a real API.
  */
 
@@ -16,7 +16,7 @@ import { describe, expect, test, mock, afterEach, beforeEach } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { createTestSession } from "@marcfargas/pi-test-harness";
 // The test harness loads the extension via jiti. Under bun, jiti shares its
 // module graph with native imports, so the `ticketRegistry`/
@@ -74,16 +74,13 @@ function mockStream(text: string) {
 type StreamFn = (...args: unknown[]) => unknown;
 
 /** Set up mock.module to intercept streamSimple, and return the factory's
- *  streamSimple override (for `patchAuth` to install on the runtime). Mocks BOTH
- *  module specifiers: pi-delegate's own code imports from "@mariozechner/pi-ai",
- *  but pi-coding-agent's internal createAgentSession imports streamSimple from
- *  "@earendil-works/pi-ai" (the package's real name — @mariozechner/pi-ai is a
- *  renamed copy). The module mock covers any path still using the module-level
- *  streamSimple; the returned override covers the runtime path (0.80.9+). */
+ *  streamSimple override (for `patchAuth` to install on the runtime). The main
+ *  package entry is used by delegate's imports; pi-coding-agent 0.80+ imports
+ *  streamSimple from the `/compat` subpath. Mock both so no test path can hit
+ *  the network. The returned override covers the runtime path. */
 function mockPiAiStream(
   factory: (orig: any) => Record<string, unknown>,
 ): StreamFn {
-  mock.module("@mariozechner/pi-ai", factory as never);
   mock.module("@earendil-works/pi-ai", factory as never);
   // pi-coding-agent 0.80+ imports streamSimple from "@earendil-works/pi-ai/compat"
   // (not the main entry), so the compat subpath must be mocked too or the

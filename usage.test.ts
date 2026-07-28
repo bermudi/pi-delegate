@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Usage } from "@mariozechner/pi-ai";
+import type { Usage } from "@earendil-works/pi-ai";
 import {
   addUsage,
   emptyUsage,
