@@ -38,6 +38,7 @@ export const VALID_THINKING_LEVELS = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ] as const;
 
 /** Runtime membership check for thinking levels. Kept as `Set<string>` (not

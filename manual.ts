@@ -79,7 +79,7 @@ export function getSubagentManualMarkdown(
     "---",
     "name: my-agent",
     "description: What it does",
-    "thinking: low                     # off/minimal/low/medium/high/xhigh",
+    "thinking: low                     # off/minimal/low/medium/high/xhigh/max",
     "tools: *                          # * = full agent. ro = read-only. Omit to inherit *.",
     "---",
     "You are a helpful agent...",

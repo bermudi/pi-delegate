@@ -2073,6 +2073,7 @@ describe("constants", () => {
     expect(VALID_THINKING.has("medium")).toBe(true);
     expect(VALID_THINKING.has("high")).toBe(true);
     expect(VALID_THINKING.has("xhigh")).toBe(true);
+    expect(VALID_THINKING.has("max")).toBe(true);
     expect(VALID_THINKING.has("invalid")).toBe(false);
   });
 
@@ -2393,6 +2394,14 @@ describe("delegate extension integration", () => {
     }
     // No required fields at the TypeBox level; runtime validation enforces constraints.
     expect(taskSchema.required).toBeUndefined();
+  });
+
+  test("task schema exposes Pi's max thinking level", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
+
+    expect(tasksArraySchema.items.properties.thinking.enum).toContain("max");
   });
 
   test("execute rejects unknown agents and suggests help", async () => {
