@@ -30,9 +30,10 @@
  * parent. Since pi 0.80.8, `createAgentSession` takes a single `modelRuntime`
  * (the unified model + auth runtime) in place of the removed `authStorage` /
  * `modelRegistry` options, so the runtime is built and cached here from
- * `~/.pi/agent/{auth,models}.json`. The parent's `ctx.modelRegistry` is still
- * threaded by the caller, but only for *model selection* in task-resolution —
- * not for `createAgentSession`.
+ * `~/.pi/agent/{auth,models}.json`. Runtime-only providers are then copied from
+ * the parent's registry into this child runtime; extensions remain disabled.
+ * The parent's `ctx.modelRegistry` is also threaded by the caller for model
+ * selection in task-resolution.
  */
 import { join } from "node:path";
 import {
@@ -40,6 +41,7 @@ import {
   ModelRuntime,
   SettingsManager,
   getAgentDir,
+  type ProviderConfig,
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 
@@ -54,6 +56,12 @@ export interface HostDepsOptions {
   cwd: string;
   /** Global config directory. Defaults to `~/.pi/agent`. */
   agentDir?: string;
+  /**
+   * Provider registrations owned by the parent extension runtime. Subagents
+   * intentionally load no extensions, so runtime-only providers (for example
+   * Kilo) must be registered explicitly for their auth/config to resolve.
+   */
+  providerConfigs?: ReadonlyArray<readonly [string, ProviderConfig]>;
   /**
    * Custom system prompt for a named agent. When set, it overrides the default
    * system prompt the resource loader would otherwise discover. The resource
@@ -82,19 +90,23 @@ let testRetryBaseMs: number | undefined;
  * uses it instead of `ModelRuntime.create` — so integration tests can feed
  * subagents a pre-authenticated runtime (e.g. the parent session's
  * `modelRuntime`) and stub auth. Since pi 0.80.8, subagents build their own
- * `modelRuntime` rather than sharing the parent's registry, so without this
- * seam a test can't reach the subagent's auth path.
+ * `modelRuntime`; the explicit provider-config seam keeps runtime-only
+ * providers available without loading extensions in the child.
  */
 let testModelRuntimeFactory: (() => Promise<ModelRuntime>) | undefined;
 
 /**
- * Lazily build and cache the shared host deps for a (cwd + systemPrompt) combo.
- * The first call pays the `resourceLoader.reload()` cost (~1.2s). Concurrent
+ * Lazily build and cache the shared host deps for a (cwd + systemPrompt +
+ * registered-provider IDs) combo. The first call pays the
+ * `resourceLoader.reload()` cost (~1.2s). Concurrent
  * calls for the same key await the same in-flight promise rather than racing a
  * duplicate reload. Subsequent calls return the cached result.
  */
 export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
-  const key = `${options.cwd}\0${options.systemPrompt ?? ""}`;
+  const providerIds = (options.providerConfigs ?? [])
+    .map(([providerId]) => providerId)
+    .join("\0");
+  const key = `${options.cwd}\0${options.systemPrompt ?? ""}\0${providerIds}`;
   const cached = hostDepsCache.get(key);
   if (cached) return cached;
 
@@ -107,8 +119,9 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
     // Canonical model/auth runtime — the 0.80.8+ successor to the separate
     // `authStorage` + `modelRegistry` options. Built once per (cwd + systemPrompt)
     // and shared across concurrent subagents, exactly like the resource loader.
-    // Reads the same ~/.pi/agent/{auth,models}.json the parent uses, so auth
-    // resolution stays consistent without threading the parent's registry.
+    // Reads the same ~/.pi/agent/{auth,models}.json the parent uses, so stored
+    // credentials stay consistent. Runtime-only provider registrations are
+    // layered on just below; extensions themselves remain disabled.
     // In tests, `_setModelRuntimeFactoryForTesting` can substitute a runtime.
     const modelRuntime = testModelRuntimeFactory
       ? await testModelRuntimeFactory()
@@ -121,6 +134,9 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
           // offline-safe; auth (getAuth) still reads auth.json directly.
           allowModelNetwork: false,
         });
+    for (const [providerId, config] of options.providerConfigs ?? []) {
+      modelRuntime.registerProvider(providerId, config);
+    }
     const settingsManager = SettingsManager.create(options.cwd, agentDir);
     if (testRetryBaseMs !== undefined) {
       installFastRetry(settingsManager, testRetryBaseMs);

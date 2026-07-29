@@ -182,14 +182,25 @@ async function sleepForWholeTaskRetry(
 async function buildDelegateSession(
   task: ResolvedTask,
   sessionManager: SessionManager,
+  modelRegistry: TaskRunEnv["modelRegistry"],
 ): Promise<AgentSession> {
   // Resolve shared host deps for this task's cwd + system prompt (cached after
   // the first call). resourceLoader is cwd-scoped (it scans for AGENTS.md/skills)
   // and the system prompt is per named-agent, so the cache key is (cwd + prompt).
   // The custom prompt overrides the default AgentSession system prompt.
+  // Pass only the provider needed by this task. This keeps a non-Kilo task
+  // from receiving Kilo's provider/auth adapter merely because Kilo is also
+  // configured in the parent runtime.
+  const providerConfig = modelRegistry.getRegisteredProviderConfig?.(
+    task.model.provider,
+  );
+  const providerConfigs = providerConfig
+    ? ([[task.model.provider, providerConfig]] as const)
+    : [];
   const hostDeps = await getHostDeps({
     cwd: task.cwd,
     systemPrompt: task.systemPrompt,
+    providerConfigs,
   });
 
   const { session } = await createAgentSession({
@@ -317,7 +328,11 @@ async function acquireAgentSession(
     const parentFile = env.parentSessionManager?.getSessionFile?.();
     if (parentFile) setParentSession(resumed, parentFile);
 
-    const session = await buildDelegateSession(task, resumed);
+    const session = await buildDelegateSession(
+      task,
+      resumed,
+      env.modelRegistry,
+    );
     return {
       session,
       sessionManager: resumed,
@@ -336,7 +351,11 @@ async function acquireAgentSession(
   sessionManager = fresh.manager;
   sessionFile = fresh.file;
 
-  const session = await buildDelegateSession(task, sessionManager);
+  const session = await buildDelegateSession(
+    task,
+    sessionManager,
+    env.modelRegistry,
+  );
   return {
     session,
     sessionManager,
