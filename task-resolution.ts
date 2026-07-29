@@ -6,7 +6,7 @@ import { configFor } from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
 import { buildSubagentSystemPrompt } from "./agents.ts";
 import { buildParentTranscript } from "./parent-context.ts";
-import { findAvailableAlternative, resolveModel } from "./model.ts";
+import { findAvailableAlternative, resolveModelWithThinking } from "./model.ts";
 import { resolveModelSpec } from "./config.ts";
 import { loadDelegateSettings } from "./settings.ts";
 import { resolveCwd } from "./utils.ts";
@@ -176,6 +176,7 @@ export function resolveTasks(
 
     // Resolve model — explicit specs must resolve or fail; omitted falls back to parent
     let model: Model<Api> | undefined;
+    let modelThinking: ThinkingLevel | undefined;
     let tools: string[] = [];
     let thinking: ThinkingLevel = "off";
     const warnings: string[] = [];
@@ -187,7 +188,7 @@ export function resolveTasks(
       } else {
         // Resolve an explicit model spec (precedence: task > session > config >
         // frontmatter). resolveModelSpec returns undefined when none is set, so
-        // we skip resolveModel entirely — passing the parent's composite id
+        // we skip model re-resolution entirely — passing the parent's composite id
         // (e.g. OpenRouter's "deepseek/deepseek-v4-flash") would split on "/"
         // and misroute to the upstream provider. Leaving resolvedModel
         // undefined also lets findAvailableAlternative run below: it returns
@@ -199,9 +200,11 @@ export function resolveTasks(
           agentType,
           frontmatterModel: agent?.model,
         });
-        const resolvedModel = modelSpec
-          ? resolveModel(modelSpec, ctx.modelRegistry, ctx.model)
+        const resolvedRequest = modelSpec
+          ? resolveModelWithThinking(modelSpec, ctx.modelRegistry, ctx.model)
           : undefined;
+        const resolvedModel = resolvedRequest?.model;
+        modelThinking = resolvedRequest?.thinking;
 
         // If the task or settings explicitly set a model but it couldn't resolve, fail loudly
         const explicitRequest = t.model ?? agentOverride?.model;
@@ -247,6 +250,7 @@ export function resolveTasks(
       const thinkingRaw =
         t.thinking ??
         agentOverride?.thinking ??
+        modelThinking ??
         agent?.thinking ??
         (isPoolHit ? pooledConfig?.thinking : undefined) ??
         "off";

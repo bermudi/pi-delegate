@@ -96,7 +96,11 @@ export {
 } from "./agents.ts";
 export { buildParentTranscript, extractTextContent } from "./parent-context.ts";
 export { extractTouchedFromActivities } from "./file-tracking.ts";
-export { resolveModel, findAvailableAlternative } from "./model.ts";
+export {
+  resolveModel,
+  resolveModelWithThinking,
+  findAvailableAlternative,
+} from "./model.ts";
 export { readDelegateSettingsFile, loadDelegateSettings } from "./settings.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";
 export {

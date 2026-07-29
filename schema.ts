@@ -48,7 +48,7 @@ export const delegateTaskParameters = Type.Object({
   ),
   model: Type.Optional(
     Type.String({
-      description: "Model override; omit to inherit parent model.",
+      description: "Model override; inherits parent. `:max` sets thinking.",
     }),
   ),
   tools: Type.Optional(
@@ -59,7 +59,8 @@ export const delegateTaskParameters = Type.Object({
   ),
   thinking: Type.Optional(
     StringEnum(VALID_THINKING_LEVELS, {
-      description: "Thinking level. Default: agent setting or off.",
+      description:
+        "Thinking: off/minimal/low/medium/high/xhigh/max; default agent/off",
     }),
   ),
   sessionId: Type.Optional(
