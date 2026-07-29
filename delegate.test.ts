@@ -6373,6 +6373,22 @@ describe("getHostDeps disables extensions for subagents", () => {
     expect(b.resourceLoader).toBe(a.resourceLoader);
     expect(b.resourceLoader.getExtensions().extensions).toHaveLength(0);
   });
+
+  test("registers parent-owned providers without loading extensions", async () => {
+    const deps = await getHostDeps({
+      cwd: process.cwd(),
+      providerConfigs: [
+        [
+          "parent-provider",
+          { baseUrl: "https://example.invalid", apiKey: "test-key" },
+        ],
+      ],
+    });
+    expect(deps.modelRuntime.getRegisteredProviderIds()).toContain(
+      "parent-provider",
+    );
+    expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(0);
+  });
 });
 
 // ── shared live-progress row helpers (format.ts) ─────────────────────────
