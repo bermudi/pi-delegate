@@ -1,5 +1,3 @@
-node_modules
+node_modules/
 *.bundle.ts
-
-# pi agent session artifacts
-.poolside/
+subagent-tool-reviews/
