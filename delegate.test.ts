@@ -26,6 +26,7 @@ import {
   buildParentTranscript,
   extractTextContent,
   resolveModel,
+  resolveModelWithThinking,
   findAvailableAlternative,
   resolveModelSpec,
   extractOutput,
@@ -81,6 +82,7 @@ import {
   _setHostRetryBaseMsForTesting,
   _resetHostDepsCacheForTesting,
 } from "./host.ts";
+import { resolveTasks } from "./task-resolution.ts";
 
 // ── Integration test imports ──────────────────────────────────────────────
 
@@ -1003,6 +1005,63 @@ describe("resolveModel", () => {
       parentModel,
     );
     expect(result).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder" });
+  });
+
+  test("resolves a Pi-style thinking suffix", () => {
+    const registry = makeRegistry([
+      { provider: "openai-codex", id: "gpt-5.6-luna" },
+    ]);
+    const result = resolveModelWithThinking(
+      "openai-codex/gpt-5.6-luna:max",
+      registry,
+      parentModel,
+    );
+
+    expect(result.model).toEqual({
+      provider: "openai-codex",
+      id: "gpt-5.6-luna",
+    });
+    expect(result.thinking).toBe("max");
+  });
+
+  test("prefers an exact model ID containing a colon", () => {
+    const colonModel = { provider: "openrouter", id: "model:exacto" };
+    const registry = makeRegistry([colonModel]);
+
+    expect(
+      resolveModelWithThinking(
+        "openrouter/model:exacto",
+        registry,
+        parentModel,
+      ),
+    ).toEqual({ model: colonModel });
+  });
+
+  test("resolveTasks applies a model suffix as the thinking level", () => {
+    const selectedModel = {
+      provider: "openai-codex",
+      id: "gpt-5.6-luna",
+    } as any;
+    const registry = makeRegistry([selectedModel]);
+    const [task] = resolveTasks(
+      [
+        {
+          prompt: "audit the project",
+          model: "openai-codex/gpt-5.6-luna:max",
+        },
+      ] as any,
+      {
+        cwd: process.cwd(),
+        model: parentModel,
+        modelRegistry: registry,
+        sessionManager: undefined,
+        getSystemPrompt: () => "parent prompt",
+      } as any,
+      new Map(),
+    );
+
+    expect(task!.model).toBe(selectedModel);
+    expect(task!.thinking).toBe("max");
   });
 });
 

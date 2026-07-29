@@ -1,12 +1,18 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { VALID_THINKING } from "./constants.ts";
 
-export function resolveModel(
-  spec: string | undefined,
+export interface ResolvedModelRequest {
+  model: Model<Api> | undefined;
+  /** Thinking level parsed from a Pi-style `model:level` suffix. */
+  thinking?: ThinkingLevel;
+}
+
+function resolveModelReference(
+  spec: string,
   registry: ModelRegistry,
-  parentModel: Model<Api> | undefined,
 ): Model<Api> | undefined {
-  if (!spec) return parentModel;
   const idx = spec.indexOf("/");
   if (idx === -1) {
     // Bare id — match against available models
@@ -14,6 +20,42 @@ export function resolveModel(
     return match ?? undefined;
   }
   return registry.find(spec.slice(0, idx), spec.slice(idx + 1)) ?? undefined;
+}
+
+/** Resolve a model reference and an optional Pi-style thinking suffix.
+ *
+ * Exact model references win first so provider model IDs containing colons are
+ * preserved. If no exact match exists, a final `:<thinking-level>` suffix is
+ * peeled off and the base reference is resolved. This mirrors Pi's CLI model
+ * syntax, including references such as `openai-codex/gpt-5.6-luna:max`. */
+export function resolveModelWithThinking(
+  spec: string | undefined,
+  registry: ModelRegistry,
+  parentModel: Model<Api> | undefined,
+): ResolvedModelRequest {
+  if (!spec) return { model: parentModel };
+
+  const exact = resolveModelReference(spec, registry);
+  if (exact) return { model: exact };
+
+  const colon = spec.lastIndexOf(":");
+  if (colon === -1) return { model: undefined };
+
+  const suffix = spec.slice(colon + 1);
+  if (!VALID_THINKING.has(suffix)) return { model: undefined };
+
+  return {
+    model: resolveModelReference(spec.slice(0, colon), registry),
+    thinking: suffix as ThinkingLevel,
+  };
+}
+
+export function resolveModel(
+  spec: string | undefined,
+  registry: ModelRegistry,
+  parentModel: Model<Api> | undefined,
+): Model<Api> | undefined {
+  return resolveModelWithThinking(spec, registry, parentModel).model;
 }
 
 /** Find an available model with the same id as the given model, preferring
