@@ -28,6 +28,8 @@ export interface DelegateConfig {
   maxConcurrent?: number;
   /** Max concurrent async tickets. */
   maxAsyncTickets?: number;
+  /** Maximum inactivity before cooperative stall cancellation is requested (0 disables). */
+  stallTimeoutMs?: number;
   /** Whole-task transient-error retry settings. */
   retry?: {
     /** Max whole-task retries after the initial attempt (0 = no retry). */
@@ -52,6 +54,7 @@ const DEFAULT_DELEGATE_CONFIG: DelegateConfig = {
   agent: { default: null },
   concurrency: { default: MAX_CONCURRENCY },
   maxConcurrent: MAX_CONCURRENCY,
+  stallTimeoutMs: 15 * 60 * 1000,
   retry: {
     wholeTaskMaxRetries: 3,
     wholeTaskBaseDelayMs: 1_000,
@@ -68,6 +71,7 @@ let __delegateConfig: DelegateConfig = {
   agent: { ...DEFAULT_DELEGATE_CONFIG.agent },
   concurrency: { ...DEFAULT_DELEGATE_CONFIG.concurrency },
 };
+let stallTimeoutOverrideForTesting: number | undefined;
 
 /** Read delegate config from disk. Returns defaults if file missing or corrupt. */
 export function loadDelegateConfig(): DelegateConfig {
@@ -114,6 +118,14 @@ initDelegateConfig();
  */
 export function _resetDelegateConfigForTesting(): void {
   __delegateConfig = structuredClone(DEFAULT_DELEGATE_CONFIG);
+  stallTimeoutOverrideForTesting = undefined;
+}
+
+/** @internal Test-only override; production configuration is file-only. */
+export function _setStallTimeoutForTesting(
+  timeoutMs: number | undefined,
+): void {
+  stallTimeoutOverrideForTesting = timeoutMs;
 }
 
 // ── Config Getters ───────────────────────────────────────────────────────
@@ -148,6 +160,22 @@ export function getMaxAsyncTickets(): number {
 /** Get the hard ceiling on total concurrent agents. */
 export function getMaxConcurrent(): number {
   return __delegateConfig.maxConcurrent ?? MAX_CONCURRENCY;
+}
+
+/** Maximum inactivity before cooperative stall cancellation is requested.
+ * `0` disables detection; malformed values fall back to the compiled default. */
+export function getStallTimeoutMs(
+  config: DelegateConfig = __delegateConfig,
+): number {
+  const configured = stallTimeoutOverrideForTesting ?? config.stallTimeoutMs;
+  if (
+    typeof configured === "number" &&
+    Number.isFinite(configured) &&
+    configured >= 0
+  ) {
+    return configured;
+  }
+  return DEFAULT_DELEGATE_CONFIG.stallTimeoutMs!;
 }
 
 /** Get the max whole-task retries after the initial attempt. */

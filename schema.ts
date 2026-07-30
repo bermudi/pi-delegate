@@ -1,6 +1,6 @@
 import { Type, type SchemaOptions } from "@sinclair/typebox";
-import { ASYNC_MAX_RUNTIME_MS, VALID_THINKING_LEVELS } from "./constants.ts";
-import type { DelegateParams } from "./types.ts";
+import { VALID_THINKING_LEVELS } from "./constants.ts";
+import type { DelegateArguments } from "./types.ts";
 
 // JSON Schema string enum that keeps the literal union in `Static<>`.
 // `Type.String({ enum })` validates identically but widens to `string`;
@@ -18,114 +18,174 @@ function StringEnum<const T extends readonly string[]>(
   });
 }
 
-export const delegateTaskParameters = Type.Object({
+export const delegateTaskSchema = Type.Object({
   prompt: Type.Optional(
     Type.String({
-      description: "Task prompt. Optional for close/list or resumeFrom.",
+      description: "Task prompt; omit only for close, list, or resumeFrom.",
     }),
   ),
   agent: Type.Optional(
     Type.String({
-      description: "Agent name; omit for custom inline agent.",
+      description: "Named agent profile; omit for an ad-hoc subagent.",
     }),
   ),
   cwd: Type.Optional(
     Type.String({
-      description: "Subagent working directory. Default: parent cwd.",
+      description: "Subagent directory; relative paths use parent cwd.",
     }),
   ),
   systemPrompt: Type.Optional(
     Type.String({
-      description: "System prompt; inherits from agent or parent.",
+      description: "Base system prompt; AgentSession adds project resources.",
     }),
   ),
   context: Type.Optional(
     StringEnum(["fresh", "with-parent-transcript"], {
       description:
-        "'with-parent-transcript' includes parent history (token-expensive).",
+        "fresh omits parent transcript; with-parent-transcript copies it (token-expensive).",
       default: "fresh",
     }),
   ),
   model: Type.Optional(
     Type.String({
-      description: "Model override; inherits parent.",
+      description: "Model override; omit to inherit parent.",
     }),
   ),
   tools: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        "`*`=all; `ro`=read/grep/find/ls. bash mutates; `ro` is read-only.",
+        "Omit to inherit; `*`=read/write/edit/bash (mutating); `ro`=read/grep/find/ls (read-only).",
     }),
   ),
   thinking: Type.Optional(
     StringEnum(VALID_THINKING_LEVELS, {
       description:
-        "Thinking: off/minimal/low/medium/high/xhigh/max; default agent/off",
+        "Thinking: off/minimal/low/medium/high/xhigh/max; defaults to agent/off.",
     }),
   ),
   sessionId: Type.Optional(
     Type.String({
-      description: "Persistent session name for multi-turn reuse.",
+      description:
+        "Optional live pool key for multi-turn reuse; omit for one-shot tasks.",
     }),
   ),
   action: Type.Optional(
     StringEnum(["prompt", "close", "list"], {
       description:
-        "Session action; close requires sessionId. list shows history.",
+        "Session action; close needs sessionId; list shows active pooled sessions.",
       default: "prompt",
     }),
   ),
   resumeFrom: Type.Optional(
     Type.String({
-      description: "Absolute prior .jsonl path; not for async tickets.",
+      description:
+        "Exact absolute .jsonl session path from retry output; never a ticket ID.",
     }),
   ),
 });
 
 // Single source of truth for registration, generated help, and the
-// DelegateParams/TaskDef projections in types.ts.
-export const delegateParameters = Type.Object({
+// DelegateArguments/TaskDef projections in types.ts.
+export const delegateArgumentsSchema = Type.Object({
   action: Type.Optional(
     StringEnum(["poll", "cancel", "wait"], {
       description:
-        "Poll, cancel, or wait on an async ticket. Prefer wait; do not cancel for time or zero results.",
+        "Ticket control: poll, cancel, or wait. Prefer wait; do not cancel for time.",
     }),
   ),
   async: Type.Optional(
     Type.Boolean({
       description:
-        "Background work returns a ticket ID. Results delivered automatically; use wait, not polling.",
+        "Detach work and return a ticket; results auto-deliver. Wait only when blocked.",
       default: false,
     }),
   ),
   ticket: Type.Optional(
     Type.String({
-      description: "Ticket ID; omit only when polling to list all.",
+      description: "Ticket ID; omit only when polling all tickets.",
     }),
   ),
   force: Type.Optional(
     Type.Boolean({
       description:
-        "Set true to cancel; omit for preview. May leave partial effects.",
+        "True cancels after preview; completed writes/commands remain.",
       default: false,
     }),
   ),
   timeoutMs: Type.Optional(
     Type.Number({
       minimum: 0,
-      maximum: ASYNC_MAX_RUNTIME_MS,
-      description: "Wait timeout (ms), max ticket runtime.",
+      description:
+        "How long wait blocks (ms); timeout does not cancel the ticket.",
     }),
   ),
   tasks: Type.Optional(
-    Type.Array(delegateTaskParameters, {
+    Type.Array(delegateTaskSchema, {
       minItems: 0,
       description:
-        "Fields belong in entries, never top-level; independent, sequential for shared files. []=help.",
-      default: [],
+        "Fields in entries; tasks run concurrently; separate dependent/shared-file work. []=help.",
     }),
   ),
 });
+
+/** Validate the three operation modes after compatibility reshaping. */
+export function validateDelegateOperation(
+  params: DelegateArguments,
+): string | undefined {
+  const tasks = params.tasks ?? [];
+  const isTicketControl = params.action !== undefined;
+
+  if (isTicketControl) {
+    if (params.tasks !== undefined || params.async === true) {
+      return "ticket control cannot include tasks or async; call it separately.";
+    }
+    if (params.action !== "poll" && !params.ticket) {
+      return `action '${params.action}' requires ticket.`;
+    }
+    if (params.action !== "cancel" && params.force === true) {
+      return "force is valid only with action 'cancel'.";
+    }
+    if (params.action !== "wait" && params.timeoutMs !== undefined) {
+      return "timeoutMs is valid only with action 'wait'.";
+    }
+    return undefined;
+  }
+
+  if (params.ticket !== undefined) {
+    return "ticket requires action 'poll', 'cancel', or 'wait'.";
+  }
+  if (params.force === true) return "force is valid only with action 'cancel'.";
+  if (params.timeoutMs !== undefined) {
+    return "timeoutMs is valid only with action 'wait'.";
+  }
+  if (!tasks.length) {
+    return params.async === true
+      ? "async dispatch requires at least one task."
+      : undefined; // Intentional help request.
+  }
+
+  for (const [index, task] of tasks.entries()) {
+    if (task.action === "close") {
+      if (!task.sessionId) {
+        return `task ${index + 1}: action 'close' requires sessionId.`;
+      }
+      const extras = Object.keys(task).filter(
+        (key) => key !== "action" && key !== "sessionId",
+      );
+      if (extras.length) {
+        return `task ${index + 1}: action 'close' accepts only action and sessionId.`;
+      }
+    }
+    if (task.action === "list") {
+      const extras = Object.keys(task).filter((key) => key !== "action");
+      if (extras.length) {
+        return `task ${index + 1}: action 'list' accepts only action.`;
+      }
+    }
+  }
+
+  return undefined;
+}
 
 /** Fields that belong to a task entry. Models sometimes place these at the
  * top level of the arguments; the shim folds them back into a single task. */
@@ -180,8 +240,8 @@ function normalizeToolsField(value: string): unknown {
  * Silent by design: these rewrites are lossless re-shaping, so unlike the
  * model-suffix warning in task-resolution (which fires because thinking
  * intent is discarded), recovery warrants no signal. */
-export function prepareDelegateArguments(args: unknown): DelegateParams {
-  if (!args || typeof args !== "object") return args as DelegateParams;
+export function normalizeDelegateArguments(args: unknown): DelegateArguments {
+  if (!args || typeof args !== "object") return args as DelegateArguments;
   const record: Record<string, unknown> = {
     ...(args as Record<string, unknown>),
   };
@@ -225,5 +285,5 @@ export function prepareDelegateArguments(args: unknown): DelegateParams {
     });
   }
 
-  return record as DelegateParams;
+  return record as DelegateArguments;
 }

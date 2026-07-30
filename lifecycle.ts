@@ -100,6 +100,7 @@ export function updateProgressFromRun(
   p.durationMs = u.durationMs;
   p.lastActivityAt = u.lastActivityAt;
   p.activities = u.activities;
+  p.failureKind = u.failureKind;
 }
 
 /** Mirror a completed TaskResult into a TaskProgress row (status/duration/error). */
@@ -108,6 +109,7 @@ function updateProgressFromResult(p: TaskProgress, r: TaskResult): void {
   p.durationMs = r.durationMs;
   p.tokens = r.tokens;
   p.error = r.error;
+  p.failureKind = r.failureKind;
 }
 
 /** Apply a TaskResult to progress and notify the env (sync fires onUpdate).
@@ -150,6 +152,7 @@ function canRetryWholeTask(task: ResolvedTask, result: TaskResult): boolean {
   // tasks, and only when our touched-file accounting says the failed attempt
   // did not write/edit anything.
   return (
+    result.failureKind !== "stalled" &&
     !task.sessionId &&
     !task.resumeFrom &&
     result.touchedFiles.length === 0 &&
@@ -240,6 +243,7 @@ async function acquireAgentSession(
       cwd: task.cwd,
       thinking: task.thinking,
       tools: task.tools,
+      ...task.reuseIntent,
     });
     if (co.status === "mismatch") {
       const detail = co.mismatches
@@ -440,7 +444,7 @@ async function runResolvedTaskUnlocked(
           failTask(task, "action='close' requires sessionId."),
         );
       }
-      const closed = pool.closePooledAgent(task.sessionId);
+      const closed = await pool.closePooledAgent(task.sessionId);
       return finishTask(
         env,
         p,
@@ -496,6 +500,14 @@ async function runResolvedTaskUnlocked(
           Date.now(),
         );
 
+        // A pooled session whose prompt stalled was explicitly aborted. It is
+        // no longer a safe continuation, so dispose it instead of leaving a
+        // poisoned live session behind. Fresh/resumed failures were never
+        // committed and therefore have nothing in the pool to remove.
+        if (task.sessionId && r.failureKind === "stalled") {
+          await pool.closePooledAgent(task.sessionId);
+        }
+
         // Pool bookkeeping. commit() is the sole mutator: it decides
         // insert-vs-recordUse by map presence (sound because the session lock
         // serializes same-sessionId tasks). Skipped on failure — insert-only-
@@ -520,6 +532,7 @@ async function runResolvedTaskUnlocked(
           agent: task.agentName,
           output: r.output,
           error: r.error,
+          failureKind: r.failureKind,
           durationMs: r.durationMs,
           tokens: r.tokens,
           usage: r.usage,
@@ -565,6 +578,7 @@ async function runResolvedTaskUnlocked(
       }
       p.status = "running";
       p.error = undefined;
+      p.failureKind = undefined;
       env.onStatusChange?.();
       result = await runAttempt();
       accumulatedUsage = addUsage(accumulatedUsage, result.usage);

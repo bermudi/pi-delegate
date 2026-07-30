@@ -11,7 +11,7 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
-import type { delegateParameters } from "./schema.ts";
+import type { delegateArgumentsSchema } from "./schema.ts";
 
 export interface AgentConfig {
   name: string;
@@ -25,16 +25,16 @@ export interface AgentConfig {
 }
 
 // ── Tool parameter types — derived from the TypeBox schema ────────────────
-// `delegateParameters` in schema.ts is the single source of truth; these are
+// `delegateArgumentsSchema` in schema.ts is the single source of truth; these are
 // projections of it, so schema and types cannot drift. Field semantics live
 // in the schema's `description`s (which the calling model also sees).
 // The import is type-only, so the schema.ts ↔ types.ts cycle is erased at
 // compile time.
 
-export type DelegateParams = Static<typeof delegateParameters>;
-export type TaskDef = NonNullable<DelegateParams["tasks"]>[number];
+export type DelegateArguments = Static<typeof delegateArgumentsSchema>;
+export type TaskDef = NonNullable<DelegateArguments["tasks"]>[number];
 /** Top-level async ticket action: "poll" | "cancel" | "wait". */
-export type DelegateAction = NonNullable<DelegateParams["action"]>;
+export type DelegateAction = NonNullable<DelegateArguments["action"]>;
 /** Per-task session action: "prompt" | "close" | "list". */
 export type SessionAction = NonNullable<TaskDef["action"]>;
 
@@ -65,6 +65,13 @@ export interface AsyncTicket {
   waiters?: TicketWaiter[];
 }
 
+export interface ReuseIntent {
+  /** Explicit model requested by this call/profile; omitted means use frozen. */
+  model?: Model<Api>;
+  /** Explicit base prompt requested by this call/profile; omitted means frozen. */
+  systemPrompt?: string;
+}
+
 export interface ResolvedTask {
   prompt: string;
   agent?: string;
@@ -79,6 +86,8 @@ export interface ResolvedTask {
   resumeFrom?: string;
   agentName: string;
   warnings: string[];
+  /** Explicit settings that must match a live pooled session on reuse. */
+  reuseIntent?: ReuseIntent;
 }
 
 export interface ToolActivity {
@@ -95,6 +104,8 @@ export interface ToolActivity {
   liveOutput?: string;
 }
 
+export type TaskFailureKind = "stalled";
+
 export interface TaskProgress {
   index: number;
   agent: string;
@@ -104,6 +115,7 @@ export interface TaskProgress {
   tokens: number;
   toolUses: number;
   error?: string;
+  failureKind?: TaskFailureKind;
   model?: string;
   lastActivityAt?: number;
   activities: ToolActivity[];
@@ -126,6 +138,8 @@ export interface TaskResult {
   agent: string;
   output: string;
   error?: string;
+  /** Stable machine-readable failure reason; error remains human-facing. */
+  failureKind?: TaskFailureKind;
   durationMs: number;
   /** Display token count for the task (cumulative-message delta). Distinct
    *  from `usage`, the full provider breakdown reported to the parent for
@@ -158,6 +172,8 @@ export interface AgentProgressUpdate {
   durationMs: number;
   lastActivityAt?: number;
   activities: ToolActivity[];
+  /** Set as soon as a terminal condition is detected, before cleanup settles. */
+  failureKind?: TaskFailureKind;
 }
 
 export interface TaskRunEnv {

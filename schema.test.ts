@@ -1,25 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import { prepareDelegateArguments } from "./schema.ts";
+import { normalizeDelegateArguments } from "./schema.ts";
 import { getSubagentManualMarkdown } from "./manual.ts";
 
-describe("prepareDelegateArguments", () => {
+describe("normalizeDelegateArguments", () => {
   test("passes well-formed arguments through unchanged", () => {
     const args = { tasks: [{ prompt: "hi", tools: ["read"] }], async: false };
-    expect(prepareDelegateArguments(args)).toEqual(args);
+    expect(normalizeDelegateArguments(args)).toEqual(args);
   });
 
   test("recovers a stringified tasks array", () => {
-    const result = prepareDelegateArguments({ tasks: '[{"prompt":"hi"}]' });
+    const result = normalizeDelegateArguments({ tasks: '[{"prompt":"hi"}]' });
     expect(result.tasks).toEqual([{ prompt: "hi" }]);
   });
 
   test("leaves an unparseable tasks string for schema validation", () => {
-    const result = prepareDelegateArguments({ tasks: "not json" });
+    const result = normalizeDelegateArguments({ tasks: "not json" });
     expect((result as Record<string, unknown>).tasks).toBe("not json");
   });
 
   test("wraps flat task fields into a single task", () => {
-    const result = prepareDelegateArguments({
+    const result = normalizeDelegateArguments({
       prompt: "do the thing",
       systemPrompt: "you are helpful",
       context: "fresh",
@@ -40,13 +40,13 @@ describe("prepareDelegateArguments", () => {
   });
 
   test("preserves top-level async alongside the wrapped task", () => {
-    const result = prepareDelegateArguments({ async: true, prompt: "bg" });
+    const result = normalizeDelegateArguments({ async: true, prompt: "bg" });
     expect(result.async).toBe(true);
     expect(result.tasks).toEqual([{ prompt: "bg" }]);
   });
 
   test("folds a flat task-level close action into the wrapped task", () => {
-    const result = prepareDelegateArguments({
+    const result = normalizeDelegateArguments({
       action: "close",
       sessionId: "s1",
     });
@@ -56,7 +56,7 @@ describe("prepareDelegateArguments", () => {
 
   test("does not wrap when a ticket action is present", () => {
     for (const action of ["poll", "cancel", "wait"] as const) {
-      const result = prepareDelegateArguments({ action, prompt: "stray" });
+      const result = normalizeDelegateArguments({ action, prompt: "stray" });
       expect(result.tasks).toBeUndefined();
       expect(result.action).toBe(action);
       expect("prompt" in result).toBe(true);
@@ -64,13 +64,16 @@ describe("prepareDelegateArguments", () => {
   });
 
   test("does not wrap when a ticket id is present", () => {
-    const result = prepareDelegateArguments({ ticket: "t1", prompt: "stray" });
+    const result = normalizeDelegateArguments({
+      ticket: "t1",
+      prompt: "stray",
+    });
     expect(result.tasks).toBeUndefined();
     expect(result.ticket).toBe("t1");
   });
 
   test("a valid tasks array wins over flat fields", () => {
-    const result = prepareDelegateArguments({
+    const result = normalizeDelegateArguments({
       tasks: [{ prompt: "real" }],
       prompt: "stray",
     });
@@ -78,12 +81,12 @@ describe("prepareDelegateArguments", () => {
   });
 
   test("flat fields recover even when tasks is an empty array", () => {
-    const result = prepareDelegateArguments({ tasks: [], prompt: "hi" });
+    const result = normalizeDelegateArguments({ tasks: [], prompt: "hi" });
     expect(result.tasks).toEqual([{ prompt: "hi" }]);
   });
 
   test("parses stringified tools inside existing task entries", () => {
-    const result = prepareDelegateArguments({
+    const result = normalizeDelegateArguments({
       tasks: [{ prompt: "a", tools: '["read","grep"]' }, { prompt: "b" }],
     });
     expect(result.tasks).toEqual([
@@ -93,28 +96,28 @@ describe("prepareDelegateArguments", () => {
   });
 
   test("wraps a bare tools group token into an array", () => {
-    const result = prepareDelegateArguments({
+    const result = normalizeDelegateArguments({
       tasks: [{ prompt: "a", tools: "ro" }],
     });
     expect(result.tasks).toEqual([{ prompt: "a", tools: ["ro"] }]);
   });
 
   test("leaves a multi-token tools string for schema validation", () => {
-    const result = prepareDelegateArguments({
+    const result = normalizeDelegateArguments({
       tasks: [{ prompt: "a", tools: "read, write" }],
     });
     expect(result.tasks).toEqual([{ prompt: "a", tools: "read, write" }]);
   });
 
   test("non-object input passes through untouched", () => {
-    expect(prepareDelegateArguments(undefined)).toBeUndefined();
-    expect(prepareDelegateArguments(null as unknown)).toBeNull();
-    expect(prepareDelegateArguments("junk" as unknown)).toBe("junk");
+    expect(normalizeDelegateArguments(undefined)).toBeUndefined();
+    expect(normalizeDelegateArguments(null as unknown)).toBeNull();
+    expect(normalizeDelegateArguments("junk" as unknown)).toBe("junk");
   });
 
   test("empty calls stay empty so help still works", () => {
-    expect(prepareDelegateArguments({}).tasks).toBeUndefined();
-    expect(prepareDelegateArguments({ tasks: [] }).tasks).toEqual([]);
+    expect(normalizeDelegateArguments({}).tasks).toBeUndefined();
+    expect(normalizeDelegateArguments({ tasks: [] }).tasks).toEqual([]);
   });
 });
 
