@@ -26,6 +26,10 @@ import type {
   TicketWaiter,
 } from "./types.ts";
 
+// Node clamps delays larger than the signed 32-bit timer limit to roughly 1ms.
+// Long waits are therefore scheduled against a deadline in safe-sized chunks.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
 const busyTicketIdsBySession = new Map<string, Set<string>>();
 const busySessionsByTicket = new Map<string, Set<string>>();
 
@@ -312,6 +316,30 @@ function timeoutWaiter(
     return;
   }
   settleWaiter(w, buildWaitTimeoutResult(ticket, timeoutMs));
+}
+
+/** Schedule a waiter timeout without allowing the host timer clamp to turn a
+ * multi-week or longer wait into an immediate timeout. */
+function scheduleWaitTimeout(
+  w: TicketWaiter,
+  ticket: AsyncTicket,
+  timeoutMs: number,
+): void {
+  const deadline = Date.now() + timeoutMs;
+  const schedule = (): void => {
+    if (w.settled) return;
+    const remaining = deadline - Date.now();
+    const delay = Math.min(Math.max(remaining, 0), MAX_TIMER_DELAY_MS);
+    w.timeoutId = setTimeout(() => {
+      if (w.settled) return;
+      if (Date.now() < deadline) {
+        schedule();
+      } else {
+        timeoutWaiter(w, ticket, timeoutMs);
+      }
+    }, delay);
+  };
+  schedule();
 }
 
 function cleanWaiters(ticket: AsyncTicket): void {
@@ -766,9 +794,7 @@ export function handleWait(
       params.timeoutMs >= 0 &&
       Number.isFinite(params.timeoutMs)
     ) {
-      waiter.timeoutId = setTimeout(() => {
-        timeoutWaiter(waiter, ticket, params.timeoutMs!);
-      }, params.timeoutMs);
+      scheduleWaitTimeout(waiter, ticket, params.timeoutMs);
     }
 
     ticket.waiters = ticket.waiters ?? [];
