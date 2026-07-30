@@ -142,15 +142,21 @@ describe("runAgentSession abort re-check", () => {
   test("aborts a silent prompt and reports a structured stalled failure", async () => {
     _setStallTimeoutForTesting(15);
     let resolvePrompt!: () => void;
+    let emitDuringAbort!: (event: unknown) => void;
     let aborts = 0;
     const progress: Array<{ failureKind?: string }> = [];
     const { session } = fakeSession({
-      prompt: () =>
-        new Promise<void>((resolve) => {
+      prompt: (emit) => {
+        emitDuringAbort = emit;
+        return new Promise<void>((resolve) => {
           resolvePrompt = resolve;
-        }),
+        });
+      },
       abort: () => {
         aborts++;
+        // Upstream may emit a final event while cooperative cancellation
+        // unwinds. The error should still name the phase that stalled.
+        emitDuringAbort({ type: "message_update" });
         resolvePrompt();
       },
     });
@@ -173,6 +179,7 @@ describe("runAgentSession abort re-check", () => {
       expect(result.failureKind).toBe("stalled");
       expect(result.error).toContain("Stalled: no AgentSession activity");
       expect(result.error).toContain("starting agent");
+      expect(result.error).not.toContain("streaming model output");
     } finally {
       _setStallTimeoutForTesting(undefined);
     }

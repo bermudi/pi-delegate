@@ -87,6 +87,12 @@ interface PooledAgent {
  * use checkout/commit/configFor/closePooledAgent/closeAllPooledAgents/listPooledAgents. */
 const agentPool = new Map<string, PooledAgent>();
 
+// AgentSession.abort() normally settles promptly, but a provider or tool can
+// ignore cancellation. Cleanup must not make parent-session shutdown hostage to
+// that promise, so close operations use a bounded wait before forced disposal.
+const DEFAULT_POOL_ABORT_TIMEOUT_MS = 10_000;
+let poolAbortTimeoutMs = DEFAULT_POOL_ABORT_TIMEOUT_MS;
+
 /** Per-session lock — serializes access to a pooled agent so concurrent
  *  delegate calls with the same sessionId queue instead of interleaving. */
 const sessionLocks = new Map<string, Promise<void>>();
@@ -265,15 +271,33 @@ export async function withSessionLock<T>(
 
 interface AbortOutcome {
   error?: unknown;
+  timedOut?: boolean;
 }
 
 /** Start cancellation without letting a cleanup failure become unhandled while
- * a holder of the per-session lock is still unwinding. */
+ * a holder of the per-session lock is still unwinding. A wedged provider/tool
+ * cannot keep disposal or parent shutdown waiting forever. */
 function beginAbort(session: AgentSession): Promise<AbortOutcome> {
-  return session.abort().then(
-    () => ({}),
-    (error: unknown) => ({ error }),
-  );
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (outcome: AbortOutcome): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(outcome);
+    };
+
+    timer = setTimeout(() => finish({ timedOut: true }), poolAbortTimeoutMs);
+    try {
+      void session.abort().then(
+        () => finish({}),
+        (error: unknown) => finish({ error }),
+      );
+    } catch (error) {
+      finish({ error });
+    }
+  });
 }
 
 /** Close and dispose one pooled session. A caller holds the per-session lock
@@ -287,8 +311,23 @@ async function closePooledAgentAfterAbort(
   if (!pooled) return false;
 
   const failures: unknown[] = [];
-  const abortOutcome = await abort;
+  let abortOutcome: AbortOutcome;
+  try {
+    abortOutcome = await abort;
+  } catch (error) {
+    // beginAbort currently normalizes rejection, but keep the teardown seam
+    // fail-closed if a future caller supplies a raw abort promise.
+    failures.push(error);
+    abortOutcome = {};
+  }
   if (abortOutcome.error !== undefined) failures.push(abortOutcome.error);
+  if (abortOutcome.timedOut) {
+    failures.push(
+      new Error(
+        `Timed out after ${poolAbortTimeoutMs}ms waiting for session '${sessionId}' to abort.`,
+      ),
+    );
+  }
   try {
     pooled.session.dispose();
   } catch (error) {
@@ -305,6 +344,8 @@ async function closePooledAgentAfterAbort(
   return true;
 }
 
+/** Abort, dispose, and remove one pooled session. Returns false when the id
+ * is already absent; cleanup failures are aggregated after removal. */
 export async function closePooledAgent(sessionId: string): Promise<boolean> {
   const pooled = agentPool.get(sessionId);
   if (!pooled) return false;
@@ -361,9 +402,17 @@ export function listPooledAgents(): string[] {
 
 // ── Test seam (internal — imported directly by tests, not re-exported) ────
 
+/** @internal Override the abort wait in tests without waiting ten seconds. */
+export function _setPoolAbortTimeoutForTesting(
+  timeoutMs: number | undefined,
+): void {
+  poolAbortTimeoutMs = timeoutMs ?? DEFAULT_POOL_ABORT_TIMEOUT_MS;
+}
+
 /** @internal Clear all pool state for test isolation. Tests use fake sessions,
  * so no live resource teardown is needed here. */
 export function _resetPoolForTesting(): void {
   agentPool.clear();
   sessionLocks.clear();
+  poolAbortTimeoutMs = DEFAULT_POOL_ABORT_TIMEOUT_MS;
 }
