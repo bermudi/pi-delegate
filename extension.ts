@@ -27,6 +27,7 @@ import { hostCompatError } from "./host-compat.ts";
 import { closeAllPooledAgents } from "./pool.ts";
 import type { DelegateArguments } from "./types.ts";
 
+/** Register the delegate tool and clean up its parent-session resources. */
 export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "delegate",

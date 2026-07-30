@@ -3,6 +3,7 @@ import {
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
+/** Render the active parent conversation as compact context for a subagent. */
 export function buildParentTranscript(
   entries: SessionEntry[],
   leafId: string | null,
@@ -25,6 +26,7 @@ export function buildParentTranscript(
   }
 }
 
+/** Extract only text blocks from a Pi message content value. */
 export function extractTextContent(
   content: string | Array<{ type: string; text?: string }>,
 ): string {

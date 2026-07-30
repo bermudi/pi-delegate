@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import * as path from "node:path";
 import type { ToolActivity } from "./types.ts";
 
+/** Return absolute paths reported as changed by Git in the task cwd.
+ * Git failures degrade to an empty set because file tracking is observational. */
 export async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
   try {
     const result = await new Promise<string>((resolve, reject) => {
