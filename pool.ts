@@ -4,15 +4,14 @@ import type {
   AgentSession,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { POOL_TTL_MS } from "./constants.ts";
 import { fmtDuration, fmtTokens, shortenPath } from "./format.ts";
 
 // ── Public value types (cross the seam) ───────────────────────────────────
 
 /** Immutable config captured when a session enters the pool. Write-once: once
- *  stored it never changes — only stats mutate, and only via {@link commit}.
- *  Reuse validates {cwd, thinking, tools} against it; model is inherited (never
- *  compared); systemPrompt is frozen for defaulting, not re-validated. */
+ * stored it never changes — only stats mutate, and only via {@link commit}.
+ * Reuse always validates cwd/thinking/tools and validates an explicitly
+ * requested model or base prompt against this frozen configuration. */
 export interface FrozenConfig {
   systemPrompt: string;
   model: Model<Api>;
@@ -21,19 +20,21 @@ export interface FrozenConfig {
   cwd: string;
 }
 
-/** The subset a reuse request supplies for validation. Built by the caller from
- *  a ResolvedTask's {cwd, thinking, tools}. Model/systemPrompt are deliberately
- *  absent — model is inherited, systemPrompt is not re-validated. */
+/** The subset a reuse request supplies for validation. `model` and
+ * `systemPrompt` are present only when this call explicitly requested them;
+ * omission means continue with the frozen live session configuration. */
 export interface ConfigCandidate {
   cwd: string;
   thinking: ThinkingLevel;
   tools: string[];
+  model?: Model<Api>;
+  systemPrompt?: string;
 }
 
 /** One field-level diff from a reuse that conflicts with the frozen config. The
- *  pool computes these; the caller formats the error string. */
+ * pool computes these; the caller formats the error string. */
 export interface ConfigMismatch {
-  field: "cwd" | "thinking" | "tools";
+  field: "cwd" | "thinking" | "tools" | "model" | "systemPrompt";
   frozen: string;
   requested: string;
 }
@@ -82,21 +83,16 @@ interface PooledAgent {
   promptCount: number;
 }
 
-/** Module-level pool — lives for the entire pi session. Not exported: callers
- *  use checkout/commit/configFor/closePooledAgent/sweepPool/listPooledAgents. */
+/** Module-level pool — lives for the entire Pi session. Not exported: callers
+ * use checkout/commit/configFor/closePooledAgent/closeAllPooledAgents/listPooledAgents. */
 const agentPool = new Map<string, PooledAgent>();
 
 /** Per-session lock — serializes access to a pooled agent so concurrent
  *  delegate calls with the same sessionId queue instead of interleaving. */
 const sessionLocks = new Map<string, Promise<void>>();
 
-/** Clock override (test-only). When set, all pool time reads use this instead
- *  of Date.now(), so TTL/eviction tests don't sleep real seconds. Mirrors the
- *  `_setHostRetryBaseMsForTesting` / `_setWholeTaskRetryForTesting` idiom. */
-let clockOverride: (() => number) | undefined;
-
 function now(): number {
-  return clockOverride ? clockOverride() : Date.now();
+  return Date.now();
 }
 
 // ── Read + validate ───────────────────────────────────────────────────────
@@ -108,13 +104,13 @@ function now(): number {
  *
  *  - hit      → pooled, and {cwd,thinking,tools} match frozen. Returns the live
  *               handles + the frozen model id.
- *  - miss     → not pooled (never inserted, or evicted by TTL). Caller
- *               materializes.
- *  - mismatch → pooled but {cwd,thinking,tools} diverge. Caller formats the
- *               structured diff into an error; model is never the cause.
+ *  - miss     → not pooled (never inserted, closed, or parent session ended).
+ *               Caller materializes.
+ *  - mismatch → pooled but its immutable configuration conflicts with this
+ *               request. Caller formats the structured diff into an error.
  *
  *  lastUsed is bumped by commit() on a successful run, not here — so a checkout
- *  that bails (e.g. a resumeFrom conflict at the caller) does not extend the TTL. */
+ *  that bails (e.g. a resumeFrom conflict at the caller) does not affect stats. */
 export function checkout(
   sessionId: string,
   candidate: ConfigCandidate,
@@ -147,6 +143,29 @@ export function checkout(
       field: "tools",
       frozen: frozenTools,
       requested: requestedTools,
+    });
+  }
+  if (
+    candidate.model &&
+    (frozen.model.provider !== candidate.model.provider ||
+      frozen.model.id !== candidate.model.id)
+  ) {
+    mismatches.push({
+      field: "model",
+      frozen: `${frozen.model.provider}/${frozen.model.id}`,
+      requested: `${candidate.model.provider}/${candidate.model.id}`,
+    });
+  }
+  if (
+    candidate.systemPrompt !== undefined &&
+    frozen.systemPrompt !== candidate.systemPrompt
+  ) {
+    // Prompts can be large and sensitive; callers need the conflicting field,
+    // not the instruction text in their tool-result context.
+    mismatches.push({
+      field: "systemPrompt",
+      frozen: "<frozen>",
+      requested: "<requested>",
     });
   }
   if (mismatches.length) return { status: "mismatch", mismatches };
@@ -214,8 +233,8 @@ export function configFor(
  *  Different ids run in parallel. Exported as a primitive so the caller
  *  (lifecycle) can bracket the ENTIRE acquire/run/commit flow; checkout/commit
  *  do NOT lock internally because their only caller is already inside this
- *  bracket. sweepPool skips any session whose lock is held, so eviction never
- *  aborts in-flight work. */
+ *  bracket. Close is also invoked under this lock, so it never disposes an
+ *  in-flight prompt. */
 export async function withSessionLock<T>(
   sessionId: string,
   fn: () => Promise<T>,
@@ -242,47 +261,91 @@ export async function withSessionLock<T>(
   }
 }
 
-// ── Teardown / maintenance / display ──────────────────────────────────────
+// ── Teardown / display ────────────────────────────────────────────────────
 
-/** Close and remove a pooled session. Best-effort aborts any in-flight model
- *  call/retry and waits for idle. Returns true if a session was removed, false
- *  if not pooled. */
-export function closePooledAgent(sessionId: string): boolean {
+interface AbortOutcome {
+  error?: unknown;
+}
+
+/** Start cancellation without letting a cleanup failure become unhandled while
+ * a holder of the per-session lock is still unwinding. */
+function beginAbort(session: AgentSession): Promise<AbortOutcome> {
+  return session.abort().then(
+    () => ({}),
+    (error: unknown) => ({ error }),
+  );
+}
+
+/** Close and dispose one pooled session. A caller holds the per-session lock
+ * while closing, so abort cannot race a reuse. All cleanup is attempted before
+ * an error is surfaced; a removed session is never silently retained. */
+async function closePooledAgentAfterAbort(
+  sessionId: string,
+  abort: Promise<AbortOutcome>,
+): Promise<boolean> {
   const pooled = agentPool.get(sessionId);
   if (!pooled) return false;
+
+  const failures: unknown[] = [];
+  const abortOutcome = await abort;
+  if (abortOutcome.error !== undefined) failures.push(abortOutcome.error);
   try {
-    // AgentSession.abort() cancels the in-flight model call / retry backoff.
-    void pooled.session.abort().catch(() => {
-      /* best effort */
-    });
-  } catch {
-    /* best effort */
+    pooled.session.dispose();
+  } catch (error) {
+    failures.push(error);
   }
-  agentPool.delete(sessionId);
+  if (agentPool.get(sessionId) === pooled) agentPool.delete(sessionId);
+
+  if (failures.length) {
+    throw new AggregateError(
+      failures,
+      `Failed to close pooled session '${sessionId}'.`,
+    );
+  }
   return true;
 }
 
-/** Evict idle agents that exceeded the TTL. Skips sessions that are actively
- *  locked — closing them would abort the in-flight prompt. The wider session
- *  lock in runResolvedTask covers first-use, resume, and pool-hit runs, so any
- *  locked session has live work. */
-export function sweepPool(): void {
-  const t = now();
-  for (const [id, pooled] of agentPool) {
-    if (sessionLocks.has(id)) continue;
-    if (t - pooled.lastUsed > POOL_TTL_MS) {
-      closePooledAgent(id);
-    }
+export async function closePooledAgent(sessionId: string): Promise<boolean> {
+  const pooled = agentPool.get(sessionId);
+  if (!pooled) return false;
+  return closePooledAgentAfterAbort(sessionId, beginAbort(pooled.session));
+}
+
+/** Dispose every live pooled session when the parent Pi session ends. First
+ * request cancellation immediately, then acquire each session's lock before
+ * disposal. The lock prevents an in-flight lifecycle from committing a live
+ * session after shutdown has removed it. Attempts all cleanup before reporting
+ * any failures. */
+export async function closeAllPooledAgents(): Promise<void> {
+  const aborts = new Map<string, Promise<AbortOutcome>>(
+    [...agentPool].map(([sessionId, pooled]) => [
+      sessionId,
+      beginAbort(pooled.session),
+    ]),
+  );
+  const results = await Promise.allSettled(
+    [...aborts].map(([sessionId, abort]) =>
+      withSessionLock(sessionId, () =>
+        closePooledAgentAfterAbort(sessionId, abort),
+      ),
+    ),
+  );
+  const failures = results
+    .filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    )
+    .map((result) => result.reason);
+  if (failures.length) {
+    throw new AggregateError(
+      failures,
+      "Failed to close one or more pooled sessions.",
+    );
   }
 }
 
-/** List active pooled agents for help/status display. Sweeps stale entries
- *  first. Returns formatted lines — the structured-data refactor (pool returns
- *  SessionInfo[], formatting moves to the renderer) is tracked separately under
- *  the formatting-locality candidate; until then the pool keeps its format.ts
- *  dependency for this display path only. */
+/** List live pooled agents. Sessions remain available until explicit close or
+ * parent-session shutdown; idle/age are observability statistics, not expiry. */
 export function listPooledAgents(): string[] {
-  sweepPool();
   const lines: string[] = [];
   if (agentPool.size === 0) return ["_(no active sessions)_"];
   const t = now();
@@ -296,18 +359,11 @@ export function listPooledAgents(): string[] {
   return lines;
 }
 
-// ── Test seams (internal — imported directly from this module by tests, not
-//    re-exported through the delegate.ts barrel; mirrors host.ts's idiom). ──
+// ── Test seam (internal — imported directly by tests, not re-exported) ────
 
-/** @internal Test-only clock override for deterministic TTL/eviction tests.
- *  Pass undefined to restore real time. */
-export function _setClockForTesting(fn: (() => number) | undefined): void {
-  clockOverride = fn;
-}
-
-/** @internal Clear all pool state (map + locks + clock) for test isolation. */
+/** @internal Clear all pool state for test isolation. Tests use fake sessions,
+ * so no live resource teardown is needed here. */
 export function _resetPoolForTesting(): void {
   agentPool.clear();
   sessionLocks.clear();
-  clockOverride = undefined;
 }

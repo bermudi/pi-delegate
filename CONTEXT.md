@@ -23,16 +23,18 @@ keyed by a caller-chosen `sessionId`. Carries a **frozen config**.
 
 **Frozen config** — the immutable `{ systemPrompt, model, thinking, tools, cwd }`
 captured when a session enters the pool. A later reuse must match on
-`{ cwd, thinking, tools }` (model is inherited, not re-compared). Mismatch
+`{ cwd, thinking, tools }`; explicitly requested model or base-prompt changes
+must also match, while omitted values continue the frozen session. Mismatch
 rejection is a **pool invariant**, not caller policy — the pool enforces it
 and returns a structured diff; the caller only formats the error.
 
 **SessionPool** — the module (`pool.ts`) owning pooled-session *state and
 policy*: the session map, the per-session serialization lock, freeze-on-insert,
-validate-on-reuse, insert-only-on-success, stats-on-hit, and TTL eviction.
-Its seam is a small set of behavioral operations (`lookup`, `configFor`,
-`insert`, `recordUse`, `close`, `sweep`, `list`, `withSessionLock`); the raw
-map is private and is **not** part of the public barrel.
+validate-on-reuse, insert-only-on-success, stats-on-hit, explicit close, and
+parent-shutdown cleanup. Its seam is a small set of behavioral operations
+(`checkout`, `commit`, `configFor`, `close`, `closeAll`, `list`,
+`withSessionLock`); the raw map is private and is **not** part of the public
+barrel.
 
 **Session materialization** — acquiring a usable `AgentSession` for a task by
 one of three paths: **pool hit** (reuse), **resume** (open a prior `.jsonl`),

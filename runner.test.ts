@@ -10,6 +10,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { runAgentSession } from "./runner.ts";
+import { _setStallTimeoutForTesting } from "./config.ts";
 
 /** Minimal fake AgentSession — records whether prompt() was invoked and allows
  *  emitting tool events / mutating messages and stats. */
@@ -17,6 +18,7 @@ function fakeSession(opts: {
   prompt?: (emit: (e: unknown) => void) => Promise<void>;
   messages?: unknown[];
   state?: unknown;
+  abort?: () => Promise<void> | void;
   getStats?: () => {
     sessionFile?: string;
     sessionId?: string;
@@ -53,7 +55,7 @@ function fakeSession(opts: {
         await opts.prompt?.(emit);
       },
       async abort() {
-        /* no-op */
+        await opts.abort?.();
       },
       get messages() {
         return opts.messages ?? [];
@@ -135,6 +137,115 @@ describe("runAgentSession abort re-check", () => {
     expect(prompted()).toBe(true);
     expect(resolved).toBe(true);
     expect(result.error).toBeUndefined();
+  });
+
+  test("aborts a silent prompt and reports a structured stalled failure", async () => {
+    _setStallTimeoutForTesting(15);
+    let resolvePrompt!: () => void;
+    let aborts = 0;
+    const progress: Array<{ failureKind?: string }> = [];
+    const { session } = fakeSession({
+      prompt: () =>
+        new Promise<void>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      abort: () => {
+        aborts++;
+        resolvePrompt();
+      },
+    });
+
+    try {
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        (update) => progress.push(update),
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(aborts).toBe(1);
+      expect(progress.some((update) => update.failureKind === "stalled")).toBe(
+        true,
+      );
+      expect(result.failureKind).toBe("stalled");
+      expect(result.error).toContain("Stalled: no AgentSession activity");
+      expect(result.error).toContain("starting agent");
+    } finally {
+      _setStallTimeoutForTesting(undefined);
+    }
+  });
+
+  test("Pi 0.83 summarization retry delay extends the inactivity window", async () => {
+    _setStallTimeoutForTesting(15);
+    let aborts = 0;
+    const { session } = fakeSession({
+      prompt: async (emit) => {
+        emit({ type: "summarization_retry_scheduled", delayMs: 30 });
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        emit({
+          type: "summarization_retry_attempt_start",
+          source: "compaction",
+        });
+      },
+      abort: () => {
+        aborts++;
+      },
+    });
+
+    try {
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(aborts).toBe(0);
+      expect(result.failureKind).toBeUndefined();
+      expect(result.error).toBeUndefined();
+    } finally {
+      _setStallTimeoutForTesting(undefined);
+    }
+  });
+
+  test("streaming model updates reset the inactivity watchdog", async () => {
+    _setStallTimeoutForTesting(20);
+    let aborts = 0;
+    const { session } = fakeSession({
+      prompt: async (emit) => {
+        for (let i = 0; i < 3; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          emit({ type: "message_update" });
+        }
+      },
+      abort: () => {
+        aborts++;
+      },
+    });
+
+    try {
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(aborts).toBe(0);
+      expect(result.failureKind).toBeUndefined();
+      expect(result.error).toBeUndefined();
+    } finally {
+      _setStallTimeoutForTesting(undefined);
+    }
   });
 
   test("prompt failure preserves partial output, usage, and touched files", async () => {

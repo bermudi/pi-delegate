@@ -14,6 +14,20 @@
   parameters: readSchema,                // model API + validator
   async execute(id, args, signal, ...) { /* local code */ }
 }</pre><p class="mt-3"><code class="inline">label</code> and rendering helpers are for the terminal. <code class="inline">execute</code> is local capability. The model-facing pieces are deliberately split: a tiny snippet for prompt orientation, a full description for tool selection, and a schema for arguments.</p>
+<div class="lab p-5 my-5"><h4 class="display text-lg font-semibold mb-2">Concrete delegate names</h4><p>The delegate extension now names each layer by what it is:</p><pre>const delegateTaskSchema = Type.Object({ ... });
+
+const delegateArgumentsSchema = Type.Object({
+  tasks: Type.Array(delegateTaskSchema),
+  ...
+});
+
+type DelegateArguments = Static&lt;typeof delegateArgumentsSchema&gt;;
+
+pi.registerTool({
+  parameters: delegateArgumentsSchema,
+  prepareArguments: normalizeDelegateArguments,
+  execute(_id, args: DelegateArguments) { ... }
+});</pre><p class="mt-3"><code class="inline">delegateTaskSchema</code> is the nested schema for one array entry. <code class="inline">delegateArgumentsSchema</code> is the complete schema sent through the provider’s tools field. <code class="inline">DelegateArguments</code> is the validated TypeScript value shape. <code class="inline">normalizeDelegateArguments</code> is local pre-validation repair code; it is never shown to the model.</p></div>
 <h3 class="display text-2xl mt-9 mb-2">2. The default system prompt contains only the short listing</h3><p><code class="inline">buildSystemPrompt()</code> filters selected tools to those having a <code class="inline">promptSnippet</code>, then renders:</p><pre>Available tools:
 - read: Read file contents
 - bash: Execute bash commands

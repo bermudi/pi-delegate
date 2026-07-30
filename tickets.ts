@@ -6,7 +6,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { ASYNC_MAX_RUNTIME_MS, ASYNC_TICKET_TTL_MS } from "./constants.ts";
+import { ASYNC_TICKET_TTL_MS } from "./constants.ts";
 import {
   fmtDuration,
   fmtTokens,
@@ -87,22 +87,11 @@ export function generateTicketId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
-/** Abort and remove tickets that exceeded runtime or TTL. */
+/** Remove completed tickets after their retention TTL. Running tickets have no
+ * wall-clock deadline: per-task stall detection owns failed-agent handling. */
 export function sweepTickets(): void {
   const now = Date.now();
   for (const [id, ticket] of ticketRegistry) {
-    // Hard runtime timeout. Cancelling still consumes runtime — the batch must
-    // settle before the hard cap.
-    if (
-      (ticket.status === "running" || ticket.status === "cancelling") &&
-      now - ticket.created >= ASYNC_MAX_RUNTIME_MS
-    ) {
-      ticket.controller.abort();
-      ticket.status = "failed";
-      ticket.error = "Exceeded maximum runtime";
-      ticket.completedAt = now;
-      syncTicketBusyIndex(ticket);
-    }
     // TTL cleanup for completed/failed/cancelled
     if (
       ticket.status !== "running" &&
@@ -144,9 +133,9 @@ export function isSessionBusy(sessionId: string): string | null {
  * is also "failed".
  *
  * Callers are expected to have already handled "cancelled" / "cancelling"
- * (set by handleCancel) and the runtime timeout (set by sweepTickets) before
- * invoking this; those paths set `ticket.status` directly and skip this
- * function via the `if (ticket.status === "running")` guard in execute().
+ * (set by handleCancel) before invoking this; those paths set `ticket.status`
+ * directly and skip this function via the `if (ticket.status === "running")`
+ * guard in execute().
  */
 export function resolveFinalTicketStatus(
   ticket: AsyncTicket,
@@ -314,7 +303,7 @@ function timeoutWaiter(
   ticket: AsyncTicket,
   timeoutMs: number,
 ): void {
-  // If the ticket became terminal (e.g. runtime expired or completed just before
+  // If the ticket became terminal (e.g. completed or cancelled just before
   // this timer fired), return that snapshot. Workers may still be unwinding, so
   // waiting for deliverTicketResults here could strand the caller indefinitely.
   sweepTickets();
@@ -754,15 +743,10 @@ export function handleWait(
   }
 
   return new Promise((resolve, reject) => {
-    let runtimeWatchdog: ReturnType<typeof setTimeout> | undefined;
-
     const waiter: TicketWaiter = {
       signal,
       onUpdate,
-      resolve: (result) => {
-        if (runtimeWatchdog) clearTimeout(runtimeWatchdog);
-        resolve(result);
-      },
+      resolve,
       reject,
       settled: false,
     };
@@ -780,27 +764,11 @@ export function handleWait(
     if (
       params.timeoutMs !== undefined &&
       params.timeoutMs >= 0 &&
-      Number.isFinite(params.timeoutMs) &&
-      params.timeoutMs <= ASYNC_MAX_RUNTIME_MS
+      Number.isFinite(params.timeoutMs)
     ) {
       waiter.timeoutId = setTimeout(() => {
         timeoutWaiter(waiter, ticket, params.timeoutMs!);
       }, params.timeoutMs);
-    }
-
-    // Runtime watchdog: make the hard timeout observable even if an aborted
-    // worker is wedged in a tool call and therefore never reaches
-    // deliverTicketResults. The caller's timeout remains armed as an
-    // independent safety net; settleWaiter makes the timer race harmless.
-    const runtimeRemaining =
-      ASYNC_MAX_RUNTIME_MS - (Date.now() - ticket.created);
-    if (runtimeRemaining > 0) {
-      runtimeWatchdog = setTimeout(() => {
-        sweepTickets();
-        if (ticket.status !== "running" && ticket.status !== "cancelling") {
-          settleWaiter(waiter, formatCompletedTicket(ticket));
-        }
-      }, runtimeRemaining);
     }
 
     ticket.waiters = ticket.waiters ?? [];

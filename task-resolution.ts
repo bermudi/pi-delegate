@@ -111,7 +111,7 @@ export function resolveTasks(
 
   return tasks.map((t, i) => {
     const agent = t.agent ? agents.get(t.agent) : undefined;
-    const cwd = resolveCwd(t.cwd ?? ctx.cwd);
+    const cwd = resolveCwd(t.cwd ?? ctx.cwd, ctx.cwd);
 
     // Load settings-based overrides for this agent
     const settings = loadDelegateSettings(cwd);
@@ -142,6 +142,14 @@ export function resolveTasks(
     // so we resolve only the *base* prompt here: explicit task prompt → named
     // agent body → parent session prompt → default. The resolved base is
     // passed as the loader's customPrompt (see buildDelegateSession).
+    // Keep explicit intent separate: a bare `{ prompt, sessionId }` continues
+    // the frozen prompt even if the parent prompt has since changed, while an
+    // explicit task/profile prompt must not be silently ignored on reuse.
+    const requestedSystemPrompt = t.systemPrompt?.trim()
+      ? t.systemPrompt
+      : agent?.systemPrompt?.trim()
+        ? agent.systemPrompt
+        : undefined;
     const systemPrompt = buildSubagentSystemPrompt({
       taskSystemPrompt: t.systemPrompt,
       agentSystemPrompt: agent?.systemPrompt,
@@ -176,14 +184,32 @@ export function resolveTasks(
 
     // Resolve model — explicit specs must resolve or fail; omitted falls back to parent
     let model: Model<Api> | undefined;
+    let requestedModel: Model<Api> | undefined;
     let modelSuffix: ThinkingLevel | undefined;
     let tools: string[] = [];
     let thinking: ThinkingLevel = "off";
     const warnings: string[] = [];
 
     if (t.action !== "close" && t.action !== "list") {
-      // For pool hits, the model is already baked into the agent — skip resolution.
+      // A pool hit always runs its frozen model, but an explicitly requested
+      // task/profile model still has to be resolved so checkout can reject a
+      // contradictory request rather than silently discarding it.
       if (pooledConfig) {
+        const requestedModelSpec =
+          t.model ??
+          (t.agent ? (agentOverride?.model ?? agent?.model) : undefined);
+        if (requestedModelSpec) {
+          requestedModel = resolveModelRequest(
+            requestedModelSpec,
+            ctx.modelRegistry,
+            ctx.model,
+          ).model;
+          if (!requestedModel) {
+            throw new Error(
+              `Task ${i}: requested model '${requestedModelSpec}' is not available. Check provider config or remove the model field to continue the pooled session.`,
+            );
+          }
+        }
         model = pooledConfig.model;
       } else {
         // Resolve an explicit model spec (precedence: task > session > config >
@@ -286,6 +312,10 @@ export function resolveTasks(
       // delegate.json/settings contract, not a display string (friction #4).
       agentName: agent?.name ?? "ad-hoc",
       warnings,
+      reuseIntent: {
+        model: requestedModel,
+        systemPrompt: requestedSystemPrompt,
+      },
     };
   });
 }

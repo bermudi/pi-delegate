@@ -2,11 +2,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
-export function resolveCwd(cwd: string): string {
+/** Resolve a path relative to the caller's working directory. Tilde paths and
+ * absolute paths intentionally ignore `baseCwd`. */
+export function resolveCwd(cwd: string, baseCwd = process.cwd()): string {
   const expanded = cwd.startsWith("~")
     ? path.join(os.homedir(), cwd.slice(1))
     : cwd;
-  return path.resolve(expanded);
+  return path.isAbsolute(expanded)
+    ? path.resolve(expanded)
+    : path.resolve(baseCwd, expanded);
 }
 
 export function validateResumeFromPath(resumeFrom: string): string | undefined {

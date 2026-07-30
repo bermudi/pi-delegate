@@ -30,6 +30,17 @@ which has no usage slot. The per-call aggregate (`Nk tokens`) is still shown in
 the delegate header for both modes. Use sync delegation when totals must roll
 into the session.
 
+### Stall detection and cancellation
+
+`stallTimeoutMs` is an inactivity watchdog, not a hard execution deadline. When
+an active subagent emits no model or tool activity for the configured interval,
+delegate reports that a stall was detected and asks Pi's `AgentSession.abort()`
+to cancel it. Cancellation is cooperative: delegate waits for the session to
+become idle before returning a failed task, because returning while a provider
+or tool can still run would let a supposedly finished agent keep mutating files.
+A provider or tool that ignores cancellation can therefore delay the final task
+result. Set `stallTimeoutMs` to `0` to disable the watchdog.
+
 ## Develop
 
 ```bash
@@ -67,7 +78,7 @@ The unbundled entry is `delegate.ts`; `extension.ts` holds the tool implementati
   `sessionId` or resume from the same session file.
 - **Pooled subagent** / **persistent session** — A live subagent kept in memory
   under a `sessionId`. The first call creates it; later calls with the same
-  `sessionId` continue the same conversation until closed or expired.
+  `sessionId` continue the same conversation until explicitly closed or the parent Pi session ends.
 - **Resumed subagent** — A subagent rehydrated from a previous session `.jsonl`
   via `resumeFrom`. It can also be pooled by providing a `sessionId`.
 - **Async ticket** — A background execution handle returned when top-level

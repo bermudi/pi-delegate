@@ -8,7 +8,11 @@ import {
 } from "./tickets.ts";
 import { discoverAgents } from "./agents.ts";
 import { getSubagentManualMarkdown } from "./manual.ts";
-import { delegateParameters, prepareDelegateArguments } from "./schema.ts";
+import {
+  delegateArgumentsSchema,
+  normalizeDelegateArguments,
+  validateDelegateOperation,
+} from "./schema.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
 import {
   initProgress,
@@ -20,22 +24,38 @@ import {
 } from "./dispatch.ts";
 import { renderDelegateCall, renderDelegateResult } from "./render-result.ts";
 import { hostCompatError } from "./host-compat.ts";
-import type { DelegateParams } from "./types.ts";
+import { closeAllPooledAgents } from "./pool.ts";
+import type { DelegateArguments } from "./types.ts";
 
 export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "delegate",
     label: "Delegate to Subagents",
     description:
-      "Spawn parallel subagents. Sync blocks for results; async for detached work.",
-    parameters: delegateParameters,
+      "Run parallel subagents via tasks:[{prompt}]. Sync returns results; async returns a ticket.",
+    parameters: delegateArgumentsSchema,
     // Runs before schema validation — recovers stringified `tasks` arrays
     // (a common model mistake that would otherwise be rejected upstream).
-    prepareArguments: prepareDelegateArguments,
+    prepareArguments: normalizeDelegateArguments,
 
-    async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
+    async execute(_id, params: DelegateArguments, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
       const tasks = params.tasks ?? [];
+
+      const operationError = validateDelegateOperation(params);
+      if (operationError) {
+        return {
+          content: [
+            { type: "text", text: `Invalid delegate call: ${operationError}` },
+          ],
+          details: {
+            tasks,
+            results: [],
+            progress: [],
+            parentModel: parentModelId,
+          },
+        };
+      }
 
       // ── Poll action ───────────────────────────────────────────────────
       if (params.action === "poll") {
@@ -128,12 +148,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     renderResult: renderDelegateResult,
   });
 
-  // ── Session shutdown: abort all active async tickets ────────────────
-  pi.on("session_shutdown", () => {
+  // ── Session shutdown: abort tickets and dispose live pooled sessions ──
+  pi.on("session_shutdown", async () => {
     for (const ticket of ticketRegistry.values()) {
       cancelTicketForShutdown(ticket);
     }
-    // Do NOT clear the entire registry here — completed tickets are cleaned up
-    // by sweepTickets() TTL.
+    // Do NOT clear the ticket registry here — completed tickets are retained
+    // until their TTL cleanup. Pooled AgentSessions, however, own listeners
+    // and must be disposed before the parent session exits.
+    await closeAllPooledAgents();
   });
 }

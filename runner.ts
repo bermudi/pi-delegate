@@ -12,8 +12,19 @@ import {
   extractUsage,
 } from "./utils.ts";
 import { snapshotSessionUsage, usageDelta, emptyUsage } from "./usage.ts";
+import { getStallTimeoutMs } from "./config.ts";
+import { fmtDuration } from "./format.ts";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { AgentProgressUpdate, ToolActivity } from "./types.ts";
+import type {
+  AgentProgressUpdate,
+  TaskFailureKind,
+  ToolActivity,
+} from "./types.ts";
+
+// Node clamps larger timer delays to 1ms. Re-arm long configured inactivity
+// windows in chunks rather than turning an intentionally patient agent into an
+// immediate false stall.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
 /**
  * Run a single prompt against a live `AgentSession` and report progress.
@@ -47,10 +58,15 @@ export async function runAgentSession(
   tokens: number;
   usage: Usage;
   touchedFiles: string[];
+  failureKind?: TaskFailureKind;
 }> {
   const startTime = start || Date.now();
+  const stallTimeoutMs = getStallTimeoutMs();
   let toolUses = 0;
-  let lastActivityAt: number | undefined;
+  let lastActivityAt: number | undefined = startTime;
+  let phase = "starting agent";
+  let stalled = false;
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
   const activities: ToolActivity[] = [];
   const pendingById = new Map<string, ToolActivity>();
 
@@ -71,7 +87,57 @@ export async function runAgentSession(
       durationMs: Date.now() - startTime,
       lastActivityAt,
       activities: [...activities],
+      failureKind: stalled ? "stalled" : undefined,
     });
+  };
+
+  const stallError = () =>
+    `Stalled: no AgentSession activity for ${fmtDuration(stallTimeoutMs)} while ${phase}; task aborted.`;
+  const clearStallWatchdog = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = undefined;
+  };
+  const abortForStall = () => {
+    if (stalled || signal?.aborted) return;
+    stalled = true;
+    clearStallWatchdog();
+    console.warn(
+      `[delegate] stalled subagent detected after ${fmtDuration(stallTimeoutMs)} while ${phase}; requesting cooperative cancellation`,
+    );
+    // AgentSession.abort() is the upstream cancellation primitive. It waits
+    // for idle, so the prompt below remains responsible for preserving the
+    // final partial-output/session evidence after cancellation settles.
+    void session.abort().catch((error: unknown) => {
+      console.error("[delegate] stalled subagent abort failed", error);
+    });
+    // Surface the transition immediately. Cancellation is cooperative, so the
+    // final TaskResult may not arrive until the provider/tool becomes idle.
+    fireProgress();
+  };
+  const armStallWatchdog = (graceMs = 0) => {
+    clearStallWatchdog();
+    if (!stallTimeoutMs || stalled || signal?.aborted) return;
+
+    const grace = Number.isFinite(graceMs) && graceMs > 0 ? graceMs : 0;
+    const deadline = Date.now() + stallTimeoutMs + grace;
+    const checkDeadline = () => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        abortForStall();
+        return;
+      }
+      stallTimer = setTimeout(
+        checkDeadline,
+        Math.min(remaining, MAX_TIMER_DELAY_MS),
+      );
+    };
+    checkDeadline();
+  };
+  const noteActivity = (nextPhase: string, graceMs = 0) => {
+    lastActivityAt = Date.now();
+    phase = nextPhase;
+    armStallWatchdog(graceMs);
+    fireProgress();
   };
 
   // Map the AgentSession event union to the renderer's ToolActivity model.
@@ -82,7 +148,6 @@ export async function runAgentSession(
     switch (event.type) {
       case "tool_execution_start": {
         const now = Date.now();
-        lastActivityAt = now;
         const activity: ToolActivity = {
           id: event.toolCallId,
           name: event.toolName,
@@ -91,22 +156,20 @@ export async function runAgentSession(
         };
         pendingById.set(event.toolCallId, activity);
         activities.push(activity);
-        fireProgress();
+        noteActivity(`executing tool '${event.toolName}'`);
         break;
       }
       case "tool_execution_update": {
-        lastActivityAt = Date.now();
         const activity = pendingById.get(event.toolCallId);
         if (activity) {
           const text = extractTextFromPartialResult(event.partialResult);
           if (text !== undefined) activity.liveOutput = text;
-          fireProgress();
         }
+        noteActivity(`executing tool '${event.toolName}'`);
         break;
       }
       case "tool_execution_end": {
         const now = Date.now();
-        lastActivityAt = now;
         const activity = pendingById.get(event.toolCallId);
         if (activity) {
           activity.result = {
@@ -117,18 +180,63 @@ export async function runAgentSession(
           pendingById.delete(event.toolCallId);
         }
         toolUses++;
-        fireProgress();
+        noteActivity("waiting for the next agent turn");
         break;
       }
-      case "message_end": {
-        lastActivityAt = Date.now();
-        fireProgress();
+      case "message_start":
+      case "message_update":
+        noteActivity("streaming model output");
+        break;
+      case "message_end":
+      case "turn_end":
+        noteActivity("waiting for the next agent turn");
+        break;
+      case "agent_start":
+      case "turn_start":
+        noteActivity("waiting for model output");
+        break;
+      case "agent_end":
+      case "agent_settled":
+        noteActivity("finishing agent run");
+        break;
+      case "auto_retry_start":
+        // A declared retry delay is intentional silence, not a wedge. Add the
+        // delay before ordinary inactivity detection resumes.
+        noteActivity("waiting to retry", event.delayMs);
+        break;
+      case "auto_retry_end":
+        noteActivity("waiting for model output");
+        break;
+      case "compaction_start":
+        noteActivity("compacting context");
+        break;
+      case "compaction_end":
+        noteActivity("waiting for model output");
+        break;
+      default: {
+        // Pi 0.83 added summarization-retry and direct-bash progress events.
+        // The extension still typechecks against its oldest supported Pi, so
+        // recognize this forward-compatible event subset at runtime.
+        const compatEvent = event as unknown as {
+          type: string;
+          delayMs?: unknown;
+        };
+        if (compatEvent.type === "summarization_retry_scheduled") {
+          const delayMs =
+            typeof compatEvent.delayMs === "number" ? compatEvent.delayMs : 0;
+          noteActivity("waiting to retry summarization", delayMs);
+        } else if (
+          compatEvent.type === "summarization_retry_attempt_start" ||
+          compatEvent.type === "summarization_retry_finished"
+        ) {
+          noteActivity("summarizing context");
+        } else if (compatEvent.type === "bash_execution_update") {
+          noteActivity("running bash command");
+        }
+        // queue_update, entry_appended, session_info_changed, and thinking
+        // changes are local bookkeeping, not evidence a blocked operation lives.
         break;
       }
-      default:
-        // auto_retry_start/end, compaction_*, queue_update, session_info_changed,
-        // thinking_level_changed — not surfaced to the renderer's progress model.
-        break;
     }
   });
 
@@ -137,9 +245,14 @@ export async function runAgentSession(
   let abortHandler: (() => void) | undefined;
   if (signal) {
     abortHandler = () => {
-      // Fire-and-forget: abort() is async; we don't need to await it here.
-      void session.abort().catch(() => {
-        /* best effort */
+      clearStallWatchdog();
+      // Fire-and-forget: prompt() observes AgentSession's abort and then
+      // returns the partial evidence that this runner reports to the caller.
+      void session.abort().catch((error: unknown) => {
+        console.error(
+          "[delegate] parent-aborted subagent cleanup failed",
+          error,
+        );
       });
     };
     signal.addEventListener("abort", abortHandler, { once: true });
@@ -162,6 +275,11 @@ export async function runAgentSession(
     };
   }
 
+  // Start detection only once the session is ready to receive its prompt;
+  // queued delegate tasks never enter this runner and therefore never time out.
+  armStallWatchdog();
+  fireProgress();
+
   // Remember how many messages existed before the prompt so we can extract
   // only the new assistant output (not cumulative history) on both success and
   // abort/failure paths.
@@ -169,10 +287,11 @@ export async function runAgentSession(
 
   try {
     await session.prompt(prompt);
+    clearStallWatchdog();
 
     const messages = session.messages;
     const state = session.state as { errorMessage?: string };
-    const errorMessage = state.errorMessage;
+    const errorMessage = stalled ? stallError() : state.errorMessage;
     const output = extractOutput(messages.slice(messagesBefore));
     const usageAfterTotal = extractUsage(messages).total;
     const tokensThisCall = Math.max(0, usageAfterTotal - usageBeforeTotal);
@@ -192,6 +311,7 @@ export async function runAgentSession(
       tokens: tokensThisCall,
       usage,
       touchedFiles,
+      failureKind: stalled ? "stalled" : undefined,
     };
   } catch (err) {
     // Preserve partial-work evidence: whatever assistant output, token spend,
@@ -207,7 +327,11 @@ export async function runAgentSession(
     const fromGit = [...gitAfter].filter((f) => !gitBaseline.has(f));
     const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
 
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = stalled
+      ? stallError()
+      : err instanceof Error
+        ? err.message
+        : String(err);
     return {
       output: partialOutput || "(no output)",
       error: msg,
@@ -215,8 +339,10 @@ export async function runAgentSession(
       tokens: tokensThisCall,
       usage,
       touchedFiles,
+      failureKind: stalled ? "stalled" : undefined,
     };
   } finally {
+    clearStallWatchdog();
     if (signal && abortHandler)
       signal.removeEventListener("abort", abortHandler);
     unsubscribe();
