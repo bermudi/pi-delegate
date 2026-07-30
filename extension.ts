@@ -157,6 +157,21 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     // Do NOT clear the ticket registry here — completed tickets are retained
     // until their TTL cleanup. Pooled AgentSessions, however, own listeners
     // and must be disposed before the parent session exits.
-    await closeAllPooledAgents();
+    //
+    // closeAllPooledAgents attempts every session (Promise.allSettled) before
+    // aggregating failures into an AggregateError, so swallowing here does not
+    // abandon remaining cleanup. Catch and log so a wedged session's failure
+    // stays observable instead of becoming an unhandled rejection — pi.on is
+    // EventEmitter-style and does not surface handler rejections — and so
+    // shutdown completes even when one pooled session failed to abort/dispose.
+    try {
+      await closeAllPooledAgents();
+    } catch (error) {
+      const failures = error instanceof AggregateError ? error.errors : [error];
+      console.error(
+        "[delegate] pooled-session cleanup failed during shutdown:",
+        failures,
+      );
+    }
   });
 }

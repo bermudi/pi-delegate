@@ -45,7 +45,7 @@ export interface TicketWaiter {
   onUpdate?: AgentToolUpdateCallback<DelegateDetails>;
   resolve: (result: AgentToolResult<DelegateDetails>) => void;
   reject: (reason: unknown) => void;
-  timeoutId?: ReturnType<typeof setTimeout>;
+  clearDeadline?: () => void;
   settled: boolean;
 }
 
