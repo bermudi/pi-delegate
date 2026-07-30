@@ -38,6 +38,7 @@ function frontmatterToData(
   return data;
 }
 
+/** Quote ambiguous YAML scalar values before handing them to Pi's parser. */
 function sanitizeYamlScalars(yaml: string): string {
   return yaml
     .split("\n")
@@ -55,6 +56,7 @@ function sanitizeYamlScalars(yaml: string): string {
     .join("\n");
 }
 
+/** Parse an agent Markdown frontmatter fence and return its body. */
 export function parseFrontmatter(
   content: string,
   filePath?: string,
@@ -100,6 +102,7 @@ export function parseFrontmatter(
 
 // ── Agent Discovery ───────────────────────────────────────────────────────
 
+/** Find the nearest ancestor containing project-scoped agent files. */
 export function findProjectRoot(cwd: string): string | null {
   let dir = cwd;
   while (true) {
@@ -167,6 +170,7 @@ function mapClaudeToolNames(raw: string | undefined): string[] {
     .filter((n): n is string => n !== null);
 }
 
+/** Load a native Pi agent Markdown file, or null when it is invalid. */
 export function loadAgentFile(filePath: string): AgentConfig | null {
   let content: string;
   try {
@@ -238,6 +242,7 @@ export function loadClaudeAgentFile(filePath: string): AgentConfig | null {
   };
 }
 
+/** Discover native and Claude-compatible agents in priority order. */
 export function discoverAgents(cwd: string): Map<string, AgentConfig> {
   // Discovery order for persisted Markdown agents (first definition wins;
   // later dirs cannot overwrite):
@@ -316,6 +321,7 @@ function firstNonBlank(
   );
 }
 
+/** Select the frozen, task, agent, or parent prompt for a subagent. */
 export function buildSubagentSystemPrompt(options: {
   taskSystemPrompt?: string;
   agentSystemPrompt?: string;

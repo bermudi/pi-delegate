@@ -86,6 +86,7 @@ class TicketRegistry extends Map<string, AsyncTicket> {
 
 export const ticketRegistry = new TicketRegistry();
 
+/** Generate a short human-copyable identifier for an async ticket. */
 export function generateTicketId(): string {
   // 8-char alphanumeric, no lookalikes
   return Math.random().toString(36).slice(2, 10);
@@ -424,6 +425,7 @@ export function deliverTicketResults(
   );
 }
 
+/** Return a snapshot of one async ticket or the complete ticket roster. */
 export function handlePoll(
   params: { ticket?: string },
   ctx: ExtensionContext,
@@ -669,6 +671,7 @@ function buildCancelPreview(ticket: AsyncTicket): string {
   return lines.join("\n");
 }
 
+/** Preview or request cancellation of a running async ticket. */
 export function handleCancel(params: {
   ticket?: string;
   force?: boolean;

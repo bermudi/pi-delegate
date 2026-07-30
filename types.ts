@@ -104,6 +104,7 @@ export interface ToolActivity {
   liveOutput?: string;
 }
 
+/** Stable machine-readable reason for an inactivity watchdog failure. */
 export type TaskFailureKind = "stalled";
 
 export interface TaskProgress {

@@ -13,6 +13,7 @@ export function resolveCwd(cwd: string, baseCwd = process.cwd()): string {
     : path.resolve(baseCwd, expanded);
 }
 
+/** Validate the absolute `.jsonl` path accepted by `resumeFrom`. */
 export function validateResumeFromPath(resumeFrom: string): string | undefined {
   if (!resumeFrom.trim()) {
     return "expected an absolute .jsonl session file path copied from delegate retry output";
@@ -72,6 +73,7 @@ export function resolveCarriageReturn(text: string): string {
     .join("\n");
 }
 
+/** Concatenate text blocks from assistant messages in a session slice. */
 export function extractOutput(messages: AgentMessage[]): string {
   const parts: string[] = [];
   for (const msg of messages) {
@@ -112,6 +114,7 @@ function isUsageLike(u: unknown): u is UsageLike {
   return hasNumeric;
 }
 
+/** Sum finite usage fields from assistant messages. */
 export function extractUsage(messages: AgentMessage[]) {
   const usage = { input: 0, output: 0, cacheRead: 0, total: 0 };
   for (const msg of messages) {

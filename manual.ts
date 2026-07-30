@@ -35,6 +35,7 @@ function schemaTable(properties: Record<string, TSchema>): string {
   ].join("\n");
 }
 
+/** Render the current schema and discovered agents as model-facing help. */
 export function getSubagentManualMarkdown(
   agents: Map<string, AgentConfig>,
 ): string {

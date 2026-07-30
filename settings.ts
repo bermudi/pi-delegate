@@ -9,6 +9,7 @@ export interface DelegateSettings {
   >;
 }
 
+/** Read and validate a JSON settings object, returning null on I/O or parse errors. */
 export function readDelegateSettingsFile(
   filePath: string,
 ): Record<string, unknown> | null {
@@ -34,9 +35,10 @@ function getDelegateSettings(filePath: string): DelegateSettings | null {
   return settings.delegate as DelegateSettings;
 }
 
-/** Load merged delegate settings: project overrides user.
- *  Result is cached per cwd for the lifetime of the delegate call. */
 const delegateSettingsCache = new Map<string, DelegateSettings | null>();
+
+/** Load merged delegate settings: project overrides user.
+ * Result is cached per cwd for the lifetime of the delegate call. */
 export function loadDelegateSettings(cwd: string): DelegateSettings | null {
   const key = path.resolve(cwd);
   const cached = delegateSettingsCache.get(key);
