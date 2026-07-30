@@ -67,6 +67,8 @@ export function getSubagentManualMarkdown(
   return [
     "# Delegate Tool Manual",
     "",
+    "**Why you're seeing this:** no tasks were provided, so the tool returned help instead of dispatching. Nothing is broken. To dispatch subagents, put task fields inside `tasks: [{ ... }]`.",
+    "",
     "Delegate subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, and thinking level. Custom agents can be defined inline in a task or persisted as Markdown files.",
     "",
     "## Available Custom Agents",

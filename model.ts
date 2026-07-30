@@ -5,8 +5,10 @@ import { VALID_THINKING } from "./constants.ts";
 
 export interface ResolvedModelRequest {
   model: Model<Api> | undefined;
-  /** Thinking level parsed from a Pi-style `model:level` suffix. */
-  thinking?: ThinkingLevel;
+  /** Pi-style `:<thinking-level>` suffix stripped to make the reference
+   *  resolve. Reported so the caller can warn — it is NOT honored as a
+   *  thinking level; the task's `thinking` field is the only thinking input. */
+  strippedSuffix?: ThinkingLevel;
 }
 
 function resolveModelReference(
@@ -22,13 +24,17 @@ function resolveModelReference(
   return registry.find(spec.slice(0, idx), spec.slice(idx + 1)) ?? undefined;
 }
 
-/** Resolve a model reference and an optional Pi-style thinking suffix.
+/** Resolve a model reference, tolerating a Pi-style `:<thinking-level>`
+ * suffix.
  *
  * Exact model references win first so provider model IDs containing colons are
  * preserved. If no exact match exists, a final `:<thinking-level>` suffix is
- * peeled off and the base reference is resolved. This mirrors Pi's CLI model
- * syntax, including references such as `openai-codex/gpt-5.6-luna:max`. */
-export function resolveModelWithThinking(
+ * stripped and the base reference is resolved — models learned this syntax
+ * from Pi's CLI (e.g. `openai-codex/gpt-5.6-luna:max`) and keep emitting it,
+ * so hard-failing the whole call over it is worse than tolerating it. The
+ * suffix is deliberately NOT fed into thinking resolution: a single knob
+ * (the `thinking` field) beats two knobs with a silent precedence rule. */
+export function resolveModelRequest(
   spec: string | undefined,
   registry: ModelRegistry,
   parentModel: Model<Api> | undefined,
@@ -44,10 +50,10 @@ export function resolveModelWithThinking(
   const suffix = spec.slice(colon + 1);
   if (!VALID_THINKING.has(suffix)) return { model: undefined };
 
-  return {
-    model: resolveModelReference(spec.slice(0, colon), registry),
-    thinking: suffix as ThinkingLevel,
-  };
+  const model = resolveModelReference(spec.slice(0, colon), registry);
+  return model
+    ? { model, strippedSuffix: suffix as ThinkingLevel }
+    : { model: undefined };
 }
 
 export function resolveModel(
@@ -55,7 +61,7 @@ export function resolveModel(
   registry: ModelRegistry,
   parentModel: Model<Api> | undefined,
 ): Model<Api> | undefined {
-  return resolveModelWithThinking(spec, registry, parentModel).model;
+  return resolveModelRequest(spec, registry, parentModel).model;
 }
 
 /** Find an available model with the same id as the given model, preferring

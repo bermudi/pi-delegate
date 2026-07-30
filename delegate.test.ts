@@ -26,7 +26,7 @@ import {
   buildParentTranscript,
   extractTextContent,
   resolveModel,
-  resolveModelWithThinking,
+  resolveModelRequest,
   findAvailableAlternative,
   resolveModelSpec,
   extractOutput,
@@ -1007,21 +1007,24 @@ describe("resolveModel", () => {
     expect(result).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder" });
   });
 
-  test("resolves a Pi-style thinking suffix", () => {
+  test("tolerates a Pi-style thinking suffix for resolution only", () => {
     const registry = makeRegistry([
       { provider: "openai-codex", id: "gpt-5.6-luna" },
     ]);
-    const result = resolveModelWithThinking(
+    const result = resolveModelRequest(
       "openai-codex/gpt-5.6-luna:max",
       registry,
       parentModel,
     );
 
+    // The suffix lets the reference resolve; it is reported (not honored here)
+    // so the caller can use it as a last-resort thinking default.
     expect(result.model).toEqual({
       provider: "openai-codex",
       id: "gpt-5.6-luna",
     });
-    expect(result.thinking).toBe("max");
+    expect(result.strippedSuffix).toBe("max");
+    expect("thinking" in result).toBe(false);
   });
 
   test("prefers an exact model ID containing a colon", () => {
@@ -1029,7 +1032,7 @@ describe("resolveModel", () => {
     const registry = makeRegistry([colonModel]);
 
     expect(
-      resolveModelWithThinking(
+      resolveModelRequest(
         "openrouter/model:exacto",
         registry,
         parentModel,
@@ -1037,7 +1040,7 @@ describe("resolveModel", () => {
     ).toEqual({ model: colonModel });
   });
 
-  test("resolveTasks applies a model suffix as the thinking level", () => {
+  test("resolveTasks honors a model suffix as the thinking fallback", () => {
     const selectedModel = {
       provider: "openai-codex",
       id: "gpt-5.6-luna",
@@ -1061,7 +1064,41 @@ describe("resolveModel", () => {
     );
 
     expect(task!.model).toBe(selectedModel);
+    // No `thinking` field set, so the `:max` suffix is honored as the
+    // last-resort default — intent preserved, no warning.
     expect(task!.thinking).toBe("max");
+    expect(task!.warnings).toHaveLength(0);
+  });
+
+  test("resolveTasks warns when a model suffix is overridden by the thinking field", () => {
+    const selectedModel = {
+      provider: "openai-codex",
+      id: "gpt-5.6-luna",
+    } as any;
+    const registry = makeRegistry([selectedModel]);
+    const [task] = resolveTasks(
+      [
+        {
+          prompt: "audit the project",
+          model: "openai-codex/gpt-5.6-luna:max",
+          thinking: "high",
+        },
+      ] as any,
+      {
+        cwd: process.cwd(),
+        model: parentModel,
+        modelRegistry: registry,
+        sessionManager: undefined,
+        getSystemPrompt: () => "parent prompt",
+      } as any,
+      new Map(),
+    );
+
+    // The explicit field wins; the suffix had no effect → warn (not silently).
+    expect(task!.thinking).toBe("high");
+    expect(task!.warnings).toHaveLength(1);
+    expect(task!.warnings[0]).toContain(":max");
+    expect(task!.warnings[0]).toContain("resolved to 'high'");
   });
 });
 
@@ -2301,15 +2338,21 @@ describe("delegate extension integration", () => {
     const recovered = prepare!({ tasks: '[{"prompt":"hi"}]', async: true });
     expect(recovered).toEqual({ tasks: [{ prompt: "hi" }], async: true });
 
-    // Already-correct arguments pass through unchanged (same reference).
+    // Flat task fields at the top level → wrapped into a single task instead
+    // of silently degrading to the help response.
+    expect(prepare!({ prompt: "hi", tools: '["*"]' })).toEqual({
+      tasks: [{ prompt: "hi", tools: ["*"] }],
+    });
+
+    // Already-correct arguments pass through unchanged in content.
     const good = { tasks: [{ prompt: "hi" }] };
-    expect(prepare!(good)).toBe(good as never);
+    expect(prepare!(good)).toEqual(good as never);
 
     // Non-JSON string and non-array JSON are left for schema validation to reject.
     const notJson = { tasks: "not json" };
-    expect(prepare!(notJson)).toBe(notJson as never);
+    expect(prepare!(notJson)).toEqual(notJson as never);
     const notArray = { tasks: '{"prompt":"hi"}' };
-    expect(prepare!(notArray)).toBe(notArray as never);
+    expect(prepare!(notArray)).toEqual(notArray as never);
 
     // Non-object inputs pass through untouched.
     expect(prepare!(null)).toBe(null as never);
@@ -2347,7 +2390,10 @@ describe("delegate extension integration", () => {
       "token-expensive",
     );
     expect(tasksArraySchema.items.properties.tools.description).toContain(
-      "read/write/edit/bash",
+      "bash mutates",
+    );
+    expect(tasksArraySchema.items.properties.tools.description).toContain(
+      "read-only",
     );
     expect(tasksArraySchema.items.properties.action.description).toContain(
       "close requires sessionId",

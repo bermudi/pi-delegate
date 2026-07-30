@@ -98,7 +98,7 @@ export { buildParentTranscript, extractTextContent } from "./parent-context.ts";
 export { extractTouchedFromActivities } from "./file-tracking.ts";
 export {
   resolveModel,
-  resolveModelWithThinking,
+  resolveModelRequest,
   findAvailableAlternative,
 } from "./model.ts";
 export { readDelegateSettingsFile, loadDelegateSettings } from "./settings.ts";
