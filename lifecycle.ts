@@ -91,8 +91,8 @@ function completeSessionAction(
 }
 
 /** Dispose a materialized session that was never committed to the pool.
- * Pool hits remain live and must not be disposed when their caller aborts. */
-function disposeAcquiredSessionOnAbort(acquired: AcquiredSession): void {
+ * Pool hits remain live and must not be disposed by a failed task. */
+function disposeUncommittedSession(acquired: AcquiredSession): void {
   if (!acquired.disposeOnAbort) return;
   try {
     acquired.session.dispose();
@@ -499,7 +499,7 @@ async function runResolvedTaskUnlocked(
       // remain live, while fresh/resumed sessions must be disposed because they
       // were never committed anywhere else.
       if (env.signal?.aborted) {
-        disposeAcquiredSessionOnAbort(acquired);
+        disposeUncommittedSession(acquired);
         return failTask(task, "Aborted");
       }
 
@@ -526,7 +526,7 @@ async function runResolvedTaskUnlocked(
           r = { ...r, error: "Aborted" };
         }
         if (env.signal?.aborted || r.error === "Aborted") {
-          disposeAcquiredSessionOnAbort(acquired);
+          disposeUncommittedSession(acquired);
         }
 
         // A stalled prompt was explicitly aborted and is no longer a safe
@@ -548,7 +548,7 @@ async function runResolvedTaskUnlocked(
               );
             }
           }
-          if (!closed) disposeAcquiredSessionOnAbort(acquired);
+          if (!closed) disposeUncommittedSession(acquired);
         }
 
         // Pool bookkeeping. commit() is the sole mutator: it decides
