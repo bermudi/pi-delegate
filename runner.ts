@@ -14,17 +14,13 @@ import {
 import { snapshotSessionUsage, usageDelta, emptyUsage } from "./usage.ts";
 import { getStallTimeoutMs } from "./config.ts";
 import { fmtDuration } from "./format.ts";
+import { scheduleDeadline } from "./timer.ts";
 import type { Usage } from "@earendil-works/pi-ai";
 import type {
   AgentProgressUpdate,
   TaskFailureKind,
   ToolActivity,
 } from "./types.ts";
-
-// Node clamps larger timer delays to 1ms. Re-arm long configured inactivity
-// windows in chunks rather than turning an intentionally patient agent into an
-// immediate false stall.
-const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
 /**
  * Run a single prompt against a live `AgentSession` and report progress.
@@ -67,7 +63,7 @@ export async function runAgentSession(
   let phase = "starting agent";
   let stalled = false;
   let stalledPhase: string | undefined;
-  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  let clearStallDeadline: (() => void) | undefined;
   const activities: ToolActivity[] = [];
   const pendingById = new Map<string, ToolActivity>();
 
@@ -95,8 +91,8 @@ export async function runAgentSession(
   const stallError = () =>
     `Stalled: no AgentSession activity for ${fmtDuration(stallTimeoutMs)} while ${stalledPhase ?? phase}; task aborted.`;
   const clearStallWatchdog = () => {
-    if (stallTimer) clearTimeout(stallTimer);
-    stallTimer = undefined;
+    clearStallDeadline?.();
+    clearStallDeadline = undefined;
   };
   const abortForStall = () => {
     if (stalled || signal?.aborted) return;
@@ -122,18 +118,7 @@ export async function runAgentSession(
 
     const grace = Number.isFinite(graceMs) && graceMs > 0 ? graceMs : 0;
     const deadline = Date.now() + stallTimeoutMs + grace;
-    const checkDeadline = () => {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        abortForStall();
-        return;
-      }
-      stallTimer = setTimeout(
-        checkDeadline,
-        Math.min(remaining, MAX_TIMER_DELAY_MS),
-      );
-    };
-    checkDeadline();
+    clearStallDeadline = scheduleDeadline(deadline, abortForStall);
   };
   const noteActivity = (nextPhase: string, graceMs = 0) => {
     lastActivityAt = Date.now();
