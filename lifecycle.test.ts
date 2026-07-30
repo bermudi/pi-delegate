@@ -1004,6 +1004,30 @@ describe("delegate task lifecycle integration", () => {
     };
 
     expect(details.results[0]?.error).toContain("config mismatch");
+
+    // The base system prompt is frozen in a live AgentSession. An explicit
+    // override must fail rather than being silently ignored.
+    const promptMismatch = await toolDef.execute(
+      "tc-mismatch-prompt",
+      {
+        tasks: [
+          {
+            prompt: "reuse",
+            sessionId: "mismatch-me",
+            tools: ["read"],
+            systemPrompt: "A different base prompt",
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const promptDetails = (promptMismatch as any).details as {
+      results: Array<{ error?: string }>;
+    };
+    expect(promptDetails.results[0]?.error).toContain("config mismatch");
+    expect(promptDetails.results[0]?.error).toContain("systemPrompt");
   });
 });
 

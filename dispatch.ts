@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
-import { sweepPool } from "./pool.ts";
 import {
   ticketRegistry,
   generateTicketId,
@@ -224,14 +223,11 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
 }
 
 /** Synchronous concurrent execution — awaits all tasks and formats the
- *  combined LLM-facing result. Sweeps stale pooled agents before dispatch. */
+ * combined LLM-facing result. Pooled sessions remain live until closed. */
 export async function dispatchSync(
   input: SyncDispatchInput,
 ): Promise<DelegateToolResult> {
   const { ctx, tasks, resolved, progress, parentModelId, signal, fire } = input;
-
-  // Sweep stale pooled agents before dispatching.
-  sweepPool();
 
   const startedAt = Date.now();
   const syncEnv: TaskRunEnv = {

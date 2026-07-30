@@ -127,10 +127,14 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
         {
           const activityAge = getActivityAge(p.lastActivityAt);
           const ageTag = activityAge ? ` · ${activityAge}` : "";
+          const stallTag =
+            p.failureKind === "stalled"
+              ? theme.fg("warning", " · stall detected · cancellation pending")
+              : "";
           const glyph = theme.fg("warning", spinnerFrame());
           lines.push(
             truncLine(
-              `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin(runParts)}${theme.fg("muted", ageTag)}`,
+              `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin(runParts)}${stallTag}${theme.fg("muted", ageTag)}`,
               w,
             ),
           );

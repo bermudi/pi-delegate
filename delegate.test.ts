@@ -4,9 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { _setClockForTesting, _resetPoolForTesting } from "./pool.ts";
+import { _resetPoolForTesting } from "./pool.ts";
 import { _resetDelegateConfigForTesting } from "./config.ts";
-import { ASYNC_MAX_RUNTIME_MS } from "./constants.ts";
 import {
   inFlightActivity,
   latestActivity,
@@ -51,7 +50,7 @@ import {
   commit,
   configFor,
   closePooledAgent,
-  sweepPool,
+  closeAllPooledAgents,
   listPooledAgents,
   withSessionLock,
   getHostDeps,
@@ -59,6 +58,7 @@ import {
   loadDelegateSettings,
   getConcurrencyLimit,
   getMaxAsyncTickets,
+  getStallTimeoutMs,
   type AgentConfig,
   type DelegateConfig,
   type TaskProgress,
@@ -1032,11 +1032,7 @@ describe("resolveModel", () => {
     const registry = makeRegistry([colonModel]);
 
     expect(
-      resolveModelRequest(
-        "openrouter/model:exacto",
-        registry,
-        parentModel,
-      ),
+      resolveModelRequest("openrouter/model:exacto", registry, parentModel),
     ).toEqual({ model: colonModel });
   });
 
@@ -1068,6 +1064,24 @@ describe("resolveModel", () => {
     // last-resort default — intent preserved, no warning.
     expect(task!.thinking).toBe("max");
     expect(task!.warnings).toHaveLength(0);
+  });
+
+  test("resolveTasks resolves a relative task cwd from the parent cwd", () => {
+    const [task] = resolveTasks(
+      [{ prompt: "inspect", cwd: "../web" }] as any,
+      {
+        cwd: "/repo/apps/api",
+        model: parentModel,
+        modelRegistry: {
+          hasConfiguredAuth: () => true,
+          getAvailable: () => [],
+        },
+        sessionManager: undefined,
+      } as any,
+      new Map(),
+    );
+
+    expect(task!.cwd).toBe("/repo/apps/web");
   });
 
   test("resolveTasks warns when a model suffix is overridden by the thinking field", () => {
@@ -1222,6 +1236,26 @@ describe("resolveModelSpec", () => {
 // ── getConcurrencyLimit ──────────────────────────────────────────────────
 // No config mutators ship (delegate.json is the only write path), so these
 // tests inject config objects directly to exercise the precedence chain.
+
+describe("getStallTimeoutMs", () => {
+  const config = (stallTimeoutMs: unknown): DelegateConfig =>
+    ({
+      agent: { default: null },
+      concurrency: { default: 1 },
+      stallTimeoutMs,
+    }) as DelegateConfig;
+
+  test("uses a configured finite non-negative value, including zero", () => {
+    expect(getStallTimeoutMs(config(1234))).toBe(1234);
+    expect(getStallTimeoutMs(config(0))).toBe(0);
+  });
+
+  test("falls back safely for malformed values", () => {
+    expect(getStallTimeoutMs(config(-1))).toBe(15 * 60 * 1000);
+    expect(getStallTimeoutMs(config(Infinity))).toBe(15 * 60 * 1000);
+    expect(getStallTimeoutMs(config("nope"))).toBe(15 * 60 * 1000);
+  });
+});
 
 describe("getConcurrencyLimit", () => {
   test("returns default when no per-model or per-provider config", () => {
@@ -2023,10 +2057,9 @@ describe("resolveCwd", () => {
     );
   });
 
-  test("resolves relative paths against process.cwd", () => {
-    const result = resolveCwd("../build/litespec");
-    expect(path.isAbsolute(result)).toBe(true);
-    expect(result).toBe(path.resolve("../build/litespec"));
+  test("resolves relative paths against the supplied parent cwd", () => {
+    const parentCwd = "/repo/apps/api";
+    expect(resolveCwd("../web", parentCwd)).toBe("/repo/apps/web");
   });
 
   test("expands tilde to homedir", () => {
@@ -2044,8 +2077,8 @@ describe("resolveCwd", () => {
     expect(resolveCwd("~/")).toBe(os.homedir());
   });
 
-  test("dot resolves to process.cwd", () => {
-    expect(resolveCwd(".")).toBe(process.cwd());
+  test("dot resolves to the supplied parent cwd", () => {
+    expect(resolveCwd(".", "/repo/apps/api")).toBe("/repo/apps/api");
   });
 });
 
@@ -2383,33 +2416,34 @@ describe("delegate extension integration", () => {
     // Critical conditional semantics that JSON Schema cannot express cheaply
     // remain available at call-time without restoring B's prose-heavy schema.
     expect(toolDef!.description).toContain("parallel subagents");
-    expect(schema.properties.ticket.description).toContain(
-      "omit only when polling",
-    );
+    expect(toolDef!.description).toContain("tasks:[{prompt}]");
+    expect(schema.properties.ticket.description).toContain("polling all");
     expect(tasksArraySchema.items.properties.context.description).toContain(
       "token-expensive",
     );
     expect(tasksArraySchema.items.properties.tools.description).toContain(
-      "bash mutates",
+      "read/write/edit/bash",
     );
     expect(tasksArraySchema.items.properties.tools.description).toContain(
       "read-only",
     );
     expect(tasksArraySchema.items.properties.action.description).toContain(
-      "close requires sessionId",
+      "list shows active pooled sessions",
     );
     expect(tasksArraySchema.items.properties.resumeFrom.description).toContain(
-      "not for async tickets",
+      "never a ticket ID",
     );
 
     // Orchestration invariants from #27 are model-visible in the schema.
     expect(toolDef!.description).toContain("Sync");
     expect(toolDef!.description).toContain("async");
-    expect(schema.properties.tasks.description).toContain("independent");
-    expect(schema.properties.async.description).toContain("automatically");
-    expect(schema.properties.async.description).toContain("wait");
-    expect(schema.properties.action.description).toContain("zero results");
-    expect(schema.properties.force.description).toContain("partial effects");
+    expect(schema.properties.tasks.description).toContain("run concurrently");
+    expect(schema.properties.async.description).toContain("auto-deliver");
+    expect(schema.properties.async.description).toContain("Wait");
+    expect(schema.properties.action.description).toContain("Prefer wait");
+    expect(schema.properties.force.description).toContain(
+      "writes/commands remain",
+    );
     expect(tasksArraySchema.items.properties.action.enum).toEqual([
       "prompt",
       "close",
@@ -2417,8 +2451,8 @@ describe("delegate extension integration", () => {
     ]);
 
     // Descriptions are a tokenizer-independent proxy for the repeated provider
-    // tool-definition payload. Keep the complete model-facing guidance compact
-    // enough that a copy edit cannot quietly recreate the verbose B-state schema.
+    // tool-definition payload. Keep truthful model-facing guidance compact —
+    // this budget intentionally leaves room for conditional safety semantics.
     const descriptions = [
       toolDef!.description!,
       ...topProperties.map(([, prop]) => prop.description as string),
@@ -2432,7 +2466,34 @@ describe("delegate extension integration", () => {
         (total, description) => total + description.length,
         0,
       ),
-    ).toBeLessThanOrEqual(1_100);
+    ).toBeLessThanOrEqual(1_250);
+  });
+
+  test("rejects mixed dispatch, ticket, and session-control shapes", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const invalidCalls = [
+      { action: "poll", tasks: [{ prompt: "stray" }] },
+      { ticket: "t1", tasks: [{ prompt: "stray" }] },
+      { async: true },
+      { timeoutMs: 10, tasks: [{ prompt: "stray" }] },
+      { force: true, tasks: [{ prompt: "stray" }] },
+      { tasks: [{ action: "list", prompt: "stray" }] },
+      { tasks: [{ action: "close", sessionId: "s1", prompt: "stray" }] },
+    ];
+
+    for (const params of invalidCalls) {
+      const result = await toolDef!.execute(
+        "tc-invalid-shape",
+        params as never,
+        undefined,
+        undefined,
+        ts.session.extensionRunner as any,
+      );
+      expect(result.content[0].text).toContain("Invalid delegate call");
+      expect(result.details.results).toEqual([]);
+      expect(result.details.progress).toEqual([]);
+    }
   });
 
   test("execute returns help when tasks is empty", async () => {
@@ -3544,6 +3605,42 @@ describe("delegate renderers", () => {
     expect(rendered).toContain("s ago");
   });
 
+  test("renderResult surfaces cooperative stall cancellation before settlement", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const result = {
+      content: [{ type: "text", text: "Running..." }],
+      details: {
+        tasks: [{ prompt: "task" }],
+        results: [],
+        progress: [
+          {
+            index: 0,
+            agent: "ad-hoc",
+            task: "task",
+            status: "running",
+            durationMs: 5000,
+            tokens: 0,
+            toolUses: 0,
+            failureKind: "stalled",
+            lastActivityAt: Date.now() - 5000,
+            activities: [],
+          },
+        ],
+      },
+    };
+
+    const component = toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      mockTheme(),
+      mockRenderCtx(),
+    );
+    const rendered = (component as any).getText();
+    expect(rendered).toContain("stall detected");
+    expect(rendered).toContain("cancellation pending");
+  });
+
   test("collapsed running shows ⎿ with current tool and Ctrl+O hint", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
@@ -4108,7 +4205,7 @@ describe("delegate pool", () => {
     // list without prompt should work
     const listResult = await toolDef!.execute(
       "tc-pool-1",
-      { tasks: [{ action: "list", systemPrompt: "test" }] },
+      { tasks: [{ action: "list" }] },
       undefined,
       undefined,
       ts.session.extensionRunner as any,
@@ -4119,9 +4216,7 @@ describe("delegate pool", () => {
     const closeResult = await toolDef!.execute(
       "tc-pool-2",
       {
-        tasks: [
-          { action: "close", sessionId: "nonexistent", systemPrompt: "test" },
-        ],
+        tasks: [{ action: "close", sessionId: "nonexistent" }],
       },
       undefined,
       undefined,
@@ -4156,19 +4251,24 @@ describe("delegate pool", () => {
       undefined,
       ts.session.extensionRunner as any,
     );
-    const details = (result as any).details as {
-      results: Array<{ error?: string }>;
-    };
-    expect(details.results[0].error).toContain(
-      "action='close' requires sessionId",
+    expect(result.content[0].text).toContain(
+      "action 'close' requires sessionId",
     );
   });
 
-  test("closePooledAgent removes agent from pool", () => {
+  test("closePooledAgent aborts, disposes, and removes a live session", async () => {
+    const calls: string[] = [];
     // Insert via the public mutator — the raw Map is private. commit on a fresh
     // sessionId stores the frozen config + material.
     commit("test-session", {
-      session: {} as any,
+      session: {
+        async abort() {
+          calls.push("abort");
+        },
+        dispose() {
+          calls.push("dispose");
+        },
+      } as any,
       sessionManager: {} as any,
       sessionFile: "/tmp/test.jsonl",
       frozen: {
@@ -4181,20 +4281,92 @@ describe("delegate pool", () => {
       tokens: 0,
     });
     expect(configFor("test-session")).toBeDefined();
-    expect(closePooledAgent("test-session")).toBe(true);
+    expect(await closePooledAgent("test-session")).toBe(true);
+    expect(calls).toEqual(["abort", "dispose"]);
     expect(configFor("test-session")).toBeUndefined();
-    expect(closePooledAgent("test-session")).toBe(false);
+    expect(await closePooledAgent("test-session")).toBe(false);
   });
 
-  test("sweepPool evicts idle agents", () => {
-    // Drive the clock so one entry is past TTL without sleeping. commit stamps
-    // lastUsed = now(); advancing the clock then sweeping evicts the stale one.
-    const sweepTime = 1_000_000_000;
-    _setClockForTesting(() => sweepTime - 11 * 60 * 1000);
-    commit("stale", {
+  test("checkout rejects explicit frozen model and prompt changes", () => {
+    const frozenModel = { provider: "test", id: "frozen" } as any;
+    commit("intent-check", {
       session: {} as any,
       sessionManager: {} as any,
-      sessionFile: "/tmp/stale.jsonl",
+      sessionFile: "/tmp/intent-check.jsonl",
+      frozen: {
+        systemPrompt: "frozen prompt",
+        model: frozenModel,
+        thinking: "off" as any,
+        tools: ["read"],
+        cwd: "/tmp",
+      },
+      tokens: 0,
+    });
+
+    const result = checkout("intent-check", {
+      cwd: "/tmp",
+      thinking: "off" as any,
+      tools: ["read"],
+      model: { provider: "test", id: "other" } as any,
+      systemPrompt: "different prompt",
+    });
+    expect(result.status).toBe("mismatch");
+    if (result.status !== "mismatch") throw new Error("expected mismatch");
+    expect(result.mismatches.map((m) => m.field)).toEqual([
+      "model",
+      "systemPrompt",
+    ]);
+  });
+
+  test("closeAllPooledAgents disposes every live session", async () => {
+    const disposed: string[] = [];
+    for (const id of ["one", "two"]) {
+      commit(id, {
+        session: {
+          async abort() {
+            disposed.push(`abort:${id}`);
+          },
+          dispose() {
+            disposed.push(`dispose:${id}`);
+          },
+        } as any,
+        sessionManager: {} as any,
+        sessionFile: `/tmp/${id}.jsonl`,
+        frozen: {
+          systemPrompt: "test",
+          model: {} as any,
+          thinking: "off" as any,
+          tools: [],
+          cwd: "/tmp",
+        },
+        tokens: 0,
+      });
+    }
+
+    await closeAllPooledAgents();
+    expect(disposed).toHaveLength(4);
+    expect(disposed.indexOf("abort:one")).toBeLessThan(
+      disposed.indexOf("dispose:one"),
+    );
+    expect(disposed.indexOf("abort:two")).toBeLessThan(
+      disposed.indexOf("dispose:two"),
+    );
+    expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
+  });
+
+  test("closeAllPooledAgents waits for an active lifecycle lock before disposal", async () => {
+    const calls: string[] = [];
+    const payload = {
+      session: {
+        async abort() {
+          calls.push("abort");
+        },
+        dispose() {
+          calls.push("dispose");
+        },
+      } as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/shutdown-race.jsonl",
       frozen: {
         systemPrompt: "test",
         model: {} as any,
@@ -4203,27 +4375,37 @@ describe("delegate pool", () => {
         cwd: "/tmp",
       },
       tokens: 0,
+    };
+    commit("shutdown-race", payload);
+
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
     });
-    _setClockForTesting(() => sweepTime);
-    commit("fresh", {
-      session: {} as any,
-      sessionManager: {} as any,
-      sessionFile: "/tmp/fresh.jsonl",
-      frozen: {
-        systemPrompt: "test",
-        model: {} as any,
-        thinking: "off" as any,
-        tools: [],
-        cwd: "/tmp",
-      },
-      tokens: 0,
+    let release!: () => void;
+    const inFlight = withSessionLock("shutdown-race", async () => {
+      markEntered();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      // Mirrors a successful lifecycle committing after shutdown has requested
+      // cancellation but before it can acquire this session's lock.
+      commit("shutdown-race", payload);
     });
-    sweepPool();
-    expect(configFor("fresh")).toBeDefined();
-    expect(configFor("stale")).toBeUndefined();
+    await entered;
+
+    const closing = closeAllPooledAgents();
+    await Promise.resolve();
+    expect(calls).toEqual(["abort"]);
+    expect(configFor("shutdown-race")).toBeDefined();
+
+    release();
+    await Promise.all([inFlight, closing]);
+    expect(calls).toEqual(["abort", "dispose"]);
+    expect(configFor("shutdown-race")).toBeUndefined();
   });
 
-  test("listPooledAgents shows stats and sweeps stale", () => {
+  test("listPooledAgents shows stats for live sessions", () => {
     _resetPoolForTesting();
     expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
 
@@ -4323,12 +4505,11 @@ describe("async ticket registry", () => {
     ts = undefined;
   });
 
-  test("sweepTickets aborts tickets exceeding max runtime", () => {
+  test("sweepTickets leaves long-running tickets alone", () => {
     const controller = new AbortController();
-    const now = Date.now();
     const ticket: AsyncTicket = {
-      id: "timeout1",
-      created: now - 31 * 60 * 1000, // 31 minutes ago
+      id: "long-running",
+      created: Date.now() - 31 * 60 * 1000,
       tasks: [],
       resolved: [],
       status: "running",
@@ -4337,12 +4518,11 @@ describe("async ticket registry", () => {
       controller,
       parentModelId: undefined,
     };
-    ticketRegistry.set("timeout1", ticket);
+    ticketRegistry.set("long-running", ticket);
     sweepTickets();
-    expect(ticket.status).toBe("failed");
-    expect(ticket.error).toBe("Exceeded maximum runtime");
-    expect(ticket.completedAt).toBeDefined();
-    expect(controller.signal.aborted).toBe(true);
+    expect(ticket.status).toBe("running");
+    expect(ticketRegistry.has("long-running")).toBe(true);
+    expect(controller.signal.aborted).toBe(false);
   });
 
   test("sweepTickets cleans up completed tickets after TTL", () => {
@@ -5026,7 +5206,7 @@ describe("async delegate integration", () => {
     });
   });
 
-  test("execute routes top-level cancel without tasks", async () => {
+  test("execute rejects top-level cancel without a ticket", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
 
@@ -5038,7 +5218,7 @@ describe("async delegate integration", () => {
       ts.session.extensionRunner as any,
     );
 
-    expect(result.content[0].text).toContain("requires a ticket ID");
+    expect(result.content[0].text).toContain("action 'cancel' requires ticket");
   });
 
   test("deliverTicketResults sends formatted task output", () => {
@@ -5706,7 +5886,7 @@ describe("async delegate integration", () => {
     expect(schema.properties.ticket).toBeDefined();
     expect(schema.properties.timeoutMs).toBeDefined();
     expect(schema.properties.timeoutMs.minimum).toBe(0);
-    expect(schema.properties.timeoutMs.maximum).toBe(ASYNC_MAX_RUNTIME_MS);
+    expect(schema.properties.timeoutMs.maximum).toBeUndefined();
     expect(schema.required ?? []).not.toContain("tasks");
   });
 
@@ -5805,10 +5985,10 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("boom");
   });
 
-  test("wait on runtime-expired ticket returns failed immediately", async () => {
+  test("wait does not expire an old running ticket", async () => {
     const controller = new AbortController();
     const ticket: AsyncTicket = {
-      id: "expired-wait",
+      id: "old-running-wait",
       created: Date.now() - 31 * 60 * 1000,
       tasks: [{ prompt: "task-a" }],
       resolved: [
@@ -5829,56 +6009,17 @@ describe("async delegate integration", () => {
       controller,
       parentModelId: "m",
     };
-    ticketRegistry.set("expired-wait", ticket);
+    ticketRegistry.set("old-running-wait", ticket);
 
     const result = await handleWait(
-      { ticket: "expired-wait" },
+      { ticket: "old-running-wait", timeoutMs: 0 },
       undefined,
       undefined,
       {} as any,
     );
-    expect(result.content[0].text).toContain("FAILED");
-    expect(controller.signal.aborted).toBe(true);
-  });
-
-  test("wait settles at the runtime cap without waiting for a wedged worker", async () => {
-    const controller = new AbortController();
-    const ticket: AsyncTicket = {
-      id: "watchdog-wait",
-      // Leave enough time for handleWait to register its watchdog, but no
-      // dispatch continuation will call deliverTicketResults in this test.
-      created: Date.now() - ASYNC_MAX_RUNTIME_MS + 20,
-      tasks: [{ prompt: "task-a" }],
-      resolved: [
-        {
-          prompt: "task-a",
-          model: {} as any,
-          tools: [],
-          thinking: "off",
-          systemPrompt: "",
-          cwd: "/tmp",
-          agentName: "scout",
-          warnings: [],
-        },
-      ],
-      status: "running",
-      results: [undefined],
-      progress: mkProgress(["running"]),
-      controller,
-      parentModelId: "m",
-    };
-    ticketRegistry.set("watchdog-wait", ticket);
-
-    const result = await handleWait(
-      { ticket: "watchdog-wait" },
-      undefined,
-      undefined,
-      {} as any,
-    );
-
-    expect(result.content[0].text).toContain("FAILED");
-    expect(ticket.status).toBe("failed");
-    expect(controller.signal.aborted).toBe(true);
+    expect(result.content[0].text).toContain("wait timed out");
+    expect(ticket.status).toBe("running");
+    expect(controller.signal.aborted).toBe(false);
   });
 
   test("wait resolves when ticket completes", async () => {
