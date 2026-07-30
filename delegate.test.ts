@@ -4,7 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { _resetPoolForTesting } from "./pool.ts";
+import {
+  _resetPoolForTesting,
+  _setPoolAbortTimeoutForTesting,
+} from "./pool.ts";
 import { _resetDelegateConfigForTesting } from "./config.ts";
 import {
   inFlightActivity,
@@ -4287,6 +4290,46 @@ describe("delegate pool", () => {
     expect(await closePooledAgent("test-session")).toBe(false);
   });
 
+  test("closePooledAgent disposes and removes after abort timeout", async () => {
+    _setPoolAbortTimeoutForTesting(1);
+    let disposed = false;
+    commit("stalled-close", {
+      session: {
+        abort: () => new Promise<void>(() => {}),
+        dispose() {
+          disposed = true;
+        },
+      } as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/stalled-close.jsonl",
+      frozen: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      tokens: 0,
+    });
+
+    try {
+      let thrown: unknown;
+      try {
+        await closePooledAgent("stalled-close");
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(AggregateError);
+      expect(String((thrown as AggregateError).errors[0])).toContain(
+        "Timed out",
+      );
+      expect(disposed).toBe(true);
+      expect(configFor("stalled-close")).toBeUndefined();
+    } finally {
+      _setPoolAbortTimeoutForTesting(undefined);
+    }
+  });
+
   test("checkout rejects explicit frozen model and prompt changes", () => {
     const frozenModel = { provider: "test", id: "frozen" } as any;
     commit("intent-check", {
@@ -4394,8 +4437,19 @@ describe("delegate pool", () => {
     });
     await entered;
 
+    let abortStarted!: () => void;
+    const abortObserved = new Promise<void>((resolve) => {
+      abortStarted = resolve;
+    });
+    // The session's abort stub is installed after the lock is entered so the
+    // test waits on the actual cancellation signal, not a microtask guess.
+    payload.session.abort = async () => {
+      calls.push("abort");
+      abortStarted();
+    };
+
     const closing = closeAllPooledAgents();
-    await Promise.resolve();
+    await abortObserved;
     expect(calls).toEqual(["abort"]);
     expect(configFor("shutdown-race")).toBeDefined();
 
@@ -6183,6 +6237,45 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("timed out");
     expect(ticket.status).toBe("running");
     expect(controller.signal.aborted).toBe(false);
+  });
+
+  test("wait chunks oversized timeouts instead of firing immediately", async () => {
+    const ticket: AsyncTicket = {
+      id: "oversized-wait",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("oversized-wait", ticket);
+
+    const parentController = new AbortController();
+    setTimeout(() => parentController.abort(), 10);
+    const result = await handleWait(
+      { ticket: "oversized-wait", timeoutMs: 2 ** 31 },
+      parentController.signal,
+      undefined,
+      {} as any,
+    );
+
+    expect(result.content[0].text).toContain("aborted");
+    expect(result.content[0].text).not.toContain("timed out");
+    expect(ticket.status).toBe("running");
   });
 
   test("wait parent abort returns running status and does not cancel ticket", async () => {

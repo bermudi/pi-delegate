@@ -90,6 +90,19 @@ function completeSessionAction(
   };
 }
 
+/** Dispose a materialized session that was never committed to the pool.
+ * Pool hits remain live and must not be disposed when their caller aborts. */
+function disposeAcquiredSessionOnAbort(acquired: AcquiredSession): void {
+  if (!acquired.disposeOnAbort) return;
+  try {
+    acquired.session.dispose();
+  } catch (error) {
+    // Preserve the cancellation result, but emit the cleanup failure so a
+    // broken provider/session implementation is not silently ignored.
+    console.error("[delegate] aborted subagent disposal failed", error);
+  }
+}
+
 /** Mirror a progress update from runAgent into a TaskProgress row. */
 export function updateProgressFromRun(
   p: TaskProgress,
@@ -273,6 +286,7 @@ async function acquireAgentSession(
         session: co.session,
         sessionManager: co.sessionManager,
         sessionFile: co.sessionFile,
+        disposeOnAbort: false,
       };
     }
     // status === "miss" → fall through to resume / fresh materialization.
@@ -341,6 +355,7 @@ async function acquireAgentSession(
       session,
       sessionManager: resumed,
       sessionFile: resolvedPath,
+      disposeOnAbort: true,
     };
   }
 
@@ -364,6 +379,7 @@ async function acquireAgentSession(
     session,
     sessionManager,
     sessionFile,
+    disposeOnAbort: true,
   };
 }
 
@@ -479,10 +495,13 @@ async function runResolvedTaskUnlocked(
       // miss a signal that fires during getHostDeps/createAgentSession/git
       // baseline. runAgentSession re-checks after attaching its listener, but a
       // cancelled ticket should not even start the subagent (no file writes, no
-      // pool insert). Returning here keeps the just-acquired session out of the
-      // run path; pool hits leave the session in the pool untouched, fresh
-      // sessions simply never get inserted (insertion is success-only).
-      if (env.signal?.aborted) return failTask(task, "Aborted");
+      // pool insert). Return the just-acquired session to its owner: pool hits
+      // remain live, while fresh/resumed sessions must be disposed because they
+      // were never committed anywhere else.
+      if (env.signal?.aborted) {
+        disposeAcquiredSessionOnAbort(acquired);
+        return failTask(task, "Aborted");
+      }
 
       // ── Run the agent ─────────────────────────────────────────────────
       try {
@@ -500,12 +519,29 @@ async function runResolvedTaskUnlocked(
           Date.now(),
         );
 
+        // The signal can fire after the pre-run check but before the runner
+        // attaches its listener. Dispose an uncommitted materialized session
+        // in that race too; pooled hits remain owned by the pool.
+        if (r.error === "Aborted") {
+          disposeAcquiredSessionOnAbort(acquired);
+        }
+
         // A pooled session whose prompt stalled was explicitly aborted. It is
         // no longer a safe continuation, so dispose it instead of leaving a
         // poisoned live session behind. Fresh/resumed failures were never
         // committed and therefore have nothing in the pool to remove.
         if (task.sessionId && r.failureKind === "stalled") {
-          await pool.closePooledAgent(task.sessionId);
+          try {
+            await pool.closePooledAgent(task.sessionId);
+          } catch (error) {
+            // The session has already been removed from the pool before close
+            // reports abort/dispose/timeout failures. Preserve the primary
+            // stalled result while logging the cleanup failure explicitly.
+            console.error(
+              `[delegate] failed to dispose stalled pooled session '${task.sessionId}'`,
+              error,
+            );
+          }
         }
 
         // Pool bookkeeping. commit() is the sole mutator: it decides

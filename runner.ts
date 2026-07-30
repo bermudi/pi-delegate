@@ -60,12 +60,13 @@ export async function runAgentSession(
   touchedFiles: string[];
   failureKind?: TaskFailureKind;
 }> {
-  const startTime = start || Date.now();
+  const startTime = start ?? Date.now();
   const stallTimeoutMs = getStallTimeoutMs();
   let toolUses = 0;
   let lastActivityAt: number | undefined = startTime;
   let phase = "starting agent";
   let stalled = false;
+  let stalledPhase: string | undefined;
   let stallTimer: ReturnType<typeof setTimeout> | undefined;
   const activities: ToolActivity[] = [];
   const pendingById = new Map<string, ToolActivity>();
@@ -92,7 +93,7 @@ export async function runAgentSession(
   };
 
   const stallError = () =>
-    `Stalled: no AgentSession activity for ${fmtDuration(stallTimeoutMs)} while ${phase}; task aborted.`;
+    `Stalled: no AgentSession activity for ${fmtDuration(stallTimeoutMs)} while ${stalledPhase ?? phase}; task aborted.`;
   const clearStallWatchdog = () => {
     if (stallTimer) clearTimeout(stallTimer);
     stallTimer = undefined;
@@ -100,6 +101,7 @@ export async function runAgentSession(
   const abortForStall = () => {
     if (stalled || signal?.aborted) return;
     stalled = true;
+    stalledPhase = phase;
     clearStallWatchdog();
     console.warn(
       `[delegate] stalled subagent detected after ${fmtDuration(stallTimeoutMs)} while ${phase}; requesting cooperative cancellation`,
@@ -143,7 +145,8 @@ export async function runAgentSession(
   // Map the AgentSession event union to the renderer's ToolActivity model.
   // Field names line up 1:1 (toolCallId, toolName, args, partialResult,
   // result, isError) — AgentSession forwards the underlying agent events
-  // verbatim, plus its own retry/compaction/queue events (ignored here).
+  // verbatim. Retry and compaction events are handled below; queue/bookkeeping
+  // events and thinking changes are intentionally ignored.
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     switch (event.type) {
       case "tool_execution_start": {
