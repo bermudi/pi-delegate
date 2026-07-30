@@ -14,7 +14,7 @@ This is **not a standalone app** — it's a Pi extension. Entry points:
 
 - **`delegate.ts`** — public API surface (barrel re-exports). The build entry point.
 - **`extension.ts`** — thin tool-definition orchestrator. Wires `registerTool` and dispatches `execute` to the focused modules below; owns only the poll/cancel/help short-circuits and the session-shutdown handler.
-- **`schema.ts`** — `delegateParameters` schema (single source of truth — `DelegateParams`/`TaskDef` in `types.ts` are `Static<>` projections of it) and `prepareDelegateArguments` (pre-validation shim recovering stringified `tasks` arrays).
+- **`schema.ts`** — `delegateParameters` schema (single source of truth — `DelegateParams`/`TaskDef` in `types.ts` are `Static<>` projections of it) and `prepareDelegateArguments` (pre-validation shim recovering the malformed shapes weaker models emit: stringified `tasks` arrays, task fields flattened to the top level → wrapped into a single task, stringified/bare-token `tools`). Without the flat-field recovery, a malformed call silently degrades to the manual and models misread that as "the tool is broken".
 - **`usage.ts`** — nested-model usage accounting: snapshots cumulative `AgentSession.getSessionStats()`, computes per-task deltas, and aggregates `Usage` for the sync tool result. Pi 0.81+ persists the top-level `usage` on the toolResult message and folds it into the parent footer/session totals. The per-task `tokens` (display, from `extractUsage` over `session.messages`) and the parent-reported `usage` (from `getSessionStats`, compaction-inclusive) intentionally diverge under compaction.
 - **`manual.ts`** — schema-driven help generation and the dynamic configured-agent list.
 - **`task-resolution.ts`** — `validateTasks` (duplicate sessions, busy conflicts, unknown agents) and `resolveTasks` (agent/model/tools/system-prompt resolution per task).
@@ -38,6 +38,8 @@ This is **not a standalone app** — it's a Pi extension. Entry points:
 
 - **Flat package** — all `.ts` files at root. No `src/` directory.
 - **Discriminated unions** for variant types (`action`-discriminated `SessionAction`, `status`-discriminated ticket states).
+- **Thinking precedence** — `thinking` field > agent override (`settings.json` `delegate.agentOverrides`) > agent frontmatter > frozen pooled config > a `:level` model suffix (last-resort default). The suffix is lowest on purpose so an agent author's `thinking: low` beats a `model: x:max` on the same profile; it's honored only when nothing else sets thinking, preserving intent for model-emitted `claude:max` calls. Override (suffix set but a higher source won) emits a warning.
+- **Tools surface** — delegatable set is the 7 native tools (`read`/`write`/`edit`/`bash`/`grep`/`find`/`ls`) rebuilt from `TOOL_FACTORIES`; MCP/skills aren't tools and aren't inherited. `*`=read+write+edit+bash, `ro`=read+grep+find+ls (no shell). `bash` subsumes mutation and transitively unlocks MCP (mcporter), and there is **no filesystem isolation** (subagents run in the resolved cwd), so any set with `bash` is full-capability — "read-only" is honest only for `ro`. Deferred fix: sandboxed bash via btrfs `--reflink` copy, if a verifier ever mutates when it shouldn't.
 
 ## Workflow
 

@@ -6,7 +6,7 @@ import { configFor } from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
 import { buildSubagentSystemPrompt } from "./agents.ts";
 import { buildParentTranscript } from "./parent-context.ts";
-import { findAvailableAlternative, resolveModelWithThinking } from "./model.ts";
+import { findAvailableAlternative, resolveModelRequest } from "./model.ts";
 import { resolveModelSpec } from "./config.ts";
 import { loadDelegateSettings } from "./settings.ts";
 import { resolveCwd } from "./utils.ts";
@@ -176,7 +176,7 @@ export function resolveTasks(
 
     // Resolve model — explicit specs must resolve or fail; omitted falls back to parent
     let model: Model<Api> | undefined;
-    let modelThinking: ThinkingLevel | undefined;
+    let modelSuffix: ThinkingLevel | undefined;
     let tools: string[] = [];
     let thinking: ThinkingLevel = "off";
     const warnings: string[] = [];
@@ -201,10 +201,12 @@ export function resolveTasks(
           frontmatterModel: agent?.model,
         });
         const resolvedRequest = modelSpec
-          ? resolveModelWithThinking(modelSpec, ctx.modelRegistry, ctx.model)
+          ? resolveModelRequest(modelSpec, ctx.modelRegistry, ctx.model)
           : undefined;
         const resolvedModel = resolvedRequest?.model;
-        modelThinking = resolvedRequest?.thinking;
+        // A Pi-style `:level` suffix was tolerated so the reference resolves;
+        // it is honored only as a last-resort thinking default (see below).
+        modelSuffix = resolvedRequest?.strippedSuffix;
 
         // If the task or settings explicitly set a model but it couldn't resolve, fail loudly
         const explicitRequest = t.model ?? agentOverride?.model;
@@ -245,18 +247,29 @@ export function resolveTasks(
         );
       }
 
-      // Resolve thinking — for active pooled sessions, default from the
-      // frozen pooled config (same reasoning as tools above).
+      // Resolve thinking. Precedence: task field → agent override → agent
+      // frontmatter → frozen pooled config → a Pi-style `:level` model suffix
+      // (honored only as a last-resort default, so a model-emitted `claude:max`
+      // runs at max when nothing else sets thinking). The suffix is lowest on
+      // purpose: an agent author's `thinking: low` must beat `model: x:max`.
       const thinkingRaw =
         t.thinking ??
         agentOverride?.thinking ??
-        modelThinking ??
         agent?.thinking ??
         (isPoolHit ? pooledConfig?.thinking : undefined) ??
+        modelSuffix ??
         "off";
       thinking = VALID_THINKING.has(thinkingRaw)
         ? (thinkingRaw as ThinkingLevel)
         : "off";
+      // The suffix was set but a higher-precedence source won — surface it so
+      // the caller knows the `:level` had no effect (rather than silently
+      // discarding the intent).
+      if (modelSuffix && thinkingRaw !== modelSuffix) {
+        warnings.push(
+          `Model ':${modelSuffix}' suffix ignored — thinking resolved to '${thinking}' from a higher-precedence source.`,
+        );
+      }
     }
     return {
       ...t,
