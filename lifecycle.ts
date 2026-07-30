@@ -509,7 +509,7 @@ async function runResolvedTaskUnlocked(
         // AgentSession owns retry/compaction internally — runAgentSession just
         // drives the prompt and maps events to the progress model.
         const gitBaseline = await getGitChangedFiles(task.cwd);
-        const r = await runAgentSession(
+        let r = await runAgentSession(
           acquired.session,
           task.prompt,
           { cwd: task.cwd },
@@ -519,29 +519,36 @@ async function runResolvedTaskUnlocked(
           Date.now(),
         );
 
-        // The signal can fire after the pre-run check but before the runner
-        // attaches its listener. Dispose an uncommitted materialized session
-        // in that race too; pooled hits remain owned by the pool.
-        if (r.error === "Aborted") {
+        // The signal can fire after the pre-run check or while the runner is
+        // collecting post-prompt evidence. Keep cancellation from looking like
+        // success and dispose any uncommitted materialized session in that race.
+        if (env.signal?.aborted && !r.error) {
+          r = { ...r, error: "Aborted" };
+        }
+        if (env.signal?.aborted || r.error === "Aborted") {
           disposeAcquiredSessionOnAbort(acquired);
         }
 
-        // A pooled session whose prompt stalled was explicitly aborted. It is
-        // no longer a safe continuation, so dispose it instead of leaving a
-        // poisoned live session behind. Fresh/resumed failures were never
-        // committed and therefore have nothing in the pool to remove.
-        if (task.sessionId && r.failureKind === "stalled") {
-          try {
-            await pool.closePooledAgent(task.sessionId);
-          } catch (error) {
-            // The session has already been removed from the pool before close
-            // reports abort/dispose/timeout failures. Preserve the primary
-            // stalled result while logging the cleanup failure explicitly.
-            console.error(
-              `[delegate] failed to dispose stalled pooled session '${task.sessionId}'`,
-              error,
-            );
+        // A stalled prompt was explicitly aborted and is no longer a safe
+        // continuation. Close a pooled hit; if this task materialized a fresh
+        // or resumed session (including a pool miss), dispose that owned
+        // session directly instead of leaving it behind.
+        if (r.failureKind === "stalled") {
+          let closed = false;
+          if (task.sessionId) {
+            try {
+              closed = await pool.closePooledAgent(task.sessionId);
+            } catch (error) {
+              // The session is removed from the pool before close reports
+              // abort/dispose/timeout failures. Preserve the primary stalled
+              // result while logging the cleanup failure explicitly.
+              console.error(
+                `[delegate] failed to dispose stalled pooled session '${task.sessionId}'`,
+                error,
+              );
+            }
           }
+          if (!closed) disposeAcquiredSessionOnAbort(acquired);
         }
 
         // Pool bookkeeping. commit() is the sole mutator: it decides

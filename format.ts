@@ -11,6 +11,7 @@ import type {
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/** Return the current spinner glyph for live progress rendering. */
 export function spinnerFrame(): string {
   return SPINNER[Math.floor(Date.now() / 80) % SPINNER.length]!;
 }
@@ -139,6 +140,7 @@ export function applyLineBudget(lines: string[], expanded: boolean): string[] {
   ];
 }
 
+/** Replace the current home-directory prefix with `~` for display. */
 export function shortenPath(p: string): string {
   const home = process.env.HOME;
   if (!home || home === "/") return p;
@@ -159,6 +161,7 @@ export function getActivityAge(lastActivityAt: number | undefined): string {
   return `active ${Math.floor(ago / 60000)}m ago`;
 }
 
+/** Format milliseconds as a compact human-readable duration. */
 export function fmtDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;
@@ -168,6 +171,7 @@ export function fmtDuration(ms: number): string {
   return `${mins}m${secs}s`;
 }
 
+/** Format a token count using compact k notation above 1,000. */
 export function fmtTokens(n: number): string {
   return n < 1000
     ? `${n}`
@@ -176,6 +180,7 @@ export function fmtTokens(n: number): string {
       : `${Math.round(n / 1000)}k`;
 }
 
+/** Truncate a string to at most `n` characters with an ellipsis. */
 export function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
@@ -209,7 +214,9 @@ export function previewOutputLine(output: string, maxWidth: number): string {
   return "";
 }
 
+/** Return the tree branch glyph for item `i` of `n`. */
 export const tree = (i: number, n: number) => (i === n - 1 ? "└─" : "├─");
+/** Return the continuation indentation for item `i` of `n`. */
 export const indent = (i: number, n: number) => (i === n - 1 ? "   " : "│  ");
 
 // ── Tool Activity Formatting ─────────────────────────────────────────────
@@ -227,6 +234,7 @@ function firstArg(
   return undefined;
 }
 
+/** Render a compact, human-readable summary of a tool call. */
 export function formatToolCallShort(
   name: string,
   args: Record<string, unknown>,

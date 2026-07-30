@@ -56,6 +56,7 @@ export function resolveModelRequest(
     : { model: undefined };
 }
 
+/** Resolve a model spec and return only the selected model instance. */
 export function resolveModel(
   spec: string | undefined,
   registry: ModelRegistry,

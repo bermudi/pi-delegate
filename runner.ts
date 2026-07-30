@@ -294,7 +294,6 @@ export async function runAgentSession(
 
     const messages = session.messages;
     const state = session.state as { errorMessage?: string };
-    const errorMessage = stalled ? stallError() : state.errorMessage;
     const output = extractOutput(messages.slice(messagesBefore));
     const usageAfterTotal = extractUsage(messages).total;
     const tokensThisCall = Math.max(0, usageAfterTotal - usageBeforeTotal);
@@ -306,6 +305,11 @@ export async function runAgentSession(
     const gitAfter = await getGitChangedFiles(config.cwd);
     const fromGit = [...gitAfter].filter((f) => !gitBaseline.has(f));
     const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
+    const errorMessage = stalled
+      ? stallError()
+      : signal?.aborted
+        ? "Aborted"
+        : state.errorMessage;
 
     return {
       output: output || "(no output)",
@@ -332,9 +336,11 @@ export async function runAgentSession(
 
     const msg = stalled
       ? stallError()
-      : err instanceof Error
-        ? err.message
-        : String(err);
+      : signal?.aborted
+        ? "Aborted"
+        : err instanceof Error
+          ? err.message
+          : String(err);
     return {
       output: partialOutput || "(no output)",
       error: msg,

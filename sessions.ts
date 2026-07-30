@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
+/** Link a subagent session to its parent and persist the header when possible. */
 export function setParentSession(sm: SessionManager, parentPath: string): void {
   const inner = sm as unknown as {
     fileEntries: Array<{ type: string; parentSession?: string }>;
