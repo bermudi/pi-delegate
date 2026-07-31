@@ -6,17 +6,20 @@ import type { ToolActivity } from "./types.ts";
  * Git failures degrade to an empty set because file tracking is observational. */
 export async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
   try {
-    const result = await new Promise<string>((resolve, reject) => {
-      execFile(
-        "git",
-        ["status", "--porcelain=v1", "--untracked-files=all", "-z"],
-        { cwd, timeout: 5000 },
-        (err, stdout) => {
+    const runGit = (args: string[]) =>
+      new Promise<string>((resolve, reject) => {
+        execFile("git", args, { cwd, timeout: 5000 }, (err, stdout) => {
           if (err) reject(err);
           else resolve(stdout);
-        },
-      );
-    });
+        });
+      });
+    const repoRoot = (await runGit(["rev-parse", "--show-toplevel"])).trim();
+    const result = await runGit([
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "-z",
+    ]);
     const files = new Set<string>();
     const entries = result.split("\0");
     for (let i = 0; i < entries.length; i++) {
@@ -26,7 +29,7 @@ export async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
       const status = entry.slice(0, 2);
       const rawPath = entry.slice(3);
       const isRenameOrCopy = status.includes("R") || status.includes("C");
-      if (rawPath) files.add(path.resolve(cwd, rawPath));
+      if (rawPath) files.add(path.resolve(repoRoot, rawPath));
 
       // With -z, Git emits the destination first and the source second for
       // rename/copy entries. Consume the source so it is not reported too.
