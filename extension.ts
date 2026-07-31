@@ -11,16 +11,10 @@ import { getSubagentManualMarkdown } from "./manual.ts";
 import {
   delegateArgumentsSchema,
   normalizeDelegateArguments,
-  validateDelegateOperation,
 } from "./schema.ts";
-import { validateTasks, resolveTasks } from "./task-resolution.ts";
 import {
-  initProgress,
-  makeFireUpdater,
-  dispatchAsync,
-  dispatchSync,
-  type AsyncDispatchInput,
-  type SyncDispatchInput,
+  dispatchDelegate,
+  validateDelegateOperationResult,
 } from "./dispatch.ts";
 import { renderDelegateCall, renderDelegateResult } from "./render-result.ts";
 import { hostCompatError } from "./host-compat.ts";
@@ -40,23 +34,19 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     prepareArguments: normalizeDelegateArguments,
 
     async execute(_id, params: DelegateArguments, signal, onUpdate, ctx) {
+      // Guard against pi dropping/renaming a symbol this extension imports
+      // before any operation-specific validation or early return.
+      const compatError = hostCompatError();
+      if (compatError) return compatError;
+
       const parentModelId = ctx.model?.id;
       const tasks = params.tasks ?? [];
 
-      const operationError = validateDelegateOperation(params);
-      if (operationError) {
-        return {
-          content: [
-            { type: "text", text: `Invalid delegate call: ${operationError}` },
-          ],
-          details: {
-            tasks,
-            results: [],
-            progress: [],
-            parentModel: parentModelId,
-          },
-        };
-      }
+      const operationResult = validateDelegateOperationResult(
+        params,
+        parentModelId,
+      );
+      if (operationResult) return operationResult;
 
       // ── Poll action ───────────────────────────────────────────────────
       if (params.action === "poll") {
@@ -93,56 +83,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         };
       }
 
-      // ── Host compatibility ────────────────────────────────────────
-      // Guard against pi dropping/renaming a symbol this extension imports
-      // (version skew between the installed pi and the bundle's build target).
-      // Surfaces a clear, actionable error instead of a cryptic
-      // `undefined.create` deep in dispatch. Cached after the first call.
-      const compatError = hostCompatError();
-      if (compatError) return compatError;
-
-      // ── Validate ──────────────────────────────────────────────────
-      const validationError = validateTasks(tasks, agents, parentModelId);
-      if (validationError) return validationError;
-
-      // ── Resolve tasks ─────────────────────────────────────────────
-      const resolved = resolveTasks(tasks, ctx, agents);
-
-      // ── Progress tracking ─────────────────────────────────────────
-      const progress = initProgress(resolved);
-      const fire = makeFireUpdater(
-        onUpdate,
-        tasks,
-        progress,
-        resolved,
-        parentModelId,
-      );
-      fire();
-
-      // ── Async mode ───────────────────────────────────────────────────
-      if (params.async) {
-        const asyncInput: AsyncDispatchInput = {
-          pi,
-          ctx,
-          tasks,
-          resolved,
-          progress,
-          parentModelId,
-        };
-        return dispatchAsync(asyncInput);
-      }
-
-      // ── Sync mode ─────────────────────────────────────────────────
-      const syncInput: SyncDispatchInput = {
+      return dispatchDelegate({
+        pi,
+        params,
         ctx,
-        tasks,
-        resolved,
-        progress,
+        agents,
         parentModelId,
         signal,
-        fire,
-      };
-      return dispatchSync(syncInput);
+        onUpdate,
+      });
     },
 
     renderCall: renderDelegateCall,

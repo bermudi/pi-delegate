@@ -14,8 +14,12 @@ import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
 import { sumUsage } from "./usage.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
 import { fmtDuration, formatCompletedTask, trunc } from "./format.ts";
+import { validateDelegateOperation } from "./schema.ts";
+import { validateTasks, resolveTasks } from "./task-resolution.ts";
 import type {
+  AgentConfig,
   AsyncTicket,
+  DelegateArguments,
   DelegateDetails,
   DelegateToolCtx,
   DelegateToolResult,
@@ -25,6 +29,28 @@ import type {
   TaskResult,
   TaskRunEnv,
 } from "./types.ts";
+
+/** Return the structured result for an invalid top-level operation, or null when
+ * the call may proceed to a ticket control/help/dispatch path. */
+export function validateDelegateOperationResult(
+  params: DelegateArguments,
+  parentModelId: string | undefined,
+): DelegateToolResult | null {
+  const operationError = validateDelegateOperation(params);
+  if (!operationError) return null;
+
+  return {
+    content: [
+      { type: "text", text: `Invalid delegate call: ${operationError}` },
+    ],
+    details: {
+      tasks: params.tasks ?? [],
+      results: [],
+      progress: [],
+      parentModel: parentModelId,
+    },
+  };
+}
 
 /** Build the initial per-task progress rows from resolved tasks. */
 export function initProgress(resolved: ResolvedTask[]): TaskProgress[] {
@@ -88,6 +114,60 @@ export interface SyncDispatchInput {
   parentModelId: string | undefined;
   signal: AbortSignal | undefined;
   fire: () => void;
+}
+
+/** Inputs for the normal task-validation, resolution, and dispatch path. */
+export interface DelegateDispatchInput {
+  pi: ExtensionAPI;
+  params: DelegateArguments;
+  ctx: DelegateToolCtx;
+  agents: Map<string, AgentConfig>;
+  parentModelId: string | undefined;
+  signal: AbortSignal | undefined;
+  onUpdate: AgentToolUpdateCallback<DelegateDetails> | undefined;
+}
+
+/** Validate, resolve, and dispatch a non-short-circuit delegate operation. */
+export async function dispatchDelegate(
+  input: DelegateDispatchInput,
+): Promise<DelegateToolResult> {
+  const { pi, params, ctx, agents, parentModelId, signal, onUpdate } = input;
+  const tasks = params.tasks ?? [];
+
+  const validationError = validateTasks(tasks, agents, parentModelId);
+  if (validationError) return validationError;
+
+  const resolved = resolveTasks(tasks, ctx, agents);
+  const progress = initProgress(resolved);
+  const fire = makeFireUpdater(
+    onUpdate,
+    tasks,
+    progress,
+    resolved,
+    parentModelId,
+  );
+  fire();
+
+  if (params.async) {
+    return dispatchAsync({
+      pi,
+      ctx,
+      tasks,
+      resolved,
+      progress,
+      parentModelId,
+    });
+  }
+
+  return dispatchSync({
+    ctx,
+    tasks,
+    resolved,
+    progress,
+    parentModelId,
+    signal,
+    fire,
+  });
 }
 
 /** Fire-and-forget background execution. Registers an `AsyncTicket`, kicks off
