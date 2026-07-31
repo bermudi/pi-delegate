@@ -9,7 +9,7 @@ export async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
     const result = await new Promise<string>((resolve, reject) => {
       execFile(
         "git",
-        ["status", "--porcelain", "--untracked-files=all"],
+        ["status", "--porcelain=v1", "--untracked-files=all", "-z"],
         { cwd, timeout: 5000 },
         (err, stdout) => {
           if (err) reject(err);
@@ -18,15 +18,19 @@ export async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
       );
     });
     const files = new Set<string>();
-    for (const line of result.split("\n")) {
-      if (line.length < 4) continue;
-      const rawPath = line.slice(3).trim();
-      if (!rawPath) continue;
-      const targetPath = rawPath.includes(" -> ")
-        ? rawPath.split(" -> ").at(-1)
-        : rawPath;
-      if (targetPath)
-        files.add(path.resolve(cwd, targetPath.replace(/^"|"$/g, "")));
+    const entries = result.split("\0");
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      if (entry.length < 4) continue;
+
+      const status = entry.slice(0, 2);
+      const rawPath = entry.slice(3);
+      const isRenameOrCopy = status.includes("R") || status.includes("C");
+      if (rawPath) files.add(path.resolve(cwd, rawPath));
+
+      // With -z, Git emits the destination first and the source second for
+      // rename/copy entries. Consume the source so it is not reported too.
+      if (isRenameOrCopy) i++;
     }
     return files;
   } catch {
