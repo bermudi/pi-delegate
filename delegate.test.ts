@@ -1836,6 +1836,93 @@ describe("formatFailedTask", () => {
     expect(lines[0]).toContain("touched: src/foo.ts");
     expect(lines.some((l) => l.includes("partial output here"))).toBe(true);
   });
+
+  test("model_error failure → hint names the model field for resume-on-different-model", () => {
+    // A model-attributable failure (usage limit, auth, quota) must point the
+    // parent at the `model` field so it resumes the same conversation on a
+    // different model — not the generic same-model retry hint.
+    const dir = mkdtempSync(path.join(tmpdir(), "delegate-fmt-"));
+    const withMessages = path.join(dir, "2026-01-01T00-00-00Z_msg.jsonl");
+    try {
+      writeFileSync(
+        withMessages,
+        [
+          JSON.stringify({ type: "session", id: "s1", version: 3 }),
+          JSON.stringify({
+            type: "message",
+            id: "m1",
+            parentId: null,
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "hi" }],
+              timestamp: 0,
+            },
+          }),
+        ].join("\n") + "\n",
+      );
+
+      const r: ResultLike = {
+        agent: "scout",
+        output: "",
+        error:
+          '429 "you have reached your session usage limit, upgrade for higher limits"',
+        failureKind: "model_error",
+        durationMs: 1000,
+        tokens: 0,
+        sessionFile: withMessages,
+        touchedFiles: [],
+      };
+      const lines = formatFailedTask(r);
+      const hint = lines.find((l) => l.includes("→ To retry"));
+      expect(hint).toBeDefined();
+      expect(hint).toContain("To retry with a different model");
+      expect(hint).toContain("model:");
+      expect(hint).toContain(JSON.stringify(withMessages));
+      expect(hint).toContain("resumeFrom");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("non-model_error failure → generic retry hint (no model field)", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "delegate-fmt-"));
+    const withMessages = path.join(dir, "2026-01-01T00-00-00Z_msg.jsonl");
+    try {
+      writeFileSync(
+        withMessages,
+        [
+          JSON.stringify({ type: "session", id: "s1", version: 3 }),
+          JSON.stringify({
+            type: "message",
+            id: "m1",
+            parentId: null,
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "hi" }],
+              timestamp: 0,
+            },
+          }),
+        ].join("\n") + "\n",
+      );
+
+      const r: ResultLike = {
+        agent: "scout",
+        output: "",
+        error: "connection reset",
+        durationMs: 1000,
+        tokens: 0,
+        sessionFile: withMessages,
+        touchedFiles: [],
+      };
+      const lines = formatFailedTask(r);
+      const hint = lines.find((l) => l.includes("→ To retry"));
+      expect(hint).toBeDefined();
+      expect(hint).not.toContain("different model");
+      expect(hint).not.toContain("model:");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── formatCompletedTask ──────────────────────────────────────────────────
