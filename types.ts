@@ -104,8 +104,13 @@ export interface ToolActivity {
   liveOutput?: string;
 }
 
-/** Stable machine-readable reason for an inactivity watchdog failure. */
-export type TaskFailureKind = "stalled";
+/** Stable machine-readable reason for a task failure.
+ *  - `stalled`: inactivity watchdog fired; the prompt was cooperatively aborted.
+ *  - `model_error`: the failure is attributable to the resolved model/provider
+ *    (account usage limit, quota exhausted, auth lost) — not transient for that
+ *    model, so same-model retry is pointless. The parent should resume with a
+ *    different `model` (see `resumeFrom` + `model`). */
+export type TaskFailureKind = "stalled" | "model_error";
 
 export interface TaskProgress {
   index: number;

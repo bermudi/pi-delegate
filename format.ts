@@ -366,9 +366,21 @@ export function formatFailedTask(r: TaskResult, cwd?: string): string[] {
 
   if (r.sessionFile && isResumableSessionFile(r.sessionFile)) {
     const safePath = JSON.stringify(r.sessionFile);
-    parts.push(
-      `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
-    );
+    // A model-attributable failure (usage limit, auth, quota) is not transient
+    // for the resolved model — point the parent at the `model` field so it
+    // resumes the same conversation on a different model instead of retrying
+    // the same wall or re-dispatching fresh (which loses the accumulated
+    // context). createAgentSession honors an explicit `model` over the
+    // session's stored model, so this works without any extra plumbing.
+    if (r.failureKind === "model_error") {
+      parts.push(
+        `→ To retry with a different model: delegate({ tasks: [{ resumeFrom: ${safePath}, model: "<alt-model>", prompt: "continue" }] })`,
+      );
+    } else {
+      parts.push(
+        `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
+      );
+    }
   } else if (r.sessionFile) {
     parts.push(`[no resumable session — re-dispatch as a fresh task]`);
   }

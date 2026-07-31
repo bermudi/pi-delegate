@@ -138,10 +138,46 @@ function finishTask(
   return r;
 }
 
+/** A failure attributable to the resolved model/provider — not transient for
+ *  that model, so same-model retry is pointless. Distinguished from a bare
+ *  transient 429 (per-minute rate limit) by the *account-level* wording:
+ *  "usage limit", "quota", "upgrade for higher limits", "exceeded your
+ *  … quota", or an auth/credential failure (401/403 with word boundaries so a
+ *  port like 4019 doesn't false-positive). The parent should resume with a
+ *  different `model` (see `resumeFrom` + `model`). */
+export function isModelAttributableError(
+  error: string | undefined,
+): boolean {
+  if (!error) return false;
+  const e = error.toLowerCase();
+  if (e.includes("abort")) return false;
+  return (
+    e.includes("usage limit") ||
+    e.includes("upgrade for higher limits") ||
+    e.includes("quota") ||
+    e.includes("exceeded your") ||
+    e.includes("insufficient credit") ||
+    e.includes("insufficient quota") ||
+    e.includes("insufficient funds") ||
+    e.includes("billing") ||
+    e.includes("unauthorized") ||
+    e.includes("unauthenticated") ||
+    e.includes("authentication") ||
+    e.includes("invalid api key") ||
+    e.includes("api key") && e.includes("invalid") ||
+    /\b401\b/.test(e) ||
+    /\b403\b/.test(e)
+  );
+}
+
 function isClearlyTransientFinalError(error: string | undefined): boolean {
   if (!error) return false;
   const e = error.toLowerCase();
   if (e.includes("abort")) return false;
+  // A model-attributable error (usage limit, auth) is NOT transient for this
+  // model — exclude it so whole-task retry doesn't burn attempts into the same
+  // wall. The parent gets one clean failure and a "switch model" hint instead.
+  if (isModelAttributableError(error)) return false;
   return (
     /\b429\b/.test(e) ||
     /\b5\d\d\b/.test(e) ||
@@ -163,9 +199,13 @@ function isClearlyTransientFinalError(error: string | undefined): boolean {
 function canRetryWholeTask(task: ResolvedTask, result: TaskResult): boolean {
   // Whole-task retry can repeat tool side effects. Keep it to stateless fresh
   // tasks, and only when our touched-file accounting says the failed attempt
-  // did not write/edit anything.
+  // did not write/edit anything. A `model_error` (usage limit, auth, quota) is
+  // not transient for the resolved model — retrying with the same model just
+  // hits the same wall, so skip it and let the parent resume with a different
+  // model (see the hint in formatFailedTask).
   return (
     result.failureKind !== "stalled" &&
+    result.failureKind !== "model_error" &&
     !task.sessionId &&
     !task.resumeFrom &&
     result.touchedFiles.length === 0 &&
@@ -575,7 +615,16 @@ async function runResolvedTaskUnlocked(
           agent: task.agentName,
           output: r.output,
           error: r.error,
-          failureKind: r.failureKind,
+          // Classify the failure: the runner sets `stalled` for the inactivity
+          // watchdog; here we add `model_error` for failures attributable to
+          // the resolved model (usage limit, auth, quota) so the parent gets a
+          // "switch model" hint instead of a same-model retry hint, and so
+          // canRetryWholeTask skips the pointless same-model retry.
+          failureKind:
+            r.failureKind ??
+            (r.error && isModelAttributableError(r.error)
+              ? "model_error"
+              : undefined),
           durationMs: r.durationMs,
           tokens: r.tokens,
           usage: r.usage,

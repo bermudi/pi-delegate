@@ -30,7 +30,7 @@ import {
   _setHostRetryBaseMsForTesting,
   _setModelRuntimeFactoryForTesting,
 } from "./host.ts";
-import { _setWholeTaskRetryForTesting } from "./lifecycle.ts";
+import { _setWholeTaskRetryForTesting, isModelAttributableError } from "./lifecycle.ts";
 import { _resetPoolForTesting } from "./pool.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
@@ -1242,6 +1242,57 @@ describe("delegate retry and error recovery", () => {
     expect(details.results[0]?.error).toBeDefined();
   });
 
+  test("model-attributable error (usage limit) → failureKind model_error, no whole-task retry, model-swap hint", async () => {
+    // A session/account usage limit is NOT transient for the resolved model.
+    // delegate must: tag it model_error, skip same-model whole-task retry, and
+    // surface a "retry with a different model" hint so the parent resumes on
+    // another model instead of burning retries into the same wall.
+    let callCount = 0;
+    const usageLimitMsg =
+      '429 "you (bermudi) have reached your session usage limit, upgrade for higher limits: https://ollama.com/upgrade (ref: 521d2571)"';
+    const stream = mockPiAiStream((orig) => ({
+      ...orig,
+      streamSimple: () => {
+        callCount++;
+        return mockStreamError(usageLimitMsg);
+      },
+    }));
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts, stream);
+
+    const toolDef = getDelegateTool(ts);
+    const ctx = getExecContext(ts);
+
+    const result = await toolDef.execute(
+      "tc-model-error",
+      { tasks: [{ prompt: "do work" }] },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const details = (result as any).details as {
+      results: Array<{
+        error?: string;
+        failureKind?: string;
+        sessionFile?: string;
+      }>;
+    };
+    const content = (result as any).content as Array<{ type: string; text: string }>;
+    const contentText = content.map((c) => c.text).join("\n");
+
+    expect(details.results[0]?.error).toContain("usage limit");
+    expect(details.results[0]?.failureKind).toBe("model_error");
+    // No whole-task retry: callCount is at most AgentSession's internal retry
+    // budget for one attempt (4), NOT 4×(1+maxRetries)=16 as a transient error
+    // would produce. This proves canRetryWholeTask excluded model_error.
+    expect(callCount).toBeLessThanOrEqual(4);
+    // The LLM-facing content must steer the parent at the `model` field.
+    expect(contentText).toContain("To retry with a different model");
+    expect(contentText).toContain("model:");
+  });
+
   test("max retries exhausted → returns last error", async () => {
     let callCount = 0;
     const stream = mockPiAiStream((orig) => ({
@@ -1583,5 +1634,60 @@ describe("delegate pool-miss with resumeFrom and sessionId", () => {
     expect(listText).toContain("2 prompts");
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+// ── isModelAttributableError ─────────────────────────────────────────────
+// Pure classifier: distinguishes account-level/model-attributable failures
+// (usage limit, quota, auth) from transient errors (bare 429, 5xx, network)
+// that same-model retry can fix. Getting this boundary right is the crux of
+// Option B — a false positive suppresses a legitimate retry; a false negative
+// burns retries into a usage-limited account.
+
+describe("isModelAttributableError", () => {
+  test("usage limit / quota / upgrade wording → true", () => {
+    expect(
+      isModelAttributableError(
+        '429 "you have reached your session usage limit, upgrade for higher limits"',
+      ),
+    ).toBe(true);
+    expect(isModelAttributableError("You exceeded your quota.")).toBe(true);
+    expect(isModelAttributableError("insufficient credit")).toBe(true);
+    expect(isModelAttributableError("billing required")).toBe(true);
+  });
+
+  test("auth / credential failures → true", () => {
+    expect(isModelAttributableError("401 Unauthorized")).toBe(true);
+    expect(isModelAttributableError("403 Forbidden")).toBe(true);
+    expect(isModelAttributableError("Invalid API key")).toBe(true);
+    expect(isModelAttributableError("authentication failed")).toBe(true);
+  });
+
+  test("transient errors → false (same-model retry is appropriate)", () => {
+    expect(isModelAttributableError("connection refused")).toBe(false);
+    expect(isModelAttributableError("network error")).toBe(false);
+    expect(isModelAttributableError("timeout")).toBe(false);
+    expect(isModelAttributableError("temporarily overloaded")).toBe(false);
+    // A bare per-minute rate-limit 429 (no account-level wording) is transient.
+    expect(isModelAttributableError("429 Too Many Requests")).toBe(false);
+    expect(isModelAttributableError("rate limit exceeded, try again later")).toBe(
+      false,
+    );
+  });
+
+  test("abort errors → false (not a model failure)", () => {
+    expect(isModelAttributableError("Aborted")).toBe(false);
+    expect(isModelAttributableError("request aborted by user")).toBe(false);
+  });
+
+  test("word-boundary status codes avoid false positives on substrings", () => {
+    // A port like 4019 or a count like 4031 must NOT match 401/403.
+    expect(isModelAttributableError("listening on port 4019")).toBe(false);
+    expect(isModelAttributableError("processed 4031 lines")).toBe(false);
+  });
+
+  test("empty / undefined → false", () => {
+    expect(isModelAttributableError(undefined)).toBe(false);
+    expect(isModelAttributableError("")).toBe(false);
   });
 });
