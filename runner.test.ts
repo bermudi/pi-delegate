@@ -139,6 +139,116 @@ describe("runAgentSession abort re-check", () => {
     expect(result.error).toBeUndefined();
   });
 
+  test("preserves output and tokens when compaction replaces the transcript", async () => {
+    const messages: unknown[] = [];
+    let statsCall = 0;
+    const assistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "survived compaction" }],
+      usage: { totalTokens: 42 },
+    };
+    const { session } = fakeSession({
+      messages,
+      getStats: () => {
+        const total = statsCall++ === 0 ? 0 : 42;
+        return {
+          tokens: {
+            input: total,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total,
+          },
+          cost: 0,
+        } as never;
+      },
+      prompt: async (emit) => {
+        messages.push(assistant);
+        emit({ type: "message_end", message: assistant });
+        emit({
+          type: "agent_end",
+          messages: [assistant],
+          willRetry: false,
+        });
+        // Pi replaces the live transcript after a compaction boundary.
+        messages.splice(0);
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("survived compaction");
+    expect(result.tokens).toBe(42);
+    expect(result.usage.totalTokens).toBe(42);
+  });
+
+  test("discards retrying attempt text while retaining the settled attempt", async () => {
+    const retryMessages: unknown[] = [];
+    let statsCall = 0;
+    const retryAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "transient failure" }],
+      stopReason: "error",
+    };
+    const finalAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "final answer" }],
+    };
+    const { session } = fakeSession({
+      messages: retryMessages,
+      getStats: () => {
+        const total = statsCall++ === 0 ? 0 : 10;
+        return {
+          tokens: {
+            input: total,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total,
+          },
+          cost: 0,
+        } as never;
+      },
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: retryAssistant });
+        emit({
+          type: "agent_end",
+          messages: [retryAssistant],
+          willRetry: true,
+        });
+        emit({ type: "message_end", message: finalAssistant });
+        emit({
+          type: "agent_end",
+          messages: [finalAssistant],
+          willRetry: false,
+        });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("final answer");
+    expect(result.output).not.toContain("transient failure");
+  });
+
   test("aborts a silent prompt and reports a structured stalled failure", async () => {
     _setStallTimeoutForTesting(15);
     let resolvePrompt!: () => void;

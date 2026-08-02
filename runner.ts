@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -6,11 +7,7 @@ import {
   getGitChangedFiles,
   extractTouchedFromActivities,
 } from "./file-tracking.ts";
-import {
-  extractTextFromPartialResult,
-  extractOutput,
-  extractUsage,
-} from "./utils.ts";
+import { extractTextFromPartialResult, extractOutput } from "./utils.ts";
 import { snapshotSessionUsage, usageDelta, emptyUsage } from "./usage.ts";
 import { getStallTimeoutMs } from "./config.ts";
 import { fmtDuration } from "./format.ts";
@@ -35,9 +32,11 @@ import type {
  *   3. snapshots usage before/after the prompt for token delta accounting, and
  *   4. computes touched files from activity + git diff.
  *
- * Output/errors are read from `session.messages` / `session.state` after the
- * prompt resolves; AgentSession's internal retry means a transient mid-loop
- * error no longer hard-fails a task whose work is already done.
+ * Output is captured from finalized AgentSession events so compaction cannot
+ * erase it before collection; `session.messages` is only a fallback for
+ * providers that fail before emitting message_end. AgentSession's internal
+ * retry means a transient mid-loop error no longer hard-fails a task whose
+ * work is already done.
  */
 export async function runAgentSession(
   session: AgentSession,
@@ -67,17 +66,19 @@ export async function runAgentSession(
   const activities: ToolActivity[] = [];
   const pendingById = new Map<string, ToolActivity>();
 
-  // Snapshot usage before the prompt so we can report only the tokens consumed
-  // by this call (not cumulative history on a pooled/resumed session).
-  const usageBeforeTotal = extractUsage(session.messages).total;
-  // Cumulative session stats (cover compacted-away history) feed the full
-  // provider Usage reported up to the parent's session-total accounting.
+  // Snapshot cumulative usage before the prompt so we can report only the
+  // tokens consumed by this call (not cumulative history on a pooled/resumed
+  // session). Cumulative session stats (including compacted-away history) are the only
+  // stable accounting boundary for pooled/resumed sessions. The transcript can
+  // be replaced during compaction, so a message-array length/usage delta is not
+  // a valid per-call counter.
   const statsBefore = snapshotSessionUsage(session);
+  const currentUsage = () =>
+    usageDelta(statsBefore, snapshotSessionUsage(session));
 
   const fireProgress = () => {
     if (!onProgress) return;
-    const usage = extractUsage(session.messages);
-    const delta = Math.max(0, usage.total - usageBeforeTotal);
+    const delta = currentUsage().totalTokens;
     onProgress({
       tokens: delta,
       toolUses,
@@ -125,6 +126,37 @@ export async function runAgentSession(
     phase = nextPhase;
     armStallWatchdog(graceMs);
     fireProgress();
+  };
+
+  // AgentSession can replace `session.messages` during compaction. Capture
+  // finalized assistant messages from the event stream instead of slicing the
+  // mutable transcript after prompt() returns. Keep each low-level attempt
+  // separate so retry/error text is discarded when Pi announces willRetry.
+  const initialMessageRefs = new Set(session.messages);
+  const assistantMessagesForAttempt: AgentMessage[] = [];
+  const settledAttemptTexts: string[] = [];
+  const finishAttempt = (
+    messages: readonly AgentMessage[],
+    willRetry: boolean,
+  ): void => {
+    const eventText = extractOutput([...messages]);
+    const attemptText = eventText || extractOutput(assistantMessagesForAttempt);
+    assistantMessagesForAttempt.length = 0;
+    if (!willRetry && attemptText) settledAttemptTexts.push(attemptText);
+  };
+  const capturedOutput = (): string => {
+    const parts = [...settledAttemptTexts];
+    const partialText = extractOutput(assistantMessagesForAttempt);
+    if (partialText) parts.push(partialText);
+    const eventOutput = parts.join("\n\n");
+    if (eventOutput) return eventOutput;
+
+    // Keep the old append-only fallback for providers/fakes that reject before
+    // emitting message_end. It is deliberately used only when event capture is
+    // empty; event capture is authoritative across compaction and retries.
+    return extractOutput(
+      session.messages.filter((message) => !initialMessageRefs.has(message)),
+    );
   };
 
   // Map the AgentSession event union to the renderer's ToolActivity model.
@@ -176,6 +208,11 @@ export async function runAgentSession(
         noteActivity("streaming model output");
         break;
       case "message_end":
+        if (event.message.role === "assistant") {
+          assistantMessagesForAttempt.push(event.message);
+        }
+        noteActivity("waiting for the next agent turn");
+        break;
       case "turn_end":
         noteActivity("waiting for the next agent turn");
         break;
@@ -184,6 +221,9 @@ export async function runAgentSession(
         noteActivity("waiting for model output");
         break;
       case "agent_end":
+        finishAttempt(event.messages, event.willRetry);
+        noteActivity("finishing agent run");
+        break;
       case "agent_settled":
         noteActivity("finishing agent run");
         break;
@@ -268,21 +308,13 @@ export async function runAgentSession(
   armStallWatchdog();
   fireProgress();
 
-  // Remember how many messages existed before the prompt so we can extract
-  // only the new assistant output (not cumulative history) on both success and
-  // abort/failure paths.
-  const messagesBefore = session.messages.length;
-
   try {
     await session.prompt(prompt);
     clearStallWatchdog();
 
-    const messages = session.messages;
     const state = session.state as { errorMessage?: string };
-    const output = extractOutput(messages.slice(messagesBefore));
-    const usageAfterTotal = extractUsage(messages).total;
-    const tokensThisCall = Math.max(0, usageAfterTotal - usageBeforeTotal);
-    const usage = usageDelta(statsBefore, snapshotSessionUsage(session));
+    const output = capturedOutput();
+    const usage = currentUsage();
 
     // Compute touched files: union of activity-based (edit/write) and git diff
     // against the pre-prompt baseline. Independent of the runner's event model.
@@ -300,7 +332,7 @@ export async function runAgentSession(
       output: output || "(no output)",
       error: errorMessage,
       durationMs: Date.now() - startTime,
-      tokens: tokensThisCall,
+      tokens: usage.totalTokens,
       usage,
       touchedFiles,
       failureKind: stalled ? "stalled" : undefined,
@@ -308,11 +340,8 @@ export async function runAgentSession(
   } catch (err) {
     // Preserve partial-work evidence: whatever assistant output, token spend,
     // and touched files accumulated before the failure/abort.
-    const messages = session.messages;
-    const partialOutput = extractOutput(messages.slice(messagesBefore));
-    const usageAfterTotal = extractUsage(messages).total;
-    const tokensThisCall = Math.max(0, usageAfterTotal - usageBeforeTotal);
-    const usage = usageDelta(statsBefore, snapshotSessionUsage(session));
+    const partialOutput = capturedOutput();
+    const usage = currentUsage();
 
     const fromActivities = extractTouchedFromActivities(activities, config.cwd);
     const gitAfter = await getGitChangedFiles(config.cwd);
@@ -330,7 +359,7 @@ export async function runAgentSession(
       output: partialOutput || "(no output)",
       error: msg,
       durationMs: Date.now() - startTime,
-      tokens: tokensThisCall,
+      tokens: usage.totalTokens,
       usage,
       touchedFiles,
       failureKind: stalled ? "stalled" : undefined,

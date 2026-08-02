@@ -147,9 +147,9 @@ export interface TaskResult {
   /** Stable machine-readable failure reason; error remains human-facing. */
   failureKind?: TaskFailureKind;
   durationMs: number;
-  /** Display token count for the task (cumulative-message delta). Distinct
-   *  from `usage`, the full provider breakdown reported to the parent for
-   *  session-total accounting. The two can differ when compaction occurred. */
+  /** Display token count for the task, derived from the compaction-inclusive
+   *  session-stat delta. This matches `usage.totalTokens`; the usage object
+   *  additionally preserves the provider breakdown and cost. */
   tokens: number;
   /** Full provider Usage consumed by this task, including compacted-away
    *  history. Always present (`emptyUsage()` on no-op/early-failure paths) so a
