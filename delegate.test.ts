@@ -1,14 +1,25 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   _resetPoolForTesting,
   _setPoolAbortTimeoutForTesting,
 } from "./pool.ts";
-import { _resetDelegateConfigForTesting } from "./config.ts";
+import {
+  _resetDelegateConfigForTesting,
+  _setDelegateConfigForTesting,
+} from "./config.ts";
 import {
   inFlightActivity,
   latestActivity,
@@ -6709,21 +6720,22 @@ describe("async delegate integration", () => {
   });
 });
 
-// ── getHostDeps: extensions disabled for subagents ───────────────────────
+// ── getHostDeps: extension policy and host-dependency isolation ───────────
 // Subagents are headless workers and must not load the parent's interactive
-// extensions. Beyond intent, this neutralizes the shared-runtime cross-wiring
-// risk: AgentSession hands the loader's shared extensionsResult.runtime to a
-// new ExtensionRunner whose bindCore() overwrites mutable runtime methods.
-// With no extensions loaded there are no handlers bound to those methods, so
-// the cached loader is safe to share across live sessions.
+// extensions. A narrow provider allowlist is the only exception. Extension-
+// bearing loaders are session-local because AgentSession hands each loader's
+// extensionsResult.runtime to an ExtensionRunner whose bindCore() overwrites
+// mutable runtime methods.
 
-describe("getHostDeps disables extensions for subagents", () => {
+describe("getHostDeps extension policy and isolation", () => {
   beforeEach(() => {
     _resetHostDepsCacheForTesting();
+    _resetDelegateConfigForTesting();
   });
   afterEach(() => {
     _resetHostDepsCacheForTesting();
     _setHostRetryBaseMsForTesting(undefined);
+    _resetDelegateConfigForTesting();
   });
 
   test("resourceLoader reports zero extensions", async () => {
@@ -6741,6 +6753,24 @@ describe("getHostDeps disables extensions for subagents", () => {
     expect(b.resourceLoader.getExtensions().extensions).toHaveLength(0);
   });
 
+  test("distinguishes an explicit empty prompt from prompt discovery", async () => {
+    const discovered = await getHostDeps({ cwd: process.cwd() });
+    const explicitEmpty = await getHostDeps({
+      cwd: process.cwd(),
+      systemPrompt: "",
+    });
+
+    expect(explicitEmpty.resourceLoader).not.toBe(discovered.resourceLoader);
+    expect(
+      (
+        await getHostDeps({
+          cwd: process.cwd(),
+          systemPrompt: "",
+        })
+      ).resourceLoader,
+    ).toBe(explicitEmpty.resourceLoader);
+  });
+
   test("registers parent-owned providers without loading extensions", async () => {
     const deps = await getHostDeps({
       cwd: process.cwd(),
@@ -6755,6 +6785,594 @@ describe("getHostDeps disables extensions for subagents", () => {
       "parent-provider",
     );
     expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(0);
+  });
+
+  test("does not reuse host deps across different agent directories", async () => {
+    const firstAgentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-dir-a-"),
+    );
+    const secondAgentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-dir-b-"),
+    );
+
+    try {
+      const first = await getHostDeps({
+        cwd: process.cwd(),
+        agentDir: firstAgentDir,
+      });
+      const second = await getHostDeps({
+        cwd: process.cwd(),
+        agentDir: secondAgentDir,
+      });
+
+      expect(second).not.toBe(first);
+      expect(second.settingsManager).not.toBe(first.settingsManager);
+      expect(second.modelRuntime).not.toBe(first.modelRuntime);
+    } finally {
+      cleanup(firstAgentDir);
+      cleanup(secondAgentDir);
+    }
+  });
+
+  test("does not reuse host deps when provider config values differ", async () => {
+    const first = await getHostDeps({
+      cwd: process.cwd(),
+      providerConfigs: [
+        [
+          "parent-provider-a",
+          { baseUrl: "https://first.example.invalid", apiKey: "first-key" },
+        ],
+      ],
+    });
+    const second = await getHostDeps({
+      cwd: process.cwd(),
+      providerConfigs: [
+        [
+          "parent-provider-a",
+          { baseUrl: "https://second.example.invalid", apiKey: "second-key" },
+        ],
+      ],
+    });
+
+    expect(second).not.toBe(first);
+    expect(second.modelRuntime).not.toBe(first.modelRuntime);
+    expect(
+      second.modelRuntime.getRegisteredProviderConfig("parent-provider-a")
+        ?.baseUrl,
+    ).toBe("https://second.example.invalid");
+  });
+
+  test("loads openai-codex compaction extension when provider matches", async () => {
+    const userCandidate = path.join(
+      os.homedir(),
+      ".pi",
+      "agent",
+      "npm",
+      "node_modules",
+      "@ogulcancelik",
+      "pi-codex-compaction",
+    );
+    // This environment-dependent check must not treat a project installation
+    // as a valid substitute: project packages are intentionally rejected.
+    if (!fs.existsSync(userCandidate)) return;
+
+    const deps = await getHostDeps({
+      cwd: process.cwd(),
+      modelProvider: "openai-codex",
+    });
+
+    const ext = deps.resourceLoader.getExtensions();
+    const hasCodexCompaction = ext.extensions.some((entry) =>
+      entry.path.includes("@ogulcancelik/pi-codex-compaction"),
+    );
+    expect(hasCodexCompaction).toBe(true);
+  });
+
+  test("loads provider extensions from configurable allowlist", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-project-config-"));
+    const agentDir = path.join(cwd, ".pi-agent");
+    mkdirSync(agentDir, { recursive: true });
+    const customSource = "npm:@example-org/pi-codex-compaction-test";
+    const customPath = path.join(agentDir, "custom-codex-extension");
+    mkdirSync(customPath, { recursive: true });
+    writeFileSync(
+      path.join(customPath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+
+    _setDelegateConfigForTesting({
+      providerExtensions: {
+        "openai-codex": [customSource],
+      },
+    });
+
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = ((
+      source: string,
+    ) => {
+      if (source === customSource) return customPath;
+      return undefined;
+    }) as typeof originalGetInstalledPath;
+
+    try {
+      const deps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "openai-codex",
+      });
+      const secondDeps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "openai-codex",
+      });
+      const ext = deps.resourceLoader.getExtensions();
+      expect(
+        ext.extensions.some((entry) =>
+          entry.path.includes("custom-codex-extension"),
+        ),
+      ).toBe(true);
+      // The extension runtime is mutable and bound to an AgentSession, so
+      // extension-bearing host deps must never be shared across sessions.
+      expect(secondDeps).not.toBe(deps);
+      expect(secondDeps.resourceLoader).not.toBe(deps.resourceLoader);
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+    }
+  });
+
+  test("verifies a Git origin and pinned ref before loading the extension", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-project-git-source-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-git-source-"),
+    );
+    const packagePath = path.join(
+      agentDir,
+      "git",
+      "github.com",
+      "example",
+      "git-extension",
+    );
+    const sourceBase = "git:https://github.com/example/git-extension";
+    mkdirSync(packagePath, { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: packagePath });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: packagePath,
+    });
+    execFileSync("git", ["config", "user.name", "Pi Delegate Test"], {
+      cwd: packagePath,
+    });
+    execFileSync("git", ["remote", "add", "origin", sourceBase.slice(4)], {
+      cwd: packagePath,
+    });
+    writeFileSync(
+      path.join(packagePath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    execFileSync("git", ["add", "index.ts"], { cwd: packagePath });
+    execFileSync("git", ["commit", "--quiet", "-m", "test"], {
+      cwd: packagePath,
+    });
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: packagePath,
+      encoding: "utf8",
+    }).trim();
+    const source = `${sourceBase}@${commit}`;
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+
+    try {
+      const deps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "custom-provider",
+      });
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(1);
+    } finally {
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("verifies an npm version constraint before loading the extension", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-project-versioned-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-versioned-"),
+    );
+    const source = "npm:@example-org/versioned-extension@1.2.3";
+    const packagePath = path.join(
+      agentDir,
+      "npm",
+      "node_modules",
+      "@example-org",
+      "versioned-extension",
+    );
+    mkdirSync(packagePath, { recursive: true });
+    writeFileSync(
+      path.join(packagePath, "package.json"),
+      JSON.stringify({
+        name: "@example-org/versioned-extension",
+        version: "1.2.3",
+        pi: { extensions: ["index.ts"] },
+      }),
+      "utf-8",
+    );
+    writeFileSync(
+      path.join(packagePath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+
+    try {
+      const deps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "custom-provider",
+      });
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(1);
+    } finally {
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("rejects an installed npm package that misses the configured version", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-project-stale-version-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-stale-version-"),
+    );
+    const source = "npm:@example-org/stale-extension@1.2.3";
+    const packagePath = path.join(
+      agentDir,
+      "npm",
+      "node_modules",
+      "@example-org",
+      "stale-extension",
+    );
+    mkdirSync(packagePath, { recursive: true });
+    writeFileSync(
+      path.join(packagePath, "package.json"),
+      JSON.stringify({
+        name: "@example-org/stale-extension",
+        version: "2.0.0",
+        pi: { extensions: ["index.ts"] },
+      }),
+      "utf-8",
+    );
+    writeFileSync(
+      path.join(packagePath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+
+    try {
+      await expect(
+        getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
+      ).rejects.toThrow("does not match the installed user-scope package");
+    } finally {
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("rejects an npm dist-tag that cannot verify an installed version", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-project-tagged-"));
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-tagged-"),
+    );
+    const source = "npm:@example-org/tagged-extension@latest";
+    const packagePath = path.join(
+      agentDir,
+      "npm",
+      "node_modules",
+      "@example-org",
+      "tagged-extension",
+    );
+    mkdirSync(packagePath, { recursive: true });
+    writeFileSync(
+      path.join(packagePath, "package.json"),
+      JSON.stringify({
+        name: "@example-org/tagged-extension",
+        version: "1.0.0",
+        pi: { extensions: ["index.ts"] },
+      }),
+      "utf-8",
+    );
+    writeFileSync(
+      path.join(packagePath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+
+    try {
+      await expect(
+        getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
+      ).rejects.toThrow(
+        "uses an npm tag rather than a verifiable semver range",
+      );
+    } finally {
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("fails when an allowlisted package exposes no extension", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-project-no-extension-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-no-extension-"),
+    );
+    const packagePath = path.join(agentDir, "no-extension-package");
+    const source = "npm:@example-org/no-extension-package";
+    mkdirSync(packagePath, { recursive: true });
+    writeFileSync(
+      path.join(packagePath, "package.json"),
+      JSON.stringify({
+        name: "no-extension-package",
+        version: "1.0.0",
+        pi: { skills: [] },
+      }),
+      "utf-8",
+    );
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
+      packagePath) as typeof originalGetInstalledPath;
+
+    try {
+      await expect(
+        getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
+      ).rejects.toThrow("Failed to load 1 allowlisted provider extension(s)");
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("fails clearly when a required provider extension is absent", async () => {
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
+      undefined) as typeof originalGetInstalledPath;
+    const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-hostdeps-"));
+
+    try {
+      await expect(
+        getHostDeps({
+          cwd,
+          agentDir: cwd,
+          modelProvider: "openai-codex",
+        }),
+      ).rejects.toThrow(
+        "Provider extension(s) for openai-codex are not installed in the user scope",
+      );
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+    }
+  });
+
+  test("does not echo credentials from a missing extension source", async () => {
+    const sensitiveSource =
+      "https://user:super-secret@example.invalid/provider-extension.git";
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [sensitiveSource] },
+    });
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
+      undefined) as typeof originalGetInstalledPath;
+
+    try {
+      const error = await getHostDeps({
+        cwd: process.cwd(),
+        modelProvider: "custom-provider",
+      }).catch((caught: unknown) => String(caught));
+      expect(error).not.toContain("super-secret");
+      expect(error).toContain("not installed in the user scope");
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+    }
+  });
+
+  test("rejects a user-scope symlink that escapes into the project", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-project-"));
+    const agentDir = mkdtempSync(path.join(tmpdir(), "pi-delegate-agent-"));
+    const outsidePath = path.join(cwd, "project-extension");
+    const linkedPath = path.join(agentDir, "provider-extension");
+    mkdirSync(outsidePath, { recursive: true });
+    symlinkSync(outsidePath, linkedPath, "dir");
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": ["./provider-extension"] },
+    });
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = ((
+      _source: string,
+      scope: "user" | "project",
+    ) =>
+      scope === "user"
+        ? linkedPath
+        : undefined) as typeof originalGetInstalledPath;
+
+    try {
+      await expect(
+        getHostDeps({
+          cwd,
+          agentDir,
+          modelProvider: "custom-provider",
+        }),
+      ).rejects.toThrow("outside the user agent directory");
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("rejects a managed-package symlink into a sibling of a nested task cwd", async () => {
+    const projectRoot = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-managed-project-"),
+    );
+    const cwd = path.join(projectRoot, "packages", "app");
+    const agentDir = path.join(projectRoot, ".trusted-agent");
+    const targetPath = path.join(projectRoot, "extensions", "pkg");
+    const linkedPath = path.join(
+      agentDir,
+      "npm",
+      "node_modules",
+      "@example-org",
+      "project-extension",
+    );
+    mkdirSync(cwd, { recursive: true });
+    mkdirSync(targetPath, { recursive: true });
+    mkdirSync(path.dirname(linkedPath), { recursive: true });
+    writeFileSync(
+      path.join(targetPath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    symlinkSync(targetPath, linkedPath, "dir");
+    execFileSync("git", ["init", "--quiet"], { cwd: projectRoot });
+
+    const source = "npm:@example-org/project-extension";
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
+      linkedPath) as typeof originalGetInstalledPath;
+
+    try {
+      await expect(
+        getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
+      ).rejects.toThrow("resolves inside the project directory");
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(projectRoot);
+    }
+  });
+
+  test("fails when an allowlisted provider extension cannot be loaded", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-project-hostdeps-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-hostdeps-"),
+    );
+    const brokenPath = path.join(agentDir, "broken-extension");
+    mkdirSync(brokenPath, { recursive: true });
+    writeFileSync(
+      path.join(brokenPath, "index.ts"),
+      "export default function(_api: unknown) { throw new Error('broken extension'); }\n",
+      "utf-8",
+    );
+    const source = "npm:@example-org/broken-extension";
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = ((
+      _source: string,
+      scope: "user" | "project",
+    ) =>
+      scope === "user"
+        ? brokenPath
+        : undefined) as typeof originalGetInstalledPath;
+
+    try {
+      await expect(
+        getHostDeps({
+          cwd,
+          agentDir,
+          modelProvider: "custom-provider",
+        }),
+      ).rejects.toThrow("Failed to load 1 allowlisted provider extension(s)");
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("never probes or loads a project-scoped provider extension", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-hostdeps-"));
+    const projectPath = path.join(cwd, "project-extension");
+    mkdirSync(projectPath, { recursive: true });
+    writeFileSync(
+      path.join(projectPath, "index.ts"),
+      "export default function(_api: unknown) { throw new Error('should not load'); }\n",
+      "utf-8",
+    );
+    const scopes: string[] = [];
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = ((
+      _source: string,
+      scope: "user" | "project",
+    ) => {
+      scopes.push(scope);
+      return scope === "project" ? projectPath : undefined;
+    }) as typeof originalGetInstalledPath;
+
+    try {
+      await expect(
+        getHostDeps({
+          cwd,
+          agentDir: cwd,
+          modelProvider: "openai-codex",
+        }),
+      ).rejects.toThrow("project-local installations are not allowed");
+      expect(scopes).toEqual(["user"]);
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+    }
+  });
+
+  test("returns zero extensions for providers not in the allowlist", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-hostdeps-"));
+    const deps = await getHostDeps({
+      cwd,
+      agentDir: cwd,
+      modelProvider: "provider-with-no-compaction",
+    });
+    const ext = deps.resourceLoader.getExtensions();
+    expect(ext.extensions).toHaveLength(0);
   });
 });
 

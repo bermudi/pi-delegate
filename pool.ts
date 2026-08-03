@@ -195,19 +195,20 @@ export function checkout(
  *  MUST be called inside withSessionLock(sessionId, …) — the map-presence
  *  decision is sound only because the lock serializes same-sessionId tasks, so
  *  no concurrent commit can race the insert. MUST only be called on run success
- *  (insert-only-on-success is caller-gated). No-op when a fresh session lacks
- *  the sessionManager/sessionFile a pooled entry requires. */
-export function commit(sessionId: string, payload: CommitPayload): void {
+ *  (insert-only-on-success is caller-gated). Returns true when the session is
+ *  now pool-owned, false when a fresh session could not be inserted because it
+ *  lacks the manager/file required by a pooled entry. */
+export function commit(sessionId: string, payload: CommitPayload): boolean {
   const existing = agentPool.get(sessionId);
   if (existing) {
     // Pool hit: session already pooled, just bump stats.
     existing.lastUsed = now();
     existing.totalTokens += payload.tokens;
     existing.promptCount++;
-    return;
+    return true;
   }
   // Miss → success: insert. A pooled entry needs a concrete file/manager.
-  if (!payload.sessionManager || !payload.sessionFile) return;
+  if (!payload.sessionManager || !payload.sessionFile) return false;
   agentPool.set(sessionId, {
     session: payload.session,
     sessionManager: payload.sessionManager,
@@ -218,6 +219,7 @@ export function commit(sessionId: string, payload: CommitPayload): void {
     totalTokens: payload.tokens,
     promptCount: 1,
   });
+  return true;
 }
 
 // ── Read-only defaults (for task-resolution) ──────────────────────────────

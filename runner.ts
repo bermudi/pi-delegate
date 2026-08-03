@@ -32,8 +32,8 @@ import type {
  *   3. snapshots usage before/after the prompt for token delta accounting, and
  *   4. computes touched files from activity + git diff.
  *
- * Output is captured from finalized AgentSession events so compaction cannot
- * erase it before collection; `session.messages` is only a fallback for
+ * Output is captured from AgentSession events so compaction cannot erase it
+ * before collection; `session.messages` is only a guarded fallback for
  * providers that fail before emitting message_end. AgentSession's internal
  * retry means a transient mid-loop error no longer hard-fails a task whose
  * work is already done.
@@ -130,33 +130,162 @@ export async function runAgentSession(
 
   // AgentSession can replace `session.messages` during compaction. Capture
   // finalized assistant messages from the event stream instead of slicing the
-  // mutable transcript after prompt() returns. Keep each low-level attempt
-  // separate so retry/error text is discarded when Pi announces willRetry.
-  const initialMessageRefs = new Set(session.messages);
+  // mutable transcript after prompt() returns. Keep each low-level attempt as
+  // structured data: overflow compaction reports its retry disposition only
+  // *after* agent_end, so output cannot be settled permanently at agent_end.
+  //
+  // The initial array and its prefix are also retained for the narrow fallback
+  // below. A Set of initial message objects is not enough: compaction can
+  // rebuild historical messages as fresh objects, making them look like new
+  // output. New pre-message_end output is still recoverable when the host has
+  // appended it to the unchanged transcript.
+  const initialMessages = session.messages;
+  const initialMessageCount = initialMessages.length;
+  const initialMessageSnapshot = initialMessages.slice();
+  let transcriptMayHaveBeenReplaced = false;
   const assistantMessagesForAttempt: AgentMessage[] = [];
-  const settledAttemptTexts: string[] = [];
+  let partialAssistantMessage: AgentMessage | undefined;
+  type AttemptCapture = {
+    eventMessages: AgentMessage[];
+    capturedAssistants: AgentMessage[];
+    partialAssistant?: AgentMessage;
+    /** Set by a retrying agent_end or a later overflow compaction_end. */
+    omitFinalAssistant: boolean;
+  };
+  const settledAttempts: AttemptCapture[] = [];
+  let pendingCompactionAttempt: AttemptCapture | undefined;
+
+  const countAssistants = (messages: readonly AgentMessage[]): number =>
+    messages.reduce(
+      (count, message) => count + (message.role === "assistant" ? 1 : 0),
+      0,
+    );
+  const removeAssistantAt = (
+    messages: readonly AgentMessage[],
+    assistantOrdinal: number,
+  ): AgentMessage[] => {
+    if (assistantOrdinal < 0) return [...messages];
+    let currentOrdinal = 0;
+    for (let index = 0; index < messages.length; index++) {
+      if (messages[index]?.role !== "assistant") continue;
+      if (currentOrdinal === assistantOrdinal) {
+        return messages.filter((_, candidate) => candidate !== index);
+      }
+      currentOrdinal++;
+    }
+    return [...messages];
+  };
+  const renderAttempt = (attempt: AttemptCapture): string => {
+    // `agent_end.messages` is authoritative for the low-level attempt. When a
+    // retry is requested, remove the final assistant by position. The
+    // message_end collection is filtered by the same assistant ordinal rather
+    // than object identity: hosts/extensions may clone event payloads.
+    const eventAssistantCount = countAssistants(attempt.eventMessages);
+    const finalAssistantOrdinal = eventAssistantCount - 1;
+    const eventMessages = attempt.omitFinalAssistant
+      ? removeAssistantAt(attempt.eventMessages, finalAssistantOrdinal)
+      : [...attempt.eventMessages];
+    const capturedAssistantCount = countAssistants(attempt.capturedAssistants);
+    const capturedOrdinal = attempt.omitFinalAssistant
+      ? finalAssistantOrdinal >= 0
+        ? finalAssistantOrdinal
+        : capturedAssistantCount - 1
+      : -1;
+    const capturedAssistants = attempt.omitFinalAssistant
+      ? removeAssistantAt(attempt.capturedAssistants, capturedOrdinal)
+      : [...attempt.capturedAssistants];
+    const eventText = extractOutput(eventMessages);
+    const capturedText = extractOutput(capturedAssistants);
+    const attemptTextWithoutPartial = eventText || capturedText;
+    const attemptParts = attemptTextWithoutPartial
+      ? [attemptTextWithoutPartial]
+      : [];
+
+    // A failed stream can contain useful text that never receives a
+    // message_end. If this agent run also contains an earlier successful turn,
+    // that turn must not win the `||` chain and hide the newer partial output.
+    // Do not retain partial text for a response that will be retried, including
+    // the overflow case whose retry disposition arrives at compaction_end.
+    const partialText =
+      attempt.omitFinalAssistant || !attempt.partialAssistant
+        ? ""
+        : extractOutput([attempt.partialAssistant]);
+    // Avoid duplicating partial output already represented by the authoritative
+    // event selection (including when the host copied the message object).
+    if (
+      partialText &&
+      !attemptParts.some(
+        (text) => text === partialText || text.includes(partialText),
+      )
+    ) {
+      attemptParts.push(partialText);
+    }
+    return attemptParts.join("\n\n");
+  };
+  const rememberPartialAssistant = (message: AgentMessage): void => {
+    // AgentSession emits an empty synthetic failure message after a provider
+    // throws mid-stream. Do not let that empty message erase useful text from
+    // the real, pre-message_end partial response.
+    const existingText = partialAssistantMessage
+      ? extractOutput([partialAssistantMessage])
+      : "";
+    const nextText = extractOutput([message]);
+    if (nextText || !existingText) partialAssistantMessage = message;
+  };
   const finishAttempt = (
     messages: readonly AgentMessage[],
     willRetry: boolean,
   ): void => {
-    const eventText = extractOutput([...messages]);
-    const attemptText = eventText || extractOutput(assistantMessagesForAttempt);
+    const attempt: AttemptCapture = {
+      eventMessages: [...messages],
+      capturedAssistants: [...assistantMessagesForAttempt],
+      partialAssistant: partialAssistantMessage,
+      omitFinalAssistant: willRetry,
+    };
+    settledAttempts.push(attempt);
+    pendingCompactionAttempt = attempt;
     assistantMessagesForAttempt.length = 0;
-    if (!willRetry && attemptText) settledAttemptTexts.push(attemptText);
+    partialAssistantMessage = undefined;
   };
   const capturedOutput = (): string => {
-    const parts = [...settledAttemptTexts];
-    const partialText = extractOutput(assistantMessagesForAttempt);
-    if (partialText) parts.push(partialText);
+    const parts = settledAttempts.map(renderAttempt).filter(Boolean);
+    const currentAttempt = renderAttempt({
+      eventMessages: [],
+      capturedAssistants: assistantMessagesForAttempt,
+      partialAssistant: partialAssistantMessage,
+      omitFinalAssistant: false,
+    });
+    if (currentAttempt) parts.push(currentAttempt);
     const eventOutput = parts.join("\n\n");
     if (eventOutput) return eventOutput;
+    // Once an event boundary has been observed, an empty rendered result is
+    // meaningful (for example, a sole retrying response was intentionally
+    // removed). Do not let the mutable transcript re-introduce that response.
+    if (
+      settledAttempts.length > 0 ||
+      assistantMessagesForAttempt.length > 0 ||
+      partialAssistantMessage
+    ) {
+      return "";
+    }
 
-    // Keep the old append-only fallback for providers/fakes that reject before
-    // emitting message_end. It is deliberately used only when event capture is
-    // empty; event capture is authoritative across compaction and retries.
-    return extractOutput(
-      session.messages.filter((message) => !initialMessageRefs.has(message)),
-    );
+    // Keep an append-only fallback for providers/fakes that reject before
+    // emitting message_end. It is deliberately used only when event capture
+    // is empty; event capture is authoritative across compaction and retries.
+    // Requiring the original array and unchanged historical prefix prevents a
+    // replacement/compaction transcript from leaking old assistant output.
+    const currentMessages = session.messages;
+    if (
+      transcriptMayHaveBeenReplaced ||
+      currentMessages !== initialMessages ||
+      currentMessages.length < initialMessageCount
+    ) {
+      return "";
+    }
+    for (let i = 0; i < initialMessageCount; i++) {
+      if (currentMessages[i] !== initialMessageSnapshot[i]) return "";
+    }
+    return extractOutput(currentMessages.slice(initialMessageCount));
   };
 
   // Map the AgentSession event union to the renderer's ToolActivity model.
@@ -205,11 +334,20 @@ export async function runAgentSession(
       }
       case "message_start":
       case "message_update":
+        if (event.message?.role === "assistant") {
+          rememberPartialAssistant(event.message);
+        }
         noteActivity("streaming model output");
         break;
       case "message_end":
         if (event.message.role === "assistant") {
           assistantMessagesForAttempt.push(event.message);
+          // Keep a text-bearing partial if the host follows a provider
+          // exception with an empty synthetic failure message. A real
+          // finalized text response supersedes the partial.
+          if (extractOutput([event.message])) {
+            partialAssistantMessage = undefined;
+          }
         }
         noteActivity("waiting for the next agent turn");
         break;
@@ -236,9 +374,26 @@ export async function runAgentSession(
         noteActivity("waiting for model output");
         break;
       case "compaction_start":
+        // Even if a host mutates the transcript in place rather than replacing
+        // its array, historical messages are no longer a safe fallback source.
+        transcriptMayHaveBeenReplaced = true;
         noteActivity("compacting context");
         break;
       case "compaction_end":
+        transcriptMayHaveBeenReplaced = true;
+        // Context-overflow agent_end is intentionally emitted with
+        // willRetry=false because Pi's retry decision belongs to compaction.
+        // Only an overflow compaction that actually retries may retract that
+        // preceding response. Failed compaction retains its error evidence;
+        // threshold compaction never discards a successful answer.
+        if (
+          event.reason === "overflow" &&
+          event.willRetry &&
+          pendingCompactionAttempt
+        ) {
+          pendingCompactionAttempt.omitFinalAssistant = true;
+        }
+        pendingCompactionAttempt = undefined;
         noteActivity("waiting for model output");
         break;
       default: {

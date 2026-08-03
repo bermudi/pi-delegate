@@ -238,6 +238,6 @@ export interface AcquiredSession {
   session: AgentSession;
   sessionManager: SessionManager | undefined;
   sessionFile: string | undefined;
-  /** Fresh/resumed sessions are caller-owned until a successful pool commit. */
-  disposeOnAbort: boolean;
+  /** Fresh/resumed sessions are lifecycle-owned until a successful pool commit. */
+  lifecycleOwnsSession: boolean;
 }

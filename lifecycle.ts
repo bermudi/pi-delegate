@@ -90,16 +90,17 @@ function completeSessionAction(
   };
 }
 
-/** Dispose a materialized session that was never committed to the pool.
- * Pool hits remain live and must not be disposed by a failed task. */
-function disposeUncommittedSession(acquired: AcquiredSession): void {
-  if (!acquired.disposeOnAbort) return;
+/** Dispose a materialized session that remains lifecycle-owned.
+ * Pool hits and successfully committed sessions remain pool-owned. */
+function disposeOwnedSession(acquired: AcquiredSession): void {
+  if (!acquired.lifecycleOwnsSession) return;
   try {
     acquired.session.dispose();
   } catch (error) {
-    // Preserve the cancellation result, but emit the cleanup failure so a
-    // broken provider/session implementation is not silently ignored.
-    console.error("[delegate] aborted subagent disposal failed", error);
+    // Cleanup must not replace the task's primary result, but it must emit a
+    // signal: extension-bearing sessions can retain callbacks/resources when a
+    // provider's dispose implementation misbehaves.
+    console.error("[delegate] uncommitted subagent disposal failed", error);
   }
 }
 
@@ -145,9 +146,7 @@ function finishTask(
  *  … quota", or an auth/credential failure (401/403 with word boundaries so a
  *  port like 4019 doesn't false-positive). The parent should resume with a
  *  different `model` (see `resumeFrom` + `model`). */
-export function isModelAttributableError(
-  error: string | undefined,
-): boolean {
+export function isModelAttributableError(error: string | undefined): boolean {
   if (!error) return false;
   const e = error.toLowerCase();
   if (e.includes("abort")) return false;
@@ -164,7 +163,7 @@ export function isModelAttributableError(
     e.includes("unauthenticated") ||
     e.includes("authentication") ||
     e.includes("invalid api key") ||
-    e.includes("api key") && e.includes("invalid") ||
+    (e.includes("api key") && e.includes("invalid")) ||
     /\b401\b/.test(e) ||
     /\b403\b/.test(e)
   );
@@ -233,16 +232,19 @@ async function sleepForWholeTaskRetry(
 
 /** Build the AgentSession for a fresh or resumed subagent via createAgentSession.
  *  Reuses the caller-supplied sessionManager (so parent-linking + per-task .jsonl
- *  files stay under our control) and the shared host deps (cached per-cwd
- *  resourceLoader/settingsManager/modelRuntime). */
+ *  files stay under our control). Extension-free host deps may be cached, while
+ *  provider-configured or allowlisted-extension deps are session-local because
+ *  Pi binds mutable extension callbacks onto each loader runtime. */
 async function buildDelegateSession(
   task: ResolvedTask,
   sessionManager: SessionManager,
   modelRegistry: TaskRunEnv["modelRegistry"],
 ): Promise<AgentSession> {
-  // Resolve shared host deps for this task's cwd + system prompt (cached after
-  // the first call). resourceLoader is cwd-scoped (it scans for AGENTS.md/skills)
-  // and the system prompt is per named-agent, so the cache key is (cwd + prompt).
+  // Resolve host deps for this task's cwd + system prompt. Extension-free
+  // resource loaders are cached after the first call; provider-configured or
+  // allowlisted-extension loaders are deliberately fresh per session because
+  // their extension runtime is mutable. The resourceLoader is cwd-scoped (it
+  // scans for AGENTS.md/skills) and the system prompt is per named-agent.
   // The custom prompt overrides the default AgentSession system prompt.
   // Pass only the provider needed by this task. This keeps a non-Kilo task
   // from receiving Kilo's provider/auth adapter merely because Kilo is also
@@ -257,6 +259,7 @@ async function buildDelegateSession(
     cwd: task.cwd,
     systemPrompt: task.systemPrompt,
     providerConfigs,
+    modelProvider: task.model.provider,
   });
 
   const { session } = await createAgentSession({
@@ -265,11 +268,12 @@ async function buildDelegateSession(
     thinkingLevel: task.thinking,
     tools: task.tools,
     sessionManager,
-    // Shared, read-only heavy deps (cached per cwd+prompt): the canonical
-    // model/auth runtime (reads the same ~/.pi/agent files as the parent),
-    // settings manager, and resource loader (reload() runs once per cwd).
-    // Since pi 0.80.8 `createAgentSession` takes `modelRuntime` in place of
-    // the removed `authStorage`/`modelRegistry` options.
+    // Extension-free host deps may be shared: the canonical model/auth runtime
+    // (reads the same ~/.pi/agent files as the parent), settings manager, and
+    // resource loader. Provider-configured or allowlisted-extension tasks get
+    // fresh instances so Pi's mutable extension runtime cannot cross-wire
+    // sessions. Since pi 0.80.8 `createAgentSession` takes `modelRuntime` in
+    // place of the removed `authStorage`/`modelRegistry` options.
     modelRuntime: hostDeps.modelRuntime,
     settingsManager: hostDeps.settingsManager,
     resourceLoader: hostDeps.resourceLoader,
@@ -326,7 +330,7 @@ async function acquireAgentSession(
         session: co.session,
         sessionManager: co.sessionManager,
         sessionFile: co.sessionFile,
-        disposeOnAbort: false,
+        lifecycleOwnsSession: false,
       };
     }
     // status === "miss" → fall through to resume / fresh materialization.
@@ -395,7 +399,7 @@ async function acquireAgentSession(
       session,
       sessionManager: resumed,
       sessionFile: resolvedPath,
-      disposeOnAbort: true,
+      lifecycleOwnsSession: true,
     };
   }
 
@@ -419,7 +423,7 @@ async function acquireAgentSession(
     session,
     sessionManager,
     sessionFile,
-    disposeOnAbort: true,
+    lifecycleOwnsSession: true,
   };
 }
 
@@ -531,20 +535,19 @@ async function runResolvedTaskUnlocked(
       const acquired = await acquireAgentSession(env, task, p);
       if ("error" in acquired) return acquired.error;
 
-      // Re-check abort after acquisition. The pre-acquire check at the top can
-      // miss a signal that fires during getHostDeps/createAgentSession/git
-      // baseline. runAgentSession re-checks after attaching its listener, but a
-      // cancelled ticket should not even start the subagent (no file writes, no
-      // pool insert). Return the just-acquired session to its owner: pool hits
-      // remain live, while fresh/resumed sessions must be disposed because they
-      // were never committed anywhere else.
-      if (env.signal?.aborted) {
-        disposeUncommittedSession(acquired);
-        return failTask(task, "Aborted");
-      }
-
-      // ── Run the agent ─────────────────────────────────────────────────
+      // A pool hit is already owned by the pool. Fresh/resumed sessions belong
+      // to this attempt until commit() explicitly transfers ownership. Keeping
+      // this state local makes cleanup a finally invariant rather than a list
+      // of special cases for aborts, stalls, and provider failures.
+      let sessionReleased = !acquired.lifecycleOwnsSession;
       try {
+        // Re-check abort after acquisition. The pre-acquire check at the top can
+        // miss a signal that fires during getHostDeps/createAgentSession/git
+        // baseline. runAgentSession re-checks after attaching its listener, but a
+        // cancelled ticket should not even start the subagent (no file writes, no
+        // pool insert).
+        if (env.signal?.aborted) return failTask(task, "Aborted");
+
         // Snapshot git status before the run so touchedFiles can diff after.
         // AgentSession owns retry/compaction internally — runAgentSession just
         // drives the prompt and maps events to the progress model.
@@ -561,42 +564,44 @@ async function runResolvedTaskUnlocked(
 
         // The signal can fire after the pre-run check or while the runner is
         // collecting post-prompt evidence. Keep cancellation from looking like
-        // success and dispose any uncommitted materialized session in that race.
+        // success; finally below releases any uncommitted session.
         if (env.signal?.aborted && !r.error) {
           r = { ...r, error: "Aborted" };
         }
-        if (env.signal?.aborted || r.error === "Aborted") {
-          disposeUncommittedSession(acquired);
-        }
 
         // A stalled prompt was explicitly aborted and is no longer a safe
-        // continuation. Close a pooled hit; if this task materialized a fresh
-        // or resumed session (including a pool miss), dispose that owned
-        // session directly instead of leaving it behind.
-        if (r.failureKind === "stalled") {
-          let closed = false;
-          if (task.sessionId) {
-            try {
-              closed = await pool.closePooledAgent(task.sessionId);
-            } catch (error) {
-              // The session is removed from the pool before close reports
-              // abort/dispose/timeout failures. Preserve the primary stalled
-              // result while logging the cleanup failure explicitly.
-              console.error(
-                `[delegate] failed to dispose stalled pooled session '${task.sessionId}'`,
-                error,
-              );
+        // continuation. Close a pooled hit; a fresh/resumed session is still
+        // released by the finally below. closePooledAgent removes the pooled
+        // entry before surfacing cleanup errors, so a pool-owned session is
+        // never directly disposed here.
+        if (r.failureKind === "stalled" && task.sessionId) {
+          try {
+            if (await pool.closePooledAgent(task.sessionId)) {
+              sessionReleased = true;
             }
+          } catch (error) {
+            // Preserve the primary stalled result while logging the cleanup
+            // failure explicitly. A pooled session is already removed by the
+            // pool; a pool miss remains lifecycle-owned and is handled below.
+            console.error(
+              `[delegate] failed to dispose stalled pooled session '${task.sessionId}'`,
+              error,
+            );
           }
-          if (!closed) disposeUncommittedSession(acquired);
         }
+
+        const sessionFile = resolveResumableSessionFile(
+          acquired.sessionFile,
+          acquired.sessionManager,
+          r.error,
+        );
 
         // Pool bookkeeping. commit() is the sole mutator: it decides
         // insert-vs-recordUse by map presence (sound because the session lock
-        // serializes same-sessionId tasks). Skipped on failure — insert-only-
-        // on-success — so there is nothing to clean up.
+        // serializes same-sessionId tasks). A successful insert transfers
+        // ownership; a failed insert leaves finally responsible for disposal.
         if (task.sessionId && !r.error) {
-          pool.commit(task.sessionId, {
+          sessionReleased = pool.commit(task.sessionId, {
             session: acquired.session,
             sessionManager: acquired.sessionManager,
             sessionFile: acquired.sessionFile,
@@ -628,17 +633,14 @@ async function runResolvedTaskUnlocked(
           durationMs: r.durationMs,
           tokens: r.tokens,
           usage: r.usage,
-          sessionFile: resolveResumableSessionFile(
-            acquired.sessionFile,
-            acquired.sessionManager,
-            r.error,
-          ),
+          sessionFile,
           touchedFiles: r.touchedFiles,
         };
-      } catch (err) {
-        // Abnormal error (runAgentSession threw rather than returning r.error).
-        // No pool entry to clean up — fresh sessions are inserted only on success.
-        throw err;
+      } finally {
+        // This runs for ordinary success, normal provider failure, whole-task
+        // retry attempts, abort races, stalls, and unexpected throws. Pool hits
+        // remain pool-owned; successful inserts were explicitly released above.
+        if (!sessionReleased) disposeOwnedSession(acquired);
       }
     };
 
@@ -647,8 +649,15 @@ async function runResolvedTaskUnlocked(
     // sessionId without needing an inner lock here.
     let result = await runAttempt();
     // Accumulate usage across whole-task retries: the parent pays for every
-    // attempt, including the transient failures that retry.
+    // attempt, including the transient failures that retry. Keep tokens tied
+    // to the accumulated usage as well; otherwise the final result and the
+    // final progress row describe different amounts of work.
     let accumulatedUsage = result.usage;
+    result = {
+      ...result,
+      tokens: accumulatedUsage.totalTokens,
+      usage: accumulatedUsage,
+    };
     const maxRetries = resolvedWholeTaskMaxRetries();
     const baseDelayMs = resolvedWholeTaskBaseDelayMs();
     for (
@@ -660,10 +669,12 @@ async function runResolvedTaskUnlocked(
       await sleepForWholeTaskRetry(env.signal, delayMs);
       if (env.signal?.aborted) {
         // Preserve any partial output/session path from the last failed attempt
-        // while recording that the retry loop was aborted.
+        // while recording that the retry loop was aborted. The task already
+        // paid for every completed attempt, including the one before sleep.
         result = {
           ...result,
           error: "Aborted",
+          tokens: accumulatedUsage.totalTokens,
           usage: accumulatedUsage,
         };
         break;
@@ -674,11 +685,16 @@ async function runResolvedTaskUnlocked(
       env.onStatusChange?.();
       result = await runAttempt();
       accumulatedUsage = addUsage(accumulatedUsage, result.usage);
-      result.usage = accumulatedUsage;
+      result = {
+        ...result,
+        tokens: accumulatedUsage.totalTokens,
+        usage: accumulatedUsage,
+      };
     }
     return finishTask(env, p, result);
   } catch (err) {
-    // If we synchronously claimed a sessionId before the error, clean it up.
+    // Any acquired session is released by runAttempt's finally before an
+    // exception reaches this boundary.
     return finishTask(
       env,
       p,

@@ -9,34 +9,35 @@
  * and the system prompt. `_buildRuntime` reads `resourceLoader.getExtensions()`
  * and the prompt/skill getters.
  *
- * **Extensions are disabled for subagents** (`noExtensions: true`). Subagents
- * are headless workers spawned by the parent's delegate tool — they must not
- * run the parent's interactive extensions (custom UI, slash commands, hooks
- * that call `pi.appendEntry()`/`pi.sendMessage()`). This also closes the
- * cross-wiring risk flagged in review: `AgentSession._buildRuntime` hands the
- * loader's shared `extensionsResult.runtime` to a new `ExtensionRunner`, whose
+ * **Extensions are disabled for subagents by default** (`noExtensions: true`).
+ * Subagents are headless workers spawned by the parent's delegate tool — they
+ * must not run the parent's interactive extensions (custom UI, slash commands,
+ * hooks that call `pi.appendEntry()`/`pi.sendMessage()`). A narrow,
+ * provider-scoped allowlist is injected as `additionalExtensionPaths` for
+ * safety-critical integrations. Those extension-bearing dependencies are
+ * deliberately built per session: `AgentSession._buildRuntime` hands the
+ * loader's `extensionsResult.runtime` to a new `ExtensionRunner`, whose
  * `bindCore()` overwrites mutable methods on that runtime (`sendMessage`,
- * `appendEntry`, `setSessionName`, …). With no extensions loaded there are no
- * handlers bound to those methods, so sharing the cached loader across live
- * sessions is safe — the runtime is mutated but never read by extension code.
- * `extendResourcesFromExtensions()` also early-returns when there are no
- * `resources_discover` handlers, so extension-discovered skills/prompts cannot
- * leak across sessions. We therefore build the deps exactly once per
- * (cwd + systemPrompt) and hand the same instances to every subagent with
- * that combo.
+ * `appendEntry`, `setSessionName`, …). Sharing that loader would redirect one
+ * session's extension calls into another session. Only extension-free deps are
+ * cached and shared.
  *
  * The `modelRuntime` / `settingsManager` / `resourceLoader` are pi-delegate-
  * owned siblings reading the same on-disk files under `~/.pi/agent` as the
  * parent. Since pi 0.80.8, `createAgentSession` takes a single `modelRuntime`
  * (the unified model + auth runtime) in place of the removed `authStorage` /
- * `modelRegistry` options, so the runtime is built and cached here from
+ * `modelRegistry` options, so the runtime is built here from
  * `~/.pi/agent/{auth,models}.json`. Runtime-only providers are then copied from
- * the parent's registry into this child runtime; extensions remain disabled.
- * The parent's `ctx.modelRegistry` is also threaded by the caller for model
- * selection in task-resolution.
+ * the parent's registry into this child runtime; extensions remain disabled
+ * unless explicitly allowlisted. The parent's `ctx.modelRegistry` is also
+ * threaded by the caller for model selection in task-resolution.
  */
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
+  DefaultPackageManager,
   DefaultResourceLoader,
   ModelRuntime,
   SettingsManager,
@@ -44,6 +45,10 @@ import {
   type ProviderConfig,
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
+import {
+  getSubagentProviderExtensionMap,
+  getSubagentProviderExtensionsForProvider,
+} from "./config.ts";
 
 export interface HostDeps {
   modelRuntime: ModelRuntime;
@@ -63,12 +68,20 @@ export interface HostDepsOptions {
    */
   providerConfigs?: ReadonlyArray<readonly [string, ProviderConfig]>;
   /**
+   * Model provider of the current task (e.g. `openai-codex`). Used to apply
+   * provider-scoped extension loading for subagents. The default behavior still
+   * keeps extension loading disabled for safety. Allowlisted extensions must be
+   * installed in the user scope; project-local installations are rejected.
+   */
+  modelProvider?: string;
+  /**
    * Custom system prompt for a named agent. When set, it overrides the default
-   * system prompt the resource loader would otherwise discover. The resource
-   * loader is cached per (cwd + systemPrompt): the expensive `reload()` (skills,
-   * AGENTS.md discovery) runs once per distinct combo, then is reused across all
-   * concurrent subagents with the same cwd + prompt. For ad-hoc tasks (no
-   * named agent) pass undefined to share the per-cwd default-prompt loader.
+   * system prompt the resource loader would otherwise discover. Extension-free
+   * host deps are cached per (agentDir + cwd + systemPrompt): the expensive
+   * `reload()` (skills, AGENTS.md discovery) runs once per distinct combo, then
+   * is reused across concurrent subagents. Provider-configured or
+   * allowlisted-extension tasks always receive fresh host deps. For ad-hoc
+   * tasks (no named agent) pass undefined to use the discovered prompt.
    */
   systemPrompt?: string;
 }
@@ -76,6 +89,442 @@ export interface HostDepsOptions {
 const hostDepsCache = new Map<string, HostDeps>();
 /** In-flight builds, so concurrent calls for the same key share one reload(). */
 const hostDepsInflight = new Map<string, Promise<HostDeps>>();
+
+function canonicalPath(candidate: string): string {
+  try {
+    return realpathSync(candidate);
+  } catch {
+    // The caller normally passes an existing installed path. Keep a lexical
+    // fallback for a race where it disappears between lookup and validation.
+    return resolve(candidate);
+  }
+}
+
+function isPathWithinDirectory(directory: string, candidate: string): boolean {
+  const relativePath = relative(
+    canonicalPath(directory),
+    canonicalPath(candidate),
+  );
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(relativePath))
+  );
+}
+
+/**
+ * Whether a managed package's canonical target remains in a user install root.
+ *
+ * Pi's managed user installs live below `agentDir`; its legacy npm fallback
+ * lives below a global `node_modules` directory. Deriving the latter from the
+ * returned lexical path avoids invoking npm merely to validate a path, while
+ * still rejecting a package-directory symlink whose canonical target escapes
+ * that install root.
+ */
+function isTrustedManagedTarget(agentDir: string, userPath: string): boolean {
+  const resolvedUserPath = canonicalPath(userPath);
+  if (isPathWithinDirectory(agentDir, resolvedUserPath)) return true;
+
+  const lexicalPath = resolve(userPath);
+  const nodeModulesMarker = `${sep}node_modules${sep}`;
+  const markerIndex = lexicalPath.lastIndexOf(nodeModulesMarker);
+  if (markerIndex < 0) return false;
+  const nodeModulesEnd = markerIndex + nodeModulesMarker.length - 1;
+  const installRoot = lexicalPath.slice(0, nodeModulesEnd);
+  return isPathWithinDirectory(installRoot, resolvedUserPath);
+}
+
+/**
+ * Find the project boundary used by the extension trust check.
+ *
+ * `cwd` is allowed to be a package directory inside a larger checkout. Checking
+ * only that exact directory makes a user-scope symlink into a sibling project
+ * directory look safe. Git is the authoritative boundary when available;
+ * marker directories provide a conservative fallback for projects that are not
+ * Git worktrees. Returning undefined is intentional: callers then require a
+ * canonical managed target to remain under the trusted user agent directory.
+ */
+function findExtensionProjectRoot(cwd: string): string | undefined {
+  try {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (root) return canonicalPath(root);
+  } catch {
+    // Not every task cwd belongs to a Git worktree. Use project markers below.
+  }
+
+  let directory = canonicalPath(cwd);
+  while (true) {
+    if (
+      existsSync(join(directory, ".pi", "settings.json")) ||
+      existsSync(join(directory, ".pi", "agents")) ||
+      (directory !== homedir() &&
+        existsSync(join(directory, ".claude", "agents")))
+    ) {
+      return directory;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return undefined;
+}
+
+/** Match the package-manager prefixes that are not local filesystem paths. */
+function isLocalExtensionSource(source: string): boolean {
+  const trimmed = source.trim().toLowerCase();
+  return !["npm:", "git:", "github:", "http:", "https:", "ssh:"].some(
+    (prefix) => trimmed.startsWith(prefix),
+  );
+}
+
+/** Whether an npm source carries a version, range, or tag after its package name. */
+function hasNpmVersionSpecifier(source: string): boolean {
+  const trimmed = source.trim();
+  if (!trimmed.toLowerCase().startsWith("npm:")) return false;
+  const spec = trimmed.slice("npm:".length).trim();
+  const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@(.+))?$/);
+  return Boolean(match?.[2]?.trim());
+}
+
+/** Parse the repository identity used by Pi's Git source parser. */
+function parseGitRepositoryIdentity(
+  source: string,
+): { host: string; path: string } | undefined {
+  let candidate = source.trim();
+  if (candidate.toLowerCase().startsWith("git:")) {
+    candidate = candidate.slice("git:".length).trim();
+  }
+
+  let host: string;
+  let repoPath: string;
+  if (candidate.startsWith("git@")) {
+    const colon = candidate.indexOf(":");
+    if (colon < 0) return undefined;
+    host = candidate.slice("git@".length, colon);
+    repoPath = candidate.slice(colon + 1);
+  } else if (/^[a-z][a-z\d+.-]*:\/\//i.test(candidate)) {
+    try {
+      const url = new URL(candidate);
+      host = url.host;
+      repoPath = url.pathname;
+    } catch {
+      return undefined;
+    }
+  } else {
+    const slash = candidate.indexOf("/");
+    if (slash < 0) return undefined;
+    host = candidate.slice(0, slash);
+    repoPath = candidate.slice(slash + 1);
+  }
+
+  const refSeparator = repoPath.indexOf("@");
+  if (refSeparator >= 0) repoPath = repoPath.slice(0, refSeparator);
+  repoPath = repoPath.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+  if (!host || !repoPath) return undefined;
+  return { host: host.toLowerCase(), path: repoPath };
+}
+
+function getGitRepositoryIdentity(
+  source: string,
+): { host: string; path: string } | undefined {
+  const trimmed = source.trim();
+  if (
+    isLocalExtensionSource(trimmed) ||
+    trimmed.toLowerCase().startsWith("npm:")
+  ) {
+    return undefined;
+  }
+  return parseGitRepositoryIdentity(trimmed);
+}
+
+function decodeGitRef(raw: string): string | undefined {
+  if (!raw) return undefined;
+  try {
+    return decodeURIComponent(raw) || undefined;
+  } catch {
+    return raw || undefined;
+  }
+}
+
+/** Extract the ref syntax understood by Pi's Git source parser. */
+function getConfiguredGitRef(source: string): string | undefined {
+  const trimmed = source.trim();
+  if (getGitRepositoryIdentity(trimmed) === undefined) return undefined;
+
+  let candidate = trimmed;
+  if (candidate.toLowerCase().startsWith("git:")) {
+    candidate = candidate.slice("git:".length).trim();
+  }
+
+  if (candidate.startsWith("git@")) {
+    const colon = candidate.indexOf(":");
+    if (colon < 0) return undefined;
+    const repoPath = candidate.slice(colon + 1);
+    const separator = repoPath.indexOf("@");
+    return separator >= 0
+      ? repoPath.slice(separator + 1) || undefined
+      : undefined;
+  }
+
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(candidate)) {
+    try {
+      const url = new URL(candidate);
+      if (url.hash.length > 1) {
+        return decodeGitRef(url.hash.slice(1));
+      }
+      const separator = url.pathname.indexOf("@");
+      return separator >= 0
+        ? url.pathname.slice(separator + 1) || undefined
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  const hashSeparator = candidate.indexOf("#");
+  if (hashSeparator >= 0) {
+    return decodeGitRef(candidate.slice(hashSeparator + 1));
+  }
+
+  // Hosted shorthand, e.g. github.com/user/repo@main.
+  const slash = candidate.indexOf("/");
+  if (slash < 0) return undefined;
+  const repoPath = candidate.slice(slash + 1);
+  const separator = repoPath.indexOf("@");
+  return separator >= 0
+    ? repoPath.slice(separator + 1) || undefined
+    : undefined;
+}
+
+function gitOutput(installedPath: string, args: string[]): string {
+  return execFileSync("git", args, {
+    cwd: installedPath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
+}
+
+/** Reject a user installation whose checkout or ref differs from the source. */
+function assertConfiguredGitInstallation(
+  source: string,
+  installedPath: string,
+): void {
+  const configuredRepository = getGitRepositoryIdentity(source);
+  if (!configuredRepository) return;
+
+  try {
+    const installedRepository = parseGitRepositoryIdentity(
+      gitOutput(installedPath, ["config", "--get", "remote.origin.url"]),
+    );
+    if (
+      !installedRepository ||
+      installedRepository.host !== configuredRepository.host ||
+      installedRepository.path !== configuredRepository.path
+    ) {
+      throw new Error("checkout has a different origin");
+    }
+
+    const ref = getConfiguredGitRef(source);
+    if (!ref) return;
+    const head = gitOutput(installedPath, ["rev-parse", "--verify", "HEAD"]);
+    const target = gitOutput(installedPath, [
+      "rev-parse",
+      "--verify",
+      "--end-of-options",
+      `${ref}^{commit}`,
+    ]);
+    if (!head || head !== target) {
+      throw new Error("checkout is at a different commit");
+    }
+  } catch (error) {
+    throw new Error(
+      "A configured provider extension is not checked out at its configured Git source or ref; delegation stopped.",
+      { cause: error },
+    );
+  }
+}
+
+type PackageManagerConstraintInternals = {
+  parseSource(source: string): unknown;
+  installedNpmMatchesConfiguredVersion(
+    source: unknown,
+    installedPath: string,
+  ): Promise<boolean>;
+};
+
+type ParsedNpmSource = {
+  type?: unknown;
+  range?: unknown;
+};
+
+/**
+ * Ask Pi's package manager to apply its own npm range semantics without
+ * duplicating semver logic or installing/updating anything during delegation.
+ * These methods are private upstream implementation details, so fail closed if
+ * a future Pi release removes or renames them rather than executing an
+ * unverified installation.
+ */
+async function assertConfiguredNpmVersion(
+  packageManager: DefaultPackageManager,
+  source: string,
+  installedPath: string,
+): Promise<void> {
+  const internals =
+    packageManager as unknown as Partial<PackageManagerConstraintInternals>;
+  if (
+    typeof internals.parseSource !== "function" ||
+    typeof internals.installedNpmMatchesConfiguredVersion !== "function"
+  ) {
+    throw new Error(
+      "This Pi version cannot verify a configured provider extension version; delegation stopped.",
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = internals.parseSource.call(packageManager, source);
+  } catch (error) {
+    throw new Error(
+      "A configured provider extension version could not be parsed; delegation stopped.",
+      { cause: error },
+    );
+  }
+
+  const parsedNpm =
+    typeof parsed === "object" && parsed !== null
+      ? (parsed as ParsedNpmSource)
+      : undefined;
+  if (parsedNpm?.type !== "npm" || typeof parsedNpm.range !== "string") {
+    // Pi treats npm tags such as `@latest` as an unconstrained source when
+    // checking an installed package. They are registry aliases, not
+    // verifiable local version constraints, so fail closed instead of
+    // accepting any stale package at the same install path.
+    throw new Error(
+      "A configured provider extension uses an npm tag rather than a verifiable semver range; delegation stopped.",
+    );
+  }
+
+  try {
+    const matches = await internals.installedNpmMatchesConfiguredVersion.call(
+      packageManager,
+      parsed,
+      installedPath,
+    );
+    if (!matches) {
+      throw new Error(
+        "installed package does not satisfy the configured version",
+      );
+    }
+  } catch (error) {
+    throw new Error(
+      "A configured provider extension version does not match the installed user-scope package; delegation stopped.",
+      { cause: error },
+    );
+  }
+}
+
+async function getProviderExtensionPaths(
+  provider: string | undefined,
+  cwd: string,
+  agentDir: string,
+  settingsManager: SettingsManager,
+): Promise<string[]> {
+  // Provider-key normalization (trim + lowercase) lives in `config.ts` —
+  // `getSubagentProviderExtensionsForProvider` is the single owner of that
+  // logic, so this module never re-implements it.
+  const requested = getSubagentProviderExtensionsForProvider(provider);
+  if (!requested.length) return [];
+
+  const packageManager = new DefaultPackageManager({
+    cwd,
+    agentDir,
+    settingsManager,
+  });
+  const projectRoot = findExtensionProjectRoot(cwd);
+
+  const validateInstalledPath = (source: string, userPath: string): void => {
+    const resolvedUserPath = canonicalPath(userPath);
+    const localSource = isLocalExtensionSource(source);
+
+    // A local source is allowed only when it resolves under the user agent
+    // directory. This closes the absolute/`..` path escape that a package
+    // manager's user-scope lookup otherwise permits.
+    if (localSource && !isPathWithinDirectory(agentDir, resolvedUserPath)) {
+      throw new Error(
+        "A configured provider extension resolves outside the user agent directory; project-local extension paths are not allowed.",
+      );
+    }
+
+    // `cwd` may be a nested package directory. Validate against the repository
+    // (or project-marker) root, not just that exact directory, so a symlink from
+    // a user-scope managed package into a sibling such as /repo/extensions is
+    // never turned into executable subagent code. This check deliberately runs
+    // for local sources too: placing the user agent directory inside a project
+    // must not turn project code into a trusted extension.
+    if (projectRoot && isPathWithinDirectory(projectRoot, resolvedUserPath)) {
+      throw new Error(
+        "A configured provider extension resolves inside the project directory; project-local extension paths are not allowed.",
+      );
+    }
+
+    // Managed sources must remain inside a canonical user install root as well.
+    // This is the conservative fallback when no project boundary is
+    // discoverable, and it also protects legacy global npm installs from a
+    // package-directory symlink that escapes their node_modules root.
+    if (!localSource && !isTrustedManagedTarget(agentDir, userPath)) {
+      throw new Error(
+        "A configured provider extension cannot be verified as a trusted user installation; project-local extension paths are not allowed.",
+      );
+    }
+
+    assertConfiguredGitInstallation(source, userPath);
+  };
+
+  const installedPaths = new Map<string, string>();
+  const missing: string[] = [];
+  for (const source of requested) {
+    // Deliberately resolve only the user scope. Project-local packages are
+    // untrusted input and must never become executable subagent extensions.
+    const userPath = packageManager.getInstalledPath(source, "user");
+    if (!userPath) {
+      missing.push(source);
+      continue;
+    }
+    installedPaths.set(source, userPath);
+  }
+
+  if (missing.length > 0) {
+    const providerName = provider?.trim() || "the selected provider";
+    const sourceLabel = missing.length === 1 ? "source" : "sources";
+    throw new Error(
+      `Provider extension(s) for ${providerName} are not installed in the user scope (${missing.length} configured ${sourceLabel}). Install the configured sources with Pi before delegating; project-local installations are not allowed.`,
+    );
+  }
+
+  const paths = new Set<string>();
+  for (const source of requested) {
+    const userPath = installedPaths.get(source);
+    // Every requested source was collected above; this guard keeps the map
+    // boundary explicit if that invariant changes later.
+    if (!userPath) {
+      throw new Error(
+        "A configured provider extension disappeared before validation; delegation stopped.",
+      );
+    }
+    validateInstalledPath(source, userPath);
+    if (hasNpmVersionSpecifier(source)) {
+      await assertConfiguredNpmVersion(packageManager, source, userPath);
+    }
+    paths.add(userPath);
+  }
+
+  return [...paths];
+}
 
 /**
  * Test-only flag: when set, every newly-built settingsManager reports a small
@@ -96,32 +545,79 @@ let testRetryBaseMs: number | undefined;
 let testModelRuntimeFactory: (() => Promise<ModelRuntime>) | undefined;
 
 /**
- * Lazily build and cache the shared host deps for a (cwd + systemPrompt +
- * registered-provider IDs) combo. The first call pays the
- * `resourceLoader.reload()` cost (~1.2s). Concurrent
- * calls for the same key await the same in-flight promise rather than racing a
- * duplicate reload. Subsequent calls return the cached result.
+ * Lazily build the host deps for a task. Extension-free, provider-independent
+ * deps are cached by (agentDir, cwd, systemPrompt); provider registrations and
+ * allowlisted extensions get a private dependency graph for every session.
+ *
+ * The first cached call pays the `resourceLoader.reload()` cost (~1.2s). An
+ * extension-bearing call intentionally pays that cost again: sharing its
+ * ResourceLoader would share Pi's mutable extension runtime and let
+ * `ExtensionRunner.bindCore()` redirect one session's extension callbacks into
+ * another session.
  */
 export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
-  const providerIds = (options.providerConfigs ?? [])
-    .map(([providerId]) => providerId)
-    .join("\0");
-  const key = `${options.cwd}\0${options.systemPrompt ?? ""}\0${providerIds}`;
-  const cached = hostDepsCache.get(key);
-  if (cached) return cached;
+  const agentDir = options.agentDir ?? getAgentDir();
+  const providerExtensions = getSubagentProviderExtensionMap();
+  const providerExtensionSignature = JSON.stringify(
+    Object.entries(providerExtensions)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([provider, entries]) => [provider, [...entries]] as const),
+  );
+  const providerConfigs = options.providerConfigs ?? [];
+  const requestedExtensions = getSubagentProviderExtensionsForProvider(
+    options.modelProvider,
+  );
 
-  // Another call is already building this key — await its promise.
-  const inflight = hostDepsInflight.get(key);
-  if (inflight) return inflight;
+  // Resolve provider extensions before deciding whether to use the cache. This
+  // both fails closed for missing sources and lets us identify the only case in
+  // which a session-local SettingsManager is needed before the build starts.
+  let settingsManager: SettingsManager | undefined;
+  let additionalExtensionPaths: string[] = [];
+  if (requestedExtensions.length > 0) {
+    settingsManager = SettingsManager.create(options.cwd, agentDir);
+    additionalExtensionPaths = await getProviderExtensionPaths(
+      options.modelProvider,
+      options.cwd,
+      agentDir,
+      settingsManager,
+    );
+  }
 
-  const promise = (async (): Promise<HostDeps> => {
-    const agentDir = options.agentDir ?? getAgentDir();
+  // Provider configs may contain functions (custom stream/OAuth handlers), so a
+  // stringified value cannot safely identify them. Do not cache any call that
+  // registers one; each call gets the exact config object supplied by its
+  // caller. The same rule is used for extension-bearing calls because their
+  // extension runtime is mutable and session-owned.
+  const cacheable =
+    providerConfigs.length === 0 && additionalExtensionPaths.length === 0;
+  const key = JSON.stringify({
+    agentDir,
+    cwd: options.cwd,
+    systemPrompt:
+      options.systemPrompt === undefined
+        ? { source: "discovered" }
+        : { source: "explicit", value: options.systemPrompt },
+    modelProvider: options.modelProvider ?? "",
+    providerExtensionSignature,
+  });
+
+  if (cacheable) {
+    const cached = hostDepsCache.get(key);
+    if (cached) return cached;
+
+    // Another call is already building this key — await its promise.
+    const inflight = hostDepsInflight.get(key);
+    if (inflight) return inflight;
+  }
+
+  const build = async (): Promise<HostDeps> => {
     // Canonical model/auth runtime — the 0.80.8+ successor to the separate
-    // `authStorage` + `modelRegistry` options. Built once per (cwd + systemPrompt)
-    // and shared across concurrent subagents, exactly like the resource loader.
+    // `authStorage` + `modelRegistry` options. It is shared only for the
+    // cacheable, extension-free path; provider-specific sessions get their own
+    // runtime so all stateful host dependencies have the same ownership.
     // Reads the same ~/.pi/agent/{auth,models}.json the parent uses, so stored
     // credentials stay consistent. Runtime-only provider registrations are
-    // layered on just below; extensions themselves remain disabled.
+    // layered on just below.
     // In tests, `_setModelRuntimeFactoryForTesting` can substitute a runtime.
     const modelRuntime = testModelRuntimeFactory
       ? await testModelRuntimeFactory()
@@ -134,23 +630,24 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
           // offline-safe; auth (getAuth) still reads auth.json directly.
           allowModelNetwork: false,
         });
-    for (const [providerId, config] of options.providerConfigs ?? []) {
+    for (const [providerId, config] of providerConfigs) {
       modelRuntime.registerProvider(providerId, config);
     }
-    const settingsManager = SettingsManager.create(options.cwd, agentDir);
+
+    const resolvedSettingsManager =
+      settingsManager ?? SettingsManager.create(options.cwd, agentDir);
     if (testRetryBaseMs !== undefined) {
-      installFastRetry(settingsManager, testRetryBaseMs);
+      installFastRetry(resolvedSettingsManager, testRetryBaseMs);
     }
     const resourceLoader = new DefaultResourceLoader({
       cwd: options.cwd,
       agentDir,
-      settingsManager,
+      settingsManager: resolvedSettingsManager,
       // Subagents are headless workers — they must not load the parent's
-      // interactive extensions. This also neutralizes the shared-runtime
-      // cross-wiring risk (see module doc): with no extensions, no handlers
-      // bind to the mutated runtime methods, so the cached loader is safe to
-      // share across live sessions.
+      // interactive extension inventory. The only paths supplied here are the
+      // explicitly allowlisted, user-scoped provider extensions.
       noExtensions: true,
+      ...(additionalExtensionPaths.length ? { additionalExtensionPaths } : {}),
       // When a named agent supplies a custom prompt, it becomes the loader's
       // customPrompt — overriding the default system prompt AgentSession would
       // otherwise build. `systemPrompt` (the source) wins over file discovery.
@@ -160,11 +657,52 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
     });
     await resourceLoader.reload();
 
-    const deps: HostDeps = { modelRuntime, settingsManager, resourceLoader };
+    const extensionsResult = resourceLoader.getExtensions();
+    const extensionErrors = extensionsResult.errors;
+    const loadedExtensionPaths = extensionsResult.extensions.map(
+      (extension) => extension.resolvedPath || extension.path,
+    );
+    // A package can resolve successfully while exposing only skills/prompts,
+    // or a malformed manifest can expose no loadable extension at all. Treat
+    // that as a failed provider integration rather than silently delegating
+    // without the safety-critical behavior the allowlist requested.
+    const missingExtensionRoots = additionalExtensionPaths.filter(
+      (root) =>
+        !loadedExtensionPaths.some((extensionPath) =>
+          isPathWithinDirectory(root, extensionPath),
+        ),
+    );
+    if (extensionErrors.length > 0 || missingExtensionRoots.length > 0) {
+      const failedRoots = new Set(
+        missingExtensionRoots.concat(
+          additionalExtensionPaths.filter((root) =>
+            extensionErrors.some((error) =>
+              isPathWithinDirectory(root, error.path),
+            ),
+          ),
+        ),
+      );
+      const failureCount = Math.max(failedRoots.size, extensionErrors.length);
+      const providerName =
+        options.modelProvider?.trim() || "the selected provider";
+      throw new Error(
+        `Failed to load ${failureCount} allowlisted provider extension(s) for ${providerName}; delegation stopped instead of running without the required integration.`,
+      );
+    }
+
+    return {
+      modelRuntime,
+      settingsManager: resolvedSettingsManager,
+      resourceLoader,
+    };
+  };
+
+  if (!cacheable) return build();
+
+  const promise = build().then((deps) => {
     hostDepsCache.set(key, deps);
     return deps;
-  })();
-
+  });
   hostDepsInflight.set(key, promise);
   try {
     return await promise;
