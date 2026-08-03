@@ -1120,4 +1120,878 @@ describe("runAgentSession abort re-check", () => {
     expect(result.touchedFiles.length).toBeGreaterThan(0);
     expect(result.touchedFiles[0]).toContain("file.txt");
   });
+
+  // ── Already-aborted cleanup (item 1) ──────────────────────────────────────
+
+  test("already-aborted signal cleans up subscription and abort listener", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    let unsubscribed = false;
+    const { session } = fakeSession({ messages: [] });
+    // Wrap subscribe to detect whether the runner unsubscribes.
+    const origSubscribe = session.subscribe.bind(session);
+    (session as unknown as { subscribe: unknown }).subscribe = (
+      fn: (e: unknown) => void,
+    ) => {
+      const unsub = origSubscribe(fn);
+      return () => {
+        unsubscribed = true;
+        unsub();
+      };
+    };
+
+    // Track whether the abort listener is removed. addEventListener with
+    // { once: true } auto-removes on fire, but for an already-aborted signal
+    // the listener never fires — so removeEventListener must be called
+    // explicitly.
+    let listenerRemoved = false;
+    const origAddEventListener = controller.signal.addEventListener.bind(
+      controller.signal,
+    );
+    const origRemoveEventListener = controller.signal.removeEventListener.bind(
+      controller.signal,
+    );
+    (
+      controller.signal as unknown as {
+        addEventListener: unknown;
+      }
+    ).addEventListener = (
+      type: string,
+      listener: EventListener,
+      opts?: unknown,
+    ) => {
+      if (type === "abort") {
+        // Don't actually register — the signal is already aborted and we want
+        // to track removal independently.
+        (
+          controller.signal as unknown as { _abortListener?: unknown }
+        )._abortListener = listener;
+        return;
+      }
+      origAddEventListener(type, listener, opts as never);
+    };
+    (
+      controller.signal as unknown as {
+        removeEventListener: unknown;
+      }
+    ).removeEventListener = (type: string, listener: EventListener) => {
+      if (type === "abort") {
+        const stored = (
+          controller.signal as unknown as { _abortListener?: unknown }
+        )._abortListener;
+        if (stored === listener) {
+          listenerRemoved = true;
+          delete (controller.signal as unknown as { _abortListener?: unknown })
+            ._abortListener;
+        }
+        return;
+      }
+      origRemoveEventListener(type, listener);
+    };
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      controller.signal,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.error).toBe("Aborted");
+    expect(unsubscribed).toBe(true);
+    expect(listenerRemoved).toBe(true);
+  });
+
+  // ── Abort racing with a delayed continuation (item 2) ─────────────────────
+
+  test("re-aborts a continuation that starts after cancellation", async () => {
+    const controller = new AbortController();
+    let compacting = false;
+    let agentActive = false;
+    let aborts = 0;
+    let continuationStarted = false;
+    let continuationAborted = false;
+    let emitSessionEvent: ((event: unknown) => void) | undefined;
+
+    const fake = fakeSession({
+      messages: [],
+      isIdle: () => !agentActive && !compacting,
+      isCompacting: () => compacting,
+      abortCompaction: () => {
+        // Don't change state here — the async callback controls compaction.
+      },
+      abort: async () => {
+        aborts++;
+        if (agentActive) {
+          // The continuation is active — abort it.
+          continuationAborted = true;
+          agentActive = false;
+          emitSessionEvent?.({
+            type: "agent_end",
+            messages: [],
+            willRetry: false,
+          });
+          emitSessionEvent?.({ type: "agent_settled" });
+        }
+      },
+      prompt: async (emit) => {
+        const answer = {
+          role: "assistant",
+          content: [{ type: "text", text: "first answer" }],
+        };
+        emit({ type: "message_end", message: answer });
+        emit({ type: "agent_end", messages: [answer], willRetry: false });
+        emit({ type: "agent_settled" });
+
+        // Start compaction (fire-and-forget, like pi-codex-compaction).
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          // compaction_end
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+          compacting = false;
+
+          // Parent aborts right after compaction_end.
+          controller.abort();
+
+          // onComplete starts a continuation AFTER the abort, delayed by
+          // asynchronous authentication (the realistic gap that defeats the
+          // "two stable event-loop turns" heuristic).
+          await new Promise<void>((resolve) => setTimeout(resolve, 20));
+          continuationStarted = true;
+          agentActive = true;
+          emit({ type: "agent_start" });
+
+          // Safety: if not aborted within 200ms, finish anyway so the test
+          // doesn't hang. The assertion below will catch the missing abort.
+          await new Promise<void>((resolve) => setTimeout(resolve, 200));
+          if (agentActive) {
+            agentActive = false;
+            emit({
+              type: "agent_end",
+              messages: [],
+              willRetry: false,
+            });
+            emit({ type: "agent_settled" });
+          }
+        })();
+      },
+    });
+    emitSessionEvent = fake.emit;
+
+    const result = await runAgentSession(
+      fake.session as never,
+      "do work",
+      { cwd: process.cwd() },
+      controller.signal,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.error).toBe("Aborted");
+    expect(continuationStarted).toBe(true);
+    expect(continuationAborted).toBe(true);
+    // Initial abort (from abort handler) + re-abort (from quiescence barrier
+    // detecting the continuation).
+    expect(aborts).toBeGreaterThanOrEqual(2);
+  });
+
+  test("detects and extends quiescence for a fast continuation that completes between samples", async () => {
+    // A continuation could emit agent_start, do work, and emit agent_settled
+    // all within one microtask — between two quiescence loop samples. The
+    // session is idle again by the time the loop checks, but the generation
+    // changed. Re-abort must fire on the generation change alone, not only
+    // when !idle.
+    //
+    // This test detects activity after it completed — it cannot prevent
+    // mutations that already occurred. The second abort is a no-op because
+    // the continuation is finished. The value is that the quiescence barrier
+    // extends its wait (resets quiet turns) rather than returning immediately,
+    // which gives the runner a chance to observe any further continuations.
+    // Deterministic prevention of fast work still requires host-visible
+    // pending extension work.
+    const controller = new AbortController();
+    let compacting = false;
+    let agentActive = false;
+    let aborts = 0;
+    let continuationStarted = false;
+    let emitSessionEvent: ((event: unknown) => void) | undefined;
+
+    const fake = fakeSession({
+      messages: [],
+      isIdle: () => !agentActive && !compacting,
+      isCompacting: () => compacting,
+      prompt: async (emit) => {
+        const answer = {
+          role: "assistant",
+          content: [{ type: "text", text: "first answer" }],
+        };
+        emit({ type: "message_end", message: answer });
+        emit({ type: "agent_end", messages: [answer], willRetry: false });
+        emit({ type: "agent_settled" });
+
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+          compacting = false;
+
+          // Parent aborts right after compaction_end.
+          controller.abort();
+
+          // onComplete starts a continuation that completes in ONE microtask —
+          // faster than the quiescence loop can sample. By the time the loop
+          // checks, agentActive is already false again, but the generation
+          // has changed.
+          await Promise.resolve();
+          continuationStarted = true;
+          agentActive = true;
+          emit({ type: "agent_start" });
+          emit({ type: "agent_end", messages: [], willRetry: false });
+          emit({ type: "agent_settled" });
+          agentActive = false;
+        })();
+      },
+    });
+    emitSessionEvent = fake.emit;
+
+    // Override abort to count calls (no-op since the continuation is already
+    // done by the time re-abort fires).
+    const origAbort = fake.session.abort.bind(fake.session);
+    (fake.session as unknown as { abort: unknown }).abort = async () => {
+      aborts++;
+      await origAbort();
+    };
+
+    const result = await runAgentSession(
+      fake.session as never,
+      "do work",
+      { cwd: process.cwd() },
+      controller.signal,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.error).toBe("Aborted");
+    expect(continuationStarted).toBe(true);
+    // Re-abort must fire even though the continuation already completed —
+    // the generation change alone is sufficient signal to extend quiescence.
+    expect(aborts).toBeGreaterThanOrEqual(2);
+  });
+
+  test("stall cancellation re-aborts a continuation that starts afterward", async () => {
+    // The re-abort logic must cover stall cancellation, not just parent abort.
+    // A continuation starting after a stall-triggered cancellation should also
+    // be re-aborted.
+    _setStallTimeoutForTesting(15);
+    let compacting = false;
+    let agentActive = false;
+    let aborts = 0;
+    let continuationStarted = false;
+    let continuationAborted = false;
+    let emitSessionEvent: ((event: unknown) => void) | undefined;
+
+    const fake = fakeSession({
+      messages: [],
+      isIdle: () => !agentActive && !compacting,
+      isCompacting: () => compacting,
+      abortCompaction: () => {
+        if (compacting) {
+          compacting = false;
+          emitSessionEvent?.({
+            type: "compaction_end",
+            reason: "manual",
+            result: undefined,
+            aborted: true,
+            willRetry: false,
+          });
+        }
+      },
+      abort: async () => {
+        aborts++;
+        if (agentActive) {
+          continuationAborted = true;
+          agentActive = false;
+          emitSessionEvent?.({
+            type: "agent_end",
+            messages: [],
+            willRetry: false,
+          });
+          emitSessionEvent?.({ type: "agent_settled" });
+        }
+      },
+      prompt: async (emit) => {
+        const answer = {
+          role: "assistant",
+          content: [{ type: "text", text: "first answer" }],
+        };
+        emit({ type: "message_end", message: answer });
+        emit({ type: "agent_end", messages: [answer], willRetry: false });
+        emit({ type: "agent_settled" });
+
+        // Start a compaction that lasts beyond the stall timeout (15ms).
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          // Wait for the stall watchdog to fire and abort compaction.
+          await new Promise<void>((resolve) => setTimeout(resolve, 30));
+          // After compaction is aborted, a continuation starts — simulating
+          // an onComplete callback that runs despite the stall cancellation.
+          await Promise.resolve();
+          continuationStarted = true;
+          agentActive = true;
+          emit({ type: "agent_start" });
+
+          // Safety: if not aborted within 200ms, finish anyway so the test
+          // doesn't hang. The assertion below will catch the missing abort.
+          await new Promise<void>((resolve) => setTimeout(resolve, 200));
+          if (agentActive) {
+            agentActive = false;
+            emit({ type: "agent_end", messages: [], willRetry: false });
+            emit({ type: "agent_settled" });
+          }
+        })();
+      },
+    });
+    emitSessionEvent = fake.emit;
+
+    try {
+      const result = await runAgentSession(
+        fake.session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined, // No parent abort signal — stall is the cancellation source.
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.failureKind).toBe("stalled");
+      expect(continuationStarted).toBe(true);
+      expect(continuationAborted).toBe(true);
+      // Initial stall abort + re-abort from the quiescence barrier.
+      expect(aborts).toBeGreaterThanOrEqual(2);
+    } finally {
+      _setStallTimeoutForTesting(undefined);
+    }
+  });
+
+  test("async abort-caused settlement events converge without an abort loop", async () => {
+    // session.abort() may emit settlement events asynchronously after returning
+    // — e.g. a delayed agent_end/agent_settled as the stream unwinds. Recording
+    // abortRequestedGeneration after calling abort() only accounts for
+    // synchronous events; later abort-caused events increment the generation
+    // and can trigger another re-abort. This test verifies that the loop
+    // converges: each re-abort resets the tracker, the async events settle,
+    // and the abort count stays bounded rather than looping forever.
+    //
+    // Real abort() is idempotent — it only produces settlement events on the
+    // first call. Subsequent calls are no-ops. The test models this: the first
+    // abort schedules async agent_end/agent_settled, later calls do nothing.
+    const controller = new AbortController();
+    let compacting = false;
+    let agentActive = false;
+    let aborts = 0;
+    let firstAbort = true;
+    let emitSessionEvent: ((event: unknown) => void) | undefined;
+
+    const fake = fakeSession({
+      messages: [],
+      isIdle: () => !agentActive && !compacting,
+      isCompacting: () => compacting,
+      prompt: async (emit) => {
+        const answer = {
+          role: "assistant",
+          content: [{ type: "text", text: "first answer" }],
+        };
+        emit({ type: "message_end", message: answer });
+        emit({ type: "agent_end", messages: [answer], willRetry: false });
+        emit({ type: "agent_settled" });
+
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+          compacting = false;
+          // Parent aborts right after compaction_end.
+          controller.abort();
+        })();
+      },
+    });
+    emitSessionEvent = fake.emit;
+
+    // abort() emits settlement events asynchronously, but only on the first
+    // call — subsequent calls are no-ops (matching real AgentSession behavior).
+    (fake.session as unknown as { abort: unknown }).abort = async () => {
+      aborts++;
+      if (!firstAbort) return;
+      firstAbort = false;
+      agentActive = true;
+      // Asynchronous settlement: the events fire after abort() returns,
+      // so abortRequestedGeneration (set after the call) won't include them.
+      void (async () => {
+        await Promise.resolve();
+        emitSessionEvent?.({
+          type: "agent_end",
+          messages: [],
+          willRetry: false,
+        });
+        emitSessionEvent?.({ type: "agent_settled" });
+        agentActive = false;
+      })();
+    };
+
+    const result = await runAgentSession(
+      fake.session as never,
+      "do work",
+      { cwd: process.cwd() },
+      controller.signal,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.error).toBe("Aborted");
+    // The loop must converge — initial abort + at most one re-abort from the
+    // async settlement events. A loop bug would hang the test or produce an
+    // unbounded count.
+    expect(aborts).toBeLessThanOrEqual(3);
+    expect(aborts).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── Longer quiescence sequences (item 4) ──────────────────────────────────
+
+  test("handles compaction → continuation → second compaction → second continuation", async () => {
+    let compacting = false;
+    let agentActive = false;
+    let callbackFinished = false;
+    const firstAnswer = {
+      role: "assistant",
+      content: [{ type: "text", text: "first answer" }],
+    };
+    const secondAnswer = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "second answer after second compaction" },
+      ],
+    };
+
+    const { session } = fakeSession({
+      messages: [],
+      isIdle: () => !agentActive && !compacting,
+      isCompacting: () => compacting,
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: firstAnswer });
+        emit({ type: "agent_end", messages: [firstAnswer], willRetry: false });
+        emit({ type: "agent_settled" });
+
+        // First compaction → first continuation (which triggers a second
+        // compaction → second continuation).
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 5));
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+          compacting = false;
+
+          // First continuation starts.
+          await Promise.resolve();
+          agentActive = true;
+          emit({ type: "agent_start" });
+          const continuedAnswer = {
+            role: "assistant",
+            content: [{ type: "text", text: "continuation answer" }],
+          };
+          emit({ type: "message_end", message: continuedAnswer });
+          emit({
+            type: "agent_end",
+            messages: [continuedAnswer],
+            willRetry: false,
+          });
+          agentActive = false;
+          emit({ type: "agent_settled" });
+
+          // Second compaction → second continuation.
+          compacting = true;
+          emit({ type: "compaction_start", reason: "manual" });
+          await new Promise<void>((resolve) => setTimeout(resolve, 5));
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+          compacting = false;
+
+          await Promise.resolve();
+          agentActive = true;
+          emit({ type: "agent_start" });
+          emit({ type: "message_end", message: secondAnswer });
+          emit({
+            type: "agent_end",
+            messages: [secondAnswer],
+            willRetry: false,
+          });
+          agentActive = false;
+          emit({ type: "agent_settled" });
+          callbackFinished = true;
+        })();
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(callbackFinished).toBe(true);
+    expect(result.output).toContain("first answer");
+    expect(result.output).toContain("continuation answer");
+    expect(result.output).toContain("second answer after second compaction");
+  });
+
+  test("captures usage, tool activity, and touched files from a continuation", async () => {
+    let compacting = false;
+    let agentActive = false;
+    let statsCall = 0;
+    const firstAnswer = {
+      role: "assistant",
+      content: [{ type: "text", text: "initial answer" }],
+    };
+    const continuedAnswer = {
+      role: "assistant",
+      content: [{ type: "text", text: "continuation wrote a file" }],
+    };
+
+    const progress: Array<{
+      toolUses?: number;
+      activities?: Array<{ name: string }>;
+    }> = [];
+    const tmpDir = `/tmp/delegate-runner-cont-${Date.now()}`;
+    const { session } = fakeSession({
+      messages: [],
+      isIdle: () => !agentActive && !compacting,
+      isCompacting: () => compacting,
+      getStats: () => {
+        // First snapshot (before prompt): 0. Subsequent calls reflect
+        // cumulative tokens including the continuation.
+        const total = statsCall++ === 0 ? 0 : 100;
+        return {
+          tokens: {
+            input: total,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total,
+          },
+          cost: 0,
+        } as never;
+      },
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: firstAnswer });
+        emit({ type: "agent_end", messages: [firstAnswer], willRetry: false });
+        emit({ type: "agent_settled" });
+
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 5));
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+          compacting = false;
+
+          await Promise.resolve();
+          agentActive = true;
+          emit({ type: "agent_start" });
+
+          // The continuation uses the write tool.
+          emit({
+            type: "tool_execution_start",
+            toolCallId: "cont-write",
+            toolName: "write",
+            args: { path: "continuation-file.txt", content: "data" },
+          });
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "cont-write",
+            toolName: "write",
+            result: { content: [] },
+            isError: false,
+          });
+
+          emit({ type: "message_end", message: continuedAnswer });
+          emit({
+            type: "agent_end",
+            messages: [continuedAnswer],
+            willRetry: false,
+          });
+          agentActive = false;
+          emit({ type: "agent_settled" });
+        })();
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: tmpDir },
+      undefined,
+      (update) => progress.push(update),
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toContain("initial answer");
+    expect(result.output).toContain("continuation wrote a file");
+    expect(result.tokens).toBe(100);
+    expect(result.usage.totalTokens).toBe(100);
+    expect(result.touchedFiles.length).toBeGreaterThan(0);
+    expect(result.touchedFiles[0]).toContain("continuation-file.txt");
+    // The continuation's tool call must be reflected in progress updates.
+    expect(progress.some((p) => p.toolUses === 1)).toBe(true);
+    expect(
+      progress.some(
+        (p) => p.activities?.some((a) => a.name === "write") === true,
+      ),
+    ).toBe(true);
+  });
+
+  test("stall watchdog fires during post-prompt compaction", async () => {
+    _setStallTimeoutForTesting(15);
+    let compacting = false;
+    let aborts = 0;
+    let compactionAborts = 0;
+    const answer = {
+      role: "assistant",
+      content: [{ type: "text", text: "answer before stalled compaction" }],
+    };
+    const { session } = fakeSession({
+      messages: [],
+      isIdle: () => !compacting,
+      isCompacting: () => compacting,
+      abortCompaction: () => {
+        compactionAborts++;
+        compacting = false;
+      },
+      abort: () => {
+        aborts++;
+      },
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: answer });
+        emit({ type: "agent_end", messages: [answer], willRetry: false });
+        emit({ type: "agent_settled" });
+
+        // Start a compaction that never ends on its own — the stall watchdog
+        // must fire and cancel it.
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        // Don't emit compaction_end; let the stall watchdog handle it.
+      },
+    });
+
+    try {
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.failureKind).toBe("stalled");
+      expect(result.error).toContain("Stalled");
+      expect(compactionAborts).toBeGreaterThanOrEqual(1);
+      expect(aborts).toBeGreaterThanOrEqual(1);
+      expect(compacting).toBe(false);
+    } finally {
+      _setStallTimeoutForTesting(undefined);
+    }
+  });
+
+  test("250ms compatibility probe handles isCompacting clearing without an event", async () => {
+    let compacting = true;
+    let probeFired = false;
+    const answer = {
+      role: "assistant",
+      content: [{ type: "text", text: "answer before silent compaction" }],
+    };
+    const { session } = fakeSession({
+      messages: [],
+      isIdle: () => !compacting,
+      isCompacting: () => compacting,
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: answer });
+        emit({ type: "agent_end", messages: [answer], willRetry: false });
+        emit({ type: "agent_settled" });
+
+        // Start compaction but never emit compaction_end. Instead, silently
+        // clear isCompacting after a short delay — simulating a host version
+        // that clears an internal busy flag without a corresponding event.
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 50));
+          compacting = false;
+          probeFired = true;
+        })();
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    // The probe must have detected the silent state change.
+    expect(probeFired).toBe(true);
+    expect(result.output).toBe("answer before silent compaction");
+    expect(result.error).toBeUndefined();
+  });
+
+  // ── Runner-contract: quiescence barrier prevents post-return callback crash ─
+  //
+  // The original crash: prompt() returns → an async compaction callback
+  // (started by an extension's agent_settled handler via ctx.compact) fires
+  // after lifecycle has already disposed the session → the callback accesses
+  // ctx.hasUI on a disposed session → crash.
+  //
+  // This is a runner-contract test, NOT a lifecycle integration test. It
+  // verifies that runAgentSession does not return until the async compaction
+  // callback has finished — the precondition lifecycle relies on. It does not
+  // call session.dispose() or execute lifecycle.ts. A full cross-module
+  // integration test would need the test harness with a real
+  // compaction-triggering extension; the runner contract above is the seam
+  // that prevents the crash.
+
+  test("runner contract: quiescence barrier outlasts async compaction callback (ctx.hasUI access)", async () => {
+    let disposed = false;
+    let callbackFinished = false;
+    let callbackCrashed = false;
+    let compacting = false;
+
+    // Simulate ctx.hasUI: after dispose, accessing it throws (matching the
+    // real extension crash when the session's extension runtime is torn down).
+    const fakeCtx = {
+      get hasUI(): boolean {
+        if (disposed) {
+          callbackCrashed = true;
+          throw new Error(
+            "Cannot read properties of undefined (reading 'hasUI')",
+          );
+        }
+        return false;
+      },
+    };
+
+    const answer = {
+      role: "assistant",
+      content: [{ type: "text", text: "answer before async compaction" }],
+    };
+
+    const { session } = fakeSession({
+      messages: [],
+      isIdle: () => !compacting,
+      isCompacting: () => compacting,
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: answer });
+        emit({ type: "agent_end", messages: [answer], willRetry: false });
+        emit({ type: "agent_settled" });
+
+        // An extension's agent_settled handler starts ctx.compact() — fire
+        // and forget, just like pi-codex-compaction does.
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+          compacting = false;
+
+          // ctx.compact's onComplete callback runs after compaction_end.
+          // It accesses ctx.hasUI — the exact access that crashed when
+          // disposal raced ahead of the callback.
+          await Promise.resolve();
+          // This is the critical access. If the runner returned before this
+          // line and lifecycle disposed the session, this would throw.
+          void fakeCtx.hasUI;
+          callbackFinished = true;
+        })();
+      },
+    });
+
+    // Simulate lifecycle's pattern: run the runner, then dispose.
+    // The runner must not return until the callback is complete.
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    // Simulate disposal immediately after the runner returns — exactly what
+    // lifecycle does in disposeOwnedSession().
+    disposed = true;
+
+    expect(callbackFinished).toBe(true);
+    expect(callbackCrashed).toBe(false);
+    expect(result.output).toBe("answer before async compaction");
+    expect(result.error).toBeUndefined();
+  });
 });
