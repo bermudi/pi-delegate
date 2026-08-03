@@ -17,6 +17,7 @@ import { _setStallTimeoutForTesting } from "./config.ts";
 function fakeSession(opts: {
   prompt?: (emit: (e: unknown) => void) => Promise<void>;
   messages?: unknown[];
+  getMessages?: () => unknown[];
   state?: unknown;
   abort?: () => Promise<void> | void;
   getStats?: () => {
@@ -58,7 +59,7 @@ function fakeSession(opts: {
         await opts.abort?.();
       },
       get messages() {
-        return opts.messages ?? [];
+        return opts.getMessages?.() ?? opts.messages ?? [];
       },
       get state() {
         return opts.state ?? {};
@@ -247,6 +248,508 @@ describe("runAgentSession abort re-check", () => {
 
     expect(result.output).toBe("final answer");
     expect(result.output).not.toContain("transient failure");
+  });
+
+  test("filters a cloned retry response positionally", async () => {
+    const retryAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "cloned transient failure" }],
+      stopReason: "error",
+    };
+    const retryAssistantCopy = {
+      ...retryAssistant,
+      content: [...retryAssistant.content],
+    };
+    const finalAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "final after cloned retry" }],
+    };
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: retryAssistant });
+        // The host/extension may copy the message before putting it in
+        // agent_end. Filtering by object identity would leak the original.
+        emit({
+          type: "agent_end",
+          messages: [retryAssistantCopy],
+          willRetry: true,
+        });
+        emit({ type: "message_end", message: finalAssistant });
+        emit({
+          type: "agent_end",
+          messages: [finalAssistant],
+          willRetry: false,
+        });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("final after cloned retry");
+    expect(result.output).not.toContain("cloned transient failure");
+  });
+
+  test("retains earlier successful turns when the final turn is internally retried", async () => {
+    const firstAssistant = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "completed the first turn" },
+        { type: "toolCall", id: "call-1", name: "read", arguments: {} },
+      ],
+    };
+    const toolResult = {
+      role: "toolResult",
+      toolCallId: "call-1",
+      toolName: "read",
+      content: [{ type: "text", text: "file contents" }],
+      isError: false,
+    };
+    const retryAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "retrying response" }],
+      stopReason: "error",
+    };
+    const finalAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "final answer" }],
+    };
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        // This is the shape of the upstream agent loop: one agent_end carries
+        // all messages produced in the run, while willRetry is about only the
+        // final retryable assistant response.
+        emit({ type: "message_end", message: firstAssistant });
+        emit({ type: "message_end", message: toolResult });
+        emit({ type: "message_end", message: retryAssistant });
+        emit({
+          type: "agent_end",
+          messages: [firstAssistant, toolResult, retryAssistant],
+          willRetry: true,
+        });
+        emit({ type: "message_end", message: finalAssistant });
+        emit({
+          type: "agent_end",
+          messages: [finalAssistant],
+          willRetry: false,
+        });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toContain("completed the first turn");
+    expect(result.output).toContain("final answer");
+    expect(result.output).not.toContain("retrying response");
+  });
+
+  test("drops an overflow response when compaction retries it", async () => {
+    const overflowAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "context overflow error" }],
+      stopReason: "error",
+    };
+    const finalAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "successful answer after compaction" }],
+    };
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: overflowAssistant });
+        emit({
+          type: "agent_end",
+          messages: [overflowAssistant],
+          // Pi marks this false because compaction, not auto-retry, decides
+          // whether the overflow turn will continue.
+          willRetry: false,
+        });
+        emit({ type: "compaction_start", reason: "overflow" });
+        emit({
+          type: "compaction_end",
+          reason: "overflow",
+          result: undefined,
+          aborted: false,
+          willRetry: true,
+        });
+        emit({ type: "message_end", message: finalAssistant });
+        emit({
+          type: "agent_end",
+          messages: [finalAssistant],
+          willRetry: false,
+        });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("successful answer after compaction");
+    expect(result.output).not.toContain("context overflow error");
+  });
+
+  test("overflow retry removes only the failed final turn", async () => {
+    const firstAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "successful earlier turn" }],
+    };
+    const toolResult = {
+      role: "toolResult",
+      toolCallId: "call-1",
+      toolName: "read",
+      content: [{ type: "text", text: "file contents" }],
+      isError: false,
+    };
+    const overflowAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "overflowing final turn" }],
+      stopReason: "error",
+    };
+    const finalAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "final answer" }],
+    };
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: firstAssistant });
+        emit({ type: "message_end", message: toolResult });
+        emit({ type: "message_end", message: overflowAssistant });
+        emit({
+          type: "agent_end",
+          messages: [firstAssistant, toolResult, overflowAssistant],
+          willRetry: false,
+        });
+        emit({ type: "compaction_start", reason: "overflow" });
+        emit({
+          type: "compaction_end",
+          reason: "overflow",
+          result: undefined,
+          aborted: false,
+          willRetry: true,
+        });
+        emit({ type: "message_end", message: finalAssistant });
+        emit({
+          type: "agent_end",
+          messages: [finalAssistant],
+          willRetry: false,
+        });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toContain("successful earlier turn");
+    expect(result.output).toContain("final answer");
+    expect(result.output).not.toContain("overflowing final turn");
+  });
+
+  test("retains overflow evidence when compaction does not retry", async () => {
+    const overflowAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "overflow could not be recovered" }],
+      stopReason: "error",
+    };
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: overflowAssistant });
+        emit({
+          type: "agent_end",
+          messages: [overflowAssistant],
+          willRetry: false,
+        });
+        emit({ type: "compaction_start", reason: "overflow" });
+        emit({
+          type: "compaction_end",
+          reason: "overflow",
+          result: undefined,
+          aborted: false,
+          willRetry: false,
+          errorMessage: "Context overflow recovery failed",
+        });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("overflow could not be recovered");
+  });
+
+  test("threshold compaction does not discard a successful answer", async () => {
+    const answer = {
+      role: "assistant",
+      content: [{ type: "text", text: "answer before threshold compaction" }],
+      stopReason: "stop",
+    };
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: answer });
+        emit({ type: "agent_end", messages: [answer], willRetry: false });
+        emit({ type: "compaction_start", reason: "threshold" });
+        emit({
+          type: "compaction_end",
+          reason: "threshold",
+          result: undefined,
+          aborted: false,
+          willRetry: false,
+        });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("answer before threshold compaction");
+  });
+
+  test("keeps partial output after an earlier successful turn", async () => {
+    const firstAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "completed earlier turn" }],
+    };
+    const partialAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "newer partial response" }],
+    };
+    const syntheticFailure = {
+      role: "assistant",
+      content: [],
+      stopReason: "error",
+    };
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: firstAssistant });
+        emit({
+          type: "message_start",
+          message: { role: "assistant", content: [] },
+        });
+        emit({ type: "message_update", message: partialAssistant });
+        // Pi can append an empty synthetic failure message after a provider
+        // throws, leaving the useful stream text without message_end.
+        emit({ type: "message_end", message: syntheticFailure });
+        emit({
+          type: "agent_end",
+          messages: [firstAssistant, syntheticFailure],
+          willRetry: false,
+        });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toContain("completed earlier turn");
+    expect(result.output).toContain("newer partial response");
+  });
+
+  test("does not duplicate partial text already present in agent_end", async () => {
+    const firstAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "first response" }],
+    };
+    const partialAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "partial response" }],
+    };
+    const laterAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "later response" }],
+    };
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: firstAssistant });
+        emit({ type: "message_update", message: partialAssistant });
+        // A host may copy the in-progress message into agent_end before the
+        // stream settles. It is already represented in eventText here.
+        emit({
+          type: "agent_end",
+          messages: [firstAssistant, partialAssistant, laterAssistant],
+          willRetry: false,
+        });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output.match(/partial response/g)).toHaveLength(1);
+    expect(result.output).toContain("later response");
+  });
+
+  test("keeps newly appended fallback output before message_end", async () => {
+    const historical = {
+      role: "assistant",
+      content: [{ type: "text", text: "historical answer" }],
+    };
+    const messages: unknown[] = [historical];
+    const { session } = fakeSession({
+      messages,
+      prompt: async () => {
+        messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: "partial appended output" }],
+        });
+        throw new Error("provider failed before message_end");
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("partial appended output");
+    expect(result.output).not.toContain("historical answer");
+  });
+
+  test("does not fall back to historical output after transcript replacement", async () => {
+    const historical = {
+      role: "assistant",
+      content: [{ type: "text", text: "historical answer" }],
+    };
+    let messages: unknown[] = [historical];
+    const { session } = fakeSession({
+      getMessages: () => messages,
+      prompt: async (emit) => {
+        emit({ type: "compaction_start", reason: "threshold" });
+        // Compaction reconstructs historical messages as new objects and then
+        // the provider fails before a new message_end is available.
+        messages = [
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "historical answer" }],
+          },
+        ];
+        emit({
+          type: "compaction_end",
+          reason: "threshold",
+          aborted: false,
+          willRetry: false,
+        });
+        throw new Error("provider failed before message_end");
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("(no output)");
+    expect(result.output).not.toContain("historical answer");
+  });
+
+  test("preserves useful output from a failed stream before message_end", async () => {
+    const partialAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "partial before provider failure" }],
+    };
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        emit({
+          type: "message_start",
+          message: { role: "assistant", content: [] },
+        });
+        emit({ type: "message_update", message: partialAssistant });
+        throw new Error("provider failed mid-stream");
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("partial before provider failure");
   });
 
   test("aborts a silent prompt and reports a structured stalled failure", async () => {

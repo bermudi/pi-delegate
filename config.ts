@@ -37,6 +37,10 @@ export interface DelegateConfig {
     /** Base delay (ms) for exponential backoff between whole-task retries. */
     wholeTaskBaseDelayMs?: number;
   };
+  /** User-scope extension sources to load for subagents by provider. */
+  providerExtensions?: {
+    [provider: string]: readonly string[];
+  };
   /** LLM-facing output bounding: over-threshold final output is spilled to a
    *  temp file with a tail kept in-context. See `spill.ts`. */
   output?: {
@@ -50,6 +54,50 @@ export interface DelegateConfig {
 const DELEGATE_CONFIG_DIR = path.join(os.homedir(), ".pi", "agent");
 const DELEGATE_CONFIG_PATH = path.join(DELEGATE_CONFIG_DIR, "delegate.json");
 
+function normalizeProviderExtensions(
+  raw: unknown,
+): Record<string, readonly string[]> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+
+  // A null-prototype map keeps config keys such as `constructor` and
+  // `__proto__` from resolving to Object.prototype members or mutating the
+  // map's prototype during normalization.
+  const out = Object.create(null) as Record<string, readonly string[]>;
+  for (const [provider, entries] of Object.entries(
+    raw as Record<string, unknown>,
+  )) {
+    const normalizedProvider = provider.trim().toLowerCase();
+    if (!normalizedProvider || !Array.isArray(entries)) continue;
+    const normalizedEntries = entries
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter((entry): entry is string => entry.length > 0);
+    if (normalizedEntries.length === 0) continue;
+    out[normalizedProvider] = [...new Set(normalizedEntries)];
+  }
+
+  return out;
+}
+
+// Provider-scoped opt-in extension map for subagents. Keep this aligned with
+// the currently shipped codex remote-compaction integration. `delegate.json`
+// `providerExtensions` replaces a provider's entries (it does not append); an
+// empty array is ignored so the default persists.
+const DEFAULT_PROVIDER_EXTENSIONS: Record<string, readonly string[]> = {
+  "openai-codex": ["npm:@ogulcancelik/pi-codex-compaction"],
+};
+
+function resolveProviderExtensions(
+  raw: unknown,
+): Record<string, readonly string[]> {
+  const out = Object.create(null) as Record<string, readonly string[]>;
+  Object.assign(
+    out,
+    DEFAULT_PROVIDER_EXTENSIONS,
+    normalizeProviderExtensions(raw),
+  );
+  return out;
+}
+
 const DEFAULT_DELEGATE_CONFIG: DelegateConfig = {
   agent: { default: null },
   concurrency: { default: MAX_CONCURRENCY },
@@ -59,6 +107,7 @@ const DEFAULT_DELEGATE_CONFIG: DelegateConfig = {
     wholeTaskMaxRetries: 3,
     wholeTaskBaseDelayMs: 1_000,
   },
+  providerExtensions: DEFAULT_PROVIDER_EXTENSIONS,
   output: {
     spillThresholdChars: OUTPUT_SPILL_THRESHOLD_CHARS,
     spillTailChars: OUTPUT_SPILL_TAIL_CHARS,
@@ -90,6 +139,7 @@ export function loadDelegateConfig(): DelegateConfig {
         ...(parsed.concurrency ?? {}),
       },
       retry: { ...DEFAULT_DELEGATE_CONFIG.retry, ...(parsed.retry ?? {}) },
+      providerExtensions: resolveProviderExtensions(parsed.providerExtensions),
       output: { ...DEFAULT_DELEGATE_CONFIG.output, ...(parsed.output ?? {}) },
     } as DelegateConfig;
   } catch {
@@ -126,6 +176,69 @@ export function _setStallTimeoutForTesting(
   timeoutMs: number | undefined,
 ): void {
   stallTimeoutOverrideForTesting = timeoutMs;
+}
+
+/**
+ * Test-only seam: replace delegate config at runtime.
+ *
+ * This is only for deterministic tests; production config is file-only and not
+ * expected to mutate at runtime.
+ */
+export function _setDelegateConfigForTesting(
+  config: Partial<DelegateConfig> = {},
+): void {
+  __delegateConfig = {
+    ...DEFAULT_DELEGATE_CONFIG,
+    ...config,
+    agent: {
+      ...DEFAULT_DELEGATE_CONFIG.agent,
+      ...(config.agent ?? {}),
+    },
+    concurrency: {
+      ...DEFAULT_DELEGATE_CONFIG.concurrency,
+      ...(config.concurrency ?? {}),
+    },
+    retry: {
+      ...DEFAULT_DELEGATE_CONFIG.retry,
+      ...(config.retry ?? {}),
+    },
+    providerExtensions: resolveProviderExtensions(config.providerExtensions),
+    output: {
+      ...DEFAULT_DELEGATE_CONFIG.output,
+      ...(config.output ?? {}),
+    },
+  };
+  stallTimeoutOverrideForTesting = undefined;
+}
+
+/**
+ * Get the configured provider-scoped extension allowlist for subagents.
+ * Explicit configs are normalized here too, so callers using the injected
+ * config form get the same case-insensitive and replace-per-provider
+ * semantics as the file-backed singleton.
+ */
+export function getSubagentProviderExtensionMap(
+  config: DelegateConfig = __delegateConfig,
+): Readonly<Record<string, readonly string[]>> {
+  return config.providerExtensions
+    ? resolveProviderExtensions(config.providerExtensions)
+    : DEFAULT_PROVIDER_EXTENSIONS;
+}
+
+/**
+ * Get extension sources for a specific provider's subagents. Provider matching is
+ * case-insensitive.
+ */
+export function getSubagentProviderExtensionsForProvider(
+  provider: string | undefined,
+  config: DelegateConfig = __delegateConfig,
+): readonly string[] {
+  const normalized = provider?.trim().toLowerCase();
+  if (!normalized) return [];
+  const extensions = getSubagentProviderExtensionMap(config);
+  return Object.prototype.hasOwnProperty.call(extensions, normalized)
+    ? (extensions[normalized] ?? [])
+    : [];
 }
 
 // ── Config Getters ───────────────────────────────────────────────────────

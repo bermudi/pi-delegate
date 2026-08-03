@@ -13,6 +13,7 @@ const REQUIRED_SYMBOLS = [
   "SettingsManager",
   "SessionManager",
   "DefaultResourceLoader",
+  "DefaultPackageManager",
   "createAgentSession",
   "getAgentDir",
   "parseFrontmatter",

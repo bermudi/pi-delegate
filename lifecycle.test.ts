@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { createTestSession } from "@marcfargas/pi-test-harness";
 // The test harness loads the extension via jiti. Under bun, jiti shares its
 // module graph with native imports, so the `ticketRegistry`/
@@ -30,7 +31,10 @@ import {
   _setHostRetryBaseMsForTesting,
   _setModelRuntimeFactoryForTesting,
 } from "./host.ts";
-import { _setWholeTaskRetryForTesting, isModelAttributableError } from "./lifecycle.ts";
+import {
+  _setWholeTaskRetryForTesting,
+  isModelAttributableError,
+} from "./lifecycle.ts";
 import { _resetPoolForTesting } from "./pool.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
@@ -190,6 +194,39 @@ describe("delegate task lifecycle integration", () => {
     );
     expect(details.results[0]?.tokens).toBeGreaterThan(0);
     expect(details.results[0]?.agent).toBe("ad-hoc");
+  });
+
+  test("disposes a fresh stateless session after successful completion", async () => {
+    const stream = installStreamMock("Disposed after success.");
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts, stream);
+
+    let disposals = 0;
+    const originalDispose = AgentSession.prototype.dispose;
+    AgentSession.prototype.dispose = function disposeForTest(
+      this: AgentSession,
+    ) {
+      disposals++;
+      originalDispose.call(this);
+    };
+
+    try {
+      const result = await getDelegateTool(ts).execute(
+        "tc-dispose-success",
+        { tasks: [{ prompt: "do work" }] },
+        undefined,
+        undefined,
+        getExecContext(ts),
+      );
+      const details = (result as any).details as {
+        results: Array<{ error?: string }>;
+      };
+
+      expect(details.results[0]?.error).toBeUndefined();
+      expect(disposals).toBe(1);
+    } finally {
+      AgentSession.prototype.dispose = originalDispose;
+    }
   });
 
   test("ad-hoc prompt inherits parent system prompt and appends AGENTS.md", async () => {
@@ -1200,7 +1237,13 @@ describe("delegate retry and error recovery", () => {
     );
 
     const details = (result as any).details as {
-      results: Array<{ output?: string; error?: string }>;
+      results: Array<{
+        output?: string;
+        error?: string;
+        tokens?: number;
+        usage?: { totalTokens: number };
+      }>;
+      progress: Array<{ tokens: number }>;
     };
 
     expect(callCount).toBe(5);
@@ -1208,6 +1251,70 @@ describe("delegate retry and error recovery", () => {
     expect(details.results[0]?.output).toContain(
       "Recovered on fresh task attempt",
     );
+    // Four failed provider calls (the first AgentSession attempt) and one
+    // successful call (the fresh whole-task attempt) all count. The final
+    // result and progress row must expose that same accumulated total.
+    expect(details.results[0]?.usage?.totalTokens).toBe(150);
+    expect(details.results[0]?.tokens).toBe(150);
+    expect(details.results[0]?.tokens).toBe(
+      details.results[0]?.usage?.totalTokens,
+    );
+    expect(details.progress[0]?.tokens).toBe(150);
+  });
+
+  test("abort during whole-task retry backoff keeps tokens aligned with usage", async () => {
+    // Let one fresh whole-task retry complete, then cancel while the next
+    // retry is sleeping. This exercises the branch that used to replace only
+    // usage and leave tokens at the last attempt's value.
+    _setWholeTaskRetryForTesting({ maxRetries: 3, baseDelayMs: 200 });
+    const controller = new AbortController();
+    let callCount = 0;
+    let abortTimer: ReturnType<typeof setTimeout> | undefined;
+    const stream = mockPiAiStream((orig) => ({
+      ...orig,
+      streamSimple: () => {
+        callCount++;
+        if (callCount === 8) {
+          abortTimer = setTimeout(() => controller.abort(), 50);
+        }
+        return mockStreamError("connection refused");
+      },
+    }));
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts, stream);
+
+    try {
+      const toolDef = getDelegateTool(ts);
+      const ctx = getExecContext(ts);
+      const result = await toolDef.execute(
+        "tc-whole-task-retry-abort",
+        { tasks: [{ prompt: "do work" }] },
+        controller.signal,
+        undefined,
+        ctx,
+      );
+
+      const details = (result as any).details as {
+        results: Array<{
+          error?: string;
+          tokens?: number;
+          usage?: { totalTokens: number };
+        }>;
+        progress: Array<{ tokens: number }>;
+      };
+
+      expect(callCount).toBe(8);
+      expect(details.results[0]?.error).toBe("Aborted");
+      expect(details.results[0]?.usage?.totalTokens).toBe(240);
+      expect(details.results[0]?.tokens).toBe(240);
+      expect(details.results[0]?.tokens).toBe(
+        details.results[0]?.usage?.totalTokens,
+      );
+      expect(details.progress[0]?.tokens).toBe(240);
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
+    }
   });
 
   test("non-retryable error → immediate failure, no retry", async () => {
@@ -1279,7 +1386,10 @@ describe("delegate retry and error recovery", () => {
         sessionFile?: string;
       }>;
     };
-    const content = (result as any).content as Array<{ type: string; text: string }>;
+    const content = (result as any).content as Array<{
+      type: string;
+      text: string;
+    }>;
     const contentText = content.map((c) => c.text).join("\n");
 
     expect(details.results[0]?.error).toContain("usage limit");
@@ -1670,9 +1780,9 @@ describe("isModelAttributableError", () => {
     expect(isModelAttributableError("temporarily overloaded")).toBe(false);
     // A bare per-minute rate-limit 429 (no account-level wording) is transient.
     expect(isModelAttributableError("429 Too Many Requests")).toBe(false);
-    expect(isModelAttributableError("rate limit exceeded, try again later")).toBe(
-      false,
-    );
+    expect(
+      isModelAttributableError("rate limit exceeded, try again later"),
+    ).toBe(false);
   });
 
   test("abort errors → false (not a model failure)", () => {
