@@ -20,6 +20,10 @@ function fakeSession(opts: {
   getMessages?: () => unknown[];
   state?: unknown;
   abort?: () => Promise<void> | void;
+  abortCompaction?: () => void;
+  abortBranchSummary?: () => void;
+  isIdle?: () => boolean;
+  isCompacting?: () => boolean;
   getStats?: () => {
     sessionFile?: string;
     sessionId?: string;
@@ -57,6 +61,18 @@ function fakeSession(opts: {
       },
       async abort() {
         await opts.abort?.();
+      },
+      abortCompaction() {
+        opts.abortCompaction?.();
+      },
+      abortBranchSummary() {
+        opts.abortBranchSummary?.();
+      },
+      get isIdle() {
+        return opts.isIdle?.() ?? true;
+      },
+      get isCompacting() {
+        return opts.isCompacting?.() ?? false;
       },
       get messages() {
         return opts.getMessages?.() ?? opts.messages ?? [];
@@ -138,6 +154,179 @@ describe("runAgentSession abort re-check", () => {
     expect(prompted()).toBe(true);
     expect(resolved).toBe(true);
     expect(result.error).toBeUndefined();
+  });
+
+  test("waits for post-settle compaction and its continuation before returning", async () => {
+    let compacting = false;
+    let agentActive = false;
+    let callbackFinished = false;
+    const firstAnswer = {
+      role: "assistant",
+      content: [{ type: "text", text: "answer before compaction" }],
+    };
+    const continuedAnswer = {
+      role: "assistant",
+      content: [{ type: "text", text: "answer after continuation" }],
+    };
+
+    const { session } = fakeSession({
+      messages: [],
+      isIdle: () => !agentActive,
+      isCompacting: () => compacting,
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: firstAnswer });
+        emit({
+          type: "agent_end",
+          messages: [firstAnswer],
+          willRetry: false,
+        });
+        emit({ type: "agent_settled" });
+
+        // pi-codex-compaction starts ctx.compact() from agent_settled without
+        // returning its promise. AgentSession.prompt() therefore returns while
+        // this work is live.
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+          compacting = false;
+
+          // ctx.compact invokes onComplete after compaction_end. The callback
+          // immediately sends the continuation turn.
+          await Promise.resolve();
+          agentActive = true;
+          emit({ type: "agent_start" });
+          emit({ type: "message_end", message: continuedAnswer });
+          emit({
+            type: "agent_end",
+            messages: [continuedAnswer],
+            willRetry: false,
+          });
+          agentActive = false;
+          emit({ type: "agent_settled" });
+          callbackFinished = true;
+        })();
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(callbackFinished).toBe(true);
+    expect(result.output).toContain("answer before compaction");
+    expect(result.output).toContain("answer after continuation");
+  });
+
+  test("waits for a post-compaction error callback before returning ownership", async () => {
+    let compacting = false;
+    let errorCallbackFinished = false;
+    const answer = {
+      role: "assistant",
+      content: [{ type: "text", text: "answer before failed compaction" }],
+    };
+    const { session } = fakeSession({
+      messages: [],
+      isCompacting: () => compacting,
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: answer });
+        emit({ type: "agent_end", messages: [answer], willRetry: false });
+        emit({ type: "agent_settled" });
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: undefined,
+            aborted: false,
+            willRetry: false,
+            errorMessage: "Compaction failed",
+          });
+          compacting = false;
+          // Pi calls ctx.compact({ onError }) only after compact() rejects.
+          // Lifecycle may invalidate ctx immediately after the runner returns,
+          // so this callback must be finished first.
+          await Promise.resolve();
+          errorCallbackFinished = true;
+        })();
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(errorCallbackFinished).toBe(true);
+    expect(result.output).toBe("answer before failed compaction");
+  });
+
+  test("parent abort cancels post-settle compaction before returning", async () => {
+    const controller = new AbortController();
+    let compacting = false;
+    let compactionAborts = 0;
+    let branchSummaryAborts = 0;
+    let emitSessionEvent: ((event: unknown) => void) | undefined;
+    const fake = fakeSession({
+      messages: [],
+      isCompacting: () => compacting,
+      abortCompaction: () => {
+        compactionAborts++;
+        if (!compacting) return;
+        compacting = false;
+        emitSessionEvent?.({
+          type: "compaction_end",
+          reason: "manual",
+          result: undefined,
+          aborted: true,
+          willRetry: false,
+        });
+      },
+      abortBranchSummary: () => {
+        branchSummaryAborts++;
+      },
+      prompt: async (emit) => {
+        compacting = true;
+        emit({ type: "compaction_start", reason: "manual" });
+        setImmediate(() => controller.abort());
+      },
+    });
+    emitSessionEvent = fake.emit;
+
+    const result = await runAgentSession(
+      fake.session as never,
+      "do work",
+      { cwd: process.cwd() },
+      controller.signal,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.error).toBe("Aborted");
+    expect(compactionAborts).toBe(1);
+    expect(branchSummaryAborts).toBe(1);
+    expect(compacting).toBe(false);
   });
 
   test("preserves output and tokens when compaction replaces the transcript", async () => {

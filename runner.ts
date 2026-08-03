@@ -29,8 +29,10 @@ import type {
  *   1. subscribes to the session's event stream and maps it to the renderer's
  *      `AgentProgressUpdate` / `ToolActivity` shapes,
  *   2. wires the parent abort signal to `session.abort()`,
- *   3. snapshots usage before/after the prompt for token delta accounting, and
- *   4. computes touched files from activity + git diff.
+ *   3. waits for extension-started post-run compaction/continuations to become
+ *      quiescent before returning ownership to lifecycle,
+ *   4. snapshots usage before/after the prompt for token delta accounting, and
+ *   5. computes touched files from activity + git diff.
  *
  * Output is captured from AgentSession events so compaction cannot erase it
  * before collection; `session.messages` is only a guarded fallback for
@@ -65,6 +67,93 @@ export async function runAgentSession(
   let clearStallDeadline: (() => void) | undefined;
   const activities: ToolActivity[] = [];
   const pendingById = new Map<string, ToolActivity>();
+  let sessionEventGeneration = 0;
+  let wakeSessionEvent: (() => void) | undefined;
+
+  // AgentSession.prompt() can return while an agent_settled extension callback
+  // is still running fire-and-forget work through ctx.compact(). Keep a small
+  // internal event seam so the runner can wait without polling throughout a
+  // potentially long remote compaction. The generation closes the race between
+  // checking session state and installing the next waiter.
+  const noteSessionEvent = () => {
+    sessionEventGeneration++;
+    const wake = wakeSessionEvent;
+    wakeSessionEvent = undefined;
+    wake?.();
+  };
+  const waitForSessionEventAfter = async (
+    generation: number,
+  ): Promise<void> => {
+    if (sessionEventGeneration !== generation) return;
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const probe = setTimeout(() => finish(), 250);
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(probe);
+        if (wakeSessionEvent === finish) wakeSessionEvent = undefined;
+        resolve();
+      };
+      if (sessionEventGeneration !== generation) {
+        finish();
+        return;
+      }
+      // AgentSession normally emits every transition we care about. The slow
+      // probe is a liveness fallback for host versions that clear an internal
+      // busy flag without a corresponding public event.
+      wakeSessionEvent = finish;
+    });
+  };
+  const nextEventLoopTurn = () =>
+    new Promise<void>((resolve) => setImmediate(resolve));
+
+  const requestSessionCancellation = (
+    source: "parent-aborted" | "stalled",
+  ): void => {
+    const logFailure = (operation: string, error: unknown) => {
+      console.error(`[delegate] ${source} subagent ${operation} failed`, error);
+    };
+    try {
+      session.abortCompaction();
+    } catch (error) {
+      logFailure("compaction cancellation", error);
+    }
+    try {
+      session.abortBranchSummary();
+    } catch (error) {
+      logFailure("branch-summary cancellation", error);
+    }
+    noteSessionEvent();
+    void session.abort().catch((error: unknown) => {
+      logFailure("agent cancellation", error);
+    });
+  };
+
+  /**
+   * Wait until the session is idle and non-compacting for two unchanged event
+   * loop turns. The quiet turns are significant: AgentSession emits
+   * compaction_end before ctx.compact's onComplete/onError callback runs, and a
+   * successful callback may immediately start a continuation prompt.
+   */
+  const waitForSessionQuiescence = async (): Promise<void> => {
+    let quietTurns = 0;
+    while (quietTurns < 2) {
+      const generation = sessionEventGeneration;
+      await nextEventLoopTurn();
+
+      const idle = session.isIdle && !session.isCompacting;
+      if (idle && sessionEventGeneration === generation) {
+        quietTurns++;
+        continue;
+      }
+
+      quietTurns = 0;
+      if (!idle) {
+        await waitForSessionEventAfter(sessionEventGeneration);
+      }
+    }
+  };
 
   // Snapshot cumulative usage before the prompt so we can report only the
   // tokens consumed by this call (not cumulative history on a pooled/resumed
@@ -103,12 +192,10 @@ export async function runAgentSession(
     console.warn(
       `[delegate] stalled subagent detected after ${fmtDuration(stallTimeoutMs)} while ${phase}; requesting cooperative cancellation`,
     );
-    // AgentSession.abort() is the upstream cancellation primitive. It waits
-    // for idle, so the prompt below remains responsible for preserving the
-    // final partial-output/session evidence after cancellation settles.
-    void session.abort().catch((error: unknown) => {
-      console.error("[delegate] stalled subagent abort failed", error);
-    });
+    // AgentSession.abort() only covers the agent loop. A post-settle manual
+    // compaction is idle by that definition, so cancel the other session work
+    // explicitly before waiting for the prompt/quiescence barrier to settle.
+    requestSessionCancellation("stalled");
     // Surface the transition immediately. Cancellation is cooperative, so the
     // final TaskResult may not arrive until the provider/tool becomes idle.
     fireProgress();
@@ -294,6 +381,7 @@ export async function runAgentSession(
   // verbatim. Retry and compaction events are handled below; queue/bookkeeping
   // events and thinking changes are intentionally ignored.
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+    noteSessionEvent();
     switch (event.type) {
       case "tool_execution_start": {
         const now = Date.now();
@@ -429,14 +517,9 @@ export async function runAgentSession(
   if (signal) {
     abortHandler = () => {
       clearStallWatchdog();
-      // Fire-and-forget: prompt() observes AgentSession's abort and then
-      // returns the partial evidence that this runner reports to the caller.
-      void session.abort().catch((error: unknown) => {
-        console.error(
-          "[delegate] parent-aborted subagent cleanup failed",
-          error,
-        );
-      });
+      // Fire-and-forget: prompt()/the quiescence barrier observe cancellation
+      // and then return the partial evidence that this runner reports.
+      requestSessionCancellation("parent-aborted");
     };
     signal.addEventListener("abort", abortHandler, { once: true });
   }
@@ -465,6 +548,7 @@ export async function runAgentSession(
 
   try {
     await session.prompt(prompt);
+    await waitForSessionQuiescence();
     clearStallWatchdog();
 
     const state = session.state as { errorMessage?: string };

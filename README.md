@@ -35,11 +35,12 @@ into the session.
 `stallTimeoutMs` is an inactivity watchdog, not a hard execution deadline. When
 an active subagent emits no model or tool activity for the configured interval,
 delegate reports that a stall was detected and asks Pi's `AgentSession.abort()`
-to cancel it. Cancellation is cooperative: delegate waits for the session to
-become idle before returning a failed task, because returning while a provider
-or tool can still run would let a supposedly finished agent keep mutating files.
-A provider or tool that ignores cancellation can therefore delay the final task
-result. Set `stallTimeoutMs` to `0` to disable the watchdog.
+to cancel it, along with any active compaction or branch summary. Cancellation
+is cooperative: delegate waits for the session to become idle and non-compacting
+before returning a failed task, because returning while a provider, tool, or
+extension can still run would let a supposedly finished agent keep mutating
+state. An operation that ignores cancellation can therefore delay the final
+task result. Set `stallTimeoutMs` to `0` to disable the watchdog.
 
 ## Develop
 
