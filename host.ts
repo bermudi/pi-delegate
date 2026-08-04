@@ -191,6 +191,16 @@ function hasNpmVersionSpecifier(source: string): boolean {
   return Boolean(match?.[2]?.trim());
 }
 
+/** Normalize the host/path identity emitted by Pi or read from Git. */
+function normalizeGitRepositoryIdentity(
+  host: string,
+  repoPath: string,
+): { host: string; path: string } | undefined {
+  const path = repoPath.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+  if (!host || !path) return undefined;
+  return { host: host.toLowerCase(), path };
+}
+
 /** Parse the repository identity used by Pi's Git source parser. */
 function parseGitRepositoryIdentity(
   source: string,
@@ -222,11 +232,14 @@ function parseGitRepositoryIdentity(
     repoPath = candidate.slice(slash + 1);
   }
 
+  // `@` is Pi's ref separator for the source forms that can also appear in
+  // an origin URL. Do not treat `#` as a ref separator here: Pi can preserve
+  // it as a literal path in generic/SCP forms, while URL parsing above already
+  // removes a real URL fragment from `pathname`. Configured-source ref
+  // semantics come from Pi's parsed source below.
   const refSeparator = repoPath.indexOf("@");
   if (refSeparator >= 0) repoPath = repoPath.slice(0, refSeparator);
-  repoPath = repoPath.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
-  if (!host || !repoPath) return undefined;
-  return { host: host.toLowerCase(), path: repoPath };
+  return normalizeGitRepositoryIdentity(host, repoPath);
 }
 
 function getGitRepositoryIdentity(
@@ -242,63 +255,82 @@ function getGitRepositoryIdentity(
   return parseGitRepositoryIdentity(trimmed);
 }
 
-function decodeGitRef(raw: string): string | undefined {
-  if (!raw) return undefined;
+/**
+ * Read the configured Git identity and ref from Pi's own parsed package
+ * source. The package manager's parser is private upstream, but
+ * getInstalledPath() uses that same parser; keeping this call on the same seam
+ * prevents validation from inventing a second (and subtly different) Git URL
+ * grammar.
+ *
+ * In particular, Pi leaves `#release` in the parsed path for generic and SCP
+ * sources, while hosted providers may interpret it as a ref. The parsed
+ * host/path is therefore authoritative; never normalize the configured source
+ * with a blanket `#` rule.
+ */
+function getConfiguredGitSource(
+  packageManager: DefaultPackageManager,
+  source: string,
+): { host: string; path: string; ref?: string } | undefined {
+  if (getGitRepositoryIdentity(source) === undefined) return undefined;
+
+  const internals =
+    packageManager as unknown as Partial<PackageManagerConstraintInternals>;
+  if (typeof internals.parseSource !== "function") {
+    throw new Error(
+      "This Pi version cannot verify a configured Git provider extension ref; delegation stopped.",
+    );
+  }
+
+  let parsed: unknown;
   try {
-    return decodeURIComponent(raw) || undefined;
-  } catch {
-    return raw || undefined;
-  }
-}
-
-/** Extract the ref syntax understood by Pi's Git source parser. */
-function getConfiguredGitRef(source: string): string | undefined {
-  const trimmed = source.trim();
-  if (getGitRepositoryIdentity(trimmed) === undefined) return undefined;
-
-  let candidate = trimmed;
-  if (candidate.toLowerCase().startsWith("git:")) {
-    candidate = candidate.slice("git:".length).trim();
+    parsed = internals.parseSource.call(packageManager, source);
+  } catch (error) {
+    throw new Error(
+      "A configured provider extension Git source could not be parsed; delegation stopped.",
+      { cause: error },
+    );
   }
 
-  if (candidate.startsWith("git@")) {
-    const colon = candidate.indexOf(":");
-    if (colon < 0) return undefined;
-    const repoPath = candidate.slice(colon + 1);
-    const separator = repoPath.indexOf("@");
-    return separator >= 0
-      ? repoPath.slice(separator + 1) || undefined
-      : undefined;
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(
+      "A configured provider extension Git source could not be verified; delegation stopped.",
+    );
   }
-
-  if (/^[a-z][a-z\d+.-]*:\/\//i.test(candidate)) {
-    try {
-      const url = new URL(candidate);
-      if (url.hash.length > 1) {
-        return decodeGitRef(url.hash.slice(1));
-      }
-      const separator = url.pathname.indexOf("@");
-      return separator >= 0
-        ? url.pathname.slice(separator + 1) || undefined
-        : undefined;
-    } catch {
-      return undefined;
-    }
+  const parsedSource = parsed as {
+    type?: unknown;
+    host?: unknown;
+    path?: unknown;
+    ref?: unknown;
+  };
+  if (parsedSource.type !== "git") {
+    throw new Error(
+      "A configured provider extension was not parsed as a Git source; delegation stopped.",
+    );
   }
-
-  const hashSeparator = candidate.indexOf("#");
-  if (hashSeparator >= 0) {
-    return decodeGitRef(candidate.slice(hashSeparator + 1));
+  if (
+    typeof parsedSource.host !== "string" ||
+    typeof parsedSource.path !== "string"
+  ) {
+    throw new Error(
+      "A configured provider extension Git identity could not be verified; delegation stopped.",
+    );
   }
-
-  // Hosted shorthand, e.g. github.com/user/repo@main.
-  const slash = candidate.indexOf("/");
-  if (slash < 0) return undefined;
-  const repoPath = candidate.slice(slash + 1);
-  const separator = repoPath.indexOf("@");
-  return separator >= 0
-    ? repoPath.slice(separator + 1) || undefined
-    : undefined;
+  const repository = normalizeGitRepositoryIdentity(
+    parsedSource.host,
+    parsedSource.path,
+  );
+  if (!repository) {
+    throw new Error(
+      "A configured provider extension Git identity could not be verified; delegation stopped.",
+    );
+  }
+  if (parsedSource.ref === undefined) return repository;
+  if (typeof parsedSource.ref !== "string" || parsedSource.ref.length === 0) {
+    throw new Error(
+      "A configured provider extension Git ref could not be verified; delegation stopped.",
+    );
+  }
+  return { ...repository, ref: parsedSource.ref };
 }
 
 function gitOutput(installedPath: string, args: string[]): string {
@@ -311,13 +343,14 @@ function gitOutput(installedPath: string, args: string[]): string {
 
 /** Reject a user installation whose checkout or ref differs from the source. */
 function assertConfiguredGitInstallation(
+  packageManager: DefaultPackageManager,
   source: string,
   installedPath: string,
 ): void {
-  const configuredRepository = getGitRepositoryIdentity(source);
-  if (!configuredRepository) return;
-
   try {
+    const configuredRepository = getConfiguredGitSource(packageManager, source);
+    if (!configuredRepository) return;
+
     const installedRepository = parseGitRepositoryIdentity(
       gitOutput(installedPath, ["config", "--get", "remote.origin.url"]),
     );
@@ -329,7 +362,7 @@ function assertConfiguredGitInstallation(
       throw new Error("checkout has a different origin");
     }
 
-    const ref = getConfiguredGitRef(source);
+    const ref = configuredRepository.ref;
     if (!ref) return;
     const head = gitOutput(installedPath, ["rev-parse", "--verify", "HEAD"]);
     const target = gitOutput(installedPath, [
@@ -432,7 +465,7 @@ async function getProviderExtensionPaths(
   provider: string | undefined,
   cwd: string,
   agentDir: string,
-  settingsManager: SettingsManager,
+  packageLookupSettingsManager: SettingsManager,
 ): Promise<string[]> {
   // Provider-key normalization (trim + lowercase) lives in `config.ts` —
   // `getSubagentProviderExtensionsForProvider` is the single owner of that
@@ -443,7 +476,7 @@ async function getProviderExtensionPaths(
   const packageManager = new DefaultPackageManager({
     cwd,
     agentDir,
-    settingsManager,
+    settingsManager: packageLookupSettingsManager,
   });
   const projectRoot = findExtensionProjectRoot(cwd);
 
@@ -482,7 +515,7 @@ async function getProviderExtensionPaths(
       );
     }
 
-    assertConfiguredGitInstallation(source, userPath);
+    assertConfiguredGitInstallation(packageManager, source, userPath);
   };
 
   const installedPaths = new Map<string, string>();
@@ -569,17 +602,24 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
   );
 
   // Resolve provider extensions before deciding whether to use the cache. This
-  // both fails closed for missing sources and lets us identify the only case in
-  // which a session-local SettingsManager is needed before the build starts.
-  let settingsManager: SettingsManager | undefined;
+  // fails closed for missing sources while keeping package lookup's user-only
+  // settings isolated from the project-aware session settings built below.
   let additionalExtensionPaths: string[] = [];
   if (requestedExtensions.length > 0) {
-    settingsManager = SettingsManager.create(options.cwd, agentDir);
+    // Package lookup is a user-scope trust boundary. Pi's legacy npm fallback
+    // may execute the configured npmCommand to discover the global npm root,
+    // so project settings must not participate even though the normal resource
+    // loader below remains project-aware.
+    const packageLookupSettingsManager = SettingsManager.create(
+      options.cwd,
+      agentDir,
+      { projectTrusted: false },
+    );
     additionalExtensionPaths = await getProviderExtensionPaths(
       options.modelProvider,
       options.cwd,
       agentDir,
-      settingsManager,
+      packageLookupSettingsManager,
     );
   }
 
@@ -634,8 +674,10 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
       modelRuntime.registerProvider(providerId, config);
     }
 
-    const resolvedSettingsManager =
-      settingsManager ?? SettingsManager.create(options.cwd, agentDir);
+    const resolvedSettingsManager = SettingsManager.create(
+      options.cwd,
+      agentDir,
+    );
     if (testRetryBaseMs !== undefined) {
       installFastRetry(resolvedSettingsManager, testRetryBaseMs);
     }

@@ -6868,6 +6868,58 @@ describe("getHostDeps extension policy and isolation", () => {
     expect(hasCodexCompaction).toBe(true);
   });
 
+  test("ignores project npmCommand during user-scope extension lookup", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-project-npm-command-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-npm-command-"),
+    );
+    const projectSettingsDir = path.join(cwd, ".pi");
+    const globalMarker = path.join(agentDir, "global-command-ran");
+    const projectMarker = path.join(cwd, "project-command-ran");
+    const globalCommand = path.join(agentDir, "global-npm-command.js");
+    const projectCommand = path.join(cwd, "project-npm-command.js");
+    const missingGlobalRoot = path.join(agentDir, "missing-global-root");
+    mkdirSync(projectSettingsDir, { recursive: true });
+    writeFileSync(
+      globalCommand,
+      `require("node:fs").writeFileSync(${JSON.stringify(globalMarker)}, "ran");\nconsole.log(${JSON.stringify(missingGlobalRoot)});\n`,
+      "utf-8",
+    );
+    writeFileSync(
+      projectCommand,
+      `require("node:fs").writeFileSync(${JSON.stringify(projectMarker)}, "ran");\nconsole.log(${JSON.stringify(missingGlobalRoot)});\n`,
+      "utf-8",
+    );
+    writeFileSync(
+      path.join(agentDir, "settings.json"),
+      JSON.stringify({ npmCommand: [process.execPath, globalCommand] }),
+      "utf-8",
+    );
+    writeFileSync(
+      path.join(projectSettingsDir, "settings.json"),
+      JSON.stringify({ npmCommand: [process.execPath, projectCommand] }),
+      "utf-8",
+    );
+    _setDelegateConfigForTesting({
+      providerExtensions: {
+        "custom-provider": ["npm:@example-org/missing-extension"],
+      },
+    });
+
+    try {
+      await expect(
+        getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
+      ).rejects.toThrow("not installed in the user scope");
+      expect(fs.existsSync(globalMarker)).toBe(true);
+      expect(fs.existsSync(projectMarker)).toBe(false);
+    } finally {
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
   test("loads provider extensions from configurable allowlist", async () => {
     const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-project-config-"));
     const agentDir = path.join(cwd, ".pi-agent");
@@ -6975,6 +7027,250 @@ describe("getHostDeps extension policy and isolation", () => {
         modelProvider: "custom-provider",
       });
       expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(1);
+    } finally {
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("verifies a Git origin and hash ref in shorthand syntax", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-project-git-hash-ref-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-git-hash-ref-"),
+    );
+    const packagePath = path.join(
+      agentDir,
+      "git",
+      "github.com",
+      "example",
+      "git-hash-extension",
+    );
+    const sourceBase = "git:github.com/example/git-hash-extension";
+    mkdirSync(packagePath, { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: packagePath });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: packagePath,
+    });
+    execFileSync("git", ["config", "user.name", "Pi Delegate Test"], {
+      cwd: packagePath,
+    });
+    execFileSync(
+      "git",
+      [
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/git-hash-extension",
+      ],
+      { cwd: packagePath },
+    );
+    writeFileSync(
+      path.join(packagePath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    execFileSync("git", ["add", "index.ts"], { cwd: packagePath });
+    execFileSync("git", ["commit", "--quiet", "-m", "test"], {
+      cwd: packagePath,
+    });
+    execFileSync("git", ["tag", "v1.0.0"], { cwd: packagePath });
+    const source = `${sourceBase}#v1.0.0`;
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+
+    try {
+      const deps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "custom-provider",
+      });
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(1);
+    } finally {
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("uses Pi's Git ref parsing for encoded refs", async () => {
+    const sources = [
+      "git:github.com/example/git-encoded-extension@feature%2Ffoo",
+      "git:https://github.com/example/git-encoded-extension@feature%2Ffoo",
+    ];
+
+    for (const source of sources) {
+      const cwd = mkdtempSync(
+        path.join(tmpdir(), "pi-delegate-project-git-encoded-ref-"),
+      );
+      const agentDir = mkdtempSync(
+        path.join(tmpdir(), "pi-delegate-agent-git-encoded-ref-"),
+      );
+      const packagePath = path.join(
+        agentDir,
+        "git",
+        "github.com",
+        "example",
+        "git-encoded-extension",
+      );
+      mkdirSync(packagePath, { recursive: true });
+      execFileSync("git", ["init", "--quiet"], { cwd: packagePath });
+      execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+        cwd: packagePath,
+      });
+      execFileSync("git", ["config", "user.name", "Pi Delegate Test"], {
+        cwd: packagePath,
+      });
+      execFileSync(
+        "git",
+        [
+          "remote",
+          "add",
+          "origin",
+          "https://github.com/example/git-encoded-extension",
+        ],
+        { cwd: packagePath },
+      );
+      writeFileSync(
+        path.join(packagePath, "index.ts"),
+        "export default function(_api: unknown) {}\n",
+        "utf-8",
+      );
+      execFileSync("git", ["add", "index.ts"], { cwd: packagePath });
+      execFileSync("git", ["commit", "--quiet", "-m", "test"], {
+        cwd: packagePath,
+      });
+      execFileSync("git", ["checkout", "-q", "-b", "feature/foo"], {
+        cwd: packagePath,
+      });
+      _setDelegateConfigForTesting({
+        providerExtensions: { "custom-provider": [source] },
+      });
+
+      try {
+        const deps = await getHostDeps({
+          cwd,
+          agentDir,
+          modelProvider: "custom-provider",
+        });
+        expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(1);
+      } finally {
+        cleanup(cwd);
+        cleanup(agentDir);
+      }
+    }
+  });
+
+  test("accepts a generic-host Git # path when the origin matches", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-project-git-generic-fragment-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-git-generic-fragment-"),
+    );
+    const packagePath = path.join(
+      agentDir,
+      "git",
+      "code.example.com",
+      "example",
+      "git-generic-fragment-extension#release",
+    );
+    const source =
+      "git:code.example.com/example/git-generic-fragment-extension#release";
+    mkdirSync(packagePath, { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: packagePath });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: packagePath,
+    });
+    execFileSync("git", ["config", "user.name", "Pi Delegate Test"], {
+      cwd: packagePath,
+    });
+    execFileSync(
+      "git",
+      [
+        "remote",
+        "add",
+        "origin",
+        "git@code.example.com:example/git-generic-fragment-extension#release",
+      ],
+      { cwd: packagePath },
+    );
+    writeFileSync(
+      path.join(packagePath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    execFileSync("git", ["add", "index.ts"], { cwd: packagePath });
+    execFileSync("git", ["commit", "--quiet", "-m", "test"], {
+      cwd: packagePath,
+    });
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+
+    try {
+      const deps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "custom-provider",
+      });
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(1);
+    } finally {
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("rejects an SCP-style Git source when its literal # path is omitted", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-project-git-scp-fragment-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-git-scp-fragment-"),
+    );
+    const packagePath = path.join(
+      agentDir,
+      "git",
+      "code.example.com",
+      "org",
+      "repo#release",
+    );
+    const source = "git:git@code.example.com:org/repo#release";
+    mkdirSync(packagePath, { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: packagePath });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: packagePath,
+    });
+    execFileSync("git", ["config", "user.name", "Pi Delegate Test"], {
+      cwd: packagePath,
+    });
+    execFileSync(
+      "git",
+      ["remote", "add", "origin", "git@code.example.com:org/repo"],
+      { cwd: packagePath },
+    );
+    writeFileSync(
+      path.join(packagePath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    execFileSync("git", ["add", "index.ts"], { cwd: packagePath });
+    execFileSync("git", ["commit", "--quiet", "-m", "test"], {
+      cwd: packagePath,
+    });
+    _setDelegateConfigForTesting({
+      providerExtensions: { "custom-provider": [source] },
+    });
+
+    try {
+      await expect(
+        getHostDeps({
+          cwd,
+          agentDir,
+          modelProvider: "custom-provider",
+        }),
+      ).rejects.toThrow("not checked out at its configured Git source or ref");
     } finally {
       cleanup(cwd);
       cleanup(agentDir);
