@@ -439,6 +439,55 @@ describe("runAgentSession abort re-check", () => {
     expect(result.output).not.toContain("transient failure");
   });
 
+  test("restores a failed retrying attempt when auto-retry is cancelled", async () => {
+    const cancelledRetryAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "transient failure should be restored" }],
+      stopReason: "error",
+    };
+    let statsCall = 0;
+    const { session } = fakeSession({
+      messages: [],
+      getStats: () => {
+        const total = statsCall++ === 0 ? 0 : 6;
+        return {
+          tokens: {
+            input: 0,
+            output: total,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total,
+          },
+          cost: 0,
+        } as never;
+      },
+      prompt: async (emit) => {
+        emit({ type: "message_end", message: cancelledRetryAssistant });
+        emit({
+          type: "agent_end",
+          messages: [cancelledRetryAssistant],
+          willRetry: true,
+        });
+        emit({ type: "auto_retry_end", success: false });
+        emit({ type: "agent_settled" });
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("transient failure should be restored");
+    expect(result.output).not.toContain("(no output)");
+    expect(result.tokens).toBe(6);
+  });
+
   test("filters a cloned retry response positionally", async () => {
     const retryAssistant = {
       role: "assistant",
@@ -866,6 +915,87 @@ describe("runAgentSession abort re-check", () => {
     );
 
     expect(result.output).toBe("partial appended output");
+    expect(result.output).not.toContain("historical answer");
+  });
+
+  test("allows fallback after aborted compaction when transcript remains append-only", async () => {
+    const historical = {
+      role: "assistant",
+      content: [{ type: "text", text: "historical answer" }],
+    };
+    const messages: unknown[] = [historical];
+    const { session } = fakeSession({
+      messages,
+      getMessages: () => messages,
+      prompt: async (emit) => {
+        emit({ type: "compaction_start", reason: "manual" });
+        // Host appends a new assistant message after a failed compaction attempt
+        // and keeps the existing array/preceding object identities.
+        messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: "compaction fallback output" }],
+        });
+        emit({
+          type: "compaction_end",
+          reason: "manual",
+          aborted: true,
+          willRetry: false,
+        });
+        throw new Error("provider failed before message_end");
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).toBe("compaction fallback output");
+    expect(result.output).not.toContain("(no output)");
+    expect(result.output).not.toContain("historical answer");
+  });
+
+  test("keeps fallback disabled after a completed compaction", async () => {
+    const historical = {
+      role: "assistant",
+      content: [{ type: "text", text: "historical answer" }],
+    };
+    const messages: unknown[] = [historical];
+    const { session } = fakeSession({
+      messages,
+      getMessages: () => messages,
+      prompt: async (emit) => {
+        emit({ type: "compaction_start", reason: "manual" });
+        emit({
+          type: "compaction_end",
+          reason: "manual",
+          aborted: false,
+          willRetry: false,
+        });
+        messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: "unsafe post-compaction fallback" }],
+        });
+        throw new Error("provider failed before message_end");
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(result.output).not.toContain("unsafe post-compaction fallback");
     expect(result.output).not.toContain("historical answer");
   });
 

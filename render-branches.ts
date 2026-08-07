@@ -1,4 +1,4 @@
-import { Markdown } from "@earendil-works/pi-tui";
+import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   fmtDuration,
@@ -16,6 +16,25 @@ import {
 import { stripAnsi, resolveCarriageReturn } from "./utils.ts";
 import { getMaxConcurrent } from "./config.ts";
 import type { TaskProgress, TaskResult } from "./types.ts";
+
+/**
+ * Render markdown output when a compatible host theme hook exists. If the host
+ * does not expose `getMarkdownTheme`, return plain text lines as a safe fallback
+ * so a single missing host hook cannot crash the renderer.
+ */
+function renderOutputLines(raw: string, width: number): string[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  try {
+    if (typeof getMarkdownTheme !== "function") return trimmed.split("\n");
+    const theme = getMarkdownTheme();
+    if (typeof theme !== "object" || !theme) return trimmed.split("\n");
+    const md = new Markdown(trimmed, 0, 0, theme as MarkdownTheme);
+    return md.render(width);
+  } catch (_error) {
+    return trimmed.split("\n");
+  }
+}
 
 /** Renderer state — the live subset of Pi's `ToolRenderContext.state`. */
 export interface RenderState {
@@ -365,8 +384,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       let mdLines: string[] | undefined = state[cacheKey] as
         string[] | undefined;
       if (!mdLines || state[`${cacheKey}_src`] !== r.output) {
-        const md = new Markdown(r.output.trim(), 0, 0, getMarkdownTheme());
-        mdLines = md.render(Math.max(20, w - ind.length));
+        mdLines = renderOutputLines(r.output, Math.max(20, w - ind.length));
         state[`${cacheKey}_src`] = r.output;
         state[cacheKey] = mdLines;
       }

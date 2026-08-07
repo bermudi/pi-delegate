@@ -18,7 +18,16 @@ import {
 } from "./dispatch.ts";
 import { renderDelegateCall, renderDelegateResult } from "./render-result.ts";
 import { hostCompatError } from "./host-compat.ts";
+import { invalidateHostDepsCache } from "./host.ts";
 import { closeAllPooledAgents } from "./pool.ts";
+import {
+  activeTicketSummary,
+  clearDelegateStatusContext,
+  describeActiveTickets,
+  guardSessionReplacement,
+  notifyActiveTicketsOnSettled,
+  syncDelegateStatus,
+} from "./status.ts";
 import type { DelegateArguments } from "./types.ts";
 
 /** Register the delegate tool and clean up its parent-session resources. */
@@ -55,7 +64,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // ── Cancel action ─────────────────────────────────────────────────
       if (params.action === "cancel") {
-        return handleCancel(params);
+        const result = handleCancel(params);
+        // A forced cancel flips the ticket to "cancelling" — keep the
+        // footer status in step (deduped; the preview path is a no-op).
+        syncDelegateStatus();
+        return result;
       }
 
       // ── Wait action ────────────────────────────────────────────────────
@@ -83,6 +96,16 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         };
       }
 
+      // Cache the full ExtensionContext for the footer-status module before
+      // dispatch narrows it to DelegateToolCtx (which has no `ui`). The
+      // status push itself is a deduped no-op here; dispatchAsync re-syncs
+      // after registering its ticket.
+      syncDelegateStatus(ctx);
+
+      // Keep expensive host deps shared within this dispatch, not indefinitely
+      // across dispatches: edits to auth/models/settings/context files must be
+      // visible without restarting Pi.
+      invalidateHostDepsCache();
       return dispatchDelegate({
         pi,
         params,
@@ -98,11 +121,48 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     renderResult: renderDelegateResult,
   });
 
+  // ── Background-work visibility (see status.ts) ──────────────────────────
+  // The turn settling with live tickets is the "looks idle but isn't" moment:
+  // warn once per ticket. The footer status carries it from there.
+  pi.on("agent_settled", (_event, ctx) => {
+    notifyActiveTicketsOnSettled(ctx);
+  });
+
+  // Session replacements are cancellable — confirm before killing live work.
+  pi.on("session_before_switch", (_event, ctx) =>
+    guardSessionReplacement(ctx, "switch"),
+  );
+  pi.on("session_before_fork", (_event, ctx) =>
+    guardSessionReplacement(ctx, "fork"),
+  );
+
   // ── Session shutdown: abort tickets and dispose live pooled sessions ──
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event, ctx) => {
+    // Quit and /reload kill background work with no cancellable hook, so
+    // leave a trace. For quit the TUI is already stopped — stderr lands in
+    // the scrollback. For reload the TUI survives — warn in place. Switch
+    // and fork already passed the confirm guard above.
+    const active = activeTicketSummary();
+    if (active.tickets.length) {
+      if (event.reason === "quit") {
+        console.error(
+          `[delegate] pi exited with ${describeActiveTickets(active)} — aborted.`,
+        );
+      } else if (event.reason === "reload") {
+        ctx.ui.notify(
+          `[delegate] reload aborted ${describeActiveTickets(active)}`,
+          "warning",
+        );
+      }
+    }
     for (const ticket of ticketRegistry.values()) {
       cancelTicketForShutdown(ticket);
     }
+    syncDelegateStatus(ctx);
+    // The runtime is invalidated right after this handler returns; aborted
+    // tickets keep unwinding asynchronously and must find no cached ctx (or
+    // captured pi) to touch. See the "cancelled"-at-entry guard in dispatch.
+    clearDelegateStatusContext();
     // Do NOT clear the ticket registry here — completed tickets are retained
     // until their TTL cleanup. Pooled AgentSessions, however, own listeners
     // and must be disposed before the parent session exits.

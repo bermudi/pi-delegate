@@ -5,10 +5,25 @@ import {
   _resetHostCompatCacheForTesting,
 } from "./host-compat.ts";
 
+const classWithStaticCreate = class {
+  static create(): never {
+    throw new Error("should not call");
+  }
+};
+
+const classWithStaticCreateAndOpen = class {
+  static create(): never {
+    throw new Error("should not call");
+  }
+  static open(): never {
+    throw new Error("should not call");
+  }
+};
+
 const ALL_PRESENT = {
-  ModelRuntime: class {},
-  SettingsManager: class {},
-  SessionManager: class {},
+  ModelRuntime: classWithStaticCreate,
+  SettingsManager: classWithStaticCreate,
+  SessionManager: classWithStaticCreateAndOpen,
   DefaultResourceLoader: class {},
   DefaultPackageManager: class {},
   createAgentSession: () => {},
@@ -35,12 +50,33 @@ describe("host-compat guard", () => {
     const result = hostCompatResult({});
     expect(result).not.toBeNull();
     const text = (result!.content[0] as { text: string }).text;
-    // All eight required symbols should be called out (the count must stay
-    // in sync with REQUIRED_SYMBOLS in host-compat.ts — if you add a symbol
-    // there, bump this).
-    expect((text.match(/'/g) ?? []).length / 2).toBe(8);
+    // All required exports/members should be called out (the count must stay
+    // in sync with REQUIRED_EXPORTS in host-compat.ts — if you add a member,
+    // bump this).
+    expect((text.match(/'/g) ?? []).length / 2).toBe(9);
     expect(result!.details.tasks).toEqual([]);
     expect(result!.details.results).toEqual([]);
+  });
+
+  test("reports missing required static members", () => {
+    const ModelRuntimeWithoutCreate = class {};
+    const SessionManagerWithoutOpen = class {
+      static create(): never {
+        throw new Error("no-op");
+      }
+    };
+
+    const ns = {
+      ...ALL_PRESENT,
+      ModelRuntime: ModelRuntimeWithoutCreate,
+      SessionManager: SessionManagerWithoutOpen,
+    };
+
+    const result = hostCompatResult(ns);
+    expect(result).not.toBeNull();
+    const text = (result!.content[0] as { text: string }).text;
+    expect(text).toContain("'ModelRuntime.create'");
+    expect(text).toContain("'SessionManager.open'");
   });
 
   test("real installed pi exports all required symbols (no compat error)", () => {

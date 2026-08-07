@@ -8,16 +8,27 @@ import type { DelegateToolResult } from "./types.ts";
  * Keep this list in sync with the actual import sites (host.ts, sessions.ts,
  * lifecycle.ts, agents.ts).
  */
-const REQUIRED_SYMBOLS = [
-  "ModelRuntime",
-  "SettingsManager",
-  "SessionManager",
-  "DefaultResourceLoader",
-  "DefaultPackageManager",
-  "createAgentSession",
-  "getAgentDir",
-  "parseFrontmatter",
-] as const;
+type ExportCheck = {
+  name: string;
+  requiredMember?: string;
+};
+
+/**
+ * Host symbols actually dereferenced by delegate. Static members are listed by
+ * `<symbol>.<member>` so we fail fast when a constructor is present but no longer
+ * exposes the required factory methods.
+ */
+const REQUIRED_EXPORTS: ExportCheck[] = [
+  { name: "ModelRuntime", requiredMember: "create" },
+  { name: "SettingsManager", requiredMember: "create" },
+  { name: "SessionManager", requiredMember: "create" },
+  { name: "SessionManager", requiredMember: "open" },
+  { name: "DefaultResourceLoader" },
+  { name: "DefaultPackageManager" },
+  { name: "createAgentSession" },
+  { name: "getAgentDir" },
+  { name: "parseFrontmatter" },
+];
 
 /**
  * Build a tool result describing any required symbols missing from a pi
@@ -27,9 +38,33 @@ const REQUIRED_SYMBOLS = [
 export function hostCompatResult(
   ns: Record<string, unknown>,
 ): DelegateToolResult | null {
-  const missing = REQUIRED_SYMBOLS.filter((name) => ns[name] === undefined);
+  const missing: string[] = [];
+  for (const entry of REQUIRED_EXPORTS) {
+    const value = ns[entry.name];
+    if (value === undefined) {
+      missing.push(`'${entry.name}'`);
+      continue;
+    }
+
+    if (typeof value !== "function") {
+      missing.push(`'${entry.name}'`);
+      continue;
+    }
+
+    if (entry.requiredMember) {
+      const symbolValue = value as unknown as { [key: string]: unknown };
+      if (!(entry.requiredMember in symbolValue)) {
+        missing.push(`'${entry.name}.${entry.requiredMember}'`);
+        continue;
+      }
+      if (typeof symbolValue[entry.requiredMember] !== "function") {
+        missing.push(`'${entry.name}.${entry.requiredMember}'`);
+      }
+    }
+  }
+
   if (missing.length === 0) return null;
-  const listed = missing.map((m) => `'${m}'`).join(", ");
+  const listed = missing.join(", ");
   return {
     content: [
       {

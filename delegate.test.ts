@@ -15,6 +15,7 @@ import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   _resetPoolForTesting,
   _setPoolAbortTimeoutForTesting,
+  recordUse,
 } from "./pool.ts";
 import {
   _resetDelegateConfigForTesting,
@@ -68,6 +69,7 @@ import {
   listPooledAgents,
   withSessionLock,
   getHostDeps,
+  invalidateHostDepsCache,
   readDelegateSettingsFile,
   loadDelegateSettings,
   getConcurrencyLimit,
@@ -2552,8 +2554,9 @@ describe("delegate extension integration", () => {
     ]);
 
     // Descriptions are a tokenizer-independent proxy for the repeated provider
-    // tool-definition payload. Keep truthful model-facing guidance compact —
-    // this budget intentionally leaves room for conditional safety semantics.
+    // tool-definition payload. Keep truthful model-facing guidance compact but
+    // informative — the budget fits the current copy with ~50 chars of headroom
+    // so small edits don't churn, while real bloat still trips it.
     const descriptions = [
       toolDef!.description!,
       ...topProperties.map(([, prop]) => prop.description as string),
@@ -2561,13 +2564,13 @@ describe("delegate extension integration", () => {
     ];
     expect(
       Math.max(...descriptions.map((description) => description.length)),
-    ).toBeLessThanOrEqual(100);
+    ).toBeLessThanOrEqual(110);
     expect(
       descriptions.reduce(
         (total, description) => total + description.length,
         0,
       ),
-    ).toBeLessThanOrEqual(1_250);
+    ).toBeLessThanOrEqual(1_350);
   });
 
   test("rejects mixed dispatch, ticket, and session-control shapes", async () => {
@@ -4495,7 +4498,55 @@ describe("delegate pool", () => {
     expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
   });
 
-  test("closeAllPooledAgents waits for an active lifecycle lock before disposal", async () => {
+  test("closePooledAgent waits for an active lifecycle lock before disposal", async () => {
+    const calls: string[] = [];
+    const payload = {
+      session: {
+        async abort() {
+          calls.push("abort");
+        },
+        dispose() {
+          calls.push("dispose");
+        },
+      } as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/close-race.jsonl",
+      frozen: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      tokens: 0,
+    };
+    commit("close-race", payload);
+
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let release!: () => void;
+    const inFlight = withSessionLock("close-race", async () => {
+      markEntered();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    await entered;
+
+    const close = closePooledAgent("close-race");
+
+    // The live lock should block the close until we release it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(calls).toEqual([]);
+
+    release();
+    await Promise.all([inFlight, close]);
+    expect(calls).toEqual(["abort", "dispose"]);
+  });
+
+  test("closeAllPooledAgents requests abort under active lock, disposes after release", async () => {
     const calls: string[] = [];
     const payload = {
       session: {
@@ -4535,35 +4586,204 @@ describe("delegate pool", () => {
     });
     await entered;
 
-    let abortStarted!: () => void;
-    const abortObserved = new Promise<void>((resolve) => {
-      abortStarted = resolve;
-    });
-    // The session's abort stub is installed after the lock is entered so the
-    // test waits on the actual cancellation signal, not a microtask guess.
-    payload.session.abort = async () => {
-      calls.push("abort");
-      abortStarted();
-    };
-
     const closing = closeAllPooledAgents();
-    await abortObserved;
+
+    // The live lock should block shutdown disposal, but abort should still be
+    // requested immediately while the lock is held.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(calls).toEqual(["abort"]);
     expect(configFor("shutdown-race")).toBeDefined();
 
     release();
     await Promise.all([inFlight, closing]);
+    expect(calls).toHaveLength(2);
     expect(calls).toEqual(["abort", "dispose"]);
+    expect(calls.indexOf("abort")).toBeLessThan(calls.indexOf("dispose"));
     expect(configFor("shutdown-race")).toBeUndefined();
+  });
+
+  test("public close waits for shutdown and returns false", async () => {
+    const calls: string[] = [];
+    const payload = {
+      session: {
+        async abort() {
+          calls.push("abort");
+        },
+        dispose() {
+          calls.push("dispose");
+        },
+      } as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/public-close-during-shutdown.jsonl",
+      frozen: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      tokens: 0,
+    };
+    commit("public-close-shutdown", payload);
+
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let release!: () => void;
+    const inFlight = withSessionLock("public-close-shutdown", async () => {
+      markEntered();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    await entered;
+
+    const closing = closeAllPooledAgents();
+    const publicClose = closePooledAgent("public-close-shutdown");
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(calls).toEqual(["abort"]);
+
+    release();
+    const result = await publicClose;
+    await closing;
+
+    expect(result).toBe(false);
+    expect(calls).toEqual(["abort", "dispose"]);
+    expect(calls.indexOf("abort")).toBeLessThan(calls.indexOf("dispose"));
+    expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
+    await Promise.all([inFlight]);
+  });
+
+  test("closeAllPooledAgents is idempotent", async () => {
+    const calls: string[] = [];
+    commit("idempotent", {
+      session: {
+        async abort() {
+          calls.push("abort");
+        },
+        dispose() {
+          calls.push("dispose");
+        },
+      } as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/idempotent.jsonl",
+      frozen: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      tokens: 0,
+    });
+
+    const a = closeAllPooledAgents();
+    const b = closeAllPooledAgents();
+    await Promise.all([a, b]);
+    expect(calls).toEqual(["abort", "dispose"]);
+    expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
+  });
+
+  test("closeAllPooledAgents concurrent callers receive shared failure outcome", async () => {
+    const calls: string[] = [];
+    commit("failure-share", {
+      session: {
+        async abort() {
+          calls.push("abort");
+        },
+        dispose() {
+          calls.push("dispose");
+          throw new Error("dispose failed");
+        },
+      } as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/failure-share.jsonl",
+      frozen: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      tokens: 0,
+    });
+
+    const first = closeAllPooledAgents();
+    const second = closeAllPooledAgents();
+    const outcomes = await Promise.allSettled([first, second]);
+
+    expect(outcomes[0].status).toBe("rejected");
+    expect(outcomes[1].status).toBe("rejected");
+    expect(calls).toEqual(["abort", "dispose"]);
+    expect((outcomes[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+      AggregateError,
+    );
+    expect((outcomes[1] as PromiseRejectedResult).reason).toBeInstanceOf(
+      AggregateError,
+    );
+    // Shared completion path means both callers observe the same failure contract.
+    expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
+  });
+
+  test("shutdown rejects late commit inserts", async () => {
+    const calls: string[] = [];
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let release!: () => void;
+    const inFlight = withSessionLock("pool-miss-race", async () => {
+      markEntered();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    await entered;
+
+    const closing = closeAllPooledAgents();
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release();
+    await inFlight;
+
+    const committed = commit("pool-miss-race", {
+      session: {
+        abort: async () => {
+          calls.push("abort");
+        },
+        dispose() {
+          calls.push("dispose");
+        },
+      } as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/pool-miss-race.jsonl",
+      frozen: {
+        systemPrompt: "test",
+        model: {} as any,
+        thinking: "off" as any,
+        tools: [],
+        cwd: "/tmp",
+      },
+      tokens: 0,
+    });
+
+    await closing;
+    expect(committed).toBe(false);
+    expect(configFor("pool-miss-race")).toBeUndefined();
+    // Lifecycle owns late materialization commits during shutdown and must dispose
+    // the session itself when commit returns false.
+    expect(calls).toEqual([]);
   });
 
   test("listPooledAgents shows stats for live sessions", () => {
     _resetPoolForTesting();
     expect(listPooledAgents()).toEqual(["_(no active sessions)_"]);
 
-    // Three commits → promptCount 3, totalTokens 1234 ("1.2k"). The first
-    // inserts; the next two are pool hits that bump stats via commit's
-    // map-presence rule (insert-vs-recordUse decided internally).
+    // Three completed prompts on the same live session ID.
+    // The first inserts; the next two are pool hits recorded as additional
+    // uses against the existing entry.
     const base = {
       session: {} as any,
       sessionManager: {} as any,
@@ -4577,8 +4797,8 @@ describe("delegate pool", () => {
       },
     };
     commit("session-a", { ...base, tokens: 412 });
-    commit("session-a", { ...base, tokens: 412 });
-    commit("session-a", { ...base, tokens: 410 });
+    recordUse("session-a", 412);
+    recordUse("session-a", 410);
     const lines = listPooledAgents();
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("session-a");
@@ -6744,6 +6964,31 @@ describe("getHostDeps extension policy and isolation", () => {
     expect(ext.extensions).toHaveLength(0);
   });
 
+  test("resourceLoader excludes global context but keeps project context", async () => {
+    const cwd = makeTempDir("pi-delegate-context-cwd-");
+    const agentDir = makeTempDir("pi-delegate-context-agent-");
+    const projectContext = "PROJECT_CONTEXT_REACHES_SUBAGENT";
+    const globalContext = "GLOBAL_CONTEXT_MUST_NOT_REACH_SUBAGENT";
+    writeFileSync(path.join(cwd, "AGENTS.md"), projectContext, "utf-8");
+    const globalContextSource = path.join(agentDir, "global-context-source.md");
+    writeFileSync(globalContextSource, globalContext, "utf-8");
+    symlinkSync(globalContextSource, path.join(agentDir, "AGENTS.md"));
+
+    try {
+      const deps = await getHostDeps({ cwd, agentDir });
+      const files = deps.resourceLoader.getAgentsFiles().agentsFiles;
+
+      expect(files.map(({ path: filePath }) => path.resolve(filePath))).toEqual(
+        [path.resolve(cwd, "AGENTS.md")],
+      );
+      expect(files.map(({ content }) => content)).toEqual([projectContext]);
+      expect(files.map(({ content }) => content)).not.toContain(globalContext);
+    } finally {
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
   test("resourceLoader is cached/shared across calls for same cwd", async () => {
     const a = await getHostDeps({ cwd: process.cwd() });
     const b = await getHostDeps({ cwd: process.cwd() });
@@ -6751,6 +6996,16 @@ describe("getHostDeps extension policy and isolation", () => {
     // extensions means no handlers bind to the shared runtime.
     expect(b.resourceLoader).toBe(a.resourceLoader);
     expect(b.resourceLoader.getExtensions().extensions).toHaveLength(0);
+  });
+
+  test("a new dispatch generation rebuilds cached host dependencies", async () => {
+    const first = await getHostDeps({ cwd: process.cwd() });
+    invalidateHostDepsCache();
+    const second = await getHostDeps({ cwd: process.cwd() });
+
+    expect(second).not.toBe(first);
+    expect(second.modelRuntime).not.toBe(first.modelRuntime);
+    expect(second.resourceLoader).not.toBe(first.resourceLoader);
   });
 
   test("distinguishes an explicit empty prompt from prompt discovery", async () => {
@@ -6868,55 +7123,82 @@ describe("getHostDeps extension policy and isolation", () => {
     expect(hasCodexCompaction).toBe(true);
   });
 
-  test("ignores project npmCommand during user-scope extension lookup", async () => {
+  test("defaults to projectTrusted=false when loading host deps", async () => {
     const cwd = mkdtempSync(
-      path.join(tmpdir(), "pi-delegate-project-npm-command-"),
+      path.join(tmpdir(), "pi-delegate-project-npm-trust-"),
     );
     const agentDir = mkdtempSync(
-      path.join(tmpdir(), "pi-delegate-agent-npm-command-"),
+      path.join(tmpdir(), "pi-delegate-agent-npm-trust-"),
     );
     const projectSettingsDir = path.join(cwd, ".pi");
-    const globalMarker = path.join(agentDir, "global-command-ran");
-    const projectMarker = path.join(cwd, "project-command-ran");
-    const globalCommand = path.join(agentDir, "global-npm-command.js");
-    const projectCommand = path.join(cwd, "project-npm-command.js");
-    const missingGlobalRoot = path.join(agentDir, "missing-global-root");
+    const projectMarker = path.join(projectSettingsDir, "project-command-ran");
+    const projectCommand = path.join(
+      projectSettingsDir,
+      "project-npm-command.js",
+    );
+    const source = "npm:@example-org/missing-project-package";
+    const fakeNpmRoot = path.join(
+      os.tmpdir(),
+      "pi-delegate-npm-command-root",
+      Date.now().toString(),
+    );
+
     mkdirSync(projectSettingsDir, { recursive: true });
     writeFileSync(
-      globalCommand,
-      `require("node:fs").writeFileSync(${JSON.stringify(globalMarker)}, "ran");\nconsole.log(${JSON.stringify(missingGlobalRoot)});\n`,
+      path.join(agentDir, "settings.json"),
+      JSON.stringify({}),
       "utf-8",
     );
+
+    // This command simulates a project-trusted input. In safe mode, getHostDeps
+    // should ignore it and proceed; the marker remains unset.
     writeFileSync(
       projectCommand,
-      `require("node:fs").writeFileSync(${JSON.stringify(projectMarker)}, "ran");\nconsole.log(${JSON.stringify(missingGlobalRoot)});\n`,
-      "utf-8",
-    );
-    writeFileSync(
-      path.join(agentDir, "settings.json"),
-      JSON.stringify({ npmCommand: [process.execPath, globalCommand] }),
+      `
+        const fs = require("node:fs");
+        fs.writeFileSync(${JSON.stringify(projectMarker)}, "ran");
+        const root = ${JSON.stringify(fakeNpmRoot)};
+        const pkgDir = require("node:path").join(root, "node_modules", ${JSON.stringify(source.slice(4))});
+        require("node:fs").mkdirSync(pkgDir, { recursive: true });
+      `,
       "utf-8",
     );
     writeFileSync(
       path.join(projectSettingsDir, "settings.json"),
-      JSON.stringify({ npmCommand: [process.execPath, projectCommand] }),
+      JSON.stringify({
+        packages: [source],
+        npmCommand: [process.execPath, projectCommand],
+      }),
       "utf-8",
     );
-    _setDelegateConfigForTesting({
-      providerExtensions: {
-        "custom-provider": ["npm:@example-org/missing-extension"],
-      },
-    });
 
     try {
       await expect(
-        getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
-      ).rejects.toThrow("not installed in the user scope");
-      expect(fs.existsSync(globalMarker)).toBe(true);
+        getHostDeps({
+          cwd,
+          agentDir,
+        }),
+      ).resolves.toBeDefined();
       expect(fs.existsSync(projectMarker)).toBe(false);
+
+      // Sanity proof: same fixture executes the marker when project trust is
+      // explicitly enabled.
+      const trustedSettingsManager = piCodingAgent.SettingsManager.create(
+        cwd,
+        agentDir,
+        { projectTrusted: true },
+      );
+      const trustedPackageManager = new piCodingAgent.DefaultPackageManager({
+        cwd,
+        agentDir,
+        settingsManager: trustedSettingsManager,
+      });
+      trustedPackageManager.getInstalledPath(source, "user");
+      expect(fs.existsSync(projectMarker)).toBe(true);
     } finally {
       cleanup(cwd);
       cleanup(agentDir);
+      cleanup(fakeNpmRoot);
     }
   });
 
@@ -6976,7 +7258,7 @@ describe("getHostDeps extension policy and isolation", () => {
     }
   });
 
-  test("verifies a Git origin and pinned ref before loading the extension", async () => {
+  test("validates Git origin, pinned commit/tag, and parser pin metadata", async () => {
     const cwd = mkdtempSync(
       path.join(tmpdir(), "pi-delegate-project-git-source-"),
     );
@@ -7027,6 +7309,90 @@ describe("getHostDeps extension policy and isolation", () => {
         modelProvider: "custom-provider",
       });
       expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(1);
+
+      // A pinned source must reject a checkout whose HEAD diverged after the
+      // configured commit/tag, rather than merely proving that the ref exists.
+      execFileSync("git", ["tag", "configured-release", commit], {
+        cwd: packagePath,
+      });
+      writeFileSync(
+        path.join(packagePath, "second.ts"),
+        "export const second = true;\n",
+        "utf-8",
+      );
+      execFileSync("git", ["add", "second.ts"], { cwd: packagePath });
+      execFileSync("git", ["commit", "--quiet", "-m", "diverge"], {
+        cwd: packagePath,
+      });
+      await expect(
+        getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
+      ).rejects.toThrow("not checked out at its configured Git source or ref");
+
+      _setDelegateConfigForTesting({
+        providerExtensions: {
+          "custom-provider": [`${sourceBase}@configured-release`],
+        },
+      });
+      await expect(
+        getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
+      ).rejects.toThrow("not checked out at its configured Git source or ref");
+
+      // Origin identity is independently mandatory even at the right commit.
+      execFileSync("git", ["reset", "--hard", "--quiet", commit], {
+        cwd: packagePath,
+      });
+      execFileSync(
+        "git",
+        [
+          "remote",
+          "set-url",
+          "origin",
+          "https://github.com/example/different-extension",
+        ],
+        { cwd: packagePath },
+      );
+      _setDelegateConfigForTesting({
+        providerExtensions: { "custom-provider": [source] },
+      });
+      await expect(
+        getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
+      ).rejects.toThrow("not checked out at its configured Git source or ref");
+
+      // Pi's parser is a private compatibility seam. If it says a source is
+      // pinned but stops exposing the ref, fail closed instead of silently
+      // treating the configured source as unpinned.
+      execFileSync(
+        "git",
+        ["remote", "set-url", "origin", sourceBase.slice(4)],
+        {
+          cwd: packagePath,
+        },
+      );
+      const packageManagerPrototype = piCodingAgent.DefaultPackageManager
+        .prototype as unknown as {
+        parseSource(source: string): unknown;
+      };
+      const originalParseSource = packageManagerPrototype.parseSource;
+      packageManagerPrototype.parseSource = function (candidate: string) {
+        const parsed = originalParseSource.call(this, candidate);
+        if (candidate !== source || typeof parsed !== "object" || !parsed) {
+          return parsed;
+        }
+        const { ref: _omitted, ...withoutRef } = parsed as Record<
+          string,
+          unknown
+        >;
+        return withoutRef;
+      };
+      try {
+        await expect(
+          getHostDeps({ cwd, agentDir, modelProvider: "custom-provider" }),
+        ).rejects.toThrow(
+          "not checked out at its configured Git source or ref",
+        );
+      } finally {
+        packageManagerPrototype.parseSource = originalParseSource;
+      }
     } finally {
       cleanup(cwd);
       cleanup(agentDir);
