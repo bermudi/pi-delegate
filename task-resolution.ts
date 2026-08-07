@@ -34,15 +34,43 @@ const PROJECT_CONTEXT_END = "\n</project_context>\n";
  * duplicate project context. Preserve the parent's base prompt and everything
  * outside Pi's structured context section; the child ResourceLoader appends its
  * own (filtered) context afterward.
+ *
+ * The AGENTS.md/CLAUDE.md content is inserted verbatim inside
+ * `<project_instructions>...</project_instructions>` blocks. A file that
+ * itself contains `\n</project_context>\n` would otherwise terminate the
+ * scan early and leak the remainder of the parent context (P1). We therefore
+ * treat a candidate closing marker as valid only when it is *outside* any
+ * open `<project_instructions>` block — i.e. the first `PROJECT_CONTEXT_END`
+ * after `start` that is not nested. That matches the generated section's
+ * final closing marker while ignoring embedded fakes. A trailing
+ * `</project_context>` in post-context prompt text (skills/cwd) would also be
+ * outside, but such text is controlled by Pi and far less likely; picking the
+ * first outside marker preserves trailing prompt content instead of
+ * over-consuming it.
  */
-function stripInheritedProjectContext(
+export function stripInheritedProjectContext(
   prompt: string | undefined,
 ): string | undefined {
   if (!prompt) return prompt;
   const start = prompt.indexOf(PROJECT_CONTEXT_START);
   if (start < 0) return prompt;
-  const end = prompt.lastIndexOf(PROJECT_CONTEXT_END);
-  if (end < start) return prompt;
+  let searchFrom = start + PROJECT_CONTEXT_START.length;
+  let end = -1;
+  while (true) {
+    const candidate = prompt.indexOf(PROJECT_CONTEXT_END, searchFrom);
+    if (candidate < 0) break;
+    const before = prompt.slice(start, candidate);
+    const openCount = (before.match(/<project_instructions/g) || []).length;
+    const closeCount = (before.match(/<\/project_instructions>/g) || []).length;
+    if (openCount > closeCount) {
+      // Inside a file block — embedded fake, skip it.
+      searchFrom = candidate + PROJECT_CONTEXT_END.length;
+      continue;
+    }
+    end = candidate;
+    break; // first valid outside block is the true closing
+  }
+  if (end < 0) return prompt;
   return `${prompt.slice(0, start)}${prompt.slice(end + PROJECT_CONTEXT_END.length)}`;
 }
 
@@ -321,11 +349,15 @@ export function resolveTasks(
         );
       }
 
-      // Resolve thinking. Explicit task/profile/pool values retain their old
-      // precedence. The built-in `default` profile instead uses the parent's
-      // live level; an explicit model suffix still beats that inherited value.
-      // On a named `default` pool reuse, the live parent level is intentional
-      // and checkout will reject a conflict with the frozen session.
+      // Resolve thinking. Precedence for most agents: explicit `thinking` >
+      // agent override > frontmatter > frozen pooled config > model `:level`
+      // suffix (last resort). The built-in `default` agent intentionally
+      // inverts the last two steps: model suffix beats the parent's live
+      // thinking, which beats the frozen pooled value. This surfaces a clear
+      // `config mismatch` error on reuse when the parent thinking level has
+      // changed, rather than silently reusing a stale frozen value. The final
+      // pooled fallback is reachable only when parentDefaults.thinking is
+      // undefined (headless parent without a thinking level).
       const thinkingRaw =
         t.thinking ??
         agentOverride?.thinking ??

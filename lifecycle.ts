@@ -256,6 +256,13 @@ function canRetryWholeTask(
   // hits the same wall, so skip it and let the parent resume with a different
   // model (see the hint in formatFailedTask). Similarly, once bash executes,
   // any retry would replay non-idempotent side effects, so suppress it.
+  // We gate on *observed* bash activity plus touchedFiles, not on the tool set
+  // itself: the default tool set includes `bash` for most tasks, and suppressing
+  // retry for every bash-capable task would disable the useful transient-error
+  // retry path even when no side effects occurred. The stricter “any bash tool
+  // → no retry” rule matches the “no filesystem isolation” stance, but is too
+  // restrictive for retry safety — touched-file accounting and observed activity
+  // are the direct side-effect signals.
   return (
     result.failureKind !== "stalled" &&
     result.failureKind !== "model_error" &&
@@ -753,11 +760,16 @@ async function runResolvedTaskUnlocked(
     try {
       result = await runAttempt();
     } catch (err) {
-      return finishTask(
-        env,
-        p,
-        failTask(task, err instanceof Error ? err.message : String(err)),
+      const failure = failTask(
+        task,
+        err instanceof Error ? err.message : String(err),
       );
+      return finishTask(env, p, {
+        ...failure,
+        durationMs: Math.max(failure.durationMs, Date.now() - taskStartedAt),
+        tokens: accumulatedUsage.totalTokens,
+        usage: accumulatedUsage,
+      });
     }
 
     const maxRetries = resolvedWholeTaskMaxRetries();
@@ -790,18 +802,34 @@ async function runResolvedTaskUnlocked(
       p.error = undefined;
       p.failureKind = undefined;
       env.onStatusChange?.();
-      result = await runAttempt();
+      try {
+        result = await runAttempt();
+      } catch (err) {
+        const failure = failTask(
+          task,
+          err instanceof Error ? err.message : String(err),
+        );
+        result = {
+          ...failure,
+          durationMs: Math.max(failure.durationMs, Date.now() - taskStartedAt),
+          tokens: accumulatedUsage.totalTokens,
+          usage: accumulatedUsage,
+        };
+        break;
+      }
     }
 
     return finishTask(env, p, {
       ...result,
       durationMs: Math.max(result.durationMs, Date.now() - taskStartedAt),
-      tokens: accumulatedUsage.totalTokens,
+      tokens: Math.max(cumulativeTokens, accumulatedUsage.totalTokens),
       usage: accumulatedUsage,
     });
   } catch (err) {
     // Any acquired session is released by runAttempt's finally before an
-    // exception reaches this boundary.
+    // exception reaches this boundary. This outer catch handles unexpected
+    // throws before retry accounting is initialized, so report a minimal
+    // failure without accumulated usage.
     return finishTask(
       env,
       p,

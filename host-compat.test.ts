@@ -5,6 +5,21 @@ import {
   _resetHostCompatCacheForTesting,
 } from "./host-compat.ts";
 
+/**
+ * Host-compatibility guard tests.
+ *
+ * These are pure unit tests for `hostCompatResult` — a function that takes a
+ * plain namespace object and reports missing Pi exports/members. They do not
+ * require a live Pi `AgentSession`, so the Pi test harness is not used here.
+ * The harness (`@marcfargas/pi-test-harness` → `createTestSession`) is for
+ * integration tests that exercise real extension loading, tool registration,
+ * and the agent loop (see `delegate.test.ts`, `lifecycle.test.ts`). For this
+ * guard, a lightweight namespace fixture is the appropriate level and avoids
+ * the session boot cost. The last test verifies the real installed Pi exports
+ * via `hostCompatError()` as an integration smoke check.
+ * See harness docs: https://github.com/marcfargas/pi-test-harness#readme
+ */
+
 const classWithStaticCreate = class {
   static create(): never {
     throw new Error("should not call");
