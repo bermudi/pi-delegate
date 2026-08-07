@@ -24,6 +24,7 @@ import type {
   DelegateDetails,
   DelegateToolCtx,
   DelegateToolResult,
+  ParentAgentDefaults,
   ResolvedTask,
   TaskDef,
   TaskProgress,
@@ -124,6 +125,7 @@ export interface DelegateDispatchInput {
   ctx: DelegateToolCtx;
   agents: Map<string, AgentConfig>;
   parentModelId: string | undefined;
+  parentDefaults: ParentAgentDefaults;
   signal: AbortSignal | undefined;
   onUpdate: AgentToolUpdateCallback<DelegateDetails> | undefined;
 }
@@ -132,13 +134,22 @@ export interface DelegateDispatchInput {
 export async function dispatchDelegate(
   input: DelegateDispatchInput,
 ): Promise<DelegateToolResult> {
-  const { pi, params, ctx, agents, parentModelId, signal, onUpdate } = input;
+  const {
+    pi,
+    params,
+    ctx,
+    agents,
+    parentModelId,
+    parentDefaults,
+    signal,
+    onUpdate,
+  } = input;
   const tasks = params.tasks ?? [];
 
   const validationError = validateTasks(tasks, agents, parentModelId);
   if (validationError) return validationError;
 
-  const resolved = resolveTasks(tasks, ctx, agents);
+  const resolved = resolveTasks(tasks, ctx, agents, parentDefaults);
   const progress = initProgress(resolved);
   const fire = makeFireUpdater(
     onUpdate,

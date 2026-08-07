@@ -98,7 +98,7 @@ import {
   _setHostRetryBaseMsForTesting,
   _resetHostDepsCacheForTesting,
 } from "./host.ts";
-import { resolveTasks } from "./task-resolution.ts";
+import { resolveTasks, validateTasks } from "./task-resolution.ts";
 
 // ── Integration test imports ──────────────────────────────────────────────
 
@@ -628,6 +628,30 @@ Global prompt.
     expect(agents.size).toBe(0);
   });
 
+  test("ignores a persisted profile named default because the built-in is reserved", () => {
+    writeAgent(
+      path.join(tmpDir, ".pi", "agent", "agents"),
+      "default.md",
+      `---
+name: default
+description: Must not shadow the built-in
+---
+Custom prompt.
+`,
+    );
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      const agents = discoverAgents("/nonexistent");
+      expect(agents.has("default")).toBe(false);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("name is reserved");
+  });
+
   test("skips .chain.md files", () => {
     writeAgent(
       path.join(tmpDir, ".pi", "agent", "agents"),
@@ -1052,6 +1076,55 @@ describe("resolveModel", () => {
     ).toEqual({ model: colonModel });
   });
 
+  test("built-in default mirrors the live parent and bypasses delegate model defaults", () => {
+    const parent = {
+      provider: "openrouter",
+      id: "muse-spark-1.2-contributor",
+    } as any;
+    _setDelegateConfigForTesting({
+      agent: { default: "openai/should-not-be-used" },
+    });
+
+    try {
+      const [task] = resolveTasks(
+        [{ prompt: "instrument file operations", agent: "default" }] as any,
+        {
+          cwd: process.cwd(),
+          model: parent,
+          modelRegistry: {
+            hasConfiguredAuth: () => true,
+            getAvailable: () => [],
+          },
+          sessionManager: undefined,
+          getSystemPrompt: () => "live parent base prompt",
+        } as any,
+        new Map(),
+        {
+          thinking: "high",
+          tools: ["read", "grep", "delegate", "extension-tool"],
+        },
+      );
+
+      expect(task!.agentName).toBe("default");
+      expect(task!.model).toBe(parent);
+      expect(task!.thinking).toBe("high");
+      expect(task!.tools).toEqual(["read", "grep"]);
+      expect(task!.systemPrompt).toBe("live parent base prompt");
+    } finally {
+      _resetDelegateConfigForTesting();
+    }
+  });
+
+  test("built-in default is valid without custom agent profiles", () => {
+    expect(
+      validateTasks(
+        [{ prompt: "inspect", agent: "default" }] as any,
+        new Map(),
+        "parent-model",
+      ),
+    ).toBeNull();
+  });
+
   test("resolveTasks honors a model suffix as the thinking fallback", () => {
     const selectedModel = {
       provider: "openai-codex",
@@ -1073,6 +1146,7 @@ describe("resolveModel", () => {
         getSystemPrompt: () => "parent prompt",
       } as any,
       new Map(),
+      { thinking: "off", tools: DEFAULT_TOOLS },
     );
 
     expect(task!.model).toBe(selectedModel);
@@ -1095,6 +1169,7 @@ describe("resolveModel", () => {
         sessionManager: undefined,
       } as any,
       new Map(),
+      { thinking: "off", tools: DEFAULT_TOOLS },
     );
 
     expect(task!.cwd).toBe("/repo/apps/web");
@@ -1122,6 +1197,7 @@ describe("resolveModel", () => {
         getSystemPrompt: () => "parent prompt",
       } as any,
       new Map(),
+      { thinking: "off", tools: DEFAULT_TOOLS },
     );
 
     // The explicit field wins; the suffix had no effect → warn (not silently).
@@ -2521,6 +2597,12 @@ describe("delegate extension integration", () => {
     expect(toolDef!.description).toContain("parallel subagents");
     expect(toolDef!.description).toContain("tasks:[{prompt}]");
     expect(schema.properties.ticket.description).toContain("polling all");
+    expect(tasksArraySchema.items.properties.agent.description).toContain(
+      "`default`",
+    );
+    expect(tasksArraySchema.items.properties.agent.description).toContain(
+      "parent model/thinking/native tools/base prompt",
+    );
     expect(tasksArraySchema.items.properties.context.description).toContain(
       "token-expensive",
     );
@@ -2690,6 +2772,7 @@ describe("delegate extension integration", () => {
     const text = result.content[0].text;
     expect(text).toContain("Unknown agent");
     expect(text).toContain("nonexistent-agent-xyz");
+    expect(text).toContain("Available: default");
     expect(text).toContain("Call delegate with an empty tasks array for help");
   });
 

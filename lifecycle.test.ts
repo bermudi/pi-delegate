@@ -203,6 +203,52 @@ describe("delegate task lifecycle integration", () => {
     expect(details.results[0]?.agent).toBe("ad-hoc");
   });
 
+  test("built-in default forwards the live parent thinking level and native tools", async () => {
+    const stream = installStreamMock("Default configuration inherited.");
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts, stream);
+    // The harness model defaults to non-reasoning. Mark this test model as
+    // reasoning-capable so the public setter can represent a live high-thinking
+    // parent without being clamped back to off.
+    if (!ts.session.model) throw new Error("test session has no model");
+    ts.session.model.reasoning = true;
+    ts.session.setThinkingLevel("high");
+    expect(ts.session.thinkingLevel).toBe("high");
+    ts.session.setActiveToolsByName(["read", "grep", "delegate"]);
+
+    let childThinking: string | undefined;
+    let childTools: string[] | undefined;
+    const originalPrompt = AgentSession.prototype.prompt;
+    AgentSession.prototype.prompt = async function promptWithConfigCapture(
+      this: AgentSession,
+      ...args: Parameters<AgentSession["prompt"]>
+    ) {
+      childThinking = this.thinkingLevel;
+      childTools = this.getActiveToolNames();
+      return originalPrompt.apply(this, args);
+    };
+
+    try {
+      const result = await getDelegateTool(ts).execute(
+        "tc-default-parent-config",
+        { tasks: [{ agent: "default", prompt: "do work" }] },
+        undefined,
+        undefined,
+        getExecContext(ts),
+      );
+      const details = (result as any).details as {
+        results: Array<{ agent?: string; error?: string }>;
+      };
+
+      expect(details.results[0]?.error).toBeUndefined();
+      expect(details.results[0]?.agent).toBe("default");
+      expect(childThinking).toBe("high");
+      expect(childTools).toEqual(["read", "grep"]);
+    } finally {
+      AgentSession.prototype.prompt = originalPrompt;
+    }
+  });
+
   test("disposes a fresh stateless session after successful completion", async () => {
     const stream = installStreamMock("Disposed after success.");
     ts = await createTestSession({ extensions: [EXTENSION] });

@@ -124,7 +124,7 @@ describe("normalizeDelegateArguments", () => {
     expect(normalizeDelegateArguments({ tasks: [] }).tasks).toEqual([]);
   });
 
-  test("treats agent:\"\" as omitted inside task entries", () => {
+  test('treats agent:"" as omitted inside task entries', () => {
     const result = normalizeDelegateArguments({
       tasks: [
         { prompt: "a", agent: "" },
@@ -137,10 +137,16 @@ describe("normalizeDelegateArguments", () => {
     ]);
   });
 
-  test("strips a flat top-level agent:\"\" after folding", () => {
+  test('strips a flat top-level agent:"" after folding', () => {
     const result = normalizeDelegateArguments({ prompt: "x", agent: "" });
     expect(result.tasks).toEqual([{ prompt: "x" }]);
     expect("agent" in result).toBe(false);
+  });
+
+  test("preserves the built-in default agent selector", () => {
+    expect(
+      normalizeDelegateArguments({ prompt: "x", agent: "default" }).tasks,
+    ).toEqual([{ prompt: "x", agent: "default" }]);
   });
 });
 
@@ -217,5 +223,13 @@ describe("getSubagentManualMarkdown", () => {
     expect(intro).toContain("no tasks");
     expect(intro).toContain("Nothing is broken");
     expect(intro).toContain("tasks: [{ ... }]");
+  });
+
+  test("documents the built-in default agent with a canonical call", () => {
+    const manual = getSubagentManualMarkdown(new Map());
+    expect(manual).toContain("## Built-in Agent");
+    expect(manual).toContain('agent: "default"');
+    expect(manual).toContain("live parent model");
+    expect(manual).toContain("extension/MCP tools are not copied");
   });
 });
