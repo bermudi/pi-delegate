@@ -1,13 +1,23 @@
 {
-  "name": "pi-delegate",
+  "name": "@bermudi/pi-delegate",
   "version": "0.1.0",
+  "description": "Delegate tool for the Pi coding agent.",
+  "keywords": ["pi-package"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bermudi/pi-delegate.git"
+  },
+  "type": "module",
+  "files": ["*.ts", "!*.test.ts", "!*.bundle.ts", "README.md", "patches"],
+  "pi": {
+    "extensions": ["./delegate.ts"]
+  },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "^0.80.9",
     "@earendil-works/pi-ai": "^0.80.9",
     "@earendil-works/pi-coding-agent": "^0.80.9",
     "@earendil-works/pi-tui": "^0.80.9",
     "@marcfargas/pi-test-harness": "^0.6.1",
-    "@sinclair/typebox": "^0.34.0",
     "esbuild": "^0.27.0",
     "prettier": "^3.8.4",
     "typescript": "^5.9.0"
@@ -15,12 +25,14 @@
   "patchedDependencies": {
     "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
   },
-  "private": true,
+  "private": false,
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=delegate.bundle.ts",
+    "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=.build/delegate.bundle.ts",
     "format": "prettier --write \"**/*.ts\""
   },
-  "type": "module"
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.0"
+  }
 }

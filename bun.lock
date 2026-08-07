@@ -4,13 +4,15 @@
   "workspaces": {
     "": {
       "name": "pi-delegate",
+      "dependencies": {
+        "@sinclair/typebox": "^0.34.0",
+      },
       "devDependencies": {
         "@earendil-works/pi-agent-core": "^0.80.9",
         "@earendil-works/pi-ai": "^0.80.9",
         "@earendil-works/pi-coding-agent": "^0.80.9",
         "@earendil-works/pi-tui": "^0.80.9",
         "@marcfargas/pi-test-harness": "^0.6.1",
-        "@sinclair/typebox": "^0.34.0",
         "esbuild": "^0.27.0",
         "prettier": "^3.8.4",
         "typescript": "^5.9.0",
@@ -185,7 +187,7 @@
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
-    "@sinclair/typebox": ["@sinclair/typebox@0.34.49", "", {}, "sha512-brySQQs7Jtn0joV8Xh9ZV/hZb9Ozb0pmazDIASBkYKCjXrXU3mpcFahmK/z4YDhGkQvP9mWJbVyahdtU5wQA+A=="],
+    "@sinclair/typebox": ["@sinclair/typebox@0.34.52", "", {}, "sha512-XiMQh7qqVlxZzcVD+kkGMNGMzcTrDMLWI7S4x7z1MkCkbDPrekpZXEUK0eZqZFMuHQg2a2DZOcDIh9o5v3Gonw=="],
 
     "@smithy/core": ["@smithy/core@3.29.0", "", { "dependencies": { "@smithy/types": "^4.15.1", "tslib": "^2.6.2" } }, "sha512-sEvpvkBVoMxjoek35XyJFn2ZD3EJ1RpiZrT47WaZodxzAIWS44zkdvbqGE/ZlugtjiQp62cffYZ9ldyRkjAGnA=="],
 
