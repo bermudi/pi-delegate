@@ -517,7 +517,9 @@ expect(capturedSystemPrompt).not.toContain(globalInstruction);</code></pre>
     sections.forEach((section) => io.observe(section));
   })();
 
-  if (window.hljs) hljs.highlightAll();
+  window.addEventListener('DOMContentLoaded', () => {
+    if (window.hljs) window.hljs.highlightAll();
+  });
 </script>
 </body>
 </html>

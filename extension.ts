@@ -67,7 +67,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const result = handleCancel(params);
         // A forced cancel flips the ticket to "cancelling" — keep the
         // footer status in step (deduped; the preview path is a no-op).
-        syncDelegateStatus();
+        syncDelegateStatus(ctx);
         return result;
       }
 

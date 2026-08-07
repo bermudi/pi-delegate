@@ -129,7 +129,6 @@ export function notifyActiveTicketsOnSettled(ctx: ExtensionContext): void {
     (t) => !settledWarnedTicketIds.has(t.id),
   );
   if (!fresh.length) return;
-  for (const t of fresh) settledWarnedTicketIds.add(t.id);
 
   const subagents = fresh.reduce(
     (n, t) =>
@@ -142,10 +141,17 @@ export function notifyActiveTicketsOnSettled(ctx: ExtensionContext): void {
     fresh.length === 1
       ? `(ticket ${fresh[0]!.id})`
       : `across ${plural(fresh.length, "ticket")} (${fresh.map((t) => t.id).join(", ")})`;
-  ctx.ui.notify(
-    `⏳ ${plural(subagents, "background subagent")} still running ${detail} — quitting pi aborts them`,
-    "warning",
-  );
+  try {
+    ctx.ui.notify(
+      `⏳ ${plural(subagents, "background subagent")} still running ${detail} — quitting pi aborts them`,
+      "warning",
+    );
+    for (const t of fresh) settledWarnedTicketIds.add(t.id);
+  } catch {
+    // Stale or headless ctx: drop it so the next live event re-caches one.
+    lastCtx = undefined;
+    lastStatusText = undefined;
+  }
 }
 
 /** Block a session replacement (switch/fork) while background subagents are

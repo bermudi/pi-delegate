@@ -4,6 +4,15 @@ import { describe, expect, test, mock } from "bun:test";
  * Verifies that markdown rendering gracefully degrades to plain text when the host
  * no longer exposes `getMarkdownTheme`. This prevents a single missing export from
  * crashing delegated output rendering.
+ *
+ * Note: This is a targeted unit test for a single rendering fallback. It uses
+ * `mock.module` to simulate a missing host export without booting a full Pi
+ * session. The Pi test harness (`@marcfargas/pi-test-harness`) is used for
+ * integration tests that need a real `AgentSession` and extension lifecycle
+ * (see `delegate.test.ts`, `lifecycle.test.ts`). For this pure rendering check,
+ * a lightweight module mock is more direct and avoids the ~1s session boot cost.
+ * See harness docs: `createTestSession` is for in-process session testing with
+ * playbook-driven model mocking, not for isolated host-export compatibility.
  */
 describe("render-branches compatibility fallback", () => {
   test("falls back to plain text when getMarkdownTheme is unavailable", async () => {

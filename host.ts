@@ -118,11 +118,10 @@ function isPathWithinDirectory(directory: string, candidate: string): boolean {
 }
 
 const CONTEXT_FILE_NAMES = new Set([
-  "AGENTS.override.md",
-  "AGENTS.md",
-  "AGENTS.MD",
-  "CLAUDE.md",
-  "CLAUDE.MD",
+  "agents.override.md",
+  "agents.md",
+  "claude.override.md",
+  "claude.md",
 ]);
 
 /**
@@ -141,7 +140,7 @@ function isExcludedGlobalContextFile(
   const roots = [resolve(agentDir), resolve(homedir(), ".agents")];
   return roots.some((root) => {
     const relativePath = relative(root, resolvedFilePath);
-    return CONTEXT_FILE_NAMES.has(relativePath);
+    return CONTEXT_FILE_NAMES.has(relativePath.toLowerCase());
   });
 }
 
