@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keeping Parent Instructions Out of Delegate Workers — Textbook Chapter</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js" defer></script>
+
+<style>
+  :root {
+    --paper: #f4f3ee;
+    --ink: #1a1f2c;
+    --accent: #2d5d4f;
+    --muted: #6a7185;
+    --hairline: #d9d5c9;
+    --code-bg: #1a1f2c;
+    --code-fg: #e8e6df;
+  }
+  html { scroll-behavior: smooth; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: var(--paper); color: var(--ink); }
+  .font-display { font-family: 'Fraunces', Georgia, serif; }
+  .font-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  pre.code-block {
+    background: var(--code-bg); color: var(--code-fg); border-left: 3px solid var(--accent);
+    padding: 1rem 1.25rem; border-radius: .25rem; overflow: auto; font-size: .82rem;
+    line-height: 1.55; font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  pre.code-block code { background: none; padding: 0; color: inherit; }
+  pre.code-block code.hljs { background: transparent; padding: 0; }
+  .lab { background: #fffdf7; border: 1px solid var(--hairline); border-radius: .5rem; }
+  .section-index { font-family: 'JetBrains Mono', monospace; font-size: .75rem; letter-spacing: .15em; color: var(--accent); text-transform: uppercase; }
+  .section-rule { border-top: 1px solid var(--hairline); }
+  .toc { position: sticky; top: 4rem; }
+  .toc a { display: flex; gap: .75rem; align-items: baseline; padding: .25rem 0; color: var(--muted); font-size: .875rem; border-left: 2px solid transparent; padding-left: .875rem; margin-left: -.875rem; transition: color .15s, border-color .15s; }
+  .toc a:hover { color: var(--ink); }
+  .toc a.active { color: var(--accent); border-left-color: var(--accent); }
+  .toc a .n { font-family: 'JetBrains Mono', monospace; font-size: .7rem; color: var(--muted); }
+  .toc a.active .n { color: var(--accent); }
+  #progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; display: flex; gap: 2px; background: transparent; z-index: 50; }
+  #progress .seg { flex: 1; background: var(--hairline); transition: background .3s ease; }
+  #progress .seg.active { background: var(--accent); }
+  .opt-card { border: 1px solid var(--hairline); border-radius: .375rem; padding: .625rem .75rem; cursor: pointer; transition: border-color .15s, background .15s; }
+  .opt-card:hover { border-color: var(--muted); }
+  .opt-card.selected { border-color: var(--accent); background: rgba(45,93,79,.06); }
+  .opt-card.correct { border-color: var(--accent); background: rgba(45,93,79,.10); }
+  .opt-card.wrong { border-color: #b8392f; background: rgba(184,57,47,.08); }
+  .opt-explain { font-size: .85rem; color: var(--muted); margin-top: .5rem; display: none; }
+  .opt-explain.show { display: block; }
+  .opt-explain .tag { font-weight: 600; }
+  .opt-explain.correct .tag { color: var(--accent); }
+  .opt-explain.wrong .tag { color: #b8392f; }
+  .route { border: 1px solid var(--hairline); border-radius: .4rem; background: #fffdf7; }
+  .route.blocked { border-color: var(--accent); background: rgba(45,93,79,.08); }
+  .route.leaky { border-color: #b8392f; background: rgba(184,57,47,.08); }
+  .route-arrow { color: var(--muted); font-size: 1.25rem; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }
+</style>
+</head>
+<body class="antialiased leading-relaxed">
+
+<div id="progress" aria-hidden="true">
+  <div class="seg" data-target="background"></div>
+  <div class="seg" data-target="intuition"></div>
+  <div class="seg" data-target="playground"></div>
+  <div class="seg" data-target="breakdown"></div>
+  <div class="seg" data-target="quiz"></div>
+</div>
+
+<div class="lg:flex lg:justify-center lg:gap-16 lg:max-w-5xl lg:mx-auto">
+  <aside class="hidden lg:block w-56 shrink-0 py-16">
+    <nav class="toc">
+      <p class="font-mono text-xs tracking-[.2em] uppercase text-[color:var(--muted)] mb-4">Contents</p>
+      <a href="#background"><span class="n">01</span> Background</a>
+      <a href="#intuition"><span class="n">02</span> Intuition</a>
+      <a href="#playground"><span class="n">03</span> Micro-World</a>
+      <a href="#breakdown"><span class="n">04</span> Breakdown</a>
+      <a href="#quiz"><span class="n">05</span> Quiz</a>
+    </nav>
+  </aside>
+
+  <main class="max-w-2xl mx-auto px-6 py-16 lg:px-0">
+    <header class="mb-20">
+      <p class="font-mono text-xs tracking-[.2em] uppercase text-[color:var(--muted)]">Textbook Chapter · pi-delegate</p>
+      <h1 class="font-display text-5xl sm:text-6xl font-semibold mt-3 leading-[1.05] tracking-tight">Keeping Parent Instructions Out of Delegate Workers</h1>
+      <p class="text-lg text-[color:var(--muted)] mt-5 max-w-prose leading-relaxed">
+        A subagent can receive global instructions through two independent routes; reliable isolation closes both routes while preserving the project context it actually needs.
+      </p>
+    </header>
+
+    <section id="background" class="mb-20">
+      <div class="section-rule pt-6">
+        <p class="section-index">01 / 05</p>
+        <h2 class="font-display text-3xl font-semibold mt-1">Background &amp; Foundational Landscape</h2>
+      </div>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">Mental model</h3>
+      <p class="leading-relaxed">
+        Pi is a host process that can own several <code class="font-mono text-sm">AgentSession</code> objects. The parent session is interactive; a delegated worker is a separate session with its own model loop, tools, resource loader, and system prompt. That system prompt is not one immutable string: Pi compiles it from a base prompt plus discovered resources such as context files and skills.
+      </p>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">Prerequisites</h3>
+      <ul class="list-disc pl-6 space-y-1.5 leading-relaxed">
+        <li><code class="font-mono text-sm">AGENTS.md</code> is instruction text injected into a model's system prompt; it is not executable sandboxing.</li>
+        <li><code class="font-mono text-sm">cwd</code> means the task's working directory, while <code class="font-mono text-sm">agentDir</code> is Pi's global configuration directory, normally <code class="font-mono text-sm">~/.pi/agent</code>.</li>
+        <li>A prompt can be inherited as text even when the child ResourceLoader never discovers the original file.</li>
+      </ul>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">Context</h3>
+      <p class="leading-relaxed">
+        The original behavior had two doors. First, Pi's ResourceLoader discovered the global file at <code class="font-mono text-sm">~/.pi/agent/AGENTS.md</code>; on this machine that path and <code class="font-mono text-sm">~/.agents/AGENTS.md</code> point to the same target. Second, ad-hoc delegation copied the parent's already-assembled system prompt, which already contained its <code class="font-mono text-sm">&lt;project_context&gt;</code> section. Filtering only the loader would leave the inherited copy intact.
+      </p>
+    </section>
+
+    <section id="intuition" class="mb-20">
+      <div class="section-rule pt-6">
+        <p class="section-index">02 / 05</p>
+        <h2 class="font-display text-3xl font-semibold mt-1">Intuition Before Details</h2>
+      </div>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">The core trick</h3>
+      <p class="leading-relaxed">
+        Treat context isolation as a two-door problem: remove global files at the child ResourceLoader seam, and remove the parent's compiled context section before copying the parent prompt.
+      </p>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">High-level goal</h3>
+      <p class="leading-relaxed">
+        Think of the parent as a courier carrying a folder into a clean office. The worker should receive the task's project folder and the base operating instructions—not the courier's private household rulebook. Checking only the office's filing cabinet is insufficient if the courier already carried a photocopy through the door.
+      </p>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">Expected outcome</h3>
+      <p class="leading-relaxed">
+        A worker launched in the repository still sees the repository's <code class="font-mono text-sm">AGENTS.md</code>. A worker launched elsewhere sees that task directory's context. In neither case does a user-global <code class="font-mono text-sm">AGENTS.md</code> silently become part of the worker's instructions.
+      </p>
+    </section>
+
+    <section id="playground" class="mb-20">
+      <div class="section-rule pt-6">
+        <p class="section-index">03 / 05</p>
+        <h2 class="font-display text-3xl font-semibold mt-1">The Micro-World <span class="text-[color:var(--muted)] font-normal text-2xl">(Interactive Playground)</span></h2>
+      </div>
+      <p class="text-[color:var(--muted)] mt-4 mb-5 leading-relaxed">
+        Disable either protection and watch the same global instruction leak through the remaining route. Project context is intentionally kept on the board.
+      </p>
+
+      <div id="widget" class="lab p-6"></div>
+
+      <script>
+        (function () {
+          const widget = document.getElementById('widget');
+          const state = {
+            stripParent: true,
+            filterLoader: true,
+            keepProject: true
+          };
+
+          function render() {
+            const parentLeak = !state.stripParent;
+            const loaderLeak = !state.filterLoader;
+            const globalLeaks = parentLeak || loaderLeak;
+            const globalSources = [
+              parentLeak ? 'parent prompt' : null,
+              loaderLeak ? 'child loader' : null
+            ].filter(Boolean);
+
+            widget.innerHTML = `
+              <div class="w-full">
+                <div class="grid md:grid-cols-3 gap-3 items-stretch mb-5">
+                  <div class="route ${parentLeak ? 'leaky' : 'blocked'} p-4">
+                    <p class="font-mono text-xs uppercase tracking-wide text-[color:var(--muted)]">Door 1</p>
+                    <p class="font-medium mt-1">Parent prompt</p>
+                    <p class="text-sm mt-2">${parentLeak ? 'Full context crosses the handoff.' : 'Context section stripped before handoff.'}</p>
+                  </div>
+                  <div class="route-arrow hidden md:flex items-center justify-center">→</div>
+                  <div class="route ${loaderLeak ? 'leaky' : 'blocked'} p-4">
+                    <p class="font-mono text-xs uppercase tracking-wide text-[color:var(--muted)]">Door 2</p>
+                    <p class="font-medium mt-1">Child ResourceLoader</p>
+                    <p class="text-sm mt-2">${loaderLeak ? 'Global file remains in discovered files.' : 'Global file filtered; project file remains.'}</p>
+                  </div>
+                  <div class="route ${globalLeaks ? 'leaky' : 'blocked'} p-4">
+                    <p class="font-mono text-xs uppercase tracking-wide text-[color:var(--muted)]">Worker result</p>
+                    <p class="font-medium mt-1">${globalLeaks ? 'Global AGENTS.md leaks' : 'Global AGENTS.md blocked'}</p>
+                    <p class="text-sm mt-2">${globalLeaks ? 'Route: ' + globalSources.join(' + ') : 'Only task-scoped context survives.'}</p>
+                  </div>
+                </div>
+
+                <div class="border-t border-[color:var(--hairline)] pt-5 space-y-3">
+                  <label class="flex items-start gap-3 cursor-pointer">
+                    <input type="checkbox" data-field="stripParent" class="mt-1 accent-[color:var(--accent)]" ${state.stripParent ? 'checked' : ''}>
+                    <span><strong>Strip inherited parent context</strong><br><span class="text-sm text-[color:var(--muted)]">Removes the parent's compiled <code class="font-mono">&lt;project_context&gt;</code> section.</span></span>
+                  </label>
+                  <label class="flex items-start gap-3 cursor-pointer">
+                    <input type="checkbox" data-field="filterLoader" class="mt-1 accent-[color:var(--accent)]" ${state.filterLoader ? 'checked' : ''}>
+                    <span><strong>Filter global files in the child loader</strong><br><span class="text-sm text-[color:var(--muted)]">Keeps cwd/ancestor project files, drops global AGENTS candidates.</span></span>
+                  </label>
+                  <label class="flex items-start gap-3 cursor-pointer">
+                    <input type="checkbox" data-field="keepProject" class="mt-1 accent-[color:var(--accent)]" ${state.keepProject ? 'checked' : ''}>
+                    <span><strong>Keep project context</strong><br><span class="text-sm text-[color:var(--muted)]">Models the intended project-specific instruction that should remain.</span></span>
+                  </label>
+                </div>
+
+                <div class="mt-5 rounded-md p-4 ${globalLeaks ? 'bg-red-50 text-red-900' : 'bg-emerald-50 text-emerald-900'}">
+                  <p class="font-display text-xl">${globalLeaks ? 'Not isolated yet.' : 'Two-door isolation is working.'}</p>
+                  <p class="text-sm mt-1">Final context: ${globalLeaks ? 'global instructions are present' : 'global instructions absent'}; project context: ${state.keepProject ? 'present' : 'absent'}.</p>
+                </div>
+              </div>`;
+
+            widget.querySelectorAll('[data-field]').forEach((input) => {
+              input.addEventListener('change', (event) => {
+                state[event.target.dataset.field] = event.target.checked;
+                render();
+              });
+            });
+          }
+
+          render();
+        })();
+      </script>
+    </section>
+
+    <section id="breakdown" class="mb-20">
+      <div class="section-rule pt-6">
+        <p class="section-index">04 / 05</p>
+        <h2 class="font-display text-3xl font-semibold mt-1">Literate Structural Breakdown</h2>
+      </div>
+      <p class="text-[color:var(--muted)] mt-4 mb-6 leading-relaxed">
+        The diff is small because it changes two seams rather than teaching every caller about isolation. First make the resource list safe; then make prompt inheritance safe; finally pin both behaviors with tests.
+      </p>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">1. Name the context candidates</h3>
+      <p class="leading-relaxed mb-3">
+        Pi can choose several conventional filenames for one directory. The filter treats all of those context candidates as global when they sit directly under a global root. The set is deliberately about context filenames, not every Markdown file: custom agent definitions in <code class="font-mono text-sm">~/.agents/</code> are a separate feature.
+      </p>
+      <pre class="code-block"><code class="language-typescript">const CONTEXT_FILE_NAMES = new Set([
+  "AGENTS.override.md", "AGENTS.md", "AGENTS.MD",
+  "CLAUDE.md", "CLAUDE.MD",
+]);</code></pre>
+      <p class="mt-3 leading-relaxed">
+        This separates “a file Pi may inject as ambient context” from “a Markdown file that happens to exist.” That distinction matters because the legacy <code class="font-mono text-sm">.agents</code> directory also stores named agents.
+      </p>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">2. Match discovered paths, not symlink targets</h3>
+      <p class="leading-relaxed mb-3">
+        The machine that exposed the bug uses symlinks. The ResourceLoader reports the path it discovered, such as <code class="font-mono text-sm">/home/daniel/.pi/agent/AGENTS.md</code>, while the file's canonical target may live somewhere else. Therefore this policy compares resolved lexical paths against two roots: the configured Pi <code class="font-mono text-sm">agentDir</code> and the legacy <code class="font-mono text-sm">~/.agents</code> directory.
+      </p>
+      <pre class="code-block"><code class="language-typescript">function isExcludedGlobalContextFile(filePath: string, agentDir: string): boolean {
+  const discovered = resolve(filePath);
+  const roots = [resolve(agentDir), resolve(homedir(), ".agents")];
+  return roots.some((root) =&gt; {
+    const relativePath = relative(root, discovered);
+    return CONTEXT_FILE_NAMES.has(relativePath);
+  });
+}</code></pre>
+      <p class="mt-3 leading-relaxed">
+        The important subtlety is the word <em>discovered</em>. Canonicalizing the candidate would turn a symlink into its target and could make a perfectly ordinary path look unrelated to the root that Pi scanned.
+      </p>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">3. Filter at the ResourceLoader seam</h3>
+      <p class="leading-relaxed mb-3">
+        The child still gets its task-specific project context. Only the final list returned by Pi's loader is filtered, so the policy is local and does not mutate the parent session or globally alter Pi's resource discovery.
+      </p>
+      <pre class="code-block"><code class="language-typescript">agentsFilesOverride: ({ agentsFiles }) =&gt; ({
+  agentsFiles: agentsFiles.filter(({ path: contextPath }) =&gt;
+    !isExcludedGlobalContextFile(contextPath, agentDir),
+  ),
+}),</code></pre>
+      <p class="mt-3 leading-relaxed">
+        This is a deep seam: callers continue to ask the ResourceLoader for context files, while the host-dependency builder enforces the subagent policy once for every fresh loader. It also applies to explicit or named child prompts, where parent inheritance is not the only source of context.
+      </p>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">4. Remove the second route: inherited parent context</h3>
+      <p class="leading-relaxed mb-3">
+        A full <code class="font-mono text-sm">ctx.getSystemPrompt()</code> is already compiled. Passing it verbatim to the child would smuggle the parent's context section around the loader filter. The resolver removes Pi's structured section first; the child then rebuilds context for its own <code class="font-mono text-sm">cwd</code>.
+      </p>
+      <pre class="code-block"><code class="language-typescript">const parentSystemPrompt = stripInheritedProjectContext(
+  ctx.getSystemPrompt?.(),
+);</code></pre>
+      <p class="mt-3 leading-relaxed">
+        The helper preserves the base prompt and text outside <code class="font-mono text-sm">&lt;project_context&gt;</code>. It is intentionally not a string replacement for one known global path: every inherited context file is stale from the child's point of view, and the child loader is the authoritative place to add the right project context back.
+      </p>
+
+      <h3 class="font-display text-xl font-medium mt-8 mb-2">5. Tests prove the two doors independently</h3>
+      <p class="leading-relaxed mb-3">
+        The host test creates a symlinked global context file and a real project file, then asserts that only the project file reaches the ResourceLoader. The lifecycle test puts a global marker inside a fake parent prompt and asserts that the model-facing child prompt does not contain it. One test catches loader regressions; the other catches prompt-inheritance regressions.
+      </p>
+      <pre class="code-block"><code class="language-typescript">expect(files.map(({ content }) =&gt; content)).toEqual([projectContext]);
+expect(files.map(({ content }) =&gt; content)).not.toContain(globalContext);
+
+expect(capturedSystemPrompt).not.toContain(globalInstruction);</code></pre>
+      <p class="mt-3 leading-relaxed">
+        The final runtime check showed only the repository's <code class="font-mono text-sm">AGENTS.md</code> in the child's discovered context. The full suite passed with 512 tests, which is useful evidence that isolation did not remove task-scoped project guidance.
+      </p>
+    </section>
+
+    <section id="quiz" class="mb-20">
+      <div class="section-rule pt-6">
+        <p class="section-index">05 / 05</p>
+        <h2 class="font-display text-3xl font-semibold mt-1">The Speed Regulator <span class="text-[color:var(--muted)] font-normal text-2xl">(Quiz)</span></h2>
+      </div>
+      <p class="text-[color:var(--muted)] mt-4 mb-6 leading-relaxed">
+        Scenario-based questions: reason about which route is still open, what cwd-specific context should survive, and what happens to already-materialized sessions.
+      </p>
+
+      <div id="quiz-root" class="space-y-8"></div>
+
+      <div class="mt-8 flex items-center gap-4">
+        <button id="check-btn" class="px-5 py-2.5 bg-[color:var(--accent)] text-white rounded-md font-medium hover:opacity-90 transition-opacity">Check Answers</button>
+        <button id="reset-btn" class="px-4 py-2.5 text-[color:var(--muted)] hover:text-[color:var(--ink)] text-sm transition-colors">Reset</button>
+        <p id="quiz-score" class="font-display text-lg ml-auto"></p>
+      </div>
+
+      <script>
+        const QUIZ = [
+          {
+            q: "The child loader filters global AGENTS.md, but the resolver starts passing the parent's full system prompt again. The parent prompt contains a global context block. What is the result?",
+            options: [
+              "The global instructions still leak through the inherited prompt.",
+              "The loader filter automatically edits strings already copied from the parent.",
+              "Only the project AGENTS.md disappears; global instructions are safe.",
+              "The child cannot start because two prompts conflict."
+            ],
+            answer: 0,
+            explain: [
+              "Correct. Loader filtering controls discovered files; it cannot retract text already supplied as the custom prompt.",
+              "Wrong. The loader sees resource objects, not arbitrary text inside the parent prompt.",
+              "Wrong. The unfiltered parent string can carry global text independently of the child's file list.",
+              "Wrong. Pi accepts a custom prompt; this is an isolation failure, not a startup conflict."
+            ]
+          },
+          {
+            q: "The parent-context section is stripped, but a named child still uses a ResourceLoader whose global-file filter was accidentally removed. What should the worker receive?",
+            options: [
+              "No context at all, because stripping the parent disables the loader.",
+              "The global AGENTS.md can be rediscovered directly by the child loader.",
+              "The parent's old global text, even though it was stripped.",
+              "Only the parent project's context, regardless of the child's cwd."
+            ],
+            answer: 1,
+            explain: [
+              "Wrong. Stripping inherited text does not turn off the child ResourceLoader.",
+              "Correct. Explicit or named child prompts still go through resource discovery, so the loader seam must be protected too.",
+              "Wrong. Stripping removes that particular inherited copy; a new leak would come from discovery.",
+              "Wrong. The child loader resolves context from the child's cwd, not the parent's project."
+            ]
+          },
+          {
+            q: "A task moves from the repository cwd to a temporary directory containing its own AGENTS.md. Both isolation protections remain enabled. Which context is expected?",
+            options: [
+              "The repository AGENTS.md, because the parent launched the task.",
+              "The temporary directory's AGENTS.md, with the user-global file excluded.",
+              "The global AGENTS.md, because a non-repository cwd has no project policy.",
+              "Both the repository and temporary files, to preserve continuity."
+            ],
+            answer: 1,
+            explain: [
+              "Wrong. Parent context is not the source of truth for the child's cwd after the section is stripped.",
+              "Correct. The child ResourceLoader discovers cwd/ancestor project context and removes user-global candidates.",
+              "Wrong. Lack of a Git repository does not grant global instructions access.",
+              "Wrong. Carrying the parent's project section would reintroduce stale context duplication."
+            ]
+          },
+          {
+            q: "The discovered path is ~/.pi/agent/AGENTS.md, but that file is a symlink whose target is outside ~/.pi/agent. Why does the lexical-path comparison still exclude it?",
+            options: [
+              "It hashes the file content and recognizes the instruction text.",
+              "It compares the path Pi reported against the configured global root before following the symlink target.",
+              "It rejects every symlink in the repository.",
+              "It treats every Markdown file outside the project as global."
+            ],
+            answer: 1,
+            explain: [
+              "Wrong. The policy does not read or hash content to make this decision.",
+              "Correct. The ResourceLoader reports the discovered lexical path, so relative-to-root matching catches the symlinked global entry.",
+              "Wrong. Symlinks are allowed; only matching context candidates under excluded roots are filtered.",
+              "Wrong. Arbitrary external Markdown is not automatically an AGENTS context candidate."
+            ]
+          },
+          {
+            q: "A pooled subagent was materialized before this isolation change and still holds its old session state. A new delegate call reuses the same sessionId. What is the safest expectation?",
+            options: [
+              "The new ResourceLoader retroactively rewrites the pooled session's old system prompt.",
+              "The old pooled session may retain its materialized context; close and recreate it to apply the new policy.",
+              "The session automatically switches to the parent's newest prompt on every turn.",
+              "The pool is unrelated to system prompts, so no context can persist."
+            ],
+            answer: 1,
+            explain: [
+              "Wrong. A live AgentSession owns the dependencies and prompt state it was created with.",
+              "Correct. New materialization is protected; an already-live pooled session needs an explicit lifecycle boundary to be recreated.",
+              "Wrong. Pooling exists specifically to preserve session continuity rather than replacing configuration each turn.",
+              "Wrong. Pooling preserves more than transcript text; it preserves live session dependencies too."
+            ]
+          }
+        ];
+
+        (function () {
+          const root = document.getElementById('quiz-root');
+          const entries = [];
+
+          QUIZ.forEach((item, i) => {
+            const wrap = document.createElement('div');
+            wrap.className = 'border border-[color:var(--hairline)] rounded-lg p-5 bg-white';
+
+            const q = document.createElement('p');
+            q.className = 'font-display text-lg font-medium mb-4';
+            q.textContent = (i + 1) + '. ' + item.q;
+            wrap.appendChild(q);
+
+            const opts = document.createElement('div');
+            opts.className = 'space-y-2';
+
+            item.options.forEach((opt, j) => {
+              const card = document.createElement('div');
+              card.className = 'opt-card';
+              card.dataset.index = j;
+
+              const label = document.createElement('div');
+              label.className = 'flex items-start gap-3';
+              const marker = document.createElement('span');
+              marker.className = 'font-mono text-xs text-[color:var(--muted)] mt-0.5';
+              marker.textContent = String.fromCharCode(65 + j);
+              const text = document.createElement('span');
+              text.textContent = opt;
+              label.appendChild(marker);
+              label.appendChild(text);
+              card.appendChild(label);
+
+              const explain = document.createElement('p');
+              explain.className = 'opt-explain';
+              explain.dataset.index = j;
+              explain.innerHTML = '<span class="tag"></span> ' + item.explain[j];
+              card.appendChild(explain);
+
+              card.addEventListener('click', () => {
+                if (wrap.dataset.checked === '1') return;
+                opts.querySelectorAll('.opt-card').forEach((c) => c.classList.remove('selected'));
+                card.classList.add('selected');
+              });
+              opts.appendChild(card);
+            });
+
+            wrap.appendChild(opts);
+            root.appendChild(wrap);
+            entries.push({ wrap, item, opts });
+          });
+
+          function check() {
+            let correct = 0;
+            entries.forEach(({ wrap, item, opts }) => {
+              const selected = opts.querySelector('.opt-card.selected');
+              const chosen = selected ? +selected.dataset.index : null;
+              if (chosen === item.answer) correct++;
+
+              opts.querySelectorAll('.opt-card').forEach((card) => {
+                const idx = +card.dataset.index;
+                card.classList.remove('selected');
+                if (idx === item.answer) card.classList.add('correct');
+                else if (idx === chosen) card.classList.add('wrong');
+
+                const explain = card.querySelector('.opt-explain');
+                const tag = explain.querySelector('.tag');
+                if (idx === item.answer) {
+                  explain.classList.add('show', 'correct');
+                  tag.textContent = '✓ Correct.';
+                } else if (idx === chosen) {
+                  explain.classList.add('show', 'wrong');
+                  tag.textContent = '✗ Incorrect.';
+                } else {
+                  explain.classList.add('show');
+                  tag.textContent = '—';
+                }
+              });
+              wrap.dataset.checked = '1';
+            });
+            document.getElementById('quiz-score').textContent = 'Score: ' + correct + ' / ' + QUIZ.length;
+          }
+
+          function reset() {
+            entries.forEach(({ wrap, opts }) => {
+              delete wrap.dataset.checked;
+              opts.querySelectorAll('.opt-card').forEach((card) => card.classList.remove('selected', 'correct', 'wrong'));
+              opts.querySelectorAll('.opt-explain').forEach((ex) => ex.classList.remove('show', 'correct', 'wrong'));
+            });
+            document.getElementById('quiz-score').textContent = '';
+          }
+
+          document.getElementById('check-btn').addEventListener('click', check);
+          document.getElementById('reset-btn').addEventListener('click', reset);
+        })();
+      </script>
+    </section>
+  </main>
+</div>
+
+<script>
+  (function () {
+    const segs = document.querySelectorAll('#progress .seg');
+    const tocLinks = document.querySelectorAll('.toc a');
+    const sections = ['background', 'intuition', 'playground', 'breakdown', 'quiz']
+      .map((id) => document.getElementById(id)).filter(Boolean);
+
+    function setActive(idx) {
+      segs.forEach((s, i) => s.classList.toggle('active', i <= idx));
+      tocLinks.forEach((a, i) => a.classList.toggle('active', i === idx));
+    }
+
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) setActive(sections.indexOf(entry.target));
+      });
+    }, { rootMargin: '-40% 0px -55% 0px', threshold: 0 });
+    sections.forEach((section) => io.observe(section));
+  })();
+
+  if (window.hljs) hljs.highlightAll();
+</script>
+</body>
+</html>
