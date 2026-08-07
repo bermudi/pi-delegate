@@ -15,6 +15,7 @@ import { sumUsage } from "./usage.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
 import { fmtDuration, formatCompletedTask, trunc } from "./format.ts";
 import { validateDelegateOperation } from "./schema.ts";
+import { syncDelegateStatus } from "./status.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
 import type {
   AgentConfig,
@@ -206,6 +207,10 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     parentModelId,
   };
   ticketRegistry.set(ticketId, ticket);
+  // Footer visibility for the new background work (see status.ts). Uses the
+  // ctx cached from the dispatch path in extension.ts — DelegateToolCtx is
+  // the intentionally narrowed surface and does not carry `ui`.
+  syncDelegateStatus();
 
   // Capture values for the closure — do NOT use `signal` from execute()
   // The parent turn's signal dies when execute() returns.
@@ -221,9 +226,13 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
       notifyWaiters(ticket);
+      // Live subagent counts in the footer. Deduped by text, so only
+      // running/pending count transitions trigger a render.
+      syncDelegateStatus();
     },
     onStatusChange: () => {
       notifyWaiters(ticket);
+      syncDelegateStatus();
     },
   };
 
@@ -243,6 +252,12 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     ticketSignal,
   )
     .then(() => {
+      // A ticket that is already terminally "cancelled" at this point was
+      // finalized by cancelTicketForShutdown (user cancels pass through
+      // "cancelling" first): the extension runtime is being torn down, the
+      // captured `pi` is stale or about to be, and a follow-up message has
+      // no live session to land in. Skip delivery entirely.
+      if (ticket.status === "cancelled") return;
       // All tasks settled — determine final ticket status.
       // Use progress (set by runResolvedTask) for settled-ness so the
       // status reflects work completion, not just result-array density.
@@ -262,10 +277,13 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         ticket.completedAt = Date.now();
         syncTicketBusyIndex(ticket);
       }
+      syncDelegateStatus();
       deliverTicketResults(pi, ticket);
     })
     .catch((err) => {
-      // Defense-in-depth — should not happen if individual tasks catch properly
+      // Defense-in-depth — should not happen if individual tasks catch properly.
+      // Same shutdown guard as the .then path above.
+      if (ticket.status === "cancelled") return;
       if (ticket.status === "cancelling") {
         ticket.status = "cancelled";
       } else if (ticket.status === "running") {
@@ -274,6 +292,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       ticket.error = err instanceof Error ? err.message : String(err);
       ticket.completedAt = Date.now();
       syncTicketBusyIndex(ticket);
+      syncDelegateStatus();
       deliverTicketResults(pi, ticket);
     });
 

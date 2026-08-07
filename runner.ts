@@ -296,7 +296,8 @@ export async function runAgentSession(
   const initialMessages = session.messages;
   const initialMessageCount = initialMessages.length;
   const initialMessageSnapshot = initialMessages.slice();
-  let transcriptMayHaveBeenReplaced = false;
+  let compactionInProgress = false;
+  let completedCompaction = false;
   const assistantMessagesForAttempt: AgentMessage[] = [];
   let partialAssistantMessage: AgentMessage | undefined;
   type AttemptCapture = {
@@ -426,11 +427,13 @@ export async function runAgentSession(
     // Keep an append-only fallback for providers/fakes that reject before
     // emitting message_end. It is deliberately used only when event capture
     // is empty; event capture is authoritative across compaction and retries.
-    // Requiring the original array and unchanged historical prefix prevents a
-    // replacement/compaction transcript from leaking old assistant output.
+    // An aborted compaction may leave the original append-only transcript
+    // untouched. Completed or indeterminate compaction remains fail-closed even
+    // if a host happened to preserve the array identity.
     const currentMessages = session.messages;
     if (
-      transcriptMayHaveBeenReplaced ||
+      compactionInProgress ||
+      completedCompaction ||
       currentMessages !== initialMessages ||
       currentMessages.length < initialMessageCount
     ) {
@@ -525,17 +528,23 @@ export async function runAgentSession(
         // delay before ordinary inactivity detection resumes.
         noteActivity("waiting to retry", event.delayMs);
         break;
-      case "auto_retry_end":
+      case "auto_retry_end": {
+        const autoRetry = event as {
+          success?: unknown;
+        };
+        if (autoRetry.success === false && pendingCompactionAttempt) {
+          pendingCompactionAttempt.omitFinalAssistant = false;
+        }
         noteActivity("waiting for model output");
         break;
+      }
       case "compaction_start":
-        // Even if a host mutates the transcript in place rather than replacing
-        // its array, historical messages are no longer a safe fallback source.
-        transcriptMayHaveBeenReplaced = true;
+        compactionInProgress = true;
         noteActivity("compacting context");
         break;
       case "compaction_end":
-        transcriptMayHaveBeenReplaced = true;
+        compactionInProgress = false;
+        if (!event.aborted) completedCompaction = true;
         // Context-overflow agent_end is intentionally emitted with
         // willRetry=false because Pi's retry decision belongs to compaction.
         // Only an overflow compaction that actually retries may retract that

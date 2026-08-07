@@ -5,8 +5,10 @@
  *
  * `DefaultResourceLoader.reload()` is the one expensive step (~1.2s cold — it
  * scans for skills, prompts, agents.md files, system prompts). It is a
- * read-only cache for the parts we care about: skills, AGENTS.md/context files,
- * and the system prompt. `_buildRuntime` reads `resourceLoader.getExtensions()`
+ * read-only cache for the parts we care about: skills, project AGENTS.md/context
+ * files, and the system prompt. Global context is filtered at this seam so a
+ * child cannot inherit the parent's user-global instructions. `_buildRuntime`
+ * reads `resourceLoader.getExtensions()`
  * and the prompt/skill getters.
  *
  * **Extensions are disabled for subagents by default** (`noExtensions: true`).
@@ -78,7 +80,7 @@ export interface HostDepsOptions {
    * Custom system prompt for a named agent. When set, it overrides the default
    * system prompt the resource loader would otherwise discover. Extension-free
    * host deps are cached per (agentDir + cwd + systemPrompt): the expensive
-   * `reload()` (skills, AGENTS.md discovery) runs once per distinct combo, then
+   * `reload()` (skills, project AGENTS.md discovery) runs once per distinct combo, then
    * is reused across concurrent subagents. Provider-configured or
    * allowlisted-extension tasks always receive fresh host deps. For ad-hoc
    * tasks (no named agent) pass undefined to use the discovered prompt.
@@ -89,6 +91,8 @@ export interface HostDepsOptions {
 const hostDepsCache = new Map<string, HostDeps>();
 /** In-flight builds, so concurrent calls for the same key share one reload(). */
 const hostDepsInflight = new Map<string, Promise<HostDeps>>();
+/** Prevent a pre-invalidation build from repopulating or clearing newer state. */
+let hostDepsCacheGeneration = 0;
 
 function canonicalPath(candidate: string): string {
   try {
@@ -111,6 +115,34 @@ function isPathWithinDirectory(directory: string, candidate: string): boolean {
       !relativePath.startsWith(`..${sep}`) &&
       !isAbsolute(relativePath))
   );
+}
+
+const CONTEXT_FILE_NAMES = new Set([
+  "AGENTS.override.md",
+  "AGENTS.md",
+  "AGENTS.MD",
+  "CLAUDE.md",
+  "CLAUDE.MD",
+]);
+
+/**
+ * Delegate workers deliberately do not inherit user-global context files.
+ * Pi's standard global file lives under `agentDir`; `.agents/AGENTS.md` is a
+ * legacy convention used by other coding-agent harnesses. Compare lexical
+ * paths here rather than canonical paths: a user's global file is commonly a
+ * symlink, and the ResourceLoader reports the path it discovered, not its
+ * symlink target.
+ */
+function isExcludedGlobalContextFile(
+  filePath: string,
+  agentDir: string,
+): boolean {
+  const resolvedFilePath = resolve(filePath);
+  const roots = [resolve(agentDir), resolve(homedir(), ".agents")];
+  return roots.some((root) => {
+    const relativePath = relative(root, resolvedFilePath);
+    return CONTEXT_FILE_NAMES.has(relativePath);
+  });
 }
 
 /**
@@ -301,6 +333,7 @@ function getConfiguredGitSource(
     host?: unknown;
     path?: unknown;
     ref?: unknown;
+    pinned?: unknown;
   };
   if (parsedSource.type !== "git") {
     throw new Error(
@@ -324,7 +357,22 @@ function getConfiguredGitSource(
       "A configured provider extension Git identity could not be verified; delegation stopped.",
     );
   }
-  if (parsedSource.ref === undefined) return repository;
+  // `ref` and `pinned` are a security contract from Pi's private parser. If a
+  // host upgrade drops either field, never reinterpret a pinned source as an
+  // unpinned checkout and silently skip commit validation.
+  if (typeof parsedSource.pinned !== "boolean") {
+    throw new Error(
+      "A configured provider extension Git pin state could not be verified; delegation stopped.",
+    );
+  }
+  if (!parsedSource.pinned) {
+    if (parsedSource.ref !== undefined) {
+      throw new Error(
+        "A configured provider extension Git ref could not be verified; delegation stopped.",
+      );
+    }
+    return repository;
+  }
   if (typeof parsedSource.ref !== "string" || parsedSource.ref.length === 0) {
     throw new Error(
       "A configured provider extension Git ref could not be verified; delegation stopped.",
@@ -579,8 +627,10 @@ let testModelRuntimeFactory: (() => Promise<ModelRuntime>) | undefined;
 
 /**
  * Lazily build the host deps for a task. Extension-free, provider-independent
- * deps are cached by (agentDir, cwd, systemPrompt); provider registrations and
- * allowlisted extensions get a private dependency graph for every session.
+ * deps are cached by (agentDir, cwd, systemPrompt) within one delegate dispatch;
+ * the extension invalidates the generation before the next dispatch so file
+ * edits become visible. Provider registrations and allowlisted extensions get
+ * a private dependency graph for every session.
  *
  * The first cached call pays the `resourceLoader.reload()` cost (~1.2s). An
  * extension-bearing call intentionally pays that cost again: sharing its
@@ -602,14 +652,13 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
   );
 
   // Resolve provider extensions before deciding whether to use the cache. This
-  // fails closed for missing sources while keeping package lookup's user-only
-  // settings isolated from the project-aware session settings built below.
+  // fails closed for missing sources while keeping both package lookup and child
+  // resource loading isolated from executable project settings.
   let additionalExtensionPaths: string[] = [];
   if (requestedExtensions.length > 0) {
     // Package lookup is a user-scope trust boundary. Pi's legacy npm fallback
     // may execute the configured npmCommand to discover the global npm root,
-    // so project settings must not participate even though the normal resource
-    // loader below remains project-aware.
+    // so project settings must never participate.
     const packageLookupSettingsManager = SettingsManager.create(
       options.cwd,
       agentDir,
@@ -630,6 +679,7 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
   // extension runtime is mutable and session-owned.
   const cacheable =
     providerConfigs.length === 0 && additionalExtensionPaths.length === 0;
+  const cacheGeneration = hostDepsCacheGeneration;
   const key = JSON.stringify({
     agentDir,
     cwd: options.cwd,
@@ -677,6 +727,7 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
     const resolvedSettingsManager = SettingsManager.create(
       options.cwd,
       agentDir,
+      { projectTrusted: false },
     );
     if (testRetryBaseMs !== undefined) {
       installFastRetry(resolvedSettingsManager, testRetryBaseMs);
@@ -689,6 +740,16 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
       // interactive extension inventory. The only paths supplied here are the
       // explicitly allowlisted, user-scoped provider extensions.
       noExtensions: true,
+      // Global AGENTS.md files describe the parent harness, not the delegated
+      // task. Keep cwd/ancestor project context discovery, but remove Pi's
+      // global file and the legacy ~/.agents equivalent. This override also
+      // handles symlinked global files because it compares discovered paths.
+      agentsFilesOverride: ({ agentsFiles }) => ({
+        agentsFiles: agentsFiles.filter(
+          ({ path: contextPath }) =>
+            !isExcludedGlobalContextFile(contextPath, agentDir),
+        ),
+      }),
       ...(additionalExtensionPaths.length ? { additionalExtensionPaths } : {}),
       // When a named agent supplies a custom prompt, it becomes the loader's
       // customPrompt — overriding the default system prompt AgentSession would
@@ -742,16 +803,20 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
   if (!cacheable) return build();
 
   const promise = build().then((deps) => {
-    hostDepsCache.set(key, deps);
+    if (hostDepsCacheGeneration === cacheGeneration) {
+      hostDepsCache.set(key, deps);
+    }
     return deps;
   });
   hostDepsInflight.set(key, promise);
   try {
     return await promise;
   } finally {
-    // Clear the in-flight marker whether it succeeded or threw; the cache holds
-    // the result on success, and a failure leaves nothing for a retry to reuse.
-    hostDepsInflight.delete(key);
+    // An invalidation can let a newer generation install its own in-flight
+    // build for the same key. Never let the older promise delete that marker.
+    if (hostDepsInflight.get(key) === promise) {
+      hostDepsInflight.delete(key);
+    }
   }
 }
 
@@ -764,10 +829,23 @@ function installFastRetry(sm: SettingsManager, baseDelayMs: number): void {
   })) as never;
 }
 
-/** Test-only: clear the cache so a fresh (cwd, prompt) gets re-built. */
-export function _resetHostDepsCacheForTesting(): void {
+/**
+ * Invalidate cached host dependencies before a new delegate dispatch.
+ *
+ * A dispatch may still share one expensive resource reload across its parallel
+ * tasks, but the next dispatch observes auth, model, settings, and context-file
+ * edits made while Pi remains open. Existing sessions retain their already-built
+ * dependencies; clearing the maps never mutates live AgentSessions.
+ */
+export function invalidateHostDepsCache(): void {
+  hostDepsCacheGeneration++;
   hostDepsCache.clear();
   hostDepsInflight.clear();
+}
+
+/** Test-only alias retained for existing test setup. */
+export function _resetHostDepsCacheForTesting(): void {
+  invalidateHostDepsCache();
 }
 
 /**

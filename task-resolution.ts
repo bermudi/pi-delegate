@@ -18,6 +18,29 @@ import type {
   TaskDef,
 } from "./types.ts";
 
+const PROJECT_CONTEXT_START =
+  "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n";
+const PROJECT_CONTEXT_END = "\n</project_context>\n";
+
+/**
+ * Parent `getSystemPrompt()` is the fully assembled prompt, including the
+ * parent's AGENTS.md files. A delegated session resolves resources for its own
+ * cwd, so carrying that section across would leak global instructions and
+ * duplicate project context. Preserve the parent's base prompt and everything
+ * outside Pi's structured context section; the child ResourceLoader appends its
+ * own (filtered) context afterward.
+ */
+function stripInheritedProjectContext(
+  prompt: string | undefined,
+): string | undefined {
+  if (!prompt) return prompt;
+  const start = prompt.indexOf(PROJECT_CONTEXT_START);
+  if (start < 0) return prompt;
+  const end = prompt.lastIndexOf(PROJECT_CONTEXT_END);
+  if (end < start) return prompt;
+  return `${prompt.slice(0, start)}${prompt.slice(end + PROJECT_CONTEXT_END.length)}`;
+}
+
 /** Build a tool result for an error/notice with no task progress. */
 function noticeResult(
   text: string,
@@ -107,7 +130,9 @@ export function resolveTasks(
     );
   }
 
-  const parentSystemPrompt = ctx.getSystemPrompt?.();
+  const parentSystemPrompt = stripInheritedProjectContext(
+    ctx.getSystemPrompt?.(),
+  );
 
   return tasks.map((t, i) => {
     const agent = t.agent ? agents.get(t.agent) : undefined;
@@ -121,8 +146,9 @@ export function resolveTasks(
         : undefined;
 
     // Build system prompt. Explicit task prompts and named agent prompts
-    // win; ad-hoc subagents inherit the parent prompt when Pi exposes it,
-    // then get explicit skills/AGENTS.md injection below.
+    // win; ad-hoc subagents inherit the parent's base prompt when Pi exposes
+    // it. The assembled parent project-context section was stripped above;
+    // the child ResourceLoader supplies context for this task's cwd.
     const pooledConfig = t.sessionId ? configFor(t.sessionId) : undefined;
 
     // Prompt is required for fresh tasks. ResumeFrom provides context already.
@@ -138,10 +164,11 @@ export function resolveTasks(
     }
 
     // System prompt resolution. AgentSession's resource loader owns
-    // skills + AGENTS.md discovery (it appends them via _rebuildSystemPrompt),
-    // so we resolve only the *base* prompt here: explicit task prompt → named
-    // agent body → parent session prompt → default. The resolved base is
-    // passed as the loader's customPrompt (see buildDelegateSession).
+    // skills + project AGENTS.md discovery (it appends them via
+    // _rebuildSystemPrompt), so we resolve only the *base* prompt here:
+    // explicit task prompt → named agent body → sanitized parent prompt →
+    // default. The resolved base is passed as the loader's customPrompt (see
+    // buildDelegateSession).
     // Keep explicit intent separate: a bare `{ prompt, sessionId }` continues
     // the frozen prompt even if the parent prompt has since changed, while an
     // explicit task/profile prompt must not be silently ignored on reuse.

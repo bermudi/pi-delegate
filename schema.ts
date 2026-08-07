@@ -26,7 +26,8 @@ export const delegateTaskSchema = Type.Object({
   ),
   agent: Type.Optional(
     Type.String({
-      description: "Named agent profile; omit for an ad-hoc subagent.",
+      description:
+        "Named agent profile from the manual; omit for ad-hoc. Unknown names fail the ENTIRE call.",
     }),
   ),
   cwd: Type.Optional(
@@ -66,7 +67,7 @@ export const delegateTaskSchema = Type.Object({
   sessionId: Type.Optional(
     Type.String({
       description:
-        "Optional live pool key for multi-turn reuse; omit for one-shot tasks.",
+        "Live pool key for multi-turn reuse; omit for one-shot tasks.",
     }),
   ),
   action: Type.Optional(
@@ -90,13 +91,13 @@ export const delegateArgumentsSchema = Type.Object({
   action: Type.Optional(
     StringEnum(["poll", "cancel", "wait"], {
       description:
-        "Ticket control: poll, cancel, or wait. Prefer wait; do not cancel for time.",
+        "Ticket control: poll=snapshot; wait=block until settled; cancel=abort. Prefer wait; never cancel for time.",
     }),
   ),
   async: Type.Optional(
     Type.Boolean({
       description:
-        "Detach work and return a ticket; results auto-deliver. Wait only when blocked.",
+        "Detach work, return a ticket; applies to ALL tasks. Results auto-deliver. Wait only if blocked.",
       default: false,
     }),
   ),
@@ -116,7 +117,7 @@ export const delegateArgumentsSchema = Type.Object({
     Type.Number({
       minimum: 0,
       description:
-        "How long wait blocks (ms); timeout does not cancel the ticket.",
+        "Bounds wait (ms); omit to block until settled. Timeout never cancels the ticket.",
     }),
   ),
   tasks: Type.Optional(
@@ -127,6 +128,28 @@ export const delegateArgumentsSchema = Type.Object({
     }),
   ),
 });
+
+/** Fields that belong to a task entry. Models sometimes place these at the
+ * top level of the arguments; the shim folds them back into a single task. */
+const TASK_FIELD_NAMES = [
+  "prompt",
+  "agent",
+  "cwd",
+  "systemPrompt",
+  "context",
+  "model",
+  "tools",
+  "thinking",
+  "sessionId",
+  "resumeFrom",
+] as const;
+
+/** Every field a task entry may carry. Anything else is a model mistake —
+ * e.g. `async` placed inside a task — and must fail loudly with a
+ * corrective message instead of being silently ignored (observed in the
+ * wild: a task-level `async: true` the caller believed had backgrounded
+ * the work while the call in fact ran synchronously). */
+const VALID_TASK_KEYS = new Set<string>([...TASK_FIELD_NAMES, "action"]);
 
 /** Validate the three operation modes after compatibility reshaping. */
 export function validateDelegateOperation(
@@ -165,6 +188,20 @@ export function validateDelegateOperation(
   }
 
   for (const [index, task] of tasks.entries()) {
+    const unknownKeys = Object.keys(task).filter(
+      (key) => !VALID_TASK_KEYS.has(key),
+    );
+    if (unknownKeys.length) {
+      const asyncHint = unknownKeys.includes("async")
+        ? " 'async' is a top-level flag; move it out of the task entry."
+        : "";
+      return (
+        `task ${index + 1}: unknown field(s) ${unknownKeys
+          .map((key) => `'${key}'`)
+          .join(", ")}.${asyncHint} ` +
+        `Valid task fields: ${[...VALID_TASK_KEYS].join(", ")}.`
+      );
+    }
     if (task.action === "close") {
       if (!task.sessionId) {
         return `task ${index + 1}: action 'close' requires sessionId.`;
@@ -186,21 +223,6 @@ export function validateDelegateOperation(
 
   return undefined;
 }
-
-/** Fields that belong to a task entry. Models sometimes place these at the
- * top level of the arguments; the shim folds them back into a single task. */
-const TASK_FIELD_NAMES = [
-  "prompt",
-  "agent",
-  "cwd",
-  "systemPrompt",
-  "context",
-  "model",
-  "tools",
-  "thinking",
-  "sessionId",
-  "resumeFrom",
-] as const;
 
 /** Actions that are only valid at task level. The top-level `action` is
  * ticket-scoped (poll/cancel/wait), so a flat close/list/prompt belongs to
@@ -233,7 +255,8 @@ function normalizeToolsField(value: string): unknown {
  * - `tasks` as a JSON string instead of an array;
  * - task fields (`prompt`, `systemPrompt`, `tools`, ...) placed at the top
  *   level instead of inside a `tasks` entry — wrapped into a single task;
- * - `tools` as a JSON string (or bare token) inside a task entry.
+ * - `tools` as a JSON string (or bare token) inside a task entry;
+ * - `agent: ""` inside a task entry — treated as omitted (ad-hoc).
  * Skipped when a ticket action is in play. All other invalid input is left
  * for normal schema validation to reject loudly.
  *
@@ -275,13 +298,22 @@ export function normalizeDelegateArguments(args: unknown): DelegateArguments {
     if (Object.keys(task).length > 0) record.tasks = [task];
   }
 
-  // Stringified (or bare-token) `tools` inside task entries → real arrays.
+  // Per-entry recovery: stringified (or bare-token) `tools` → real arrays,
+  // and `agent: ""` → omitted (models emit an empty string to mean "ad-hoc";
+  // without this it only works by truthiness accident downstream).
   if (Array.isArray(record.tasks)) {
     record.tasks = record.tasks.map((entry: unknown) => {
       if (!entry || typeof entry !== "object") return entry;
       const e = entry as Record<string, unknown>;
-      if (typeof e.tools !== "string") return entry;
-      return { ...e, tools: normalizeToolsField(e.tools) };
+      const rawTools = e.tools;
+      const fixAgent = e.agent === "";
+      if (typeof rawTools !== "string" && !fixAgent) return entry;
+      const out = { ...e };
+      if (typeof rawTools === "string") {
+        out.tools = normalizeToolsField(rawTools);
+      }
+      if (fixAgent) delete out.agent;
+      return out;
     });
   }
 

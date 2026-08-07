@@ -97,8 +97,23 @@ let poolAbortTimeoutMs = DEFAULT_POOL_ABORT_TIMEOUT_MS;
  *  delegate calls with the same sessionId queue instead of interleaving. */
 const sessionLocks = new Map<string, Promise<void>>();
 
+type PoolShutdownState = "open" | "closing" | "closed";
+let poolState: PoolShutdownState = "open";
+let closePromise: Promise<void> | null = null;
+
 function now(): number {
   return Date.now();
+}
+
+function assertPoolOpenForNormalWork(): void {
+  if (poolState !== "open") {
+    throw new Error("Session pool is not accepting new work.");
+  }
+}
+
+function waitForActiveSessionLocks(): Promise<void> {
+  const locks = [...sessionLocks.values()];
+  return Promise.all(locks).then(() => undefined);
 }
 
 // ── Read + validate ───────────────────────────────────────────────────────
@@ -115,8 +130,8 @@ function now(): number {
  *  - mismatch → pooled but its immutable configuration conflicts with this
  *               request. Caller formats the structured diff into an error.
  *
- *  lastUsed is bumped by commit() on a successful run, not here — so a checkout
- *  that bails (e.g. a resumeFrom conflict at the caller) does not affect stats. */
+ *  lastUsed is bumped by recordUse() after a completed pool hit, not here — so
+ *  a checkout that bails (e.g. a resumeFrom conflict) does not affect stats. */
 export function checkout(
   sessionId: string,
   candidate: ConfigCandidate,
@@ -187,28 +202,26 @@ export function checkout(
 
 // ── The sole mutator (besides close) ──────────────────────────────────────
 
-/** Record the outcome of a run against a sessionId. Decides insert-vs-recordUse
- *  internally by map presence:
- *   - present (pool hit)  → bump lastUsed, totalTokens, promptCount.
- *   - absent  (fresh/resume success) → insert with the frozen config.
+/**
+ * Insert the first successful prompt for a fresh/resumed session into the pool.
  *
- *  MUST be called inside withSessionLock(sessionId, …) — the map-presence
- *  decision is sound only because the lock serializes same-sessionId tasks, so
- *  no concurrent commit can race the insert. MUST only be called on run success
- *  (insert-only-on-success is caller-gated). Returns true when the session is
- *  now pool-owned, false when a fresh session could not be inserted because it
- *  lacks the manager/file required by a pooled entry. */
+ *  MUST be called inside withSessionLock(sessionId, …) and only when this run
+ *  should transfer ownership from lifecycle to the pool. Returns true when the
+ *  session is now pool-owned, false when insertion is blocked (shutdown) or
+ *  impossible (missing manager/file).
+ */
 export function commit(sessionId: string, payload: CommitPayload): boolean {
-  const existing = agentPool.get(sessionId);
-  if (existing) {
-    // Pool hit: session already pooled, just bump stats.
-    existing.lastUsed = now();
-    existing.totalTokens += payload.tokens;
-    existing.promptCount++;
-    return true;
+  // Shutdown-aware policy: once shutdown has started, inserting a new pool entry
+  // is unsafe. The lifecycle handles the still-owned session (abort/cleanup) and
+  // should dispose it instead of inserting it after the barrier begins.
+  if (poolState !== "open") {
+    return false;
   }
+
   // Miss → success: insert. A pooled entry needs a concrete file/manager.
   if (!payload.sessionManager || !payload.sessionFile) return false;
+
+  if (agentPool.has(sessionId)) return false;
   agentPool.set(sessionId, {
     session: payload.session,
     sessionManager: payload.sessionManager,
@@ -219,6 +232,20 @@ export function commit(sessionId: string, payload: CommitPayload): boolean {
     totalTokens: payload.tokens,
     promptCount: 1,
   });
+  return true;
+}
+
+/** Record a completed run against an existing pooled session. This is separate
+ *  from commit() so lifecycle can distinguish ownership transfer from hit
+ *  accounting. Returns true only when the sessionId is currently pooled.
+ */
+export function recordUse(sessionId: string, tokens: number): boolean {
+  const existing = agentPool.get(sessionId);
+  if (!existing) return false;
+
+  existing.lastUsed = now();
+  existing.totalTokens += tokens;
+  existing.promptCount++;
   return true;
 }
 
@@ -242,8 +269,24 @@ export function configFor(
  *  (lifecycle) can bracket the ENTIRE acquire/run/commit flow; checkout/commit
  *  do NOT lock internally because their only caller is already inside this
  *  bracket. Close is also invoked under this lock, so it never disposes an
- *  in-flight prompt. */
+ *  in-flight prompt.
+ *
+ *  External callers must go through this exported path only while the pool is
+ *  open. Internal callers that are already synchronized by a higher-level lock
+ *  can use `withSessionLockInternal`.
+ */
 export async function withSessionLock<T>(
+  sessionId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  assertPoolOpenForNormalWork();
+  return withSessionLockInternal(sessionId, fn);
+}
+
+/** Internal lock variant that does not reject during shutdown. Use only from
+ *  lifecycle/control paths that already account for pool shutdown state.
+ */
+async function withSessionLockInternal<T>(
   sessionId: string,
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -303,8 +346,8 @@ function beginAbort(session: AgentSession): Promise<AbortOutcome> {
 }
 
 /** Close and dispose one pooled session. A caller holds the per-session lock
- * while closing, so abort cannot race a reuse. All cleanup is attempted before
- * an error is surfaced; a removed session is never silently retained. */
+ *  while closing, so abort cannot race a reuse. All cleanup is attempted before
+ *  an error is surfaced; a removed session is never silently retained. */
 async function closePooledAgentAfterAbort(
   sessionId: string,
   abort: Promise<AbortOutcome>,
@@ -346,44 +389,117 @@ async function closePooledAgentAfterAbort(
   return true;
 }
 
-/** Abort, dispose, and remove one pooled session. Returns false when the id
- * is already absent; cleanup failures are aggregated after removal. */
-export async function closePooledAgent(sessionId: string): Promise<boolean> {
+/** Internal close helper for callers that already own (or are obtaining) the
+ *  session lock. */
+async function closePooledAgentAfterLock(sessionId: string): Promise<boolean> {
   const pooled = agentPool.get(sessionId);
   if (!pooled) return false;
   return closePooledAgentAfterAbort(sessionId, beginAbort(pooled.session));
 }
 
-/** Dispose every live pooled session when the parent Pi session ends. First
- * request cancellation immediately, then acquire each session's lock before
- * disposal. The lock prevents an in-flight lifecycle from committing a live
- * session after shutdown has removed it. Attempts all cleanup before reporting
- * any failures. */
-export async function closeAllPooledAgents(): Promise<void> {
-  const aborts = new Map<string, Promise<AbortOutcome>>(
-    [...agentPool].map(([sessionId, pooled]) => [
-      sessionId,
-      beginAbort(pooled.session),
-    ]),
-  );
-  const results = await Promise.allSettled(
-    [...aborts].map(([sessionId, abort]) =>
-      withSessionLock(sessionId, () =>
-        closePooledAgentAfterAbort(sessionId, abort),
-      ),
-    ),
-  );
-  const failures = results
-    .filter(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    )
-    .map((result) => result.reason);
-  if (failures.length) {
-    throw new AggregateError(
-      failures,
-      "Failed to close one or more pooled sessions.",
-    );
+/** @internal Close while the caller already owns the per-session lock. */
+export async function _closePooledAgentWithoutLock(
+  sessionId: string,
+): Promise<boolean> {
+  return closePooledAgentAfterLock(sessionId);
+}
+
+/** Abort, dispose, and remove one pooled session. Returns false when the id
+ * is already absent; cleanup failures are aggregated after removal.
+ * During shutdown or after close, this waits for shutdown to finish and
+ * returns `false` instead of throwing.
+ */
+export async function closePooledAgent(sessionId: string): Promise<boolean> {
+  if (poolState !== "open") {
+    const existing = closePromise;
+    if (existing) {
+      try {
+        await existing;
+      } catch {
+        // Keep public close idempotent during and after shutdown.
+      }
+    }
+    return false;
   }
+
+  let awaitShutdown: Promise<void> | undefined;
+  let closed = false;
+
+  await withSessionLockInternal(sessionId, async () => {
+    // A shutdown can begin while this call waits for its lock. Avoid waiting
+    // for closePromise inside this lock: do that work after releasing it, so
+    // closeAll can acquire the lock and dispose the same session.
+    if (poolState !== "open") {
+      awaitShutdown = closePromise ?? undefined;
+      return;
+    }
+    closed = await closePooledAgentAfterLock(sessionId);
+  });
+
+  if (awaitShutdown) {
+    try {
+      await awaitShutdown;
+    } catch {
+      // Keep public close idempotent during and after shutdown.
+    }
+  }
+
+  return closed;
+}
+
+/** Dispose every live pooled session when the parent Pi session ends. First
+ * request cancellation immediately, then wait for all in-flight session locks,
+ * then acquire each remaining session's lock before disposal. Attempts are
+ * executed for all sessions before reporting failures. Idempotent callers share
+ * the same completion promise, including failures.
+ */
+export async function closeAllPooledAgents(): Promise<void> {
+  if (closePromise) {
+    return closePromise;
+  }
+  if (poolState === "closed") {
+    const completed = Promise.resolve();
+    closePromise = completed;
+    return completed;
+  }
+
+  poolState = "closing";
+
+  const completion = (async () => {
+    const aborts = new Map<string, Promise<AbortOutcome>>(
+      [...agentPool].map(([sessionId, pooled]) => [
+        sessionId,
+        beginAbort(pooled.session),
+      ]),
+    );
+
+    await waitForActiveSessionLocks();
+
+    const results = await Promise.allSettled(
+      [...aborts].map(([sessionId, abort]) =>
+        withSessionLockInternal(sessionId, () =>
+          closePooledAgentAfterAbort(sessionId, abort),
+        ),
+      ),
+    );
+    const failures = results
+      .filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      )
+      .map((result) => result.reason);
+    if (failures.length) {
+      throw new AggregateError(
+        failures,
+        "Failed to close one or more pooled sessions.",
+      );
+    }
+  })();
+
+  closePromise = completion.finally(() => {
+    poolState = "closed";
+  });
+  return closePromise;
 }
 
 /** List live pooled agents. Sessions remain available until explicit close or
@@ -416,5 +532,7 @@ export function _setPoolAbortTimeoutForTesting(
 export function _resetPoolForTesting(): void {
   agentPool.clear();
   sessionLocks.clear();
+  poolState = "open";
+  closePromise = null;
   poolAbortTimeoutMs = DEFAULT_POOL_ABORT_TIMEOUT_MS;
 }

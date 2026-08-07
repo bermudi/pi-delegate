@@ -32,10 +32,17 @@ import {
   _setModelRuntimeFactoryForTesting,
 } from "./host.ts";
 import {
+  _setRunAgentSessionForTesting,
   _setWholeTaskRetryForTesting,
   isModelAttributableError,
+  runResolvedTask,
 } from "./lifecycle.ts";
-import { _resetPoolForTesting } from "./pool.ts";
+import {
+  _resetPoolForTesting,
+  commit,
+  configFor,
+  listPooledAgents,
+} from "./pool.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
 
@@ -229,8 +236,9 @@ describe("delegate task lifecycle integration", () => {
     }
   });
 
-  test("ad-hoc prompt inherits parent system prompt and appends AGENTS.md", async () => {
+  test("ad-hoc prompt inherits the parent base but not global AGENTS.md", async () => {
     const projectInstruction = "SPAWN_PROMPT_HYGIENE_PROJECT_CONTEXT";
+    const globalInstruction = "SPAWN_PROMPT_HYGIENE_GLOBAL_CONTEXT";
     let capturedSystemPrompt = "";
     const stream = mockPiAiStream((orig) => ({
       ...orig,
@@ -257,6 +265,18 @@ describe("delegate task lifecycle integration", () => {
         [
           "PARENT_EFFECTIVE_PROMPT_SHOULD_BE_INHERITED",
           "- delegate: verbose parent tool docs",
+          "",
+          "<project_context>",
+          "",
+          "Project-specific instructions and guidelines:",
+          "",
+          `<project_instructions path="${path.join(os.homedir(), ".agents", "AGENTS.md")}">`,
+          globalInstruction,
+          "</project_instructions>",
+          "",
+          "</project_context>",
+          "",
+          "Current working directory: /parent",
         ].join("\n");
 
       const result = await toolDef.execute(
@@ -275,6 +295,7 @@ describe("delegate task lifecycle integration", () => {
         "PARENT_EFFECTIVE_PROMPT_SHOULD_BE_INHERITED",
       );
       expect(capturedSystemPrompt).toContain("verbose parent tool docs");
+      expect(capturedSystemPrompt).not.toContain(globalInstruction);
       expect(capturedSystemPrompt.split(projectInstruction).length - 1).toBe(1);
     } finally {
       fs.rmSync(taskCwd, { recursive: true, force: true });
@@ -631,6 +652,87 @@ describe("delegate task lifecycle integration", () => {
     const listText = (listResult as any).details.results[0]?.output as string;
     expect(listText).toContain("reuse-sess");
     expect(listText).toContain("2 prompts");
+  });
+
+  test("failed pooled prompt still updates pool usage statistics", async () => {
+    let callCount = 0;
+    const stream = mockPiAiStream((orig) => ({
+      ...orig,
+      streamSimple: () => {
+        callCount++;
+        return callCount === 1
+          ? mockStream("Seed pooled session")
+          : mockStreamError("invalid api key");
+      },
+    }));
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts, stream);
+    const toolDef = getDelegateTool(ts);
+    const ctx = getExecContext(ts);
+
+    await toolDef.execute(
+      "tc-pool-failed-use-seed",
+      { tasks: [{ prompt: "seed", sessionId: "failed-use" }] },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const failed = await toolDef.execute(
+      "tc-pool-failed-use",
+      { tasks: [{ prompt: "fail", sessionId: "failed-use" }] },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect((failed as any).details.results[0]?.error).toContain(
+      "invalid api key",
+    );
+
+    const listed = await toolDef.execute(
+      "tc-pool-failed-use-list",
+      { tasks: [{ action: "list" }] },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const listText = (listed as any).details.results[0]?.output as string;
+    expect(listText).toContain("failed-use");
+    expect(listText).toContain("2 prompts");
+  });
+
+  test("failed pool miss is disposed and never inserted", async () => {
+    const stream = mockPiAiStream((orig) => ({
+      ...orig,
+      streamSimple: () => mockStreamError("invalid api key"),
+    }));
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts, stream);
+    const toolDef = getDelegateTool(ts);
+    const ctx = getExecContext(ts);
+
+    const failed = await toolDef.execute(
+      "tc-pool-failed-miss",
+      { tasks: [{ prompt: "fail", sessionId: "never-pooled" }] },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect((failed as any).details.results[0]?.error).toContain(
+      "invalid api key",
+    );
+
+    const listed = await toolDef.execute(
+      "tc-pool-failed-miss-list",
+      { tasks: [{ action: "list" }] },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect((listed as any).details.results[0]?.output).not.toContain(
+      "never-pooled",
+    );
   });
 
   test("close action tears down pooled session", async () => {
@@ -1744,6 +1846,456 @@ describe("delegate pool-miss with resumeFrom and sessionId", () => {
     expect(listText).toContain("2 prompts");
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe("whole-task retry gating", () => {
+  test("does not retry when a bash tool activity is observed", async () => {
+    const task = {
+      prompt: "do work",
+      model: { id: "m", provider: "p", api: "openai-responses" } as never,
+      tools: ["bash", "read"],
+      thinking: "default",
+      systemPrompt: "",
+      cwd: process.cwd(),
+      agentName: "inline",
+      warnings: [],
+    } as never;
+
+    const progressRow = {
+      index: 0,
+      agent: "inline",
+      task: "do work",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [] as Array<{
+        id: string;
+        name: string;
+        args: { command: string };
+        startTime: number;
+        endTime?: number;
+      }>,
+    };
+
+    let runAttempts = 0;
+    let bashMarker = 0;
+
+    _setRunAgentSessionForTesting(
+      async (_s, _p, _c, _signal, onProgressCallback) => {
+        runAttempts += 1;
+        bashMarker += 1;
+        onProgressCallback({
+          tokens: 10,
+          toolUses: 1,
+          durationMs: 10,
+          lastActivityAt: Date.now(),
+          activities: [
+            {
+              id: "call-1",
+              name: "bash",
+              args: { command: "echo hi" },
+              startTime: Date.now(),
+            },
+          ],
+        });
+        return {
+          output: "",
+          error: "connection refused",
+          durationMs: 10,
+          tokens: 10,
+          usage: {
+            input: 0,
+            output: 10,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 10,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          },
+          touchedFiles: [],
+        } as never;
+      },
+    );
+
+    const env = {
+      signal: undefined,
+      modelRegistry: {} as never,
+      parentSessionManager: undefined,
+      delegateStartedAt: Date.now(),
+      onProgress: (
+        p: {
+          activities: Array<{
+            id: string;
+            name: string;
+            args: Record<string, unknown>;
+            startTime: number;
+          }>;
+        },
+        u: {
+          tokens: number;
+          toolUses: number;
+          durationMs: number;
+          lastActivityAt?: number;
+          activities: Array<{
+            id: string;
+            name: string;
+            args: { command: string };
+            startTime: number;
+            endTime?: number;
+          }>;
+          failureKind?: "stalled" | "model_error";
+        },
+      ) => {
+        p.activities = u.activities;
+        p.tokens = u.tokens;
+        p.toolUses = u.toolUses;
+        p.durationMs = u.durationMs;
+        p.lastActivityAt = u.lastActivityAt;
+      },
+      onStatusChange: () => {},
+    } as never;
+
+    _setWholeTaskRetryForTesting({
+      maxRetries: 3,
+      baseDelayMs: 0,
+    });
+
+    try {
+      const result = await runResolvedTask(env, task, progressRow as never, 0);
+
+      expect(result.error).toBe("connection refused");
+      expect(result.tokens).toBe(10);
+      expect(runAttempts).toBe(1);
+      expect(bashMarker).toBe(1);
+      expect(
+        progressRow.activities.some((activity) => activity.name === "bash"),
+      ).toBe(true);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setWholeTaskRetryForTesting(undefined);
+    }
+  });
+
+  test("aggregates monotonic progress across retry attempts", async () => {
+    const task = {
+      prompt: "do work",
+      model: { id: "m", provider: "p", api: "openai-responses" } as never,
+      tools: ["read"],
+      thinking: "default",
+      systemPrompt: "",
+      cwd: process.cwd(),
+      agentName: "inline",
+      warnings: [],
+    } as never;
+
+    const progressRow = {
+      index: 0,
+      agent: "inline",
+      task: "do work",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [] as Array<{
+        id: string;
+        name: string;
+        args: Record<string, unknown>;
+        startTime: number;
+        endTime?: number;
+      }>,
+    };
+    const updateSamples: Array<{ tokens: number; toolUses: number }> = [];
+
+    let runAttempts = 0;
+    _setRunAgentSessionForTesting(
+      async (_s, _p, _c, _signal, onProgressCallback) => {
+        runAttempts += 1;
+        const attempt = runAttempts;
+        onProgressCallback({
+          tokens: 10,
+          toolUses: 1,
+          durationMs: 5,
+          lastActivityAt: Date.now(),
+          activities: [
+            {
+              id: `activity-${attempt}`,
+              name: attempt === 1 ? "read" : "write",
+              args: { path: `file-${attempt}.txt` },
+              startTime: Date.now(),
+            },
+          ],
+        });
+
+        if (attempt === 1) {
+          return {
+            output: "",
+            error: "connection refused",
+            durationMs: 5,
+            tokens: 10,
+            usage: {
+              input: 0,
+              output: 10,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 10,
+              cost: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+              },
+            },
+            touchedFiles: [],
+          } as never;
+        }
+
+        return {
+          output: "Recovered on retry",
+          error: undefined,
+          durationMs: 5,
+          tokens: 10,
+          usage: {
+            input: 0,
+            output: 10,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 10,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          },
+          touchedFiles: [],
+        } as never;
+      },
+    );
+
+    const env = {
+      signal: undefined,
+      modelRegistry: {} as never,
+      parentSessionManager: undefined,
+      delegateStartedAt: Date.now(),
+      onProgress: (
+        p: {
+          activities: Array<{
+            id: string;
+            name: string;
+            args: Record<string, unknown>;
+            startTime: number;
+          }>;
+        },
+        u: {
+          tokens: number;
+          toolUses: number;
+          durationMs: number;
+          lastActivityAt?: number;
+          activities: Array<{
+            id: string;
+            name: string;
+            args: Record<string, unknown>;
+            startTime: number;
+            endTime?: number;
+          }>;
+          failureKind?: "stalled" | "model_error";
+        },
+      ) => {
+        p.activities = [...p.activities, ...u.activities];
+        p.tokens = u.tokens;
+        p.toolUses = u.toolUses;
+        p.durationMs = u.durationMs;
+        p.lastActivityAt = u.lastActivityAt;
+        updateSamples.push({ tokens: u.tokens, toolUses: u.toolUses });
+      },
+      onStatusChange: () => {},
+    } as never;
+
+    _setWholeTaskRetryForTesting({
+      maxRetries: 1,
+      baseDelayMs: 25,
+    });
+
+    try {
+      const result = await runResolvedTask(env, task, progressRow as never, 0);
+
+      expect(runAttempts).toBe(2);
+      expect(result.error).toBeUndefined();
+      expect(result.output).toBe("Recovered on retry");
+      expect(result.usage.totalTokens).toBe(20);
+      expect(result.tokens).toBe(20);
+      expect(result.tokens).toBe(progressRow.tokens);
+      expect(progressRow.toolUses).toBe(2);
+      expect(progressRow.activities.map((activity) => activity.id)).toEqual([
+        "activity-1",
+        "activity-2",
+      ]);
+      expect(updateSamples.map((sample) => sample.tokens)).toEqual([10, 20]);
+      expect(updateSamples.map((sample) => sample.toolUses)).toEqual([1, 2]);
+      expect(progressRow.durationMs).toBeGreaterThanOrEqual(25);
+      expect(progressRow.durationMs).toBe(result.durationMs);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setWholeTaskRetryForTesting(undefined);
+    }
+  });
+
+  test("keeps wall-time and counters when abort happens during backoff", async () => {
+    const task = {
+      prompt: "do work",
+      model: { id: "m", provider: "p", api: "openai-responses" } as never,
+      tools: ["read"],
+      thinking: "default",
+      systemPrompt: "",
+      cwd: process.cwd(),
+      agentName: "inline",
+      warnings: [],
+    } as never;
+
+    const progressRow = {
+      index: 0,
+      agent: "inline",
+      task: "do work",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [] as Array<{
+        id: string;
+        name: string;
+        args: Record<string, unknown>;
+        startTime: number;
+        endTime?: number;
+      }>,
+    };
+
+    let runAttempts = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    let resolveFirstProgress!: () => void;
+    const firstProgress = new Promise<void>((resolve) => {
+      resolveFirstProgress = resolve;
+    });
+
+    _setRunAgentSessionForTesting(
+      async (_s, _p, _c, _signal, onProgressCallback) => {
+        runAttempts += 1;
+        onProgressCallback({
+          tokens: 15,
+          toolUses: 1,
+          durationMs: 5,
+          lastActivityAt: Date.now(),
+          activities: [
+            {
+              id: "activity-1",
+              name: "read",
+              args: { path: "read.txt" },
+              startTime: Date.now(),
+            },
+          ],
+        });
+        return {
+          output: "",
+          error: "connection refused",
+          durationMs: 5,
+          tokens: 15,
+          usage: {
+            input: 0,
+            output: 15,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 15,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          },
+          touchedFiles: [],
+        } as never;
+      },
+    );
+
+    const env = {
+      signal: controller.signal,
+      modelRegistry: {} as never,
+      parentSessionManager: undefined,
+      delegateStartedAt: Date.now(),
+      onProgress: (
+        p: {
+          activities: Array<{
+            id: string;
+            name: string;
+            args: Record<string, unknown>;
+            startTime: number;
+          }>;
+        },
+        u: {
+          tokens: number;
+          toolUses: number;
+          durationMs: number;
+          lastActivityAt?: number;
+          activities: Array<{
+            id: string;
+            name: string;
+            args: Record<string, unknown>;
+            startTime: number;
+            endTime?: number;
+          }>;
+          failureKind?: "stalled" | "model_error";
+        },
+      ) => {
+        p.activities = u.activities;
+        p.tokens = u.tokens;
+        p.toolUses = u.toolUses;
+        p.durationMs = u.durationMs;
+        p.lastActivityAt = u.lastActivityAt;
+        if (runAttempts === 1) {
+          resolveFirstProgress();
+        }
+      },
+      onStatusChange: () => {},
+    } as never;
+
+    _setWholeTaskRetryForTesting({
+      maxRetries: 3,
+      baseDelayMs: 40,
+    });
+
+    try {
+      const running = runResolvedTask(env, task, progressRow as never, 0);
+      await firstProgress;
+      timer = setTimeout(() => {
+        if (!controller.signal.aborted) {
+          controller.abort();
+        }
+      }, 15);
+
+      const result = await running;
+
+      expect(result.error).toBe("Aborted");
+      expect(runAttempts).toBe(1);
+      expect(result.tokens).toBe(15);
+      expect(result.usage.totalTokens).toBe(15);
+      expect(result.tokens).toBe(progressRow.tokens);
+      expect(progressRow.durationMs).toBeGreaterThanOrEqual(10);
+      expect(progressRow.durationMs).toBe(result.durationMs);
+    } finally {
+      if (timer) clearTimeout(timer);
+      _setRunAgentSessionForTesting(undefined);
+      _setWholeTaskRetryForTesting(undefined);
+    }
   });
 });
 

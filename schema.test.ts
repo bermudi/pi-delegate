@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeDelegateArguments } from "./schema.ts";
+import {
+  normalizeDelegateArguments,
+  validateDelegateOperation,
+} from "./schema.ts";
 import { getSubagentManualMarkdown } from "./manual.ts";
+import type { DelegateArguments } from "./types.ts";
 
 describe("normalizeDelegateArguments", () => {
   test("passes well-formed arguments through unchanged", () => {
@@ -118,6 +122,91 @@ describe("normalizeDelegateArguments", () => {
   test("empty calls stay empty so help still works", () => {
     expect(normalizeDelegateArguments({}).tasks).toBeUndefined();
     expect(normalizeDelegateArguments({ tasks: [] }).tasks).toEqual([]);
+  });
+
+  test("treats agent:\"\" as omitted inside task entries", () => {
+    const result = normalizeDelegateArguments({
+      tasks: [
+        { prompt: "a", agent: "" },
+        { prompt: "b", agent: "reviewer" },
+      ],
+    });
+    expect(result.tasks).toEqual([
+      { prompt: "a" },
+      { prompt: "b", agent: "reviewer" },
+    ]);
+  });
+
+  test("strips a flat top-level agent:\"\" after folding", () => {
+    const result = normalizeDelegateArguments({ prompt: "x", agent: "" });
+    expect(result.tasks).toEqual([{ prompt: "x" }]);
+    expect("agent" in result).toBe(false);
+  });
+});
+
+describe("validateDelegateOperation task-field whitelist", () => {
+  test("rejects a task-level async flag with a corrective hint", () => {
+    const err = validateDelegateOperation({
+      tasks: [{ prompt: "x", async: true }],
+    } as unknown as DelegateArguments);
+    expect(err).toContain("task 1: unknown field(s) 'async'");
+    expect(err).toContain("top-level flag");
+  });
+
+  test("rejects misspelled task fields and lists the valid set", () => {
+    const err = validateDelegateOperation({
+      tasks: [{ prompt: "x", promtp: "y" }],
+    } as unknown as DelegateArguments);
+    expect(err).toContain("task 1: unknown field(s) 'promtp'");
+    expect(err).toContain("prompt");
+    expect(err).toContain("resumeFrom");
+    expect(err).not.toContain("top-level flag");
+  });
+
+  test("indexes the offending task", () => {
+    const err = validateDelegateOperation({
+      tasks: [{ prompt: "ok" }, { prompt: "x", bogus: 1 }],
+    } as unknown as DelegateArguments);
+    expect(err).toContain("task 2: unknown field(s) 'bogus'");
+  });
+
+  test("accepts a task using every valid field", () => {
+    const err = validateDelegateOperation({
+      tasks: [
+        {
+          prompt: "x",
+          agent: "a",
+          cwd: "/tmp",
+          systemPrompt: "s",
+          context: "fresh",
+          model: "m",
+          tools: ["ro"],
+          thinking: "low",
+          sessionId: "s1",
+          action: "prompt",
+          resumeFrom: "/tmp/s.jsonl",
+        },
+      ],
+    });
+    expect(err).toBeUndefined();
+  });
+
+  test("an unknown key on close reports the key, not the extras rule", () => {
+    const err = validateDelegateOperation({
+      tasks: [{ action: "close", sessionId: "s1", bogus: 1 }],
+    } as unknown as DelegateArguments);
+    expect(err).toContain("unknown field(s) 'bogus'");
+  });
+
+  test("a known-but-disallowed field on close still hits the extras rule", () => {
+    const err = validateDelegateOperation({
+      tasks: [{ action: "close", sessionId: "s1", prompt: "x" }],
+    });
+    expect(err).toContain("accepts only action and sessionId");
+  });
+
+  test("ticket-control calls skip task checks", () => {
+    expect(validateDelegateOperation({ action: "poll" })).toBeUndefined();
   });
 });
 
