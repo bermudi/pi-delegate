@@ -112,6 +112,10 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         ctx,
         agents,
         parentModelId,
+        parentDefaults: {
+          thinking: pi.getThinkingLevel(),
+          tools: pi.getActiveTools(),
+        },
         signal,
         onUpdate,
       });

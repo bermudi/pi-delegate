@@ -14,12 +14,14 @@ export type {
   TaskResult,
   TaskFailureKind,
   ReuseIntent,
+  ParentAgentDefaults,
   AgentRunConfig,
   TaskRunEnv,
 } from "./types.ts";
 export type { DelegateConfig } from "./config.ts";
 
 export {
+  DEFAULT_AGENT_NAME,
   DEFAULT_TOOLS,
   READONLY_TOOLS,
   MAX_CONCURRENCY,

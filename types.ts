@@ -65,6 +65,14 @@ export interface AsyncTicket {
   waiters?: TicketWaiter[];
 }
 
+/** Live parent settings captured when a delegate call starts. The built-in
+ *  `default` profile mirrors these settings, limited to tools delegate can
+ *  safely recreate without loading the parent's extensions. */
+export interface ParentAgentDefaults {
+  thinking: ThinkingLevel;
+  tools: string[];
+}
+
 export interface ReuseIntent {
   /** Explicit model requested by this call/profile; omitted means use frozen. */
   model?: Model<Api>;

@@ -6,7 +6,11 @@ import type {
   ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter as parsePiFrontmatter } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
+import {
+  DEFAULT_AGENT_NAME,
+  DEFAULT_TOOLS,
+  VALID_THINKING,
+} from "./constants.ts";
 import { resolveToolGroups } from "./tools.ts";
 import type { AgentConfig } from "./types.ts";
 
@@ -294,7 +298,14 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
     }
     for (const e of entries) {
       if (!e.name.endsWith(".md") || e.name.endsWith(".chain.md")) continue;
-      const cfg = loader(path.join(dir, e.name));
+      const filePath = path.join(dir, e.name);
+      const cfg = loader(filePath);
+      if (cfg?.name === DEFAULT_AGENT_NAME) {
+        console.warn(
+          `[delegate] ignoring agent profile '${DEFAULT_AGENT_NAME}' from ${filePath}: the name is reserved for the built-in parent-mirroring profile.`,
+        );
+        continue;
+      }
       if (cfg && !agents.has(cfg.name)) {
         cfg.scope = scope;
         agents.set(cfg.name, cfg);

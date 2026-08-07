@@ -1,3 +1,6 @@
+/** Reserved built-in profile that mirrors the live parent configuration. */
+export const DEFAULT_AGENT_NAME = "default";
+
 /** Full-capability agent set. Inline-task default and the `*` shorthand.
  *  Bash subsumes search, so the dedicated grep/find/ls tools are excluded. */
 export const DEFAULT_TOOLS = ["read", "write", "edit", "bash"];

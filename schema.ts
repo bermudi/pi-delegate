@@ -27,7 +27,7 @@ export const delegateTaskSchema = Type.Object({
   agent: Type.Optional(
     Type.String({
       description:
-        "Named agent profile from the manual; omit for ad-hoc. Unknown names fail the ENTIRE call.",
+        "Use `default`: parent model/thinking/native tools/base prompt. Omit=ad-hoc; unknown fails call.",
     }),
   ),
   cwd: Type.Optional(
@@ -55,13 +55,13 @@ export const delegateTaskSchema = Type.Object({
   tools: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        "Omit to inherit; `*`=read/write/edit/bash (mutating); `ro`=read/grep/find/ls (read-only).",
+        "`default`=parent natives; ad-hoc=*; *=read/write/edit/bash (mutating); ro=read/grep/find/ls (read-only).",
     }),
   ),
   thinking: Type.Optional(
     StringEnum(VALID_THINKING_LEVELS, {
       description:
-        "Thinking: off/minimal/low/medium/high/xhigh/max; defaults to agent/off.",
+        "Thinking: off/minimal/low/medium/high/xhigh/max; default=parent; others=agent/off.",
     }),
   ),
   sessionId: Type.Optional(

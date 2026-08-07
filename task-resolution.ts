@@ -1,6 +1,10 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { DEFAULT_TOOLS, VALID_THINKING } from "./constants.ts";
+import {
+  DEFAULT_AGENT_NAME,
+  DEFAULT_TOOLS,
+  VALID_THINKING,
+} from "./constants.ts";
 import { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
 import { configFor } from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
@@ -14,6 +18,7 @@ import type {
   AgentConfig,
   DelegateToolCtx,
   DelegateToolResult,
+  ParentAgentDefaults,
   ResolvedTask,
   TaskDef,
 } from "./types.ts";
@@ -90,10 +95,12 @@ export function validateTasks(
 
   const unknown: string[] = [];
   for (const t of tasks) {
-    if (t.agent && !agents.has(t.agent)) unknown.push(t.agent);
+    if (t.agent && t.agent !== DEFAULT_AGENT_NAME && !agents.has(t.agent)) {
+      unknown.push(t.agent);
+    }
   }
   if (unknown.length) {
-    const names = [...agents.keys()];
+    const names = [DEFAULT_AGENT_NAME, ...agents.keys()];
     return noticeResult(
       `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with an empty tasks array for help.`,
       tasks,
@@ -112,6 +119,7 @@ export function resolveTasks(
   tasks: TaskDef[],
   ctx: DelegateToolCtx,
   agents: Map<string, AgentConfig>,
+  parentDefaults: ParentAgentDefaults,
 ): ResolvedTask[] {
   // Build parent transcript lazily — only computed once if any task uses with-parent-transcript
   let parentTranscript: string | null = null;
@@ -135,13 +143,14 @@ export function resolveTasks(
   );
 
   return tasks.map((t, i) => {
-    const agent = t.agent ? agents.get(t.agent) : undefined;
+    const isDefaultAgent = t.agent === DEFAULT_AGENT_NAME;
+    const agent = t.agent && !isDefaultAgent ? agents.get(t.agent) : undefined;
     const cwd = resolveCwd(t.cwd ?? ctx.cwd, ctx.cwd);
 
     // Load settings-based overrides for this agent
     const settings = loadDelegateSettings(cwd);
     const agentOverride =
-      t.agent && settings?.agentOverrides?.[t.agent]
+      t.agent && !isDefaultAgent && settings?.agentOverrides?.[t.agent]
         ? settings.agentOverrides[t.agent]
         : undefined;
 
@@ -176,7 +185,9 @@ export function resolveTasks(
       ? t.systemPrompt
       : agent?.systemPrompt?.trim()
         ? agent.systemPrompt
-        : undefined;
+        : isDefaultAgent
+          ? parentSystemPrompt
+          : undefined;
     const systemPrompt = buildSubagentSystemPrompt({
       taskSystemPrompt: t.systemPrompt,
       agentSystemPrompt: agent?.systemPrompt,
@@ -220,39 +231,44 @@ export function resolveTasks(
     if (t.action !== "close" && t.action !== "list") {
       // A pool hit always runs its frozen model, but an explicitly requested
       // task/profile model still has to be resolved so checkout can reject a
-      // contradictory request rather than silently discarding it.
+      // contradictory request rather than silently discarding it. Naming the
+      // built-in `default` profile is also explicit: it requests the live
+      // parent model, so reuse fails clearly if the pool was frozen differently.
       if (pooledConfig) {
         const requestedModelSpec =
           t.model ??
-          (t.agent ? (agentOverride?.model ?? agent?.model) : undefined);
+          (t.agent && !isDefaultAgent
+            ? (agentOverride?.model ?? agent?.model)
+            : undefined);
         if (requestedModelSpec) {
-          requestedModel = resolveModelRequest(
+          const requested = resolveModelRequest(
             requestedModelSpec,
             ctx.modelRegistry,
             ctx.model,
-          ).model;
+          );
+          requestedModel = requested.model;
+          modelSuffix = requested.strippedSuffix;
           if (!requestedModel) {
             throw new Error(
               `Task ${i}: requested model '${requestedModelSpec}' is not available. Check provider config or remove the model field to continue the pooled session.`,
             );
           }
+        } else if (isDefaultAgent) {
+          requestedModel = ctx.model;
         }
         model = pooledConfig.model;
       } else {
-        // Resolve an explicit model spec (precedence: task > session > config >
-        // frontmatter). resolveModelSpec returns undefined when none is set, so
-        // we skip model re-resolution entirely — passing the parent's composite id
-        // (e.g. OpenRouter's "deepseek/deepseek-v4-flash") would split on "/"
-        // and misroute to the upstream provider. Leaving resolvedModel
-        // undefined also lets findAvailableAlternative run below: it returns
-        // ctx.model as-is when it has auth, or swaps to an authenticated
-        // same-id alternative when the parent's provider lost auth.
+        // The built-in `default` profile bypasses delegate.json and settings:
+        // absent a task override, it means this exact live parent Model object.
+        // Other tasks retain the normal task > config > frontmatter chain.
         const agentType = t.agent ?? "inline";
-        const modelSpec = resolveModelSpec({
-          taskModel: t.model ?? agentOverride?.model,
-          agentType,
-          frontmatterModel: agent?.model,
-        });
+        const modelSpec = isDefaultAgent
+          ? t.model
+          : resolveModelSpec({
+              taskModel: t.model ?? agentOverride?.model,
+              agentType,
+              frontmatterModel: agent?.model,
+            });
         const resolvedRequest = modelSpec
           ? resolveModelRequest(modelSpec, ctx.modelRegistry, ctx.model)
           : undefined;
@@ -269,10 +285,11 @@ export function resolveTasks(
           );
         }
 
-        model =
-          resolvedModel ??
-          findAvailableAlternative(ctx.model, ctx.modelRegistry) ??
-          ctx.model;
+        model = isDefaultAgent
+          ? (resolvedModel ?? ctx.model)
+          : (resolvedModel ??
+            findAvailableAlternative(ctx.model, ctx.modelRegistry) ??
+            ctx.model);
       }
 
       if (!model) {
@@ -286,10 +303,14 @@ export function resolveTasks(
       // "continue with only sessionId" works without re-supplying tools.
       // Explicit overrides that don't match get rejected by acquireAgentSession.
       const isPoolHit = pooledConfig !== undefined;
+      const parentNativeTools = parentDefaults.tools.filter(
+        (name) => name in TOOL_FACTORIES,
+      );
       tools = resolveToolGroups(
         t.tools ??
           agentOverride?.tools ??
           agent?.tools ??
+          (isDefaultAgent ? parentNativeTools : undefined) ??
           (isPoolHit ? pooledConfig?.tools : undefined) ??
           DEFAULT_TOOLS,
       );
@@ -300,17 +321,19 @@ export function resolveTasks(
         );
       }
 
-      // Resolve thinking. Precedence: task field → agent override → agent
-      // frontmatter → frozen pooled config → a Pi-style `:level` model suffix
-      // (honored only as a last-resort default, so a model-emitted `claude:max`
-      // runs at max when nothing else sets thinking). The suffix is lowest on
-      // purpose: an agent author's `thinking: low` must beat `model: x:max`.
+      // Resolve thinking. Explicit task/profile/pool values retain their old
+      // precedence. The built-in `default` profile instead uses the parent's
+      // live level; an explicit model suffix still beats that inherited value.
+      // On a named `default` pool reuse, the live parent level is intentional
+      // and checkout will reject a conflict with the frozen session.
       const thinkingRaw =
         t.thinking ??
         agentOverride?.thinking ??
         agent?.thinking ??
-        (isPoolHit ? pooledConfig?.thinking : undefined) ??
+        (isPoolHit && !isDefaultAgent ? pooledConfig?.thinking : undefined) ??
         modelSuffix ??
+        (isDefaultAgent ? parentDefaults.thinking : undefined) ??
+        (isPoolHit ? pooledConfig?.thinking : undefined) ??
         "off";
       thinking = VALID_THINKING.has(thinkingRaw)
         ? (thinkingRaw as ThinkingLevel)
@@ -334,10 +357,11 @@ export function resolveTasks(
       // Empty only for close/list actions (validated above) — downstream
       // display code treats "" and absent alike (`t.prompt || …`).
       prompt: prompt ?? "",
-      // Display label for ad-hoc subagents (no named profile). NOTE: the
-      // config-namespace key at resolveModelSpec stays "inline" — that's a
-      // delegate.json/settings contract, not a display string (friction #4).
-      agentName: agent?.name ?? "ad-hoc",
+      // Keep the built-in selector visible in progress/results. Omitted-agent
+      // inline tasks retain the established `ad-hoc` label and config namespace.
+      agentName: isDefaultAgent
+        ? DEFAULT_AGENT_NAME
+        : (agent?.name ?? "ad-hoc"),
       warnings,
       reuseIntent: {
         model: requestedModel,

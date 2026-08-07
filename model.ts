@@ -6,8 +6,7 @@ import { VALID_THINKING } from "./constants.ts";
 export interface ResolvedModelRequest {
   model: Model<Api> | undefined;
   /** Pi-style `:<thinking-level>` suffix stripped to make the reference
-   *  resolve. Reported so the caller can warn — it is NOT honored as a
-   *  thinking level; the task's `thinking` field is the only thinking input. */
+   *  resolve. The caller may use it as a last-resort thinking default. */
   strippedSuffix?: ThinkingLevel;
 }
 
@@ -32,8 +31,8 @@ function resolveModelReference(
  * stripped and the base reference is resolved — models learned this syntax
  * from Pi's CLI (e.g. `openai-codex/gpt-5.6-luna:max`) and keep emitting it,
  * so hard-failing the whole call over it is worse than tolerating it. The
- * suffix is deliberately NOT fed into thinking resolution: a single knob
- * (the `thinking` field) beats two knobs with a silent precedence rule. */
+ * suffix is returned separately so task resolution can use it as a
+ * last-resort default while keeping explicit `thinking` authoritative. */
 export function resolveModelRequest(
   spec: string | undefined,
   registry: ModelRegistry,

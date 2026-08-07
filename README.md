@@ -23,6 +23,21 @@ starting Pi. Pi loads `delegate.ts` from the isolated Git package checkout; do
 not point a running Pi at this repository or at `.build/delegate.bundle.ts`.
 Start a fresh Pi process after updating the installed ref.
 
+## Usage
+
+Use the built-in `default` profile to run a subagent with the live parent's
+model, thinking level, delegatable native tools, and base system prompt:
+
+```ts
+delegate({
+  tasks: [{ agent: "default", prompt: "Investigate the auth module" }],
+});
+```
+
+Parent extension/MCP tools are not copied, and project instructions are rebuilt
+for the task's `cwd`. Omit `agent` when you want an ad-hoc task using delegate's
+normal inline defaults instead.
+
 ### Token accounting
 
 Sync delegate calls report aggregate subagent `Usage` on the tool result, so Pi
@@ -86,6 +101,9 @@ over an installed extension.
   `systemPrompt`, `thinking`, `cwd`, `context`, `sessionId`, or `resumeFrom`.
   `model` is also accepted but should be rare — subagents inherit the parent
   model by default.
+- **Default subagent** — The reserved built-in `agent: "default"` profile. It
+  mirrors the live parent's model, thinking level, delegatable native tools, and
+  base system prompt while preserving delegate's extension/context isolation.
 - **Custom agent** — A subagent profile defined by the parent, either inline in
   a delegate task (`systemPrompt`, `tools`, and `thinking`) or persisted as a
   Markdown file. The subagent inherits the parent model by default; `model` is a
