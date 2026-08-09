@@ -10,6 +10,7 @@ import {
   notifyWaiters,
 } from "./tickets.ts";
 import { getConcurrencyLimit, getMaxAsyncTickets } from "./config.ts";
+import { getCurrentLeafId } from "./leaf.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
 import { sumUsage } from "./usage.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
@@ -21,7 +22,7 @@ import {
   formatTouchedOverlapWarning,
 } from "./format.ts";
 import { validateDelegateOperation } from "./schema.ts";
-import { syncDelegateStatus } from "./status.ts";
+import { notifyCrossLeafDelivery, syncDelegateStatus } from "./status.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
 import type {
   AgentConfig,
@@ -189,6 +190,15 @@ export async function dispatchDelegate(
   });
 }
 
+/** Deliver a settled ticket and, when leaf affinity downgraded delivery to a
+ *  non-waking `nextTurn` message, tell the human — otherwise the completion is
+ *  silent apart from the footer clearing. */
+function finishTicketDelivery(pi: ExtensionAPI, ticket: AsyncTicket): void {
+  if (deliverTicketResults(pi, ticket) === "deferred") {
+    notifyCrossLeafDelivery(ticket);
+  }
+}
+
 /** Fire-and-forget background execution. Registers an `AsyncTicket`, kicks off
  *  the concurrent run, and returns the ticket acknowledgment immediately.
  *  Results are delivered via `deliverTicketResults` when all tasks settle. */
@@ -223,6 +233,9 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     progress: [...progress],
     controller,
     parentModelId,
+    // Leaf affinity for delivery: a ticket that outlives a /tree navigation
+    // must not wake the agent on the branch the user moved to (issue #30).
+    spawnLeafId: getCurrentLeafId(),
   };
   ticketRegistry.set(ticketId, ticket);
   // Footer visibility for the new background work (see status.ts). Uses the
@@ -296,7 +309,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         syncTicketBusyIndex(ticket);
       }
       syncDelegateStatus();
-      deliverTicketResults(pi, ticket);
+      finishTicketDelivery(pi, ticket);
     })
     .catch((err) => {
       // Defense-in-depth — should not happen if individual tasks catch properly.
@@ -311,7 +324,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       ticket.completedAt = Date.now();
       syncTicketBusyIndex(ticket);
       syncDelegateStatus();
-      deliverTicketResults(pi, ticket);
+      finishTicketDelivery(pi, ticket);
     });
 
   return {

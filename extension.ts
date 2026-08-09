@@ -19,12 +19,14 @@ import {
 import { renderDelegateCall, renderDelegateResult } from "./render-result.ts";
 import { hostCompatError } from "./host-compat.ts";
 import { invalidateHostDepsCache } from "./host.ts";
+import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import { closeAllPooledAgents } from "./pool.ts";
 import {
   activeTicketSummary,
   clearDelegateStatusContext,
   describeActiveTickets,
   guardSessionReplacement,
+  guardTreeNavigation,
   notifyActiveTicketsOnSettled,
   syncDelegateStatus,
 } from "./status.ts";
@@ -140,6 +142,17 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     guardSessionReplacement(ctx, "fork"),
   );
 
+  // /tree navigation stays inside the same session: nothing is torn down and
+  // live tickets keep running, but their results would land on the branch the
+  // user moves to. Ask first, and record the new leaf either way so delivery
+  // can detect the mismatch (issue #30). `session_tree` also fires for
+  // extension-driven ctx.navigateTree, which never reaches the guard.
+  pi.on("session_before_tree", (_event, ctx) => guardTreeNavigation(ctx));
+  pi.on("session_tree", (event, ctx) => {
+    recordTreeNavigation(event.newLeafId);
+    syncDelegateStatus(ctx);
+  });
+
   // ── Session shutdown: abort tickets and dispose live pooled sessions ──
   pi.on("session_shutdown", async (event, ctx) => {
     // Quit and /reload kill background work with no cancellable hook, so
@@ -167,6 +180,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     // tickets keep unwinding asynchronously and must find no cached ctx (or
     // captured pi) to touch. See the "cancelled"-at-entry guard in dispatch.
     clearDelegateStatusContext();
+    // A replacement session starts on its own leaf; stale tracking would make
+    // every ticket look cross-leaf (or, worse, look same-leaf by accident).
+    resetLeafTracking();
     // Do NOT clear the ticket registry here — completed tickets are retained
     // until their TTL cleanup. Pooled AgentSessions, however, own listeners
     // and must be disposed before the parent session exits.

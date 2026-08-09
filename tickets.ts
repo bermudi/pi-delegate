@@ -21,6 +21,7 @@ import {
   findTouchedOverlaps,
   formatTouchedOverlapWarning,
 } from "./format.ts";
+import { isCrossLeafTicket } from "./leaf.ts";
 import { renderOutputForPoll } from "./spill.ts";
 import { scheduleDeadline } from "./timer.ts";
 import { emptyUsage } from "./usage.ts";
@@ -124,6 +125,17 @@ export function cancelTicketForShutdown(ticket: AsyncTicket): void {
   ticket.completedAt = Date.now();
   syncTicketBusyIndex(ticket);
   settleTicketWaiters(ticket);
+}
+
+/** Request cooperative cancellation of a live ticket: abort the workers and
+ *  move to "cancelling" so they settle and report what actually ran. Unlike
+ *  `cancelTicketForShutdown` this leaves the ticket deliverable — the runtime
+ *  is still alive, so the final "cancelled" result still reaches the user. */
+export function requestTicketCancel(ticket: AsyncTicket): void {
+  if (ticket.status !== "running") return;
+  ticket.controller.abort();
+  ticket.status = "cancelling";
+  syncTicketBusyIndex(ticket);
 }
 
 /** Check if any running async ticket holds a given sessionId.
@@ -434,18 +446,39 @@ export function notifyWaiters(ticket: AsyncTicket): void {
   ticket.waiters = active.length ? active : undefined;
 }
 
+/** Prefix for a result whose spawn leaf is no longer the active one. The model
+ *  would otherwise read a foreign branch's work as current-turn context. */
+const CROSS_LEAF_NOTICE =
+  "NOTE: this async delegate ticket was spawned on a different branch of the " +
+  "session tree; the conversation has since navigated elsewhere (/tree). These " +
+  "results may not relate to the current line of work — verify relevance before " +
+  "acting on them.";
+
+/** How a completed ticket was handed back. `deferred` means the result was
+ *  queued without waking the agent because the session navigated away from
+ *  the spawn leaf; callers surface that to the human (see status.ts). */
+export type TicketDelivery = "none" | "waiters" | "steer" | "deferred";
+
 /** Push results into parent session via sendMessage when background ticket completes.
  *  If there are active blocking waiters, resolve them directly and suppress the
- *  automatic follow-up so completion is delivered exactly once. */
+ *  automatic follow-up so completion is delivered exactly once.
+ *
+ *  Delivery mode depends on leaf affinity (see leaf.ts). Same leaf: `steer` +
+ *  `triggerTurn`, the agent picks the result up immediately. Different leaf:
+ *  `nextTurn`, which explicitly "does not interrupt or trigger anything" — the
+ *  result waits for the human's next prompt instead of waking the agent on a
+ *  branch the task was never part of. The ticket stays pollable either way. */
 export function deliverTicketResults(
   pi: ExtensionAPI,
   ticket: AsyncTicket,
-): void {
-  if (!ticket.completedAt) return;
+): TicketDelivery {
+  if (!ticket.completedAt) return "none";
 
   // Resolve active blocking waiters directly. Stale/aborted waiters are
   // cleaned but not resolved here (their abort handlers already returned).
-  if (settleTicketWaiters(ticket)) return;
+  // A waiter is a tool call on the live leaf by construction, so leaf
+  // affinity does not apply to it.
+  if (settleTicketWaiters(ticket)) return "waiters";
 
   const formatted = formatCompletedTicket(ticket);
   const text = formatted.content
@@ -456,10 +489,12 @@ export function deliverTicketResults(
     .map((c) => c.text)
     .join("\n");
 
+  const crossLeaf = isCrossLeafTicket(ticket);
+
   pi.sendMessage(
     {
       customType: "async_delegate_result",
-      content: text,
+      content: crossLeaf ? `${CROSS_LEAF_NOTICE}\n\n${text}` : text,
       display: true,
       details: {
         ...formatted.details,
@@ -467,11 +502,11 @@ export function deliverTicketResults(
         status: ticket.status,
       },
     },
-    {
-      deliverAs: "steer",
-      triggerTurn: true,
-    },
+    crossLeaf
+      ? { deliverAs: "nextTurn" }
+      : { deliverAs: "steer", triggerTurn: true },
   );
+  return crossLeaf ? "deferred" : "steer";
 }
 
 /** Return a snapshot of one async ticket or the complete ticket roster. */
@@ -774,9 +809,7 @@ export function handleCancel(params: {
       details,
     };
   }
-  ticket.controller.abort();
-  ticket.status = "cancelling";
-  syncTicketBusyIndex(ticket);
+  requestTicketCancel(ticket);
   const details = buildWaitDetails(ticket);
   const base = `Ticket '${ticketId}' is cancelling; workers are settling. Poll for final status.`;
   const text =

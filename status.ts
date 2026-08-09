@@ -13,7 +13,12 @@
  *    active ticket — the moment a user is most likely to assume everything
  *    is done and close the session.
  * 3. A confirm guard on the session-replacement paths pi lets extensions
- *    cancel (`session_before_switch`, `session_before_fork`).
+ *    cancel (`session_before_switch`, `session_before_fork`), plus a distinct
+ *    prompt for `/tree` navigation, which re-targets results rather than
+ *    killing them (see `guardTreeNavigation`).
+ * 4. A notification when a ticket completes after the session navigated away
+ *    from its spawn leaf: delivery is downgraded to non-waking, so without
+ *    this the human gets no signal that the ticket finished at all.
  *
  * Quit (Ctrl+C×2 / Ctrl+D / /quit) and /reload CANNOT be intercepted from an
  * extension — `session_shutdown` is advisory, not cancellable. The footer
@@ -21,7 +26,7 @@
  * there.
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { ticketRegistry } from "./tickets.ts";
+import { requestTicketCancel, ticketRegistry } from "./tickets.ts";
 import type { AsyncTicket } from "./types.ts";
 
 const STATUS_KEY = "delegate";
@@ -176,6 +181,67 @@ export async function guardSessionReplacement(
       `${verb} aborts them — work already done is not rolled back. Continue anyway?`,
   );
   return proceed ? undefined : { cancel: true };
+}
+
+/** `/tree` navigation is not a session replacement: the runtime survives and
+ *  the subagents keep running, but the eventual result no longer belongs to
+ *  the branch the user is on. Offer the three honest outcomes instead of the
+ *  destructive switch/fork confirm. Dismissal keeps the user where they are —
+ *  the conservative choice, since navigating is what creates the hazard.
+ *
+ *  This guard is UX, not the correctness mechanism: navigation that never
+ *  reaches it (dismissed dialog, headless ctx, `ctx.navigateTree` from another
+ *  extension) is still handled at delivery time via leaf affinity. */
+export async function guardTreeNavigation(
+  ctx: ExtensionContext,
+): Promise<{ cancel: true } | undefined> {
+  lastCtx = ctx;
+  const summary = activeTicketSummary();
+  if (!summary.tickets.length || !ctx.hasUI) return undefined;
+
+  const ids = summary.tickets.map((t) => t.id).join(", ");
+  const hold = "Navigate — hold results (poll to read them)";
+  const cancel = "Navigate — cancel the background subagents";
+  const stay = "Stay on this branch";
+  let choice: string | undefined;
+  try {
+    choice = await ctx.ui.select(
+      `${plural(summary.activeSubagents, "background subagent")} (${ids}) still running — ` +
+        "navigating means their results arrive on a different branch",
+      [hold, cancel, stay],
+    );
+  } catch {
+    // pi does not surface handler rejections, so a throwing dialog (stale ctx,
+    // TUI failure) would become an unhandled rejection. Let the navigation
+    // through rather than trapping the user: leaf affinity at delivery time is
+    // the correctness mechanism, not this prompt.
+    return undefined;
+  }
+
+  if (choice === hold) return undefined;
+  if (choice === cancel) {
+    for (const ticket of summary.tickets) requestTicketCancel(ticket);
+    syncDelegateStatus(ctx);
+    return undefined;
+  }
+  return { cancel: true };
+}
+
+/** Tell the human a ticket landed on a branch they had left. Delivery used
+ *  `nextTurn` (no wake-up), so this notification and the pollable ticket are
+ *  the only signals that the work finished. */
+export function notifyCrossLeafDelivery(ticket: AsyncTicket): void {
+  if (!lastCtx) return;
+  try {
+    lastCtx.ui.notify(
+      `Ticket ${ticket.id} finished (${ticket.status}) on a branch you navigated away from — ` +
+        `results are held for your next message; read them with delegate poll.`,
+      "warning",
+    );
+  } catch {
+    lastCtx = undefined;
+    lastStatusText = undefined;
+  }
 }
 
 /** One-line description of live work for shutdown traces. */

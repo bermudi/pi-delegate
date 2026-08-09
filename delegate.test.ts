@@ -101,6 +101,7 @@ import {
   _resetHostDepsCacheForTesting,
 } from "./host.ts";
 import { resolveTasks, validateTasks } from "./task-resolution.ts";
+import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 
 // ── Integration test imports ──────────────────────────────────────────────
 
@@ -5161,6 +5162,9 @@ describe("async ticket registry", () => {
 
   afterEach(() => {
     ticketRegistry.clear();
+    // Leaf tracking is module-level and feeds deliverTicketResults; a leaked
+    // navigation would silently flip delivery to the cross-leaf path.
+    resetLeafTracking();
     _resetPoolForTesting();
     ts?.dispose();
     ts = undefined;
@@ -5318,6 +5322,9 @@ describe("async delegate integration", () => {
 
   afterEach(() => {
     ticketRegistry.clear();
+    // Leaf tracking is module-level and feeds deliverTicketResults; a leaked
+    // navigation would silently flip delivery to the cross-leaf path.
+    resetLeafTracking();
     _resetPoolForTesting();
     ts?.dispose();
     ts = undefined;

@@ -9,7 +9,13 @@ import {
 import { _setRunAgentSessionForTesting } from "./lifecycle.ts";
 import { _resetPoolForTesting, commit } from "./pool.ts";
 import { emptyUsage } from "./usage.ts";
-import { dispatchSync } from "./dispatch.ts";
+import { dispatchAsync, dispatchSync } from "./dispatch.ts";
+import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
+import {
+  _resetDelegateStatusForTesting,
+  syncDelegateStatus,
+} from "./status.ts";
+import { ticketRegistry } from "./tickets.ts";
 import type { ResolvedTask, TaskDef, TaskProgress } from "./types.ts";
 
 interface FakeSession {
@@ -303,5 +309,126 @@ describe("dispatchSync touched-file overlap warning", () => {
     expect(result.details.results[0]!.error).toBeUndefined();
     expect(result.details.results[1]!.error).toBeUndefined();
     expect(result.details.results[1]!.output).toBe("b done");
+  });
+});
+
+// Issue #30: an async ticket must remember the session-tree leaf it was
+// spawned on, so a result that arrives after /tree navigation does not wake
+// the parent agent on a branch the task was never part of.
+describe("dispatchAsync leaf affinity", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    _resetPoolForTesting();
+    _setGlobalConcurrencyLimitForTesting(10);
+    resetLeafTracking();
+    _resetDelegateStatusForTesting();
+    tmpDir = mkdtempSync(path.join(os.tmpdir(), "delegate-leaf-"));
+    _setRunAgentSessionForTesting(
+      async () =>
+        ({
+          output: "done",
+          durationMs: 1,
+          tokens: 1,
+          usage: emptyUsage(),
+          touchedFiles: [],
+          attributedFiles: [],
+        }) as any,
+    );
+  });
+
+  afterEach(() => {
+    _setRunAgentSessionForTesting(undefined);
+    _resetGlobalConcurrencyForTesting();
+    _resetPoolForTesting();
+    ticketRegistry.clear();
+    resetLeafTracking();
+    _resetDelegateStatusForTesting();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function run(): {
+    sent: { message: any; options: any }[];
+    notified: string[];
+    ticketId: string;
+  } {
+    const sent: { message: any; options: any }[] = [];
+    const notified: string[] = [];
+    const uiCtx = {
+      hasUI: true,
+      ui: {
+        setStatus: () => {},
+        notify: (message: string) => notified.push(message),
+      },
+    } as any;
+    // Prime the ctx status.ts caches for its event-driven notifications;
+    // dispatchAsync itself only calls syncDelegateStatus() without a ctx.
+    syncDelegateStatus(uiCtx);
+
+    const result = dispatchAsync({
+      pi: {
+        sendMessage: (message: any, options: any) =>
+          sent.push({ message, options }),
+      } as any,
+      ctx: { cwd: tmpDir, modelRegistry: {} as any, sessionManager: undefined },
+      tasks: [{ prompt: "a" }] as TaskDef[],
+      resolved: [
+        {
+          agentName: "a",
+          prompt: "a work",
+          cwd: tmpDir,
+          thinking: "off",
+          tools: [],
+          systemPrompt: "",
+          model: { provider: "test", id: "m" } as any,
+        } as ResolvedTask,
+      ],
+      progress: [
+        {
+          index: 0,
+          agent: "a",
+          task: "a work",
+          status: "running",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        } as TaskProgress,
+      ],
+      parentModelId: "m",
+    });
+    const ticketId = result.details.ticketId!;
+    return { sent, notified, ticketId };
+  }
+
+  async function settled(ticketId: string): Promise<void> {
+    for (let i = 0; i < 200; i++) {
+      if (ticketRegistry.get(ticketId)?.completedAt) return;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error(`ticket ${ticketId} never settled`);
+  }
+
+  test("stamps the current leaf and delivers normally when it has not changed", async () => {
+    recordTreeNavigation("leaf-1");
+    const { sent, notified, ticketId } = run();
+    expect(ticketRegistry.get(ticketId)!.spawnLeafId).toBe("leaf-1");
+
+    await settled(ticketId);
+    expect(sent[0]!.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(notified).toEqual([]);
+  });
+
+  test("navigating away before completion defers delivery and warns the human", async () => {
+    recordTreeNavigation("leaf-1");
+    const { sent, notified, ticketId } = run();
+
+    // The user opens /tree and moves while the subagent is still working.
+    recordTreeNavigation("leaf-2");
+    await settled(ticketId);
+
+    expect(sent[0]!.options).toEqual({ deliverAs: "nextTurn" });
+    expect(notified).toHaveLength(1);
+    expect(notified[0]).toContain(ticketId);
   });
 });

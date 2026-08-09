@@ -80,6 +80,10 @@ export interface AsyncTicket {
   controller: AbortController;
   error?: string;
   parentModelId?: string;
+  /** Session-tree leaf active when the ticket was spawned (see leaf.ts).
+   *  `undefined` = the leaf the session opened on. Compared at delivery time
+   *  so results are not used to wake the agent on a foreign branch. */
+  spawnLeafId?: string | null;
   /** Active blocking waiters. Resolved by terminal delivery or timeout/abort. */
   waiters?: TicketWaiter[];
 }
