@@ -6,7 +6,7 @@ import {
 } from "./task-resolution.ts";
 import { _resetPoolForTesting, commit } from "./pool.ts";
 import { _resetDelegateConfigForTesting } from "./config.ts";
-import type { TaskDef } from "./types.ts";
+import type { AgentConfig, TaskDef } from "./types.ts";
 
 const START =
   "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n";
@@ -182,6 +182,39 @@ describe("resolveTasks error messages", () => {
       ),
     ).toThrow(
       /Task 1#bad-model: requested model 'unknown\/provider' is not available/,
+    );
+  });
+
+  test("reject an unavailable named-agent frontmatter model", () => {
+    const agents = new Map<string, AgentConfig>([
+      [
+        "reviewer",
+        {
+          name: "reviewer",
+          description: "Reviews changes",
+          model: "unknown/provider",
+          thinking: "off",
+          tools: ["read"],
+          systemPrompt: "Review the changes.",
+        },
+      ],
+    ]);
+
+    expect(() =>
+      resolveTasks(
+        [
+          {
+            id: "bad-agent-model",
+            prompt: "do it",
+            agent: "reviewer",
+          },
+        ] as TaskDef[],
+        makeCtx(),
+        agents,
+        { thinking: "off", tools: ["read"] } as any,
+      ),
+    ).toThrow(
+      /Task 1#bad-agent-model: requested model 'unknown\/provider' is not available/,
     );
   });
 

@@ -8,6 +8,17 @@ import {
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 1000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("waitFor timeout");
+    await delay(5);
+  }
+}
+
 interface ModelStub {
   provider: string;
   id: string;
@@ -139,5 +150,86 @@ describe("mapConcurrentByModel", () => {
     );
 
     expect(maxConcurrent).toBe(2);
+  });
+
+  test("abort wakes queued tasks without waiting for a slot release", async () => {
+    _setGlobalConcurrencyLimitForTesting(1);
+
+    const controller = new AbortController();
+    const started: number[] = [];
+    const settledAfterAbort: number[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((r) => (releaseFirst = r));
+
+    const runTask = async (task: Task): Promise<string> => {
+      started.push(task.id);
+      if (controller.signal.aborted) {
+        // Reached only via the abort-aware acquireGlobal wakeup: the slot is
+        // still held by task 0, so these tasks must NOT have been released.
+        settledAfterAbort.push(task.id);
+        return `aborted-${task.id}`;
+      }
+      if (task.id === 0) await firstGate; // holds the only slot while 1,2 queue
+      return `done-${task.id}`;
+    };
+
+    const items = [
+      makeTask(0, "openai", "gpt-4"),
+      makeTask(1, "openai", "gpt-4"),
+      makeTask(2, "openai", "gpt-4"),
+    ];
+
+    const runPromise = mapConcurrentByModel(
+      items,
+      (t) => getModelKey(t.model as any),
+      () => 10,
+      runTask,
+      controller.signal,
+    );
+
+    // Task 0 holds the slot; 1 and 2 must be queued behind it.
+    await waitFor(() => started.length === 1);
+    await delay(5); // let waiters register
+
+    const abortedAt = Date.now();
+    controller.abort();
+    // Both queued tasks settle via the abort wakeup, with the slot still held.
+    await waitFor(() => settledAfterAbort.length === 2);
+    expect(Date.now() - abortedAt).toBeLessThan(100);
+
+    releaseFirst();
+    const results = await runPromise;
+
+    expect(started).toEqual([0, 1, 2]);
+    expect(results[0]).toBe("done-0");
+    expect(results[1]).toBe("aborted-1");
+    expect(results[2]).toBe("aborted-2");
+  });
+
+  test("already-aborted signal settles promptly without consuming a slot", async () => {
+    _setGlobalConcurrencyLimitForTesting(1);
+
+    const controller = new AbortController();
+    controller.abort();
+
+    const started: string[] = [];
+    const runPromise = mapConcurrentByModel(
+      [makeTask(0, "openai", "gpt-4"), makeTask(1, "openai", "gpt-4")],
+      (t) => getModelKey(t.model as any),
+      () => 10,
+      async (task) => {
+        started.push(String(task.id));
+        return `aborted-${task.id}`;
+      },
+      controller.signal,
+    );
+
+    const results = await Promise.race([
+      runPromise,
+      delay(100).then(() => "TIMEOUT" as const),
+    ]);
+    expect(results).not.toBe("TIMEOUT");
+    expect(started).toEqual(["0", "1"]);
+    expect(results).toEqual(["aborted-0", "aborted-1"]);
   });
 });
