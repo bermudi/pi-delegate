@@ -59,6 +59,7 @@ export {
   ticketRegistry,
   sweepTickets,
   cancelTicketForShutdown,
+  requestTicketCancel,
   isSessionBusy,
   handlePoll,
   handleCancel,
@@ -68,6 +69,13 @@ export {
   resolveFinalTicketStatus,
   formatCompletedTicket,
 } from "./tickets.ts";
+export type { TicketDelivery } from "./tickets.ts";
+export {
+  recordTreeNavigation,
+  getCurrentLeafId,
+  resetLeafTracking,
+  isCrossLeafTicket,
+} from "./leaf.ts";
 export { runAgentSession } from "./runner.ts";
 export {
   activeTicketSummary,
@@ -77,6 +85,8 @@ export {
   syncDelegateStatus,
   notifyActiveTicketsOnSettled,
   guardSessionReplacement,
+  guardTreeNavigation,
+  notifyCrossLeafDelivery,
 } from "./status.ts";
 export type { ActiveTicketSummary } from "./status.ts";
 export { getHostDeps, invalidateHostDepsCache } from "./host.ts";

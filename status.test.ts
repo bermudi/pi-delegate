@@ -1,6 +1,7 @@
 import { describe, expect, test, afterEach, mock } from "bun:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { cancelTicketForShutdown, ticketRegistry } from "./tickets.ts";
+import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import {
   _resetDelegateStatusForTesting,
   activeTicketSummary,
@@ -8,7 +9,9 @@ import {
   clearDelegateStatusContext,
   describeActiveTickets,
   guardSessionReplacement,
+  guardTreeNavigation,
   notifyActiveTicketsOnSettled,
+  notifyCrossLeafDelivery,
   syncDelegateStatus,
 } from "./status.ts";
 import type { AsyncTicket, TaskProgress } from "./types.ts";
@@ -50,11 +53,19 @@ function mkTicket(
   };
 }
 
-function mkCtx(opts: { hasUI?: boolean; confirmResult?: boolean } = {}) {
+function mkCtx(
+  opts: {
+    hasUI?: boolean;
+    confirmResult?: boolean;
+    /** Index into the option list, or undefined to simulate a dismissal. */
+    selectIndex?: number;
+  } = {},
+) {
   const calls = {
     setStatus: [] as (string | undefined)[],
     notify: [] as { message: string; type?: string }[],
     confirm: [] as { title: string; message: string }[],
+    select: [] as { title: string; options: string[] }[],
   };
   const ctx = {
     hasUI: opts.hasUI ?? true,
@@ -69,6 +80,14 @@ function mkCtx(opts: { hasUI?: boolean; confirmResult?: boolean } = {}) {
         calls.confirm.push({ title, message });
         return Promise.resolve(opts.confirmResult ?? true);
       }),
+      select: mock((title: string, options: string[]) => {
+        calls.select.push({ title, options });
+        return Promise.resolve(
+          opts.selectIndex === undefined
+            ? undefined
+            : options[opts.selectIndex],
+        );
+      }),
     },
   } as unknown as ExtensionContext;
   return { ctx, calls };
@@ -77,6 +96,7 @@ function mkCtx(opts: { hasUI?: boolean; confirmResult?: boolean } = {}) {
 afterEach(() => {
   ticketRegistry.clear();
   _resetDelegateStatusForTesting();
+  resetLeafTracking();
 });
 
 // ── Summary + status text ───────────────────────────────────────────────────
@@ -294,6 +314,79 @@ describe("guardSessionReplacement", () => {
     const { ctx, calls } = mkCtx({ hasUI: false });
     expect(await guardSessionReplacement(ctx, "switch")).toBeUndefined();
     expect(calls.confirm).toEqual([]);
+  });
+});
+
+// ── Tree-navigation guard (issue #30) ───────────────────────────────────────
+
+describe("guardTreeNavigation", () => {
+  test("no active tickets → allow without prompting", async () => {
+    const { ctx, calls } = mkCtx();
+    expect(await guardTreeNavigation(ctx)).toBeUndefined();
+    expect(calls.select).toEqual([]);
+  });
+
+  test("hold → navigate, tickets keep running", async () => {
+    const ticket = mkTicket("a", { progressStatuses: ["running", "running"] });
+    ticketRegistry.set("a", ticket);
+    const { ctx, calls } = mkCtx({ selectIndex: 0 });
+
+    expect(await guardTreeNavigation(ctx)).toBeUndefined();
+    expect(calls.select).toHaveLength(1);
+    expect(calls.select[0]!.title).toContain("2 background subagents (a)");
+    // Navigation is not destructive — the ticket must survive it.
+    expect(ticket.status).toBe("running");
+    expect(ticket.controller.signal.aborted).toBe(false);
+  });
+
+  test("cancel → navigate and abort the live tickets cooperatively", async () => {
+    const ticket = mkTicket("a");
+    ticketRegistry.set("a", ticket);
+    const { ctx } = mkCtx({ selectIndex: 1 });
+
+    expect(await guardTreeNavigation(ctx)).toBeUndefined();
+    // "cancelling", not "cancelled": the runtime is alive, so workers settle
+    // and the final result is still delivered.
+    expect(ticket.status).toBe("cancelling");
+    expect(ticket.controller.signal.aborted).toBe(true);
+  });
+
+  test("stay → cancel the navigation", async () => {
+    ticketRegistry.set("a", mkTicket("a"));
+    const { ctx } = mkCtx({ selectIndex: 2 });
+    expect(await guardTreeNavigation(ctx)).toEqual({ cancel: true });
+  });
+
+  test("dismissed dialog keeps the user on the current branch", async () => {
+    ticketRegistry.set("a", mkTicket("a"));
+    const { ctx } = mkCtx({ selectIndex: undefined });
+    expect(await guardTreeNavigation(ctx)).toEqual({ cancel: true });
+  });
+
+  test("headless context is never blocked", async () => {
+    ticketRegistry.set("a", mkTicket("a"));
+    const { ctx, calls } = mkCtx({ hasUI: false });
+    expect(await guardTreeNavigation(ctx)).toBeUndefined();
+    expect(calls.select).toEqual([]);
+  });
+});
+
+describe("notifyCrossLeafDelivery", () => {
+  test("warns with the ticket id and how to read the held result", () => {
+    const { ctx, calls } = mkCtx();
+    syncDelegateStatus(ctx);
+    recordTreeNavigation("leaf-2");
+
+    notifyCrossLeafDelivery(mkTicket("a", { status: "done" }));
+    expect(calls.notify).toHaveLength(1);
+    expect(calls.notify[0]!.type).toBe("warning");
+    expect(calls.notify[0]!.message).toContain("Ticket a finished (done)");
+    expect(calls.notify[0]!.message).toContain("poll");
+  });
+
+  test("no cached ctx (post-teardown) is a silent no-op", () => {
+    clearDelegateStatusContext();
+    expect(() => notifyCrossLeafDelivery(mkTicket("a"))).not.toThrow();
   });
 });
 
