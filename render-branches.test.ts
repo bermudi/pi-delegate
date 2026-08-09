@@ -295,6 +295,60 @@ describe("render-branches compatibility fallback", () => {
     expect(ctx.lines.length).toBeGreaterThan(0);
     expect(ctx.lines.some((line) => line.includes("agent"))).toBe(true);
   });
+
+  test("does not render stale unfinished rows as live for terminal tickets", async () => {
+    const { renderFinalBranch } = await import("./render-branches.ts");
+
+    const theme = {
+      fg: (_: string, text: string) => text,
+      bold: (text: string) => text,
+    } as never;
+    const helpers = {
+      statJoin: () => " · FINAL_STATS",
+      modelLabel: () => "",
+      compactActivity: () => "LIVE_ACTIVITY",
+      pushWarnings: () => undefined,
+    };
+
+    const makeProgress = (status: "running" | "pending"): TaskProgress => ({
+      index: 0,
+      agent: "agent",
+      task: "do work",
+      status,
+      durationMs: 10,
+      tokens: 3,
+      toolUses: 0,
+      activities: [],
+    });
+
+    for (const ticketStatus of ["failed", "cancelled"] as const) {
+      for (const rowStatus of ["running", "pending"] as const) {
+        const ctx = {
+          progress: [makeProgress(rowStatus)],
+          taskResults: [{ error: "PENDING" }],
+          total: 1,
+          w: 100,
+          expanded: false,
+          state: {},
+          theme,
+          lines: [],
+          ticketId: "ticket-1",
+          ticketStatus,
+        };
+
+        renderFinalBranch(ctx, helpers);
+
+        expect(ctx.lines.join("\n")).not.toContain("LIVE_ACTIVITY");
+        expect(ctx.lines.join("\n")).not.toContain("waiting");
+        expect(ctx.lines.join("\n")).not.toContain("running in background");
+        if (ticketStatus === "cancelled" && rowStatus === "pending") {
+          expect(ctx.lines.join("\n")).toContain("CANCELLED");
+        } else {
+          expect(ctx.lines.join("\n")).toContain("FINAL_STATS");
+        }
+      }
+    }
+  });
 });
 
 describe("render-result overlap warning", () => {

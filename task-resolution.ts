@@ -361,8 +361,10 @@ export function resolveTasks(
         // it is honored only as a last-resort thinking default (see below).
         modelSuffix = resolvedRequest?.strippedSuffix;
 
-        // If the task or settings explicitly set a model but it couldn't resolve, fail loudly
-        const explicitRequest = t.model ?? agentOverride?.model;
+        // The selected model spec is explicit regardless of whether it came
+        // from the task, settings, or named-agent frontmatter. If it cannot
+        // resolve, fail loudly instead of silently falling back to the parent.
+        const explicitRequest = modelSpec;
         if (explicitRequest && !resolvedModel) {
           throw new Error(
             `${formatTaskRef(i, t.id)}: requested model '${explicitRequest}' is not available. Check provider config or remove the model field to use the parent model.`,

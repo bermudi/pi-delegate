@@ -298,6 +298,30 @@ Body.
     expect(result.data.tools).toBe("*");
   });
 
+  test("recovers bare `tools: *` with a trailing YAML comment", () => {
+    const content = `---
+name: star
+description: All tools
+tools: * # Full agent
+---
+Body.
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.tools).toBe("*");
+  });
+
+  test("recovers commented bare `tools: *` with CRLF line endings", () => {
+    const content = `---\r
+name: star\r
+description: All tools\r
+tools: * # Full agent\r
+---\r
+Body.\r
+`;
+    const result = parseFrontmatter(content);
+    expect(result.data.tools).toBe("*");
+  });
+
   test("nested map values are JSON-stringified, not '[object Object]'", () => {
     const content = `---
 name: nested
@@ -7367,6 +7391,70 @@ describe("async delegate integration", () => {
     expect(updates.some((u) => u.details.progress[0]!.toolUses === 3)).toBe(
       true,
     );
+  });
+
+  test("throwing wait progress callbacks do not fail the ticket or strand waiters", async () => {
+    const ticket: AsyncTicket = {
+      id: "throwing-progress-wait",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set(ticket.id, ticket);
+
+    let healthyUpdates = 0;
+    const throwingWait = handleWait(
+      { ticket: ticket.id },
+      undefined,
+      () => {
+        throw new Error("progress observer failed");
+      },
+      {} as any,
+    );
+    const healthyWait = handleWait(
+      { ticket: ticket.id },
+      undefined,
+      () => {
+        healthyUpdates++;
+      },
+      {} as any,
+    );
+
+    // The bad observer must not escape notifyWaiters, fail the ticket, or
+    // prevent the next waiter from receiving its immediate frame.
+    expect(ticket.status).toBe("running");
+    expect(healthyUpdates).toBe(1);
+    expect(ticket.waiters).toHaveLength(2);
+
+    ticket.results = [mkResult()];
+    ticket.progress = mkProgress(["done"]);
+    ticket.status = "done";
+    ticket.completedAt = Date.now();
+    deliverTicketResults({ sendMessage: () => {} } as any, ticket);
+
+    const [throwingResult, healthyResult] = await Promise.all([
+      throwingWait,
+      healthyWait,
+    ]);
+    expect(throwingResult.details.status).toBe("done");
+    expect(healthyResult.details.status).toBe("done");
+    expect(ticket.waiters).toBeUndefined();
   });
 
   test("notifyWaiters progress frame counts finalized as done + failed", () => {

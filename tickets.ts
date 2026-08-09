@@ -416,7 +416,20 @@ export function notifyWaiters(ticket: AsyncTicket): void {
       continue;
     }
     active.push(w);
-    if (w.onUpdate) w.onUpdate(buildWaitRunningUpdate(ticket));
+    if (w.onUpdate) {
+      try {
+        w.onUpdate(buildWaitRunningUpdate(ticket));
+      } catch (error) {
+        // Progress delivery is an observer boundary. A host callback must not
+        // be able to fail the worker that reported the update or reject the
+        // wait promise; keep the waiter attached for the terminal result and
+        // leave the failure visible for diagnosis.
+        console.error(
+          `[delegate] wait progress callback for ticket '${ticket.id}' threw; continuing`,
+          error,
+        );
+      }
+    }
   }
   ticket.waiters = active.length ? active : undefined;
 }

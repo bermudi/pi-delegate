@@ -266,12 +266,18 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
   const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
   const ticketId = ctx.ticketId;
   const ticketStatus = ctx.ticketStatus;
-  const isLive = ticketStatus === "running" || ticketStatus === "cancelling";
+  // A terminal ticket can retain a stale running/pending row while its workers
+  // unwind. Keep the row presentation terminal in that case; an absent status
+  // is the synchronous-render path, where task status remains authoritative.
+  const ticketIsLive =
+    ticketStatus === undefined ||
+    ticketStatus === "running" ||
+    ticketStatus === "cancelling";
   const elapsed = state.startedAt
     ? fmtDuration(Date.now() - state.startedAt)
     : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
 
-  if (ticketId && isLive) {
+  if (ticketId && ticketIsLive) {
     // Background ticket — frame it as in-progress, not a finished result.
     const ticketParts = [
       `ticket ${ticketId}`,
@@ -319,7 +325,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const previewBudget = Math.max(1, w - 30 - taskIdWidth);
     const taskPreview = theme.fg("muted", trunc(p.task, previewBudget));
     const isLive =
-      p.status === "running" || (p.status === "pending" && !isCancelledPending);
+      ticketIsLive &&
+      (p.status === "running" ||
+        (p.status === "pending" && !isCancelledPending));
     // Live tasks show an activity/waiting hint instead of final stats.
     const liveTail =
       p.status === "running"

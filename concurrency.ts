@@ -10,21 +10,75 @@ import { getMaxConcurrent } from "./config.ts";
 
 let globalConcurrencyLimit = Math.max(1, getMaxConcurrent());
 let globalConcurrencyRunning = 0;
-const globalConcurrencyWaiters: Array<() => void> = [];
 
-function acquireGlobal(): Promise<void> {
+interface GlobalWaiter {
+  /** Resolve with `true` when a slot was acquired, `false` when the signal
+   *  aborted while queued (the caller must not release a slot it never held). */
+  resolve: (acquired: boolean) => void;
+  signal?: AbortSignal;
+  onAbort: () => void;
+}
+
+const globalConcurrencyWaiters: GlobalWaiter[] = [];
+
+/**
+ * Acquire a global concurrency slot.
+ *
+ * Resolves `true` when a slot is held (caller must pair with `releaseGlobal`),
+ * or `false` when `signal` aborted before a slot could be acquired. Waiters are
+ * abort-aware: an abort removes the queued waiter immediately and resolves
+ * `false`, so a cancelled ticket is not stranded in "cancelling" until some
+ * unrelated task happens to release capacity. The caller still invokes its fn
+ * on `false` — the production fn (runResolvedTask) observes the aborted signal
+ * at entry and returns an "Aborted" TaskResult without consuming a slot.
+ */
+function acquireGlobal(signal?: AbortSignal): Promise<boolean> {
+  // Already aborted: never queue (a slot would be wasted on a task that can
+  // only report Aborted) and never increment — nothing to release later.
+  if (signal?.aborted) return Promise.resolve(false);
   if (globalConcurrencyRunning < globalConcurrencyLimit) {
     globalConcurrencyRunning++;
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
-  return new Promise<void>((r) => globalConcurrencyWaiters.push(r));
+  return new Promise<boolean>((resolve) => {
+    const waiter: GlobalWaiter = {
+      resolve,
+      signal,
+      onAbort: () => {
+        // Remove ourselves from the queue without taking a slot. The caller's
+        // fn sees the aborted signal at entry and settles promptly.
+        const index = globalConcurrencyWaiters.indexOf(waiter);
+        if (index === -1) return; // already woken by releaseGlobal
+        globalConcurrencyWaiters.splice(index, 1);
+        waiter.signal?.removeEventListener("abort", waiter.onAbort);
+        resolve(false);
+      },
+    };
+    if (signal) {
+      signal.addEventListener("abort", waiter.onAbort, { once: true });
+    }
+    globalConcurrencyWaiters.push(waiter);
+  });
 }
 
 function releaseGlobal(): void {
   globalConcurrencyRunning--;
+  // Never hand a slot to a waiter whose signal already aborted. The abort
+  // listener normally removes it synchronously during abort() dispatch; this
+  // drain is defensive for any ordering edge.
+  while (
+    globalConcurrencyWaiters.length > 0 &&
+    globalConcurrencyWaiters[0]!.signal?.aborted
+  ) {
+    const w = globalConcurrencyWaiters.shift()!;
+    w.signal?.removeEventListener("abort", w.onAbort);
+    w.resolve(false);
+  }
   if (globalConcurrencyWaiters.length > 0) {
     globalConcurrencyRunning++;
-    globalConcurrencyWaiters.shift()!();
+    const w = globalConcurrencyWaiters.shift()!;
+    w.signal?.removeEventListener("abort", w.onAbort);
+    w.resolve(true);
   }
 }
 
@@ -109,9 +163,18 @@ export async function mapConcurrentByModel<T, R>(
         groupItems,
         group.limit,
         async (_item, localIdx) => {
-          await acquireGlobal();
+          const globalIdx = group.indices[localIdx]!;
+          const acquired = await acquireGlobal(signal);
+          if (!acquired) {
+            // Aborted while queued for a global slot: we hold no slot, so we
+            // must NOT release one. Still invoke fn — runResolvedTask observes
+            // the aborted signal at entry and returns an "Aborted" TaskResult,
+            // keeping the results array dense for the sync dereference path
+            // (the same contract as mapConcurrent's worker loop).
+            results[globalIdx] = await fn(_item, globalIdx);
+            return results[globalIdx];
+          }
           try {
-            const globalIdx = group.indices[localIdx]!;
             results[globalIdx] = await fn(_item, globalIdx);
             return results[globalIdx];
           } finally {

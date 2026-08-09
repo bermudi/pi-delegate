@@ -75,11 +75,15 @@ export function parseFrontmatter(
 
   // A bare `*` is a YAML alias indicator and is invalid as a scalar, so
   // `tools: *` (the full-agent shorthand) would throw. Quote any value that is
-  // exactly `*` so it parses as the string "*", which resolveFrontmatterTools
-  // then expands via TOOL_GROUPS. (A `*` mid-scalar, e.g. `use * here`, is a
-  // legal plain scalar and needs no quoting.)
+  // exactly `*`, including when it has a trailing YAML comment, so it parses
+  // as the string "*", which resolveFrontmatterTools then expands via
+  // TOOL_GROUPS. (A `*` mid-scalar, e.g. `use * here`, is a legal plain scalar
+  // and needs no quoting.)
   const sanitized = sanitizeYamlScalars(
-    yamlString.replace(/^(\s*[\w-]+):\s*\*(?=\s*$)/gm, '$1: "*"'),
+    yamlString.replace(
+      /^([ \t]*[\w-]+:[ \t]*)\*([ \t]*(?:#[^\r\n]*)?)(?=\r?$)/gm,
+      '$1"*"$2',
+    ),
   );
 
   try {
