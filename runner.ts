@@ -19,6 +19,16 @@ import type {
   ToolActivity,
 } from "./types.ts";
 
+/** Human-facing error for an expired `deadlineMs` budget.
+ *
+ * This is exported so the lifecycle pre-check can return the same text as the
+ * runner, keeping the sync and (future) async paths consistent. */
+export function formatDeadlineExceededError(budgetMs: number): string {
+  return `Deadline exceeded: task exceeded its ${fmtDuration(
+    Math.max(0, budgetMs),
+  )} wall-clock budget and was cooperatively aborted (not a hard kill). Completed writes and commands remain.`;
+}
+
 /**
  * Run a single prompt against a live `AgentSession` and report progress.
  *
@@ -34,6 +44,15 @@ import type {
  *   4. snapshots usage before/after the prompt for token delta accounting, and
  *   5. computes touched files from activity + git diff.
  *
+ * Touched-file tracking is best-effort. Explicit edit/write tool calls are
+ * captured from the activity log. bash mutations are only captured via git
+ * status when the cwd is a git repo and git is available; in a non-git
+ * directory, bash-mutated files are not reported. Git failures on either the
+ * baseline or post-run snapshot degrade to an empty diff, and a failed baseline
+ * suppresses git-based attribution entirely so pre-existing dirty files are not
+ * blamed on this task. The resulting list is a lower bound, not a complete
+ * record.
+ *
  * Output is captured from AgentSession events so compaction cannot erase it
  * before collection; `session.messages` is only a guarded fallback for
  * providers that fail before emitting message_end. AgentSession's internal
@@ -46,16 +65,24 @@ export async function runAgentSession(
   config: { cwd: string },
   signal: AbortSignal | undefined,
   onProgress: ((update: AgentProgressUpdate) => void) | undefined,
-  gitBaseline: Set<string>,
+  gitBaseline: Set<string> | undefined,
   start: number,
+  deadlineAt?: number,
 ): Promise<{
   output: string;
   error?: string;
   durationMs: number;
   tokens: number;
   usage: Usage;
+  /** Best-effort union of activity- and git-derived touched files for display. */
   touchedFiles: string[];
+  /** Files directly attributable to this run's edit/write tool calls. */
+  attributedFiles: string[];
   failureKind?: TaskFailureKind;
+  /** Whether `session.prompt()` was actually invoked. Distinguishes a pre-prompt
+   *  deadline (session never used) from a mid-prompt deadline (session was
+   *  prompted and may have partial state mutations). */
+  prompted: boolean;
 }> {
   const startTime = start ?? Date.now();
   const stallTimeoutMs = getStallTimeoutMs();
@@ -65,6 +92,9 @@ export async function runAgentSession(
   let stalled = false;
   let stalledPhase: string | undefined;
   let clearStallDeadline: (() => void) | undefined;
+  let deadlineExceeded = false;
+  let clearDeadline: (() => void) | undefined;
+  let prompted = false;
   const activities: ToolActivity[] = [];
   const pendingById = new Map<string, ToolActivity>();
   let sessionEventGeneration = 0;
@@ -110,7 +140,7 @@ export async function runAgentSession(
     new Promise<void>((resolve) => setImmediate(resolve));
 
   const requestSessionCancellation = (
-    source: "parent-aborted" | "stalled",
+    source: "parent-aborted" | "stalled" | "deadline",
   ): void => {
     const logFailure = (operation: string, error: unknown) => {
       console.error(`[delegate] ${source} subagent ${operation} failed`, error);
@@ -171,9 +201,14 @@ export async function runAgentSession(
    */
   const waitForSessionQuiescence = async (): Promise<void> => {
     const cancelledGraceMs = 50;
-    const cancellationRequested = () => signal?.aborted || stalled;
-    const cancellationSource = (): "parent-aborted" | "stalled" =>
-      signal?.aborted ? "parent-aborted" : "stalled";
+    const cancellationRequested = () =>
+      signal?.aborted || stalled || deadlineExceeded;
+    const cancellationSource = (): "parent-aborted" | "stalled" | "deadline" =>
+      signal?.aborted
+        ? "parent-aborted"
+        : deadlineExceeded
+          ? "deadline"
+          : "stalled";
     let quietTurns = 0;
     let graceWaited = false;
     while (quietTurns < 2) {
@@ -235,14 +270,24 @@ export async function runAgentSession(
   const fireProgress = () => {
     if (!onProgress) return;
     const delta = currentUsage().totalTokens;
-    onProgress({
-      tokens: delta,
-      toolUses,
-      durationMs: Date.now() - startTime,
-      lastActivityAt,
-      activities: [...activities],
-      failureKind: stalled ? "stalled" : undefined,
-    });
+    try {
+      onProgress({
+        tokens: delta,
+        toolUses,
+        durationMs: Date.now() - startTime,
+        lastActivityAt,
+        activities: [...activities],
+        failureKind: signal?.aborted
+          ? undefined
+          : deadlineExceeded
+            ? "deadline_exceeded"
+            : stalled
+              ? "stalled"
+              : undefined,
+      });
+    } catch (error) {
+      console.error("[delegate] progress callback threw; continuing", error);
+    }
   };
 
   const stallError = () =>
@@ -252,10 +297,12 @@ export async function runAgentSession(
     clearStallDeadline = undefined;
   };
   const abortForStall = () => {
-    if (stalled || signal?.aborted) return;
+    if (stalled || signal?.aborted || deadlineExceeded) return;
     stalled = true;
     stalledPhase = phase;
     clearStallWatchdog();
+    clearDeadline?.();
+    clearDeadline = undefined;
     console.warn(
       `[delegate] stalled subagent detected after ${fmtDuration(stallTimeoutMs)} while ${phase}; requesting cooperative cancellation`,
     );
@@ -269,12 +316,41 @@ export async function runAgentSession(
   };
   const armStallWatchdog = (graceMs = 0) => {
     clearStallWatchdog();
-    if (!stallTimeoutMs || stalled || signal?.aborted) return;
+    if (!stallTimeoutMs || stalled || signal?.aborted || deadlineExceeded)
+      return;
 
     const grace = Number.isFinite(graceMs) && graceMs > 0 ? graceMs : 0;
     const deadline = Date.now() + stallTimeoutMs + grace;
     clearStallDeadline = scheduleDeadline(deadline, abortForStall);
   };
+
+  const deadlineError = () =>
+    formatDeadlineExceededError(deadlineAt ? deadlineAt - startTime : 0);
+  const clearDeadlineWatchdog = () => {
+    clearDeadline?.();
+    clearDeadline = undefined;
+  };
+  const abortForDeadline = () => {
+    if (deadlineExceeded || signal?.aborted) return;
+    deadlineExceeded = true;
+    clearDeadlineWatchdog();
+    clearStallWatchdog();
+    console.warn(
+      `[delegate] subagent exceeded its wall-clock deadline; requesting cooperative cancellation`,
+    );
+    requestSessionCancellation("deadline");
+    fireProgress();
+  };
+  const armDeadlineWatchdog = () => {
+    clearDeadlineWatchdog();
+    if (!deadlineAt || deadlineExceeded || stalled || signal?.aborted) return;
+    if (Date.now() >= deadlineAt) {
+      abortForDeadline();
+      return;
+    }
+    clearDeadline = scheduleDeadline(deadlineAt, abortForDeadline);
+  };
+
   const noteActivity = (nextPhase: string, graceMs = 0) => {
     lastActivityAt = Date.now();
     phase = nextPhase;
@@ -593,6 +669,7 @@ export async function runAgentSession(
   if (signal) {
     abortHandler = () => {
       clearStallWatchdog();
+      clearDeadlineWatchdog();
       // Fire-and-forget: prompt()/the quiescence barrier observe cancellation
       // and then return the partial evidence that this runner reports.
       requestSessionCancellation("parent-aborted");
@@ -621,34 +698,107 @@ export async function runAgentSession(
       tokens: 0,
       usage: emptyUsage(),
       touchedFiles: [],
+      attributedFiles: [],
+      prompted: false,
     };
   }
 
-  // Start detection only once the session is ready to receive its prompt;
-  // queued delegate tasks never enter this runner and therefore never time out.
-  armStallWatchdog();
-  fireProgress();
-
-  try {
-    await session.prompt(prompt);
+  // If the deadline is already in the past, request cooperative cancellation
+  // and wait for the session to settle before returning ownership. Starting a
+  // prompt after the deadline would let the session do work without an active
+  // deadline watchdog.
+  if (deadlineAt && Date.now() >= deadlineAt) {
+    abortForDeadline();
+    // A pre-prompt deadline still calls session.abort(), so any in-flight
+    // compaction or extension work must settle before lifecycle disposes or
+    // reuses the session. The same quiescence barrier used after prompt()
+    // handles a never-prompted session safely — it just observes idle state.
+    //
+    // Keep the parent abort listener armed during the quiescence wait. If the
+    // parent signal aborts while we are waiting, the runner should report the
+    // parent cancellation ("Aborted") rather than the pre-expired deadline.
     await waitForSessionQuiescence();
     clearStallWatchdog();
+    clearDeadlineWatchdog();
+    if (signal && abortHandler)
+      signal.removeEventListener("abort", abortHandler);
+    unsubscribe();
+    if (signal?.aborted) {
+      return {
+        output: "",
+        error: "Aborted",
+        durationMs: Date.now() - startTime,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+        prompted: false,
+      };
+    }
+    return {
+      output: "(no output)",
+      error: deadlineError(),
+      durationMs: Date.now() - startTime,
+      tokens: 0,
+      usage: emptyUsage(),
+      touchedFiles: [],
+      attributedFiles: [],
+      failureKind: "deadline_exceeded",
+      prompted: false,
+    };
+  }
 
+  try {
+    // Start detection only once the session is ready to receive its prompt;
+    // queued delegate tasks never enter this runner and therefore never time out.
+    armStallWatchdog();
+    armDeadlineWatchdog();
+    fireProgress();
+
+    prompted = true;
+    await session.prompt(prompt);
+    await waitForSessionQuiescence();
+
+    // The model is done; inactivity is no longer the right watchdog. Git
+    // evidence collection can take several seconds (up to 5s per git call),
+    // so keep the wall-clock deadline armed through it while preventing the
+    // stall watchdog from firing on the silent git commands.
+    clearStallWatchdog();
+    phase = "collecting git evidence";
+    lastActivityAt = Date.now();
+
+    const gitAfter = await getGitChangedFiles(config.cwd);
+    if (deadlineAt && Date.now() >= deadlineAt && !deadlineExceeded) {
+      abortForDeadline();
+    }
+    clearDeadlineWatchdog();
+    // If the deadline or parent abort fired after the first quiescence barrier,
+    // including while Git was running, the fire-and-forget
+    // cancellation is still unwinding. Wait for the same quiescence barrier so
+    // lifecycle does not dispose/reuse the session while compaction or an
+    // extension callback is still active.
+    if (deadlineExceeded || signal?.aborted) await waitForSessionQuiescence();
+
+    // Recompute evidence after the final quiescence wait. Output, usage,
+    // activity-derived touched files, and the session error state can all be
+    // mutated by the unwinding work that the barrier just waited for.
     const state = session.state as { errorMessage?: string };
     const output = capturedOutput();
     const usage = currentUsage();
-
-    // Compute touched files: union of activity-based (edit/write) and git diff
-    // against the pre-prompt baseline. Independent of the runner's event model.
     const fromActivities = extractTouchedFromActivities(activities, config.cwd);
-    const gitAfter = await getGitChangedFiles(config.cwd);
-    const fromGit = [...gitAfter].filter((f) => !gitBaseline.has(f));
+    const fromGit =
+      gitBaseline && gitAfter
+        ? [...gitAfter].filter((f) => !gitBaseline.has(f))
+        : [];
     const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
-    const errorMessage = stalled
-      ? stallError()
-      : signal?.aborted
-        ? "Aborted"
-        : state.errorMessage;
+    const attributedFiles = fromActivities;
+    const errorMessage = signal?.aborted
+      ? "Aborted"
+      : deadlineExceeded
+        ? deadlineError()
+        : stalled
+          ? stallError()
+          : state.errorMessage;
 
     return {
       output: output || "(no output)",
@@ -657,26 +807,62 @@ export async function runAgentSession(
       tokens: usage.totalTokens,
       usage,
       touchedFiles,
-      failureKind: stalled ? "stalled" : undefined,
+      attributedFiles,
+      failureKind: signal?.aborted
+        ? undefined
+        : deadlineExceeded
+          ? "deadline_exceeded"
+          : stalled
+            ? "stalled"
+            : undefined,
+      prompted,
     };
   } catch (err) {
     // Preserve partial-work evidence: whatever assistant output, token spend,
-    // and touched files accumulated before the failure/abort.
+    // and touched files accumulated before the failure/abort. The touched-file
+    // union is still best-effort; any edit/write activity and git-visible
+    // changes observed so far are retained. Keep the stall watchdog armed
+    // through the quiescence barrier so a busy session that stops emitting
+    // events is still rescued; clear it only once the barrier completes.
+    await waitForSessionQuiescence();
+    clearStallWatchdog();
+    phase = "collecting git evidence";
+    lastActivityAt = Date.now();
+
+    const gitAfter = await getGitChangedFiles(config.cwd);
+    if (deadlineAt && Date.now() >= deadlineAt && !deadlineExceeded) {
+      abortForDeadline();
+    }
+    clearDeadlineWatchdog();
+    // If the deadline or parent abort fired after the first quiescence barrier,
+    // including while Git was running, the fire-and-forget
+    // cancellation is still unwinding. Wait for the same quiescence barrier so
+    // lifecycle does not dispose/reuse the session while compaction or an
+    // extension callback is still active.
+    if (deadlineExceeded || signal?.aborted) await waitForSessionQuiescence();
+
+    // Recompute evidence after the final quiescence wait. Output, usage, and
+    // activity-derived touched files can all be mutated by the unwinding work
+    // that the barrier just waited for.
     const partialOutput = capturedOutput();
     const usage = currentUsage();
-
     const fromActivities = extractTouchedFromActivities(activities, config.cwd);
-    const gitAfter = await getGitChangedFiles(config.cwd);
-    const fromGit = [...gitAfter].filter((f) => !gitBaseline.has(f));
+    const fromGit =
+      gitBaseline && gitAfter
+        ? [...gitAfter].filter((f) => !gitBaseline.has(f))
+        : [];
     const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
+    const attributedFiles = fromActivities;
 
-    const msg = stalled
-      ? stallError()
-      : signal?.aborted
-        ? "Aborted"
-        : err instanceof Error
-          ? err.message
-          : String(err);
+    const msg = signal?.aborted
+      ? "Aborted"
+      : deadlineExceeded
+        ? deadlineError()
+        : stalled
+          ? stallError()
+          : err instanceof Error
+            ? err.message
+            : String(err);
     return {
       output: partialOutput || "(no output)",
       error: msg,
@@ -684,10 +870,19 @@ export async function runAgentSession(
       tokens: usage.totalTokens,
       usage,
       touchedFiles,
-      failureKind: stalled ? "stalled" : undefined,
+      attributedFiles,
+      failureKind: signal?.aborted
+        ? undefined
+        : deadlineExceeded
+          ? "deadline_exceeded"
+          : stalled
+            ? "stalled"
+            : undefined,
+      prompted,
     };
   } finally {
     clearStallWatchdog();
+    clearDeadlineWatchdog();
     if (signal && abortHandler)
       signal.removeEventListener("abort", abortHandler);
     unsubscribe();

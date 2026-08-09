@@ -140,11 +140,13 @@ const CLAUDE_TOOL_ALIASES: Record<string, string> = {
 
 /** Parse a `tools:` frontmatter value into a resolved tool list.
  *  Omitted or blank → inherit the full agent set (`*`), matching CC/OpenCode/
- *  Devin convention. This is the only caller-owned knob — both inline tasks
- *  and named agents now inherit-all when `tools:` is absent. */
+ *  Devin convention. For Claude imports (`aliasMap` set), an explicit
+ *  allowlist that maps to an empty set means the agent gets no tools, with a
+ *  warning, instead of silently inheriting anything. */
 function resolveFrontmatterTools(
   raw: string | undefined,
   aliasMap?: Record<string, string>,
+  filePath?: string,
 ): string[] {
   if (!raw) return DEFAULT_TOOLS; // omitted/blank → inherit *
   const names = raw
@@ -154,11 +156,25 @@ function resolveFrontmatterTools(
   if (!names.length) return DEFAULT_TOOLS;
   const mapped = aliasMap
     ? names
-        .map((n) => aliasMap[n.toLowerCase()] ?? null)
+        .map((n) => {
+          const lower = n.toLowerCase();
+          // Preserve delegate tool-group shorthands when importing Claude files.
+          if (lower === "*" || lower === "ro") return lower;
+          return aliasMap[lower] ?? null;
+        })
         .filter((n): n is string => n !== null)
     : names;
-  // Empty after aliasing (e.g. a Claude agent listing only WebSearch) → inherit.
-  return mapped.length ? resolveToolGroups(mapped) : DEFAULT_TOOLS;
+  // Empty after aliasing (e.g. a Claude agent listing only WebSearch) must not
+  // silently inherit the full mutating set. An explicit allowlist that maps to
+  // nothing means the agent gets no tools.
+  if (!mapped.length) {
+    const where = filePath ? ` (${filePath})` : "";
+    console.warn(
+      `[delegate] Claude agent allowlist contained no mappable tools${where}; agent will have no tools.`,
+    );
+    return [];
+  }
+  return resolveToolGroups(mapped);
 }
 
 /** Parse and alias a comma-separated Claude tool list into delegate tool names,
@@ -201,15 +217,19 @@ export function loadAgentFile(filePath: string): AgentConfig | null {
   };
 }
 
-/** Variant for `.claude/agents/*.md` files. Two Claude-specific adaptations:
+/** Variant for `.claude/agents/*.md` files. Claude-specific adaptations:
  *  - Maps capitalized tool names (Read/Glob/…) to delegate tools, dropping
  *    unmappable ones (WebSearch, TodoWrite, …). Omitted `tools` inherits `*`.
  *  - Honors `disallowedTools` as a denylist layered on top of the resolved
  *    set (Claude semantics: denylist applies whether or not an allowlist is
  *    set). Since delegate has no runtime denylist, we bake it into `tools` at
- *    import time. A reviewer with `disallowedTools: Write, Edit` and no
- *    `tools` becomes `read, bash, grep, find, ls` — it does NOT silently
- *    inherit full tools.
+ *    import time. `bash` is special: in the delegate tool set it subsumes
+ *    `grep`/`find`/`ls` (a shell can run all of them), so an imported `Bash`
+ *    resolves to `bash` alone. If the denylist then removes `Bash` from an
+ *    inherited (omitted) allowlist, the dedicated read-only search tools it
+ *    was subsuming are restored. If the user explicitly allowlisted `Bash`,
+ *    removing it gives them no extra tools — they never asked for `grep`,
+ *    `find`, or `ls`.
  *  - `model: inherit` (Claude's default) is mapped to "omit" so the agent
  *    inherits the parent model; passing it through verbatim would crash
  *    resolveModel() with "model 'inherit' is not available". */
@@ -223,11 +243,32 @@ export function loadClaudeAgentFile(filePath: string): AgentConfig | null {
   const { data, body } = parseFrontmatter(content, filePath);
   if (!data.name || !data.description) return null;
 
-  let tools = resolveFrontmatterTools(data.tools, CLAUDE_TOOL_ALIASES);
+  // Track whether the user wrote an explicit `tools:` allowlist. Omitted or
+  // blank means "inherit the full default set" (`*`), and only in that case
+  // does denying `bash` restore the search tools it was subsuming.
+  const explicitTools = data.tools != null && data.tools.trim() !== "";
+  let tools = resolveFrontmatterTools(
+    data.tools,
+    CLAUDE_TOOL_ALIASES,
+    filePath,
+  );
   // disallowedTools is a denylist applied after the allowlist resolves.
-  // Empty-after-mapping denylist (e.g. only unmappable names) → no-op.
+  // `bash` subsumes `grep`/`find`/`ls`: if the denylist removes `bash` from an
+  // inherited (omitted) allowlist, restore the dedicated read-only search
+  // tools it was covering, but only the ones not already present and not also
+  // explicitly denied. If `bash` came from an explicit allowlist, do not add
+  // search tools the user never requested.
   const denied = new Set(mapClaudeToolNames(data.disallowedTools));
-  if (denied.size) tools = tools.filter((t) => !denied.has(t));
+  if (denied.size) {
+    const hadBash = tools.includes("bash");
+    tools = tools.filter((t) => !denied.has(t));
+    if (hadBash && !tools.includes("bash") && !explicitTools) {
+      const restored = ["grep", "find", "ls"].filter(
+        (t) => !tools.includes(t) && !denied.has(t),
+      );
+      if (restored.length) tools = tools.concat(restored);
+    }
+  }
 
   return {
     name: data.name,
@@ -324,6 +365,95 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
 export const DEFAULT_SUBAGENT_SYSTEM_PROMPT =
   "You are a helpful coding assistant.";
 
+/** First line of Pi's default generated system prompt. Used to detect an
+ *  inherited fully-assembled parent prompt that contains a stale tool
+ *  inventory. */
+const PI_DEFAULT_PROMPT_PREFIX =
+  "You are an expert coding assistant operating inside pi, a coding agent harness.";
+
+const PI_DEFAULT_PROMPT_INTRO = `${PI_DEFAULT_PROMPT_PREFIX} You help users by reading files, executing commands, editing code, and writing new files.`;
+
+function buildCapabilityProse(tools: string[]): string {
+  const set = new Set(tools);
+  const parts: string[] = [];
+  if (set.has("read")) parts.push("reading files");
+  if (set.has("grep") || set.has("find")) parts.push("searching code");
+  if (set.has("ls")) parts.push("listing directories");
+  if (set.has("bash")) parts.push("executing commands");
+  if (set.has("edit")) parts.push("editing code");
+  if (set.has("write")) parts.push("writing new files");
+  if (parts.length === 0) return "following the provided instructions";
+  if (parts.length === 1) return parts[0]!;
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]!}`;
+}
+
+function buildIntro(tools: string[]): string {
+  return `${PI_DEFAULT_PROMPT_PREFIX} You help users by ${buildCapabilityProse(tools)}.`;
+}
+
+const PI_DEFAULT_AVAILABLE_TOOLS_MARKER = "\n\nAvailable tools:\n";
+const PI_DEFAULT_PI_DOCS_MARKER = "\n\nPi documentation";
+const PI_DEFAULT_CWD_PREFIX = "\nCurrent working directory: ";
+
+/**
+ * Strip the default tool inventory, guidelines, and parent working directory
+ * line from an inherited parent prompt before it becomes a child's custom
+ * system prompt.
+ *
+ * Pi's `buildSystemPrompt()` synthesizes an "Available tools" list, tool
+ * guidelines, and a "Current working directory" line when no custom `SYSTEM.md`
+ * is in use. That assembled prompt is what the parent's `getSystemPrompt()`
+ * returns. If we pass it through as the child's custom prompt, the child keeps
+ * the parent's tool advertisement (and cwd) even when its actual tool set is
+ * restricted (e.g. `tools: ["ro"]`) and it is running in a different
+ * directory. AgentSession will append the correct child cwd when it rebuilds
+ * the system prompt, so the inherited parent cwd line is removed here.
+ *
+ * The function detects the default prompt by its stable intro, then removes
+ * only the "Available tools" + "Guidelines" region and the trailing
+ * "Current working directory" line, preserving the rest of the parent base
+ * (and any append/project context/skills that the resource loader added).
+ *
+ * Custom parent `SYSTEM.md` prompts are left untouched: they do not start with
+ * the default intro, so no heuristic stripping occurs.
+ */
+function sanitizeParentToolInventory(
+  prompt: string | undefined,
+  tools: string[] = DEFAULT_TOOLS,
+): string | undefined {
+  if (!prompt) return prompt;
+
+  // Only act on Pi's default generated prompt. Custom prompts may mention tools
+  // intentionally and should not be rewritten by a heuristic.
+  const trimmed = prompt.trimStart();
+  if (!trimmed.startsWith(PI_DEFAULT_PROMPT_INTRO)) return prompt;
+
+  const availableStart = prompt.indexOf(PI_DEFAULT_AVAILABLE_TOOLS_MARKER);
+  if (availableStart < 0) return prompt;
+
+  const piDocsStart = prompt.indexOf(
+    PI_DEFAULT_PI_DOCS_MARKER,
+    availableStart + PI_DEFAULT_AVAILABLE_TOOLS_MARKER.length,
+  );
+  if (piDocsStart < 0) return prompt;
+
+  const intro = buildIntro(tools);
+  const prefix = prompt
+    .slice(0, availableStart)
+    .replace(PI_DEFAULT_PROMPT_INTRO, intro);
+  let base = prefix + prompt.slice(piDocsStart);
+
+  // Remove the inherited parent cwd line; AgentSession adds the correct child
+  // cwd when it assembles the final system prompt.
+  const cwdIndex = base.lastIndexOf(PI_DEFAULT_CWD_PREFIX);
+  if (cwdIndex >= 0) {
+    return base.slice(0, cwdIndex).replace(/\n+$/, "");
+  }
+
+  return base;
+}
+
 function firstNonBlank(
   ...values: Array<string | undefined>
 ): string | undefined {
@@ -338,6 +468,7 @@ export function buildSubagentSystemPrompt(options: {
   agentSystemPrompt?: string;
   parentSystemPrompt?: string;
   pooledSystemPrompt?: string;
+  tools?: string[];
 }): string {
   // Pooled agents already have a frozen prompt baked into their session state.
   // Return it unchanged so repeated sessionId calls do not re-resolve.
@@ -347,11 +478,22 @@ export function buildSubagentSystemPrompt(options: {
   // from this custom prompt + its own resource-loader discovery (skills,
   // AGENTS.md, active-tool snippets). We previously appended skills/AGENTS.md
   // here; that duplicated AgentSession's work.
+  // An inherited parent prompt may be Pi's fully-assembled default prompt,
+  // which carries the parent's "Available tools" list and tool guidelines. A
+  // restricted child (e.g. `tools: ["ro"]`) must not advertise the parent's
+  // mutating tools as callable. Sanitize the parent prompt only; task and agent
+  // prompts are intentionally authored and are left untouched.
+  const resolvedTools = resolveToolGroups(options.tools ?? DEFAULT_TOOLS);
+  const parentSystemPrompt = sanitizeParentToolInventory(
+    options.parentSystemPrompt,
+    resolvedTools,
+  );
+
   const base =
     firstNonBlank(
       options.taskSystemPrompt,
       options.agentSystemPrompt,
-      options.parentSystemPrompt,
+      parentSystemPrompt,
     ) ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT;
 
   return base;

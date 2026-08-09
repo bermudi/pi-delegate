@@ -185,6 +185,11 @@ export function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
 
+/** Render an optional task `id` in a compact, visually distinct form. */
+export function formatTaskId(id: string | undefined): string {
+  return id ? ` #${id}` : "";
+}
+
 /**
  * Extract a single-line preview of agent output for collapsed final display.
  *
@@ -340,7 +345,7 @@ function isResumableSessionFile(sessionFile: string): boolean {
  * path that didn't exist on disk.
  *
  * Emits:
- *   [FAILED|ABORTED: <error> · session: <shortpath> · touched: <files>]
+ *   [FAILED|ABORTED: <error> · session: <shortpath> · touched (best-effort): <files>]
  *   <partial output, when available>
  *   → To retry: delegate({ tasks: [{ resumeFrom: "<path>", prompt: "continue" }] })
  *
@@ -351,12 +356,12 @@ function isResumableSessionFile(sessionFile: string): boolean {
  */
 export function formatFailedTask(r: TaskResult, cwd?: string): string[] {
   const parts: string[] = [];
-  const isAbort = /abort/i.test(r.error ?? "");
+  const isAbort = r.error === "Aborted";
   // Empty string is falsy but not nullish — `||` covers both undefined and "".
   const failParts = [r.error || "unknown error"];
   if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);
   const touched = cwd ? relativeTouchedSummary(r.touchedFiles, cwd) : null;
-  if (touched) failParts.push(`touched: ${touched}`);
+  if (touched) failParts.push(`touched (best-effort): ${touched}`);
   parts.push(`[${isAbort ? "ABORTED" : "FAILED"}: ${failParts.join(" · ")}]`);
 
   // Surface partial assistant output even when the task did not complete.
@@ -398,7 +403,7 @@ export function formatFailedTask(r: TaskResult, cwd?: string): string[] {
  * Emits:
  *   === <agent>: <truncated prompt> ===
  *   [WARNING: <w>]  (per warning, if any)
- *   [FAILED: ...] / [OK | <duration> | <tokens> tokens · <sessionFile> · touched: <files>]
+ *   [FAILED: ...] / [OK | <duration> | <tokens> tokens · <sessionFile> · touched (best-effort): <files>]
  *
  *   <output>  (success body only)
  *
@@ -410,10 +415,10 @@ export function formatCompletedTask(
   result: TaskResult,
 ): string[] {
   const parts: string[] = [];
-  // `|| task.action` covers action-only tasks (close/list/...) where prompt is
+  // `|| task.sessionAction` covers action-only tasks (close/list/...) where prompt is
   // empty. Async prompt tasks always set prompt, so this is a no-op there.
   parts.push(
-    `=== ${result.agent}: ${trunc(task.prompt || task.action || "", 80)} ===`,
+    `=== ${result.agent}${formatTaskId(result.id ?? task.id)}: ${trunc(task.prompt || task.sessionAction || "", 80)} ===`,
   );
   if (task.warnings?.length) {
     for (const w of task.warnings) parts.push(`[WARNING: ${w}]`);
@@ -426,7 +431,7 @@ export function formatCompletedTask(
     ];
     if (result.sessionFile) meta.push(shortenPath(result.sessionFile));
     const touched = relativeTouchedSummary(result.touchedFiles, task.cwd);
-    if (touched) meta.push(`touched: ${touched}`);
+    if (touched) meta.push(`touched (best-effort): ${touched}`);
     parts.push(
       `[${meta.join(" · ")}]\n\n${renderOutputForLLM(result.output, result.agent)}`,
     );
@@ -503,4 +508,38 @@ export function relativeTouchedSummary(
     .map((f) => path.relative(cwd, f))
     .filter((f) => f && !f.startsWith(".."));
   return rel.length ? rel.join(", ") : null;
+}
+
+/** Find absolute paths directly attributed to more than one task result.
+ *
+ *  Overlap is computed from {@link TaskResult.attributedFiles} (edit/write
+ *  tool calls), not from {@link TaskResult.touchedFiles}, so concurrent tasks
+ *  in the same repository do not fabricate false conflicts from shared
+ *  repository-wide git snapshots. */
+export function findTouchedOverlaps(
+  results: readonly { attributedFiles?: string[] }[],
+): string[] {
+  const counts = new Map<string, number>();
+  for (const r of results) {
+    for (const f of r.attributedFiles ?? []) {
+      counts.set(f, (counts.get(f) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([file]) => file)
+    .sort();
+}
+
+/**
+ * Format a post-dispatch overlap warning, or null when there is no overlap.
+ *
+ * The warning is deliberately conservative: it only reports paths that two or
+ * more tasks claimed to touch. It does NOT claim that disjoint touchedFiles
+ * mean there was no conflict, and it does NOT claim filesystem isolation or
+ * rollback.
+ */
+export function formatTouchedOverlapWarning(overlaps: string[]): string | null {
+  if (!overlaps.length) return null;
+  return `WARNING: These tasks reported touching the same file(s): ${overlaps.join(", ")}. Delegate does not isolate or serialize file access and does not roll back completed writes.`;
 }

@@ -28,8 +28,8 @@ must also match, while omitted values continue the frozen session. Mismatch
 rejection is a **pool invariant**, not caller policy — the pool enforces it
 and returns a structured diff; the caller only formats the error.
 
-**SessionPool** — the module (`pool.ts`) owning pooled-session *state and
-policy*: the session map, the per-session serialization lock, freeze-on-insert,
+**SessionPool** — the module (`pool.ts`) owning pooled-session _state and
+policy_: the session map, the per-session serialization lock, freeze-on-insert,
 validate-on-reuse, insert-only-on-success, stats-on-hit, explicit close, and
 parent-shutdown cleanup. Its seam is a small set of behavioral operations
 (`checkout`, `commit`, `configFor`, `close`, `closeAll`, `list`,
@@ -38,7 +38,7 @@ barrel.
 
 **Session materialization** — acquiring a usable `AgentSession` for a task by
 one of three paths: **pool hit** (reuse), **resume** (open a prior `.jsonl`),
-or **fresh** (create). This is *not* the SessionPool's concern — it needs host
+or **fresh** (create). This is _not_ the SessionPool's concern — it needs host
 deps (`host.ts`), session persistence (`sessions.ts`), the SDK
 (`createAgentSession` / `SessionManager`), and `fs`. It lives in `lifecycle.ts`
 (`acquireAgentSession`), which orchestrates against the SessionPool.
@@ -46,7 +46,7 @@ deps (`host.ts`), session persistence (`sessions.ts`), the SDK
 > **Do not fold materialization into the pool.** Doing so makes the pool
 > shallow by widening its interface with every materialization dependency
 > (host deps, SDK, fs), rather than deep. The pool's depth comes from owning
-> *policy* behind a narrow interface; materialization is a separate concern
+> _policy_ behind a narrow interface; materialization is a separate concern
 > that legitimately spans several modules. A future review that re-suggests
 > "make `acquire(task)` the pool's interface" should re-read this before
 > proceeding.
@@ -59,4 +59,4 @@ consumed by the dispatch/lifecycle path.
 
 **Async ticket** — a fire-and-forget background batch. Spawns, returns a ticket
 id immediately, and delivers results via `sendMessage` when all tasks settle.
-Poll/cancel are top-level `action` values. Lives in `tickets.ts`.
+Poll/cancel/wait are top-level `ticketAction` values. Lives in `tickets.ts`.

@@ -13,7 +13,13 @@ import { getConcurrencyLimit, getMaxAsyncTickets } from "./config.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
 import { sumUsage } from "./usage.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
-import { fmtDuration, formatCompletedTask, trunc } from "./format.ts";
+import {
+  fmtDuration,
+  formatCompletedTask,
+  trunc,
+  findTouchedOverlaps,
+  formatTouchedOverlapWarning,
+} from "./format.ts";
 import { validateDelegateOperation } from "./schema.ts";
 import { syncDelegateStatus } from "./status.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
@@ -57,9 +63,10 @@ export function validateDelegateOperationResult(
 /** Build the initial per-task progress rows from resolved tasks. */
 export function initProgress(resolved: ResolvedTask[]): TaskProgress[] {
   return resolved.map((t, i) => ({
+    id: t.id,
     index: i,
     agent: t.agentName,
-    task: trunc(t.prompt || t.action || "", 50),
+    task: trunc(t.prompt || t.sessionAction || "", 50),
     status: "pending" as const,
     durationMs: 0,
     tokens: 0,
@@ -316,8 +323,8 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
           `${resolved.length} task(s) dispatched · ${runningCount + 1}/${getMaxAsyncTickets()} async slots in use`,
           "",
           "Completed task results are available via poll. Final results delivered automatically when all tasks complete.",
-          `Check progress: delegate({ action: "poll", ticket: "${ticketId}" }) — avoid polling in a tight loop`,
-          `Cancel if needed: delegate({ action: "cancel", ticket: "${ticketId}", force: true }) — first call without force is a preview`,
+          `Check progress: delegate({ ticketAction: "poll", ticket: "${ticketId}" }) — avoid polling in a tight loop`,
+          `Cancel if needed: delegate({ ticketAction: "cancel", ticket: "${ticketId}", force: true }) — first call without force is a preview`,
         ].join("\n"),
       },
     ],
@@ -376,6 +383,11 @@ export async function dispatchSync(
     parts.push(...formatCompletedTask(t, r));
   }
 
+  const overlapWarning = formatTouchedOverlapWarning(
+    findTouchedOverlaps(finalResults),
+  );
+  if (overlapWarning) parts.push("", overlapWarning);
+
   return {
     content: [{ type: "text", text: parts.join("\n\n") }],
     details: {
@@ -383,6 +395,7 @@ export async function dispatchSync(
       results: finalResults,
       progress,
       parentModel: parentModelId,
+      overlapWarning: overlapWarning || undefined,
     },
     // Aggregate subagent spend so Pi folds it into the parent's
     // session/footer totals. Sync dispatch only — async results arrive via a
