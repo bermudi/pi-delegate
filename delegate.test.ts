@@ -29,6 +29,8 @@ import {
   taskMetaBase,
   waitingLabel,
   relativeTouchedSummary,
+  findTouchedOverlaps,
+  formatTouchedOverlapWarning,
 } from "./format.ts";
 
 import {
@@ -519,6 +521,12 @@ describe("resolveToolGroups", () => {
   test("returns empty array as-is", () => {
     expect(resolveToolGroups([])).toEqual([]);
   });
+
+  test("does not throw on Object.prototype-named tool names", () => {
+    expect(resolveToolGroups(["constructor"])).toEqual(["constructor"]);
+    expect(resolveToolGroups(["toString"])).toEqual(["toString"]);
+    expect(resolveToolGroups(["__proto__"])).toEqual(["__proto__"]);
+  });
 });
 
 // ── discoverAgents ────────────────────────────────────────────────────────
@@ -733,7 +741,7 @@ Claude body.
     expect(c.tools.sort()).toEqual(["bash", "find", "read"]);
   });
 
-  test("claude tool names are mapped, unmappable tools dropped, empty inherits *", () => {
+  test("claude tool names are mapped and unmappable tools are dropped", () => {
     const fp = path.join(tmpDir, "claude-only.md");
     writeFileSync(
       fp,
@@ -750,7 +758,7 @@ Body.
     expect(c.tools).toEqual(["read"]);
   });
 
-  test("claude agent with only unmappable tools inherits the full agent set", () => {
+  test("claude agent with only unmappable tools gets no tools and warns", () => {
     const fp = path.join(tmpDir, "web-only.md");
     writeFileSync(
       fp,
@@ -762,9 +770,19 @@ tools: WebSearch, WebFetch
 Body.
 `,
     );
-    const c = loadClaudeAgentFile(fp)!;
-    // Nothing mappable → inherit * (DEFAULT_TOOLS), not an empty toolset.
-    expect(c.tools).toEqual(DEFAULT_TOOLS);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      const c = loadClaudeAgentFile(fp)!;
+      // Nothing mappable → an explicit allowlist that maps to nothing means the
+      // agent gets no tools, plus a warning to the author.
+      expect(c.tools).toEqual([]);
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("no mappable tools");
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 
   test("native pi agents take precedence over same-named .claude/agents", () => {
@@ -1889,13 +1907,13 @@ describe("formatFailedTask", () => {
     const r: ResultLike = {
       agent: "scout",
       output: "",
-      error: "action='close' requires sessionId.",
+      error: "sessionAction='close' requires sessionId.",
       durationMs: 0,
       tokens: 0,
       touchedFiles: [],
     };
     expect(formatFailedTask(r)).toEqual([
-      "[FAILED: action='close' requires sessionId.]",
+      "[FAILED: sessionAction='close' requires sessionId.]",
     ]);
   });
 
@@ -1922,7 +1940,7 @@ describe("formatFailedTask", () => {
     };
     const lines = formatFailedTask(r, "/home/daniel/build/pi-delegate");
     expect(lines[0]).toContain("[ABORTED: Aborted");
-    expect(lines[0]).toContain("touched: src/foo.ts");
+    expect(lines[0]).toContain("touched (best-effort): src/foo.ts");
     expect(lines.some((l) => l.includes("partial output here"))).toBe(true);
   });
 
@@ -2086,7 +2104,7 @@ describe("formatCompletedTask", () => {
       // OK metadata includes the shortened session path (no "session:" label —
       // that prefix is reserved for the FAILED line) and touched files.
       expect(ok).toContain(shortenPath(session));
-      expect(ok).toContain("touched: src/a.ts");
+      expect(ok).toContain("touched (best-effort): src/a.ts");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -2104,7 +2122,7 @@ describe("formatCompletedTask", () => {
         makeResult({ touchedFiles: [inside, outside] }),
       );
       const ok = lines[lines.length - 1]!;
-      expect(ok).toContain("touched: inside.ts");
+      expect(ok).toContain("touched (best-effort): inside.ts");
       expect(ok).not.toContain("outside.ts");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
@@ -2131,14 +2149,27 @@ describe("formatCompletedTask", () => {
     expect(lines[0]!.length).toBeLessThan(long.length);
   });
 
-  test("falls back to action when prompt is empty (action-only tasks)", () => {
-    // Sync path uses `t.prompt || t.action` — action-only tasks (close/list)
+  test("falls back to sessionAction when prompt is empty (action-only tasks)", () => {
+    // Sync path uses `t.prompt || t.sessionAction` — action-only tasks (close/list)
     // rely on this fallback. The helper preserves it.
     const lines = formatCompletedTask(
-      makeTask({ prompt: "", action: "close" }),
+      makeTask({ prompt: "", sessionAction: "close" }),
       makeResult(),
     );
     expect(lines[0]).toBe("=== scout: close ===");
+  });
+
+  test("renders #<id> in the header when the task has an id", () => {
+    const lines = formatCompletedTask(
+      makeTask({ id: "task-1" }),
+      makeResult({ id: "task-1" }),
+    );
+    expect(lines[0]).toBe("=== scout #task-1: do the thing ===");
+  });
+
+  test("omits id in the header when the task has no id", () => {
+    const lines = formatCompletedTask(makeTask(), makeResult());
+    expect(lines[0]).toBe("=== scout: do the thing ===");
   });
 });
 
@@ -2299,12 +2330,19 @@ describe("extractTouchedFromActivities", () => {
 
   test("extracts paths from edit and write tool calls", () => {
     const activities = [
-      { id: "1", name: "edit", args: { path: "src/foo.ts" }, startTime: 0 },
+      {
+        id: "1",
+        name: "edit",
+        args: { path: "src/foo.ts" },
+        startTime: 0,
+        result: { content: [], isError: false },
+      },
       {
         id: "2",
         name: "write",
         args: { path: "src/bar.ts", content: "..." },
         startTime: 0,
+        result: { content: [], isError: false },
       },
       { id: "3", name: "read", args: { path: "src/baz.ts" }, startTime: 0 },
     ];
@@ -2325,8 +2363,20 @@ describe("extractTouchedFromActivities", () => {
 
   test("deduplicates paths", () => {
     const activities = [
-      { id: "1", name: "edit", args: { path: "src/foo.ts" }, startTime: 0 },
-      { id: "2", name: "write", args: { path: "src/foo.ts" }, startTime: 0 },
+      {
+        id: "1",
+        name: "edit",
+        args: { path: "src/foo.ts" },
+        startTime: 0,
+        result: { content: [], isError: false },
+      },
+      {
+        id: "2",
+        name: "write",
+        args: { path: "src/foo.ts" },
+        startTime: 0,
+        result: { content: [], isError: false },
+      },
     ];
     expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
       path.resolve(cwd, "src/foo.ts"),
@@ -2344,7 +2394,13 @@ describe("extractTouchedFromActivities", () => {
 
   test("handles args with filePath key", () => {
     const activities = [
-      { id: "1", name: "edit", args: { filePath: "src/qux.ts" }, startTime: 0 },
+      {
+        id: "1",
+        name: "edit",
+        args: { filePath: "src/qux.ts" },
+        startTime: 0,
+        result: { content: [], isError: false },
+      },
     ];
     expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
       path.resolve(cwd, "src/qux.ts"),
@@ -2405,6 +2461,12 @@ describe("constants", () => {
     for (const name of ["grep", "find", "ls"] as const) {
       expect(TOOL_FACTORIES[name]).toBeFunction();
     }
+  });
+
+  test("TOOL_FACTORIES does not report Object.prototype property names as members", () => {
+    expect(Object.hasOwn(TOOL_FACTORIES, "constructor")).toBe(false);
+    expect(Object.hasOwn(TOOL_FACTORIES, "toString")).toBe(false);
+    expect(Object.hasOwn(TOOL_FACTORIES, "__proto__")).toBe(false);
   });
 });
 
@@ -2596,6 +2658,7 @@ describe("delegate extension integration", () => {
     // remain available at call-time without restoring B's prose-heavy schema.
     expect(toolDef!.description).toContain("parallel subagents");
     expect(toolDef!.description).toContain("tasks:[{prompt}]");
+    expect(toolDef!.description).toContain("tasks:[]=full manual");
     expect(schema.properties.ticket.description).toContain("polling all");
     expect(tasksArraySchema.items.properties.agent.description).toContain(
       "`default`",
@@ -2603,33 +2666,51 @@ describe("delegate extension integration", () => {
     expect(tasksArraySchema.items.properties.agent.description).toContain(
       "parent model/thinking/native tools/base prompt",
     );
+    expect(tasksArraySchema.items.properties.prompt.description).toContain(
+      "cannot see this chat",
+    );
     expect(tasksArraySchema.items.properties.context.description).toContain(
       "token-expensive",
     );
+    expect(
+      tasksArraySchema.items.properties.systemPrompt.description,
+    ).not.toContain("AgentSession");
     expect(tasksArraySchema.items.properties.tools.description).toContain(
       "read/write/edit/bash",
     );
     expect(tasksArraySchema.items.properties.tools.description).toContain(
       "read-only",
     );
-    expect(tasksArraySchema.items.properties.action.description).toContain(
-      "list shows active pooled sessions",
-    );
+    expect(
+      tasksArraySchema.items.properties.sessionAction.description,
+    ).toContain("list shows active pooled sessions");
     expect(tasksArraySchema.items.properties.resumeFrom.description).toContain(
       "never a ticket ID",
+    );
+    expect(tasksArraySchema.items.properties.id.description).toContain(
+      "correlation",
+    );
+    expect(tasksArraySchema.items.properties.id.description).toContain(
+      "duplicate",
     );
 
     // Orchestration invariants from #27 are model-visible in the schema.
     expect(toolDef!.description).toContain("Sync");
     expect(toolDef!.description).toContain("async");
+    expect(schema.properties.tasks.description).toContain("real filesystem");
     expect(schema.properties.tasks.description).toContain("run concurrently");
+    expect(schema.properties.tasks.description).toContain("[]=full manual");
     expect(schema.properties.async.description).toContain("auto-deliver");
     expect(schema.properties.async.description).toContain("Wait");
-    expect(schema.properties.action.description).toContain("Prefer wait");
+    expect(schema.properties.ticketAction.description).toContain("Prefer wait");
+    expect(schema.properties.force.description).toContain(
+      "previews active work",
+    );
+    expect(schema.properties.force.description).toContain("confirms abort");
     expect(schema.properties.force.description).toContain(
       "writes/commands remain",
     );
-    expect(tasksArraySchema.items.properties.action.enum).toEqual([
+    expect(tasksArraySchema.items.properties.sessionAction.enum).toEqual([
       "prompt",
       "close",
       "list",
@@ -2637,8 +2718,10 @@ describe("delegate extension integration", () => {
 
     // Descriptions are a tokenizer-independent proxy for the repeated provider
     // tool-definition payload. Keep truthful model-facing guidance compact but
-    // informative — the budget fits the current copy with ~50 chars of headroom
-    // so small edits don't churn, while real bloat still trips it.
+    // informative — the budget fits the current copy with ~50 chars of headroom.
+    // Raise it only when new model-visible semantics justify their repeated
+    // provider payload; do not mutilate useful copy merely to preserve a stale
+    // number.
     const descriptions = [
       toolDef!.description!,
       ...topProperties.map(([, prop]) => prop.description as string),
@@ -2652,20 +2735,22 @@ describe("delegate extension integration", () => {
         (total, description) => total + description.length,
         0,
       ),
-    ).toBeLessThanOrEqual(1_350);
+    ).toBeLessThanOrEqual(1_900);
   });
 
   test("rejects mixed dispatch, ticket, and session-control shapes", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const invalidCalls = [
-      { action: "poll", tasks: [{ prompt: "stray" }] },
+      { ticketAction: "poll", tasks: [{ prompt: "stray" }] },
       { ticket: "t1", tasks: [{ prompt: "stray" }] },
       { async: true },
       { timeoutMs: 10, tasks: [{ prompt: "stray" }] },
       { force: true, tasks: [{ prompt: "stray" }] },
-      { tasks: [{ action: "list", prompt: "stray" }] },
-      { tasks: [{ action: "close", sessionId: "s1", prompt: "stray" }] },
+      { tasks: [{ sessionAction: "list", prompt: "stray" }] },
+      { tasks: [{ sessionAction: "close", sessionId: "s1", prompt: "stray" }] },
+      { tasks: [{ prompt: "x", deadlineMs: 0 }] },
+      { tasks: [{ prompt: "x", deadlineMs: -5 }] },
     ];
 
     for (const params of invalidCalls) {
@@ -2676,7 +2761,11 @@ describe("delegate extension integration", () => {
         undefined,
         ts.session.extensionRunner as any,
       );
-      expect(result.content[0].text).toContain("Invalid delegate call");
+      const text = result.content[0].text;
+      expect(text).toContain("Invalid delegate call");
+      if ((params as any).tasks?.[0]?.deadlineMs !== undefined) {
+        expect(text).toContain("deadlineMs must be a positive number");
+      }
       expect(result.details.results).toEqual([]);
       expect(result.details.progress).toEqual([]);
     }
@@ -2699,6 +2788,14 @@ describe("delegate extension integration", () => {
     expect(text).toContain("Available Custom Agents");
     expect(text).toContain("Task Fields");
     expect(text).toContain("Top-level Fields");
+    expect(text).toContain("**ticket**");
+    expect(text).toContain("**sessionId**");
+    expect(text).toContain("**resumeFrom**");
+    expect(text).toContain("cannot call `delegate` recursively");
+    expect(text).toContain(
+      "Parent-global `AGENTS.md` instructions are also excluded",
+    );
+    expect(text).toContain("validation is batch-wide");
     const schema = toolDef!.parameters as any;
     for (const key of Object.keys(schema.properties)) {
       expect(text).toContain(`| \`${key}\` |`);
@@ -2740,11 +2837,17 @@ describe("delegate extension integration", () => {
       "cwd",
       "context",
       "sessionId",
-      "action",
+      "sessionAction",
+      "deadlineMs",
     ];
     for (const field of optionalFields) {
       expect(taskSchema.properties[field]).toBeDefined();
     }
+    expect(taskSchema.properties.deadlineMs).toBeDefined();
+    // Legacy aliases remain type/runtime compatible but are intentionally absent
+    // from the provider-visible schema so models see only canonical namespaces.
+    expect(taskSchema.properties.action).toBeUndefined();
+    expect((toolDef!.parameters as any).properties.action).toBeUndefined();
     // No required fields at the TypeBox level; runtime validation enforces constraints.
     expect(taskSchema.required).toBeUndefined();
   });
@@ -2841,7 +2944,7 @@ describe("delegate extension integration", () => {
 
     const result = await toolDef!.execute(
       "tc-parent-inherit",
-      { tasks: [{ prompt: "hello", action: "prompt" }] },
+      { tasks: [{ prompt: "hello", sessionAction: "prompt" }] },
       undefined,
       undefined,
       // Custom ctx: composite-id parent + trap registry. No explicit task model.
@@ -4372,6 +4475,85 @@ describe("delegate renderers", () => {
     ).getText();
     expect(rendered).toContain("queued (3 running)");
   });
+
+  test("renderResult shows the overlap warning after the progress trees", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "delegate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx();
+
+    // Make the terminal wide enough so the safety warning is not truncated.
+    const originalColumns = process.stdout.columns;
+    process.stdout.columns = 220;
+
+    const shared = "/tmp/shared.txt";
+    const results = [
+      {
+        agent: "a",
+        output: "done",
+        durationMs: 100,
+        tokens: 10,
+        attributedFiles: [shared],
+      },
+      {
+        agent: "b",
+        output: "done",
+        durationMs: 100,
+        tokens: 10,
+        attributedFiles: [shared],
+      },
+    ];
+    const overlapWarning = formatTouchedOverlapWarning(
+      findTouchedOverlaps(results),
+    );
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        tasks: [{ prompt: "a" }, { prompt: "b" }],
+        results,
+        progress: [
+          {
+            index: 0,
+            agent: "a",
+            task: "a",
+            status: "done",
+            durationMs: 100,
+            tokens: 10,
+            toolUses: 0,
+            activities: [],
+          },
+          {
+            index: 1,
+            agent: "b",
+            task: "b",
+            status: "done",
+            durationMs: 100,
+            tokens: 10,
+            toolUses: 0,
+            activities: [],
+          },
+        ],
+        overlapWarning,
+      },
+    };
+
+    try {
+      const rendered = (
+        toolDef!.renderResult(
+          result,
+          { isPartial: false, expanded: false } as any,
+          theme,
+          ctx,
+        ) as any
+      ).getText();
+      expect(rendered).toContain("2/2 completed");
+      expect(rendered).toContain(shared);
+      expect(rendered).toContain("does not isolate or serialize file access");
+      expect(rendered).toContain("does not roll back completed writes");
+    } finally {
+      process.stdout.columns = originalColumns;
+    }
+  });
 });
 
 // ── Pool tests ────────────────────────────────────────────────────────────
@@ -4392,7 +4574,7 @@ describe("delegate pool", () => {
     // list without prompt should work
     const listResult = await toolDef!.execute(
       "tc-pool-1",
-      { tasks: [{ action: "list" }] },
+      { tasks: [{ sessionAction: "list" }] },
       undefined,
       undefined,
       ts.session.extensionRunner as any,
@@ -4403,7 +4585,7 @@ describe("delegate pool", () => {
     const closeResult = await toolDef!.execute(
       "tc-pool-2",
       {
-        tasks: [{ action: "close", sessionId: "nonexistent" }],
+        tasks: [{ sessionAction: "close", sessionId: "nonexistent" }],
       },
       undefined,
       undefined,
@@ -4427,19 +4609,19 @@ describe("delegate pool", () => {
     ).rejects.toThrow("prompt is required");
   });
 
-  test("close action requires sessionId", async () => {
+  test("close sessionAction requires sessionId", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
 
     const result = await toolDef!.execute(
       "tc-pool-4",
-      { tasks: [{ action: "close", systemPrompt: "test" }] },
+      { tasks: [{ sessionAction: "close", systemPrompt: "test" }] },
       undefined,
       undefined,
       ts.session.extensionRunner as any,
     );
     expect(result.content[0].text).toContain(
-      "action 'close' requires sessionId",
+      "sessionAction 'close' requires sessionId",
     );
   });
 
@@ -5122,7 +5304,7 @@ describe("async delegate integration", () => {
     const toolDef = getToolDef(ts, "delegate");
     const result = await toolDef!.execute(
       "tc-poll-1",
-      { action: "poll", async: undefined, ticket: undefined },
+      { ticketAction: "poll", async: undefined, ticket: undefined },
       undefined,
       undefined,
       ts.session.extensionRunner as any,
@@ -5132,7 +5314,7 @@ describe("async delegate integration", () => {
 
   test("poll with no tickets includes a discovery hint", () => {
     const result = handlePoll({ tasks: [], ticket: undefined }, {} as any);
-    // Dead-end must self-correct: a confused `action: "poll"` should point
+    // Dead-end must self-correct: a confused `ticketAction: "poll"` should point
     // the caller at the spawn syntax and the help path, not strand them.
     expect(result.content[0].text).toContain("No async tickets");
     expect(result.content[0].text).toContain("tasks: [{ agent, prompt }]");
@@ -5180,7 +5362,7 @@ describe("async delegate integration", () => {
     // Enriched list: agent roster + copy-pasteable poll/cancel controls.
     expect(result.content[0].text).toContain("scout");
     expect(result.content[0].text).toContain(
-      'delegate({ action: "cancel", ticket: "abc12345", force: true })',
+      'delegate({ ticketAction: "cancel", ticket: "abc12345", force: true })',
     );
 
     ticket.status = "cancelling";
@@ -5189,10 +5371,10 @@ describe("async delegate integration", () => {
       {} as any,
     );
     expect(cancellingResult.content[0].text).toContain(
-      'delegate({ action: "poll", ticket: "abc12345" })',
+      'delegate({ ticketAction: "poll", ticket: "abc12345" })',
     );
     expect(cancellingResult.content[0].text).not.toContain(
-      'delegate({ action: "cancel", ticket: "abc12345", force: true })',
+      'delegate({ ticketAction: "cancel", ticket: "abc12345", force: true })',
     );
   });
 
@@ -5333,7 +5515,11 @@ describe("async delegate integration", () => {
     const ticket: AsyncTicket = {
       id: "partial1",
       created: Date.now(),
-      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+      tasks: [
+        { prompt: "task-a" },
+        { prompt: "task-b", id: "task-b" },
+        { prompt: "task-c" },
+      ],
       resolved: [
         {
           prompt: "task-a",
@@ -5346,6 +5532,7 @@ describe("async delegate integration", () => {
           warnings: [],
         },
         {
+          id: "task-b",
           prompt: "task-b",
           model: {} as any,
           tools: [],
@@ -5438,10 +5625,16 @@ describe("async delegate integration", () => {
     expect(text).toContain("worker");
 
     // details.results is index-aligned — same length as progress
-    // Undefined results are filled with error objects to match DelegateDetails type
+    // Pending results are filled with placeholder TaskResult objects carrying
+    // the task id and agent, not sparse holes or bare error objects.
+    // The placeholder carries a machine-visible pending marker so consumers
+    // checking result.error can tell the task is not yet successful.
     expect(result.details.results).toHaveLength(3);
     expect(result.details.results![0]!.agent).toBe("scout");
-    expect(result.details.results![1]).toEqual({
+    expect(result.details.results![1]).toMatchObject({
+      id: "task-b",
+      agent: "worker",
+      output: "",
       error: "PENDING — result not available",
     });
     expect(result.details.results![2]!.agent).toBe("runner");
@@ -5478,6 +5671,117 @@ describe("async delegate integration", () => {
     expect(text).toContain("1 active");
     expect(text).toContain("2 failed");
     expect(text).not.toContain("2/5 finalized");
+  });
+
+  test("poll running ticket surfaces partial overlap warning from completed tasks", () => {
+    const shared = "/tmp/shared.txt";
+    const ticket: AsyncTicket = {
+      id: "partial-overlap",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "a",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "b",
+          warnings: [],
+        },
+        {
+          prompt: "task-c",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "c",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [
+        {
+          agent: "a",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        {
+          agent: "b",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        undefined,
+      ],
+      progress: [
+        {
+          index: 0,
+          agent: "a",
+          task: "task-a",
+          status: "done",
+          durationMs: 100,
+          tokens: 10,
+          toolUses: 1,
+          activities: [],
+        },
+        {
+          index: 1,
+          agent: "b",
+          task: "task-b",
+          status: "done",
+          durationMs: 100,
+          tokens: 10,
+          toolUses: 1,
+          activities: [],
+        },
+        {
+          index: 2,
+          agent: "c",
+          task: "task-c",
+          status: "running",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "test-model",
+    };
+    ticketRegistry.set("partial-overlap", ticket);
+
+    const result = handlePoll({ ticket: "partial-overlap" }, {} as any);
+
+    // The two completed tasks already share an attributed file; the warning must
+    // be surfaced in the poll view before the third task settles.
+    expect(result.details.overlapWarning).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.details.overlapWarning).toContain(shared);
+    expect(result.content[0].text).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.content[0].text).toContain(shared);
   });
 
   test("poll with unknown ticket returns not found", () => {
@@ -5528,6 +5832,173 @@ describe("async delegate integration", () => {
     expect(controller.signal.aborted).toBe(true);
   });
 
+  test("cancel without force surfaces partial overlap warning from completed tasks", () => {
+    const shared = "/tmp/shared-cancel-preview.txt";
+    const controller = new AbortController();
+    const ticket: AsyncTicket = {
+      id: "cancel-preview-overlap",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "a",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "b",
+          warnings: [],
+        },
+        {
+          prompt: "task-c",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "c",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [
+        {
+          agent: "a",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        {
+          agent: "b",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        undefined,
+      ],
+      progress: mkProgress(["done", "done", "running"]),
+      controller,
+      parentModelId: "m",
+    };
+    ticketRegistry.set("cancel-preview-overlap", ticket);
+
+    const result = handleCancel({ ticket: "cancel-preview-overlap" });
+
+    expect(result.content[0].text).toContain("cancellation preview");
+    expect(result.content[0].text).toContain(shared);
+    expect(result.content[0].text).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.details.overlapWarning).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.details.overlapWarning).toContain(shared);
+    expect(ticket.status).toBe("running");
+    expect(controller.signal.aborted).toBe(false);
+  });
+
+  test("cancel with force surfaces partial overlap warning from completed tasks", () => {
+    const shared = "/tmp/shared-cancel-force.txt";
+    const controller = new AbortController();
+    const ticket: AsyncTicket = {
+      id: "cancel-force-overlap",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "a",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "b",
+          warnings: [],
+        },
+        {
+          prompt: "task-c",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "c",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [
+        {
+          agent: "a",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        {
+          agent: "b",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        undefined,
+      ],
+      progress: mkProgress(["done", "done", "running"]),
+      controller,
+      parentModelId: "m",
+    };
+    ticketRegistry.set("cancel-force-overlap", ticket);
+
+    const result = handleCancel({
+      ticket: "cancel-force-overlap",
+      force: true,
+    });
+
+    expect(result.content[0].text).toContain("cancelling");
+    expect(result.content[0].text).toContain(shared);
+    expect(result.content[0].text).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.details.overlapWarning).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.details.overlapWarning).toContain(shared);
+    expect(ticket.status).toBe("cancelling");
+    expect(controller.signal.aborted).toBe(true);
+  });
+
   test("cancel requires ticket ID", () => {
     const result = handleCancel({ tasks: [], ticket: undefined });
     expect(result.content[0].text).toContain("requires a ticket ID");
@@ -5569,6 +6040,7 @@ describe("async delegate integration", () => {
           warnings: [],
         },
         {
+          id: "task-b",
           prompt: "task-b",
           model: {} as any,
           tools: [],
@@ -5579,6 +6051,7 @@ describe("async delegate integration", () => {
           warnings: [],
         },
         {
+          id: "task-c",
           prompt: "task-c",
           model: {} as any,
           tools: [],
@@ -5650,13 +6123,20 @@ describe("async delegate integration", () => {
     );
 
     // details.results is index-aligned — same length as tasks
-    // Undefined results are filled with error objects to match DelegateDetails type
+    // Undefined results are filled with full TaskResult placeholders carrying
+    // the task id, agent, and the cancelled-pending error message.
     expect(result.details.results).toHaveLength(3);
     expect(result.details.results![0]!.agent).toBe("scout");
-    expect(result.details.results![1]).toEqual({
+    expect(result.details.results![1]).toMatchObject({
+      id: "task-b",
+      agent: "worker",
+      output: "",
       error: "CANCELLED — task not started",
     });
-    expect(result.details.results![2]).toEqual({
+    expect(result.details.results![2]).toMatchObject({
+      id: "task-c",
+      agent: "runner",
+      output: "",
       error: "CANCELLED — task aborted mid-run, partial effects possible",
     });
   });
@@ -5667,13 +6147,15 @@ describe("async delegate integration", () => {
 
     const result = await toolDef!.execute(
       "tc-cancel-frontdoor",
-      { action: "cancel" },
+      { ticketAction: "cancel" },
       undefined,
       undefined,
       ts.session.extensionRunner as any,
     );
 
-    expect(result.content[0].text).toContain("action 'cancel' requires ticket");
+    expect(result.content[0].text).toContain(
+      "ticketAction 'cancel' requires ticket",
+    );
   });
 
   test("deliverTicketResults sends formatted task output", () => {
@@ -5961,6 +6443,53 @@ describe("async delegate integration", () => {
     expect(text).not.toContain("FAILED");
     expect(text).not.toContain("CANCELLED");
     expect(text).toContain("1/1 tasks completed");
+  });
+
+  test("formatCompletedTicket overwrites pending placeholder with a human-readable label", () => {
+    // The pending placeholder carries a machine-visible marker, but the final
+    // formatted delivery must replace it with a human-readable message so the
+    // LLM/TUI sees a descriptive status rather than an internal constant.
+    const ticket: AsyncTicket = {
+      id: "failed-with-pending",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "worker",
+          warnings: [],
+        },
+      ],
+      status: "failed",
+      results: [mkResult("boom"), undefined],
+      progress: mkProgress(["failed", "pending"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    const result = formatCompletedTicket(ticket);
+
+    expect(result.details.results).toHaveLength(2);
+    expect(result.details.results![0]!.error).toBe("boom");
+    expect(result.details.results![1]!.error).toBe(
+      "PENDING — result not available",
+    );
+    expect(result.content[0]!.text).toContain("PENDING — result not available");
   });
 
   test("formatCompletedTicket keeps FULL output in details.results[i].output even when spilled from content", () => {
@@ -6314,29 +6843,33 @@ describe("async delegate integration", () => {
     expect(text).toContain("150 tokens");
   });
 
-  test("per-task action enum does not advertise poll or cancel", async () => {
+  test("per-task sessionAction enum does not advertise poll or cancel", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
     const taskSchema = tasksArraySchema.items;
-    const actionEnum = taskSchema.properties.action.enum;
-    expect(actionEnum).not.toContain("poll");
-    expect(actionEnum).not.toContain("cancel");
-    expect(actionEnum).toEqual(["prompt", "close", "list"]);
+    const sessionActionEnum = taskSchema.properties.sessionAction.enum;
+    expect(sessionActionEnum).not.toContain("poll");
+    expect(sessionActionEnum).not.toContain("cancel");
+    expect(sessionActionEnum).toEqual(["prompt", "close", "list"]);
   });
 
-  test("top-level action enum includes wait", async () => {
+  test("top-level ticketAction enum includes wait", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const schema = toolDef!.parameters as any;
-    expect(schema.properties.action.enum).toContain("wait");
+    expect(schema.properties.ticketAction.enum).toContain("wait");
   });
 
   test("parameter schema includes top-level async ticket controls", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const schema = toolDef!.parameters as any;
-    expect(schema.properties.action.enum).toEqual(["poll", "cancel", "wait"]);
+    expect(schema.properties.ticketAction.enum).toEqual([
+      "poll",
+      "cancel",
+      "wait",
+    ]);
     expect(schema.properties.async).toBeDefined();
     expect(schema.properties.ticket).toBeDefined();
     expect(schema.properties.timeoutMs).toBeDefined();
@@ -6475,6 +7008,73 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("wait timed out");
     expect(ticket.status).toBe("running");
     expect(controller.signal.aborted).toBe(false);
+  });
+
+  test("wait details fill sparse result holes with placeholder TaskResult objects", async () => {
+    // Reproduce the sparse-array bug: dispatchAsync pre-allocates results with
+    // `new Array(resolved.length)`, leaving holes for pending tasks. Wait/poll
+    // details must be a dense array where placeholders carry the task id and
+    // agent instead of bare `undefined` or error-only objects.
+    const results: (TaskResult | undefined)[] = [mkResult()];
+    results.length = 2; // sparse hole at index 1
+
+    const ticket: AsyncTicket = {
+      id: "wait-details-placeholder",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b", id: "task-b" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+        {
+          id: "task-b",
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "worker",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results,
+      progress: mkProgress(["done", "pending"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("wait-details-placeholder", ticket);
+
+    const result = await handleWait(
+      { ticket: "wait-details-placeholder", timeoutMs: 0 },
+      undefined,
+      undefined,
+      {} as any,
+    );
+
+    // details.results is index-aligned and dense — the sparse hole is filled.
+    // The placeholder carries a machine-visible pending marker; wait/poll
+    // consumers can distinguish pending entries from successful ones.
+    expect(result.details.results).toHaveLength(2);
+    expect(result.details.results![0]).toBe(results[0]);
+    const placeholder = result.details.results![1] as TaskResult;
+    expect(placeholder).toBeDefined();
+    expect(placeholder.id).toBe("task-b");
+    expect(placeholder.agent).toBe("worker");
+    expect(placeholder.output).toBe("");
+    expect(placeholder.error).toBe("PENDING — result not available");
+    expect(placeholder.durationMs).toBe(0);
+    expect(placeholder.tokens).toBe(0);
+    expect(placeholder.touchedFiles).toEqual([]);
+    expect(placeholder.attributedFiles).toEqual([]);
   });
 
   test("wait resolves when ticket completes", async () => {
@@ -7020,6 +7620,269 @@ describe("async delegate integration", () => {
 
     const result = await promise;
     expect(result.content[0].text).toContain("1/1 tasks completed");
+  });
+
+  test("wait progress update surfaces partial overlap warning from completed tasks", () => {
+    const shared = "/tmp/shared-wait-update.txt";
+    const ticket: AsyncTicket = {
+      id: "wait-overlap-update",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "a",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "b",
+          warnings: [],
+        },
+        {
+          prompt: "task-c",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "c",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [
+        {
+          agent: "a",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        {
+          agent: "b",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        undefined,
+      ],
+      progress: mkProgress(["done", "done", "running"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set("wait-overlap-update", ticket);
+
+    const updates: any[] = [];
+    ticket.waiters = [
+      {
+        settled: false,
+        onUpdate: (update: any) => updates.push(update),
+      } as any,
+    ];
+    notifyWaiters(ticket);
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.content[0]!.text).toContain("2/3 finalized");
+    expect(updates[0]!.content[0]!.text).toContain(shared);
+    expect(updates[0]!.content[0]!.text).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(updates[0]!.details.overlapWarning).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(updates[0]!.details.overlapWarning).toContain(shared);
+  });
+
+  test("wait timeout surfaces partial overlap warning from completed tasks", async () => {
+    const shared = "/tmp/shared-wait-timeout.txt";
+    const controller = new AbortController();
+    const ticket: AsyncTicket = {
+      id: "wait-overlap-timeout",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "a",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "b",
+          warnings: [],
+        },
+        {
+          prompt: "task-c",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "c",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [
+        {
+          agent: "a",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        {
+          agent: "b",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        undefined,
+      ],
+      progress: mkProgress(["done", "done", "running"]),
+      controller,
+      parentModelId: "m",
+    };
+    ticketRegistry.set("wait-overlap-timeout", ticket);
+
+    const result = await handleWait(
+      { ticket: "wait-overlap-timeout", timeoutMs: 0 },
+      undefined,
+      undefined,
+      {} as any,
+    );
+
+    expect(result.content[0].text).toContain("wait timed out");
+    expect(result.content[0].text).toContain(shared);
+    expect(result.content[0].text).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.details.overlapWarning).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.details.overlapWarning).toContain(shared);
+    expect(ticket.status).toBe("running");
+    expect(controller.signal.aborted).toBe(false);
+  });
+
+  test("wait abort surfaces partial overlap warning from completed tasks", async () => {
+    const shared = "/tmp/shared-wait-abort.txt";
+    const controller = new AbortController();
+    const parentController = new AbortController();
+    parentController.abort();
+    const ticket: AsyncTicket = {
+      id: "wait-overlap-abort",
+      created: Date.now(),
+      tasks: [{ prompt: "task-a" }, { prompt: "task-b" }, { prompt: "task-c" }],
+      resolved: [
+        {
+          prompt: "task-a",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "a",
+          warnings: [],
+        },
+        {
+          prompt: "task-b",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "b",
+          warnings: [],
+        },
+        {
+          prompt: "task-c",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "c",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [
+        {
+          agent: "a",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        {
+          agent: "b",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        undefined,
+      ],
+      progress: mkProgress(["done", "done", "running"]),
+      controller,
+      parentModelId: "m",
+    };
+    ticketRegistry.set("wait-overlap-abort", ticket);
+
+    const result = await handleWait(
+      { ticket: "wait-overlap-abort" },
+      parentController.signal,
+      undefined,
+      {} as any,
+    );
+
+    expect(result.content[0].text).toContain("aborted");
+    expect(result.content[0].text).toContain(shared);
+    expect(result.content[0].text).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.details.overlapWarning).toContain(
+      "does not isolate or serialize file access",
+    );
+    expect(result.details.overlapWarning).toContain(shared);
+    expect(ticket.status).toBe("running");
+    expect(controller.signal.aborted).toBe(false);
   });
 });
 
@@ -8299,5 +9162,147 @@ describe("shared live-progress row helpers", () => {
 
   test("compactActivity returns thinking when no activity", () => {
     expect(compactActivity({ activities: [] } as any)).toBe("thinking…");
+  });
+});
+
+// ── touched-file overlap and best-effort labeling (issue #33) ───────────────
+
+describe("touched-file overlap warning", () => {
+  test("findTouchedOverlaps returns empty when tasks touch distinct files", () => {
+    expect(
+      findTouchedOverlaps([
+        { attributedFiles: ["/tmp/a.txt"] },
+        { attributedFiles: ["/tmp/b.txt"] },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("findTouchedOverlaps returns overlapping paths and ignores singletons", () => {
+    expect(
+      findTouchedOverlaps([
+        { attributedFiles: ["/tmp/a.txt", "/tmp/shared.txt"] },
+        { attributedFiles: ["/tmp/b.txt", "/tmp/shared.txt"] },
+        { attributedFiles: ["/tmp/c.txt"] },
+      ]),
+    ).toEqual(["/tmp/shared.txt"]);
+  });
+
+  test("findTouchedOverlaps ignores touchedFiles and uses only attributedFiles", () => {
+    expect(
+      findTouchedOverlaps([
+        {
+          attributedFiles: ["/tmp/a.txt"],
+          touchedFiles: ["/tmp/a.txt", "/tmp/b.txt"],
+        },
+        {
+          attributedFiles: ["/tmp/b.txt"],
+          touchedFiles: ["/tmp/a.txt", "/tmp/b.txt"],
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("formatTouchedOverlapWarning is null when there is no overlap", () => {
+    expect(formatTouchedOverlapWarning([])).toBeNull();
+  });
+
+  test("formatTouchedOverlapWarning names paths and does not claim isolation or rollback", () => {
+    const warning = formatTouchedOverlapWarning(["/tmp/shared.txt"]);
+    expect(warning).toContain("/tmp/shared.txt");
+    expect(warning).toContain("does not isolate or serialize file access");
+    expect(warning).toContain("does not roll back completed writes");
+  });
+
+  test("formatCompletedTicket emits overlap warning for identical touched paths", () => {
+    const shared = "/tmp/shared.txt";
+    const ticket: AsyncTicket = {
+      id: "overlap",
+      created: 0,
+      status: "done",
+      tasks: [{ prompt: "a" }, { prompt: "b" }] as any,
+      resolved: [
+        {
+          agentName: "a",
+          cwd: "/tmp",
+          prompt: "a",
+        },
+        {
+          agentName: "b",
+          cwd: "/tmp",
+          prompt: "b",
+        },
+      ] as any,
+      progress: [],
+      results: [
+        {
+          agent: "a",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+        {
+          agent: "b",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: [shared],
+          attributedFiles: [shared],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    const result = formatCompletedTicket(ticket);
+    const text = result.content[0]!.text;
+    expect(text).toContain("touched (best-effort):");
+    expect(text).toContain(shared);
+    expect(text).toContain("does not isolate or serialize file access");
+    expect(result.details.overlapWarning).toContain(
+      "does not isolate or serialize file access",
+    );
+  });
+
+  test("formatCompletedTicket omits overlap warning when touched paths are distinct", () => {
+    const ticket: AsyncTicket = {
+      id: "no-overlap",
+      created: 0,
+      status: "done",
+      tasks: [{ prompt: "a" }, { prompt: "b" }] as any,
+      resolved: [
+        { agentName: "a", cwd: "/tmp", prompt: "a" },
+        { agentName: "b", cwd: "/tmp", prompt: "b" },
+      ] as any,
+      progress: [],
+      results: [
+        {
+          agent: "a",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: ["/tmp/a.txt"],
+          attributedFiles: ["/tmp/a.txt"],
+        },
+        {
+          agent: "b",
+          output: "done",
+          durationMs: 100,
+          tokens: 10,
+          usage: { totalTokens: 10, cost: { total: 0 } } as any,
+          touchedFiles: ["/tmp/b.txt"],
+          attributedFiles: ["/tmp/b.txt"],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    const result = formatCompletedTicket(ticket);
+    const text = result.content[0]!.text;
+    expect(text).not.toContain("does not isolate or serialize file access");
+    expect(result.details.overlapWarning).toBeUndefined();
   });
 });

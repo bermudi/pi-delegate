@@ -8,7 +8,14 @@
  * ever calling `session.prompt()`. These tests pin that seam with a fake
  * AgentSession so we don't need a real model/stream.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { getGitChangedFiles } from "./file-tracking.ts";
+import * as fileTracking from "./file-tracking.ts";
+import * as timer from "./timer.ts";
 import { runAgentSession } from "./runner.ts";
 import { _setStallTimeoutForTesting } from "./config.ts";
 
@@ -2123,5 +2130,1435 @@ describe("runAgentSession abort re-check", () => {
     expect(callbackCrashed).toBe(false);
     expect(result.output).toBe("answer before async compaction");
     expect(result.error).toBeUndefined();
+  });
+
+  // ── Progress-callback exceptions must not leak watchdogs or subscriptions ──
+  //
+  // fireProgress() is now guarded by a try/catch around the user callback, and
+  // the arming/fireProgress calls live inside the main try/finally so any
+  // unexpected throw still triggers cleanup.
+
+  test("progress callback exceptions are caught and do not leak subscription or listener", async () => {
+    const controller = new AbortController();
+    let unsubscribed = false;
+    const { session, prompted } = fakeSession({
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "done" }],
+          usage: { totalTokens: 5 },
+        },
+      ],
+      prompt: () => {},
+    });
+
+    const origSubscribe = session.subscribe.bind(session);
+    (session as unknown as { subscribe: unknown }).subscribe = (
+      fn: (e: unknown) => void,
+    ) => {
+      const unsub = origSubscribe(fn);
+      return () => {
+        unsubscribed = true;
+        unsub();
+      };
+    };
+
+    let listenerRemoved = false;
+    const origAdd = controller.signal.addEventListener.bind(controller.signal);
+    const origRemove = controller.signal.removeEventListener.bind(
+      controller.signal,
+    );
+    (
+      controller.signal as unknown as {
+        addEventListener: unknown;
+      }
+    ).addEventListener = (
+      type: string,
+      listener: EventListener,
+      opts?: unknown,
+    ) => {
+      if (type === "abort") {
+        (
+          controller.signal as unknown as { _abortListener?: unknown }
+        )._abortListener = listener;
+      }
+      origAdd(type, listener, opts as never);
+    };
+    (
+      controller.signal as unknown as {
+        removeEventListener: unknown;
+      }
+    ).removeEventListener = (type: string, listener: EventListener) => {
+      if (type === "abort") {
+        const stored = (
+          controller.signal as unknown as { _abortListener?: unknown }
+        )._abortListener;
+        if (stored === listener) {
+          listenerRemoved = true;
+          delete (controller.signal as unknown as { _abortListener?: unknown })
+            ._abortListener;
+        }
+      }
+      origRemove(type, listener);
+    };
+
+    let progressCalls = 0;
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      controller.signal,
+      () => {
+        progressCalls++;
+        throw new Error("progress exploded");
+      },
+      new Set<string>(),
+      Date.now(),
+    );
+
+    expect(prompted()).toBe(true);
+    expect(progressCalls).toBeGreaterThanOrEqual(1);
+    expect(result.error).toBeUndefined();
+    expect(unsubscribed).toBe(true);
+    expect(listenerRemoved).toBe(true);
+  });
+
+  test("prompt rejection awaits session quiescence before returning", async () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-reject-quiesce-"),
+    );
+    let compacting = false;
+    let compactionDone = false;
+    const { session, emit } = fakeSession({
+      prompt: async () => {
+        compacting = true;
+        emit({
+          type: "compaction_start",
+          reason: "manual",
+        });
+        setTimeout(() => {
+          compacting = false;
+          compactionDone = true;
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+        }, 20);
+        throw new Error("simulated prompt failure");
+      },
+      isIdle: () => !compacting,
+      isCompacting: () => compacting,
+    });
+
+    try {
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(compactionDone).toBe(true);
+      expect(result.error).toBe("simulated prompt failure");
+      expect(result.prompted).toBe(true);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── touched-file tracking (issue #33) ─────────────────────────────────────
+
+describe("touched-file tracking", () => {
+  test("write and edit activity is captured in a non-git directory", async () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-touched-non-git-"),
+    );
+    try {
+      const { session } = fakeSession({
+        messages: [],
+        prompt: async (emit) => {
+          const answer = {
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+          };
+          emit({
+            type: "tool_execution_start",
+            toolCallId: "tc-write",
+            toolName: "write",
+            args: { path: "written.txt", content: "hello" },
+          });
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "tc-write",
+            toolName: "write",
+            result: { content: [] },
+            isError: false,
+          });
+          emit({
+            type: "tool_execution_start",
+            toolCallId: "tc-edit",
+            toolName: "edit",
+            args: { path: "edit.txt", old: "x", new: "y" },
+          });
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "tc-edit",
+            toolName: "edit",
+            result: { content: [] },
+            isError: false,
+          });
+          emit({ type: "message_end", message: answer });
+          emit({ type: "agent_end", messages: [answer], willRetry: false });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.touchedFiles).toContain(path.join(tmpDir, "written.txt"));
+      expect(result.touchedFiles).toContain(path.join(tmpDir, "edit.txt"));
+      expect(result.attributedFiles).toEqual(
+        expect.arrayContaining([
+          path.join(tmpDir, "written.txt"),
+          path.join(tmpDir, "edit.txt"),
+        ]),
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("bash mutation in a git repo is captured via git diff", async () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-touched-git-"),
+    );
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: tmpDir });
+      const bashFile = path.join(tmpDir, "bash-created.txt");
+      const { session } = fakeSession({
+        messages: [],
+        prompt: async (emit) => {
+          execFileSync("bash", ["-c", "echo data > bash-created.txt"], {
+            cwd: tmpDir,
+          });
+          const answer = {
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+          };
+          emit({
+            type: "tool_execution_start",
+            toolCallId: "tc-bash",
+            toolName: "bash",
+            args: { command: "echo data > bash-created.txt" },
+          });
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "tc-bash",
+            toolName: "bash",
+            result: { content: [] },
+            isError: false,
+          });
+          emit({ type: "message_end", message: answer });
+          emit({ type: "agent_end", messages: [answer], willRetry: false });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.touchedFiles).toContain(bashFile);
+      expect(result.attributedFiles).not.toContain(bashFile);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("bash mutation in a non-git directory is not captured", async () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-touched-no-git-"),
+    );
+    try {
+      const bashFile = path.join(tmpDir, "bash-created.txt");
+      const { session } = fakeSession({
+        messages: [],
+        prompt: async () => {
+          execFileSync("bash", ["-c", "echo data > bash-created.txt"], {
+            cwd: tmpDir,
+          });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.touchedFiles).not.toContain(bashFile);
+      expect(result.attributedFiles).not.toContain(bashFile);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("failure path preserves touched files observed before the throw", async () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-touched-fail-"),
+    );
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: tmpDir });
+      const bashFile = path.join(tmpDir, "bash-created.txt");
+      const { session } = fakeSession({
+        messages: [],
+        prompt: async (emit) => {
+          execFileSync("bash", ["-c", "echo data > bash-created.txt"], {
+            cwd: tmpDir,
+          });
+          emit({
+            type: "tool_execution_start",
+            toolCallId: "tc-write",
+            toolName: "write",
+            args: { path: "written.txt", content: "hello" },
+          });
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "tc-write",
+            toolName: "write",
+            result: { content: [] },
+            isError: false,
+          });
+          throw new Error("boom");
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.error).toBe("boom");
+      expect(result.touchedFiles).toContain(path.join(tmpDir, "written.txt"));
+      expect(result.touchedFiles).toContain(bashFile);
+      expect(result.attributedFiles).toContain(
+        path.join(tmpDir, "written.txt"),
+      );
+      expect(result.attributedFiles).not.toContain(bashFile);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("attributedFiles only includes this run's edit/write activity, not other concurrent git changes", async () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-attributed-concurrent-"),
+    );
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: tmpDir });
+      const otherFile = path.join(tmpDir, "other.txt");
+      const writtenFile = path.join(tmpDir, "written.txt");
+      const { session } = fakeSession({
+        messages: [],
+        prompt: async (emit) => {
+          // Simulate another concurrent task writing a file after this task's
+          // git baseline was taken (so the baseline does not include it) but
+          // before this task's post-run git snapshot.
+          writeFileSync(otherFile, "concurrent");
+          const answer = {
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+          };
+          emit({
+            type: "tool_execution_start",
+            toolCallId: "tc-write",
+            toolName: "write",
+            args: { path: "written.txt", content: "hello" },
+          });
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "tc-write",
+            toolName: "write",
+            result: { content: [] },
+            isError: false,
+          });
+          emit({ type: "message_end", message: answer });
+          emit({ type: "agent_end", messages: [answer], willRetry: false });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        new Set<string>(), // empty baseline, as in a concurrent start
+        Date.now(),
+      );
+
+      expect(result.error).toBeUndefined();
+      // touchedFiles is the best-effort union (for display), so it sees both.
+      expect(result.touchedFiles).toContain(writtenFile);
+      expect(result.touchedFiles).toContain(otherFile);
+      // attributedFiles is only what this run's own activity wrote.
+      expect(result.attributedFiles).toContain(writtenFile);
+      expect(result.attributedFiles).not.toContain(otherFile);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("baseline success + post-run success diffs only new git changes", async () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-baseline-success-"),
+    );
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: tmpDir });
+      const preexistingFile = path.join(tmpDir, "preexisting.txt");
+      const newFile = path.join(tmpDir, "new.txt");
+      writeFileSync(preexistingFile, "preexisting");
+      const gitBaseline = await getGitChangedFiles(tmpDir);
+
+      const { session } = fakeSession({
+        messages: [],
+        prompt: async (emit) => {
+          execFileSync("bash", ["-c", "echo new > new.txt"], { cwd: tmpDir });
+          const answer = {
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+          };
+          emit({ type: "message_end", message: answer });
+          emit({
+            type: "agent_end",
+            messages: [answer],
+            willRetry: false,
+          });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        gitBaseline,
+        Date.now(),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.touchedFiles).toContain(newFile);
+      expect(result.touchedFiles).not.toContain(preexistingFile);
+      expect(result.attributedFiles).not.toContain(newFile);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("baseline failure + post-run success does not attribute git-based files", async () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-baseline-failed-"),
+    );
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: tmpDir });
+      const preexistingFile = path.join(tmpDir, "preexisting.txt");
+      const bashFile = path.join(tmpDir, "bash-created.txt");
+      const writtenFile = path.join(tmpDir, "written.txt");
+      writeFileSync(preexistingFile, "preexisting");
+
+      const { session } = fakeSession({
+        messages: [],
+        prompt: async (emit) => {
+          execFileSync("bash", ["-c", "echo data > bash-created.txt"], {
+            cwd: tmpDir,
+          });
+          emit({
+            type: "tool_execution_start",
+            toolCallId: "tc-write",
+            toolName: "write",
+            args: { path: "written.txt", content: "hello" },
+          });
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "tc-write",
+            toolName: "write",
+            result: { content: [] },
+            isError: false,
+          });
+          const answer = {
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+          };
+          emit({ type: "message_end", message: answer });
+          emit({
+            type: "agent_end",
+            messages: [answer],
+            willRetry: false,
+          });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        undefined, // baseline failed
+        Date.now(),
+      );
+
+      expect(result.error).toBeUndefined();
+      // Activity-based file is still reported and attributed.
+      expect(result.touchedFiles).toContain(writtenFile);
+      expect(result.attributedFiles).toContain(writtenFile);
+      // Git-based files (pre-existing and bash-created) must not be attributed.
+      expect(result.touchedFiles).not.toContain(bashFile);
+      expect(result.touchedFiles).not.toContain(preexistingFile);
+      expect(result.attributedFiles).not.toContain(bashFile);
+      expect(result.attributedFiles).not.toContain(preexistingFile);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("clean successful baseline attributes all post-run git changes", async () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-baseline-clean-"),
+    );
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: tmpDir });
+      const bashFile = path.join(tmpDir, "bash-created.txt");
+
+      const { session } = fakeSession({
+        messages: [],
+        prompt: async (emit) => {
+          execFileSync("bash", ["-c", "echo data > bash-created.txt"], {
+            cwd: tmpDir,
+          });
+          const answer = {
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+          };
+          emit({ type: "message_end", message: answer });
+          emit({
+            type: "agent_end",
+            messages: [answer],
+            willRetry: false,
+          });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.touchedFiles).toContain(bashFile);
+      expect(result.attributedFiles).not.toContain(bashFile);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("runAgentSession deadline", () => {
+  test("cooperatively aborts a prompt that exceeds its deadline and preserves partial output", async () => {
+    let cancelled = false;
+    const { session, emit } = fakeSession({
+      prompt: async () => {
+        emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "partial before deadline" }],
+          },
+        });
+        await new Promise<void>((resolve) => {
+          const interval = setInterval(() => {
+            if (cancelled) {
+              clearInterval(interval);
+              resolve();
+            }
+          }, 5);
+        });
+      },
+      abort: () => {
+        cancelled = true;
+      },
+    });
+
+    const start = Date.now();
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      start,
+      start + 15,
+    );
+
+    expect(cancelled).toBe(true);
+    expect(result.failureKind).toBe("deadline_exceeded");
+    expect(result.error).toContain("Deadline exceeded");
+    expect(result.error).toContain("cooperatively aborted");
+    expect(result.output).toBe("partial before deadline");
+    expect(result.prompted).toBe(true);
+  });
+
+  test("parent abort wins when the signal fires after the deadline", async () => {
+    let cancelled = false;
+    const controller = new AbortController();
+    const { session, emit } = fakeSession({
+      prompt: async () => {
+        emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "partial" }],
+          },
+        });
+        await new Promise<void>((resolve) => {
+          const interval = setInterval(() => {
+            if (cancelled) {
+              clearInterval(interval);
+              resolve();
+            }
+          }, 5);
+        });
+      },
+      abort: () => {
+        cancelled = true;
+      },
+    });
+
+    const start = Date.now();
+    const running = runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      controller.signal,
+      undefined,
+      new Set<string>(),
+      start,
+      start + 20,
+    );
+
+    setTimeout(() => controller.abort(), 40);
+    const result = await running;
+
+    expect(result.error).toBe("Aborted");
+    expect(result.failureKind).toBeUndefined();
+    expect(result.prompted).toBe(true);
+  });
+
+  test("omitting deadlineAt lets a prompt complete normally", async () => {
+    const { session, emit } = fakeSession({
+      prompt: async () => {
+        emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "completed" }],
+          },
+        });
+      },
+    });
+
+    const start = Date.now();
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      start,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.failureKind).toBeUndefined();
+    expect(result.output).toBe("completed");
+    expect(result.prompted).toBe(true);
+  });
+
+  test("pre-expired deadline returns deadline_exceeded without calling prompt", async () => {
+    let promptCalls = 0;
+    const { session } = fakeSession({
+      prompt: async () => {
+        promptCalls++;
+      },
+    });
+
+    const start = Date.now();
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      start,
+      start - 1,
+    );
+
+    expect(promptCalls).toBe(0);
+    expect(result.failureKind).toBe("deadline_exceeded");
+    expect(result.error).toContain("Deadline exceeded");
+    expect(result.output).toBe("(no output)");
+    expect(result.prompted).toBe(false);
+  });
+
+  test("pre-expired deadline awaits session quiescence before returning", async () => {
+    let promptCalls = 0;
+    let compacting = true;
+    let compactionDone = false;
+    const { session, emit } = fakeSession({
+      prompt: async () => {
+        promptCalls++;
+      },
+      isIdle: () => true,
+      isCompacting: () => compacting,
+      abortCompaction: () => {
+        if (!compacting || compactionDone) return;
+        setTimeout(() => {
+          compacting = false;
+          compactionDone = true;
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: true,
+            willRetry: false,
+          });
+        }, 10);
+      },
+    });
+
+    const start = Date.now();
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      start,
+      start - 1,
+    );
+
+    expect(promptCalls).toBe(0);
+    expect(compactionDone).toBe(true);
+    expect(result.failureKind).toBe("deadline_exceeded");
+    expect(result.error).toContain("Deadline exceeded");
+    expect(result.output).toBe("(no output)");
+    expect(result.prompted).toBe(false);
+  });
+
+  test("pre-expired deadline parent abort during quiescence is reported as Aborted", async () => {
+    const controller = new AbortController();
+    let promptCalls = 0;
+    let compacting = true;
+    let compactionDone = false;
+    const { session, emit } = fakeSession({
+      prompt: async () => {
+        promptCalls++;
+      },
+      isIdle: () => true,
+      isCompacting: () => compacting,
+      abortCompaction: () => {
+        if (!compacting || compactionDone) return;
+        setTimeout(() => {
+          compacting = false;
+          compactionDone = true;
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: true,
+            willRetry: false,
+          });
+        }, 30);
+      },
+    });
+
+    const start = Date.now();
+    const running = runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      controller.signal,
+      undefined,
+      new Set<string>(),
+      start,
+      start - 1,
+    );
+    setTimeout(() => controller.abort(), 10);
+    const result = await running;
+
+    expect(promptCalls).toBe(0);
+    expect(compactionDone).toBe(true);
+    expect(result.error).toBe("Aborted");
+    expect(result.failureKind).toBeUndefined();
+    expect(result.output).toBe("");
+    expect(result.prompted).toBe(false);
+  });
+
+  test("deadline watchdog stays armed during git evidence collection on success", async () => {
+    let gitCalls = 0;
+    const slowGit = async (_cwd: string): Promise<Set<string>> => {
+      gitCalls++;
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      return new Set<string>();
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: slowGit,
+    }));
+    try {
+      const answer = {
+        role: "assistant",
+        content: [{ type: "text", text: "done before git" }],
+      };
+      const { session } = fakeSession({
+        prompt: async (emit) => {
+          emit({ type: "message_end", message: answer });
+          emit({
+            type: "agent_end",
+            messages: [answer],
+            willRetry: false,
+          });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const start = Date.now();
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        start,
+        start + 50,
+      );
+
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(result.output).toBe("done before git");
+      expect(gitCalls).toBe(1);
+      expect(result.prompted).toBe(true);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  test("deadline watchdog stays armed during git evidence collection on failure", async () => {
+    let gitCalls = 0;
+    const slowGit = async (_cwd: string): Promise<Set<string>> => {
+      gitCalls++;
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      return new Set<string>();
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: slowGit,
+    }));
+    try {
+      const { session } = fakeSession({
+        prompt: async () => {
+          throw new Error("simulated prompt failure");
+        },
+      });
+
+      const start = Date.now();
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        start,
+        start + 50,
+      );
+
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(gitCalls).toBe(1);
+      expect(result.prompted).toBe(true);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  test("deadline during git evidence collection awaits a second quiescence", async () => {
+    let gitCalls = 0;
+    let gitDone = false;
+    let idle = true;
+    let postGitSettled = false;
+    let abortCalled = false;
+    const slowGit = async (_cwd: string): Promise<Set<string>> => {
+      gitCalls++;
+      await sleep(150);
+      gitDone = true;
+      return new Set<string>();
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: slowGit,
+    }));
+    try {
+      const answer = {
+        role: "assistant",
+        content: [{ type: "text", text: "done before git" }],
+      };
+      const { session, emit } = fakeSession({
+        prompt: async (emit) => {
+          emit({ type: "message_end", message: answer });
+          emit({
+            type: "agent_end",
+            messages: [answer],
+            willRetry: false,
+          });
+          emit({ type: "agent_settled" });
+        },
+        isIdle: () => idle,
+        abort: async () => {
+          if (abortCalled) return;
+          abortCalled = true;
+          idle = false;
+          setTimeout(() => {
+            idle = true;
+            postGitSettled = true;
+            emit({ type: "agent_settled" });
+          }, 120);
+        },
+      });
+
+      const start = Date.now();
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        start,
+        start + 100,
+      );
+
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(result.output).toBe("done before git");
+      expect(gitCalls).toBe(1);
+      expect(gitDone).toBe(true);
+      expect(postGitSettled).toBe(true);
+      expect(result.prompted).toBe(true);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  test("recomputes output, usage, and touched files after the second quiescence wait", async () => {
+    let gitCalls = 0;
+    let gitDone = false;
+    let idle = true;
+    let postGitSettled = false;
+    let abortCalled = false;
+    let tokensTotal = 0;
+    const slowGit = async (_cwd: string): Promise<Set<string>> => {
+      gitCalls++;
+      await sleep(150);
+      gitDone = true;
+      return new Set<string>();
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: slowGit,
+    }));
+    try {
+      const answer = {
+        role: "assistant",
+        content: [{ type: "text", text: "done before git" }],
+      };
+      const postAnswer = {
+        role: "assistant",
+        content: [{ type: "text", text: "post-deadline output" }],
+      };
+      const { session, emit } = fakeSession({
+        messages: [],
+        isIdle: () => idle,
+        getStats: () =>
+          ({
+            tokens: {
+              input: tokensTotal,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: tokensTotal,
+            },
+            cost: 0,
+          }) as never,
+        abort: async () => {
+          if (abortCalled) return;
+          abortCalled = true;
+          idle = false;
+          setTimeout(() => {
+            tokensTotal = 100;
+            emit({
+              type: "tool_execution_start",
+              toolCallId: "tc-post",
+              toolName: "write",
+              args: { path: "post-deadline.txt", content: "data" },
+            });
+            emit({
+              type: "tool_execution_end",
+              toolCallId: "tc-post",
+              toolName: "write",
+              result: { content: [] },
+              isError: false,
+            });
+            emit({ type: "message_end", message: postAnswer });
+            emit({
+              type: "agent_end",
+              messages: [postAnswer],
+              willRetry: false,
+            });
+            emit({ type: "agent_settled" });
+            idle = true;
+            postGitSettled = true;
+          }, 120);
+        },
+        prompt: async (emit) => {
+          tokensTotal = 10;
+          emit({ type: "message_end", message: answer });
+          emit({
+            type: "agent_end",
+            messages: [answer],
+            willRetry: false,
+          });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const start = Date.now();
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        start,
+        start + 100,
+      );
+
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(result.output).toContain("done before git");
+      expect(result.output).toContain("post-deadline output");
+      expect(result.tokens).toBe(100);
+      expect(result.usage.totalTokens).toBe(100);
+      expect(
+        result.touchedFiles.some((f) => f.includes("post-deadline.txt")),
+      ).toBe(true);
+      expect(
+        (result.attributedFiles ?? []).some((f) =>
+          f.includes("post-deadline.txt"),
+        ),
+      ).toBe(true);
+      expect(gitCalls).toBe(1);
+      expect(gitDone).toBe(true);
+      expect(postGitSettled).toBe(true);
+      expect(result.prompted).toBe(true);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  test("missed deadline after Git collection is reported as deadline_exceeded", async () => {
+    let gitCalls = 0;
+    const lateGit = async (_cwd: string): Promise<Set<string>> => {
+      gitCalls++;
+      await sleep(120);
+      return new Set<string>();
+    };
+    const noOpSchedule =
+      (_deadline: number, _onDeadline: () => void) => () => {};
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: lateGit,
+    }));
+    mock.module("./timer.ts", () => ({
+      ...timer,
+      scheduleDeadline: noOpSchedule,
+    }));
+    try {
+      const answer = {
+        role: "assistant",
+        content: [{ type: "text", text: "done before git" }],
+      };
+      const { session } = fakeSession({
+        prompt: async (emit) => {
+          emit({ type: "message_end", message: answer });
+          emit({
+            type: "agent_end",
+            messages: [answer],
+            willRetry: false,
+          });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const start = Date.now();
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        start,
+        start + 50,
+      );
+
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(result.output).toBe("done before git");
+      expect(gitCalls).toBe(1);
+      expect(result.prompted).toBe(true);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  test("missed deadline after Git collection in the error path is reported as deadline_exceeded", async () => {
+    let gitCalls = 0;
+    const lateGit = async (_cwd: string): Promise<Set<string>> => {
+      gitCalls++;
+      await sleep(120);
+      return new Set<string>();
+    };
+    const noOpSchedule =
+      (_deadline: number, _onDeadline: () => void) => () => {};
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: lateGit,
+    }));
+    mock.module("./timer.ts", () => ({
+      ...timer,
+      scheduleDeadline: noOpSchedule,
+    }));
+    try {
+      const { session } = fakeSession({
+        prompt: async () => {
+          throw new Error("simulated prompt failure");
+        },
+      });
+
+      const start = Date.now();
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        start,
+        start + 50,
+      );
+
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(gitCalls).toBe(1);
+      expect(result.prompted).toBe(true);
+    } finally {
+      mock.restore();
+    }
+  });
+});
+
+describe("runAgentSession parent abort during git evidence", () => {
+  test("parent abort during git evidence collection awaits a second quiescence", async () => {
+    const controller = new AbortController();
+    let gitCalls = 0;
+    let gitDone = false;
+    let idle = true;
+    let postGitSettled = false;
+    let abortCalled = false;
+    const slowGit = async (_cwd: string): Promise<Set<string>> => {
+      gitCalls++;
+      // The runner is in the Git evidence window; fire the parent abort here.
+      controller.abort();
+      await sleep(100);
+      gitDone = true;
+      return new Set<string>();
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: slowGit,
+    }));
+    try {
+      const answer = {
+        role: "assistant",
+        content: [{ type: "text", text: "done before git" }],
+      };
+      const { session, emit } = fakeSession({
+        prompt: async (emit) => {
+          emit({ type: "message_end", message: answer });
+          emit({
+            type: "agent_end",
+            messages: [answer],
+            willRetry: false,
+          });
+          emit({ type: "agent_settled" });
+        },
+        isIdle: () => idle,
+        abort: () => {
+          if (abortCalled) return;
+          abortCalled = true;
+          // Simulate the session still unwinding from the fire-and-forget
+          // cancellation. Git resolves before this finishes, so a runner that
+          // does not wait for a second quiescence would return while active.
+          idle = false;
+          setTimeout(() => {
+            idle = true;
+            postGitSettled = true;
+            emit({ type: "agent_settled" });
+          }, 200);
+        },
+      });
+
+      const start = Date.now();
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        controller.signal,
+        undefined,
+        new Set<string>(),
+        start,
+      );
+
+      expect(result.error).toBe("Aborted");
+      expect(result.prompted).toBe(true);
+      expect(gitCalls).toBe(1);
+      expect(gitDone).toBe(true);
+      expect(postGitSettled).toBe(true);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  test("parent abort during git evidence collection in the error path awaits a second quiescence", async () => {
+    const controller = new AbortController();
+    let gitCalls = 0;
+    let gitDone = false;
+    let idle = true;
+    let postGitSettled = false;
+    let abortCalled = false;
+    const slowGit = async (_cwd: string): Promise<Set<string>> => {
+      gitCalls++;
+      controller.abort();
+      await sleep(100);
+      gitDone = true;
+      return new Set<string>();
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: slowGit,
+    }));
+    try {
+      const { session, emit } = fakeSession({
+        prompt: async () => {
+          throw new Error("simulated prompt failure");
+        },
+        isIdle: () => idle,
+        abort: () => {
+          if (abortCalled) return;
+          abortCalled = true;
+          idle = false;
+          setTimeout(() => {
+            idle = true;
+            postGitSettled = true;
+            emit({ type: "agent_settled" });
+          }, 200);
+        },
+      });
+
+      const start = Date.now();
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        controller.signal,
+        undefined,
+        new Set<string>(),
+        start,
+      );
+
+      expect(result.error).toBe("Aborted");
+      expect(result.prompted).toBe(true);
+      expect(gitCalls).toBe(1);
+      expect(gitDone).toBe(true);
+      expect(postGitSettled).toBe(true);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  test("recomputes evidence after the second quiescence wait in the error path", async () => {
+    const controller = new AbortController();
+    let gitCalls = 0;
+    let gitDone = false;
+    let idle = true;
+    let postGitSettled = false;
+    let abortCalled = false;
+    let tokensTotal = 0;
+    const slowGit = async (_cwd: string): Promise<Set<string>> => {
+      gitCalls++;
+      controller.abort();
+      await sleep(100);
+      gitDone = true;
+      return new Set<string>();
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: slowGit,
+    }));
+    try {
+      const postAnswer = {
+        role: "assistant",
+        content: [{ type: "text", text: "post-abort output" }],
+      };
+      const { session, emit } = fakeSession({
+        messages: [],
+        isIdle: () => idle,
+        getStats: () =>
+          ({
+            tokens: {
+              input: tokensTotal,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: tokensTotal,
+            },
+            cost: 0,
+          }) as never,
+        abort: () => {
+          if (abortCalled) return;
+          abortCalled = true;
+          idle = false;
+          setTimeout(() => {
+            tokensTotal = 100;
+            emit({
+              type: "tool_execution_start",
+              toolCallId: "tc-post",
+              toolName: "write",
+              args: { path: "post-abort.txt", content: "data" },
+            });
+            emit({
+              type: "tool_execution_end",
+              toolCallId: "tc-post",
+              toolName: "write",
+              result: { content: [] },
+              isError: false,
+            });
+            emit({ type: "message_end", message: postAnswer });
+            emit({
+              type: "agent_end",
+              messages: [postAnswer],
+              willRetry: false,
+            });
+            emit({ type: "agent_settled" });
+            idle = true;
+            postGitSettled = true;
+          }, 150);
+        },
+        prompt: async () => {
+          tokensTotal = 10;
+          throw new Error("simulated prompt failure");
+        },
+      });
+
+      const start = Date.now();
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        controller.signal,
+        undefined,
+        new Set<string>(),
+        start,
+      );
+
+      expect(result.error).toBe("Aborted");
+      expect(result.output).toContain("post-abort output");
+      expect(result.tokens).toBe(100);
+      expect(result.usage.totalTokens).toBe(100);
+      expect(
+        result.touchedFiles.some((f) => f.includes("post-abort.txt")),
+      ).toBe(true);
+      expect(
+        (result.attributedFiles ?? []).some((f) =>
+          f.includes("post-abort.txt"),
+        ),
+      ).toBe(true);
+      expect(gitCalls).toBe(1);
+      expect(gitDone).toBe(true);
+      expect(postGitSettled).toBe(true);
+      expect(result.prompted).toBe(true);
+    } finally {
+      mock.restore();
+    }
   });
 });

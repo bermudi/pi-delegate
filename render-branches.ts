@@ -3,6 +3,7 @@ import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   fmtDuration,
   fmtTokens,
+  formatTaskId,
   getActivityAge,
   indent,
   tree,
@@ -107,7 +108,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       case "done":
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
+            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
             w,
           ),
         );
@@ -126,7 +127,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       case "failed":
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${modelLabel(p)}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`,
+            `${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`,
             w,
           ),
         );
@@ -146,14 +147,19 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
         {
           const activityAge = getActivityAge(p.lastActivityAt);
           const ageTag = activityAge ? ` · ${activityAge}` : "";
-          const stallTag =
-            p.failureKind === "stalled"
-              ? theme.fg("warning", " · stall detected · cancellation pending")
-              : "";
+          const issueTag =
+            p.failureKind === "deadline_exceeded"
+              ? theme.fg("error", " · deadline exceeded · cancellation pending")
+              : p.failureKind === "stalled"
+                ? theme.fg(
+                    "warning",
+                    " · stall detected · cancellation pending",
+                  )
+                : "";
           const glyph = theme.fg("warning", spinnerFrame());
           lines.push(
             truncLine(
-              `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${modelLabel(p)}${statJoin(runParts)}${stallTag}${theme.fg("muted", ageTag)}`,
+              `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)}${statJoin(runParts)}${issueTag}${theme.fg("muted", ageTag)}`,
               w,
             ),
           );
@@ -229,7 +235,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
         );
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelLabel(p)} ${queuedTag}`,
+            `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)} ${queuedTag}`,
             w,
           ),
         );
@@ -307,7 +313,11 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
           : p.status === "running"
             ? theme.fg("warning", "◐")
             : theme.fg("muted", "○");
-    const taskPreview = theme.fg("muted", trunc(p.task, w - 30));
+    const taskId = p.id ? formatTaskId(p.id) : "";
+    const taskIdTag = p.id ? theme.fg("accent", taskId) : "";
+    const taskIdWidth = p.id ? taskId.length : 0;
+    const previewBudget = Math.max(1, w - 30 - taskIdWidth);
+    const taskPreview = theme.fg("muted", trunc(p.task, previewBudget));
     const isLive =
       p.status === "running" || (p.status === "pending" && !isCancelledPending);
     // Live tasks show an activity/waiting hint instead of final stats.
@@ -322,7 +332,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       : "";
     lines.push(
       truncLine(
-        `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)} ${taskPreview}${isLive ? liveTail : cancelledTail || statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
+        `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)}${taskIdTag} ${taskPreview}${isLive ? liveTail : cancelledTail || statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
         w,
       ),
     );

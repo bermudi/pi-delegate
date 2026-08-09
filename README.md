@@ -126,8 +126,9 @@ over an installed extension.
 - **Resumed subagent** — A subagent rehydrated from a previous session `.jsonl`
   via `resumeFrom`. It can also be pooled by providing a `sessionId`.
 - **Async ticket** — A background execution handle returned when top-level
-  `async: true` is used. Poll or cancel tickets with top-level `action: "poll"`
-  or `action: "cancel"`.
+  `async: true` is used. Poll, wait, or cancel tickets with top-level
+  `ticketAction: "poll"`, `ticketAction: "wait"` (blocks until the ticket settles;
+  optional `timeoutMs`), or `ticketAction: "cancel"`.
 - **Skill** — A `SKILL.md` instruction bundle injected into the subagent system
   prompt. Skills are text instructions only; they do not unlock additional
   tools.

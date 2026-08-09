@@ -36,7 +36,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     name: "delegate",
     label: "Delegate to Subagents",
     description:
-      "Run parallel subagents via tasks:[{prompt}]. Sync returns results; async returns a ticket.",
+      "Run parallel subagents via tasks:[{prompt}]. Sync returns results; async=ticket. tasks:[]=full manual.",
     parameters: delegateArgumentsSchema,
     // Runs before schema validation — recovers stringified `tasks` arrays
     // (a common model mistake that would otherwise be rejected upstream).
@@ -58,12 +58,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       if (operationResult) return operationResult;
 
       // ── Poll action ───────────────────────────────────────────────────
-      if (params.action === "poll") {
+      if (params.ticketAction === "poll") {
         return handlePoll(params, ctx);
       }
 
       // ── Cancel action ─────────────────────────────────────────────────
-      if (params.action === "cancel") {
+      if (params.ticketAction === "cancel") {
         const result = handleCancel(params);
         // A forced cancel flips the ticket to "cancelling" — keep the
         // footer status in step (deduped; the preview path is a no-op).
@@ -72,7 +72,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       }
 
       // ── Wait action ────────────────────────────────────────────────────
-      if (params.action === "wait") {
+      if (params.ticketAction === "wait") {
         return handleWait(params, signal, onUpdate, ctx);
       }
 

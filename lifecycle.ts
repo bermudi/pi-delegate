@@ -20,12 +20,13 @@ import {
   persistSessionHeader,
   setParentSession,
 } from "./sessions.ts";
-import { runAgentSession } from "./runner.ts";
+import { runAgentSession, formatDeadlineExceededError } from "./runner.ts";
 import { getGitChangedFiles } from "./file-tracking.ts";
 import { getHostDeps } from "./host.ts";
 import { resolveCwd, validateResumeFromPath } from "./utils.ts";
 import { getWholeTaskMaxRetries, getWholeTaskBaseDelayMs } from "./config.ts";
 import { addUsage, emptyUsage } from "./usage.ts";
+import { scheduleDeadline } from "./timer.ts";
 
 /** Internal seam for lifecycle-level tests without replacing session ownership. */
 type RunAgentSession = typeof runAgentSession;
@@ -72,6 +73,7 @@ function failTask(
   sessionFile?: string,
 ): TaskResult {
   return {
+    id: task.id,
     agent: task.agentName,
     output: "",
     error,
@@ -80,6 +82,7 @@ function failTask(
     usage: emptyUsage(),
     sessionFile,
     touchedFiles: [],
+    attributedFiles: [],
   };
 }
 
@@ -91,6 +94,7 @@ function completeSessionAction(
   elapsedMs?: number,
 ): TaskResult {
   return {
+    id: task.id,
     agent: task.agentName,
     output,
     durationMs: elapsedMs ?? 0,
@@ -98,6 +102,7 @@ function completeSessionAction(
     usage: emptyUsage(),
     sessionFile: undefined,
     touchedFiles: [],
+    attributedFiles: [],
   };
 }
 
@@ -266,6 +271,7 @@ function canRetryWholeTask(
   return (
     result.failureKind !== "stalled" &&
     result.failureKind !== "model_error" &&
+    result.failureKind !== "deadline_exceeded" &&
     !task.sessionId &&
     !task.resumeFrom &&
     result.touchedFiles.length === 0 &&
@@ -277,16 +283,23 @@ function canRetryWholeTask(
 async function sleepForWholeTaskRetry(
   signal: AbortSignal | undefined,
   delayMs: number,
+  deadlineAt?: number,
 ): Promise<void> {
   if (signal?.aborted) return;
+  if (deadlineAt !== undefined && Date.now() >= deadlineAt) return;
+
+  const retryAt = Date.now() + delayMs;
+  const wakeAt =
+    deadlineAt !== undefined ? Math.min(retryAt, deadlineAt) : retryAt;
+
   await new Promise<void>((resolve) => {
-    let timeout: ReturnType<typeof setTimeout>;
+    let clear: (() => void) | undefined;
     const done = () => {
-      clearTimeout(timeout);
+      clear?.();
       signal?.removeEventListener("abort", done);
       resolve();
     };
-    timeout = setTimeout(done, delayMs);
+    clear = scheduleDeadline(wakeAt, done);
     if (!signal) return;
     signal.addEventListener("abort", done, { once: true });
   });
@@ -516,7 +529,7 @@ function resolveResumableSessionFile(
  *  Used by both sync (params.async === false) and async (params.async === true) paths.
  *  When task.sessionId is set, the entire acquire/run/close lifecycle runs under
  *  a per-session mutex so concurrent tasks with the same sessionId serialize
- *  cleanly. The lock also covers action='close' and the early-busy/abort paths. */
+ *  cleanly. The lock also covers sessionAction='close' and the early-busy/abort paths. */
 export async function runResolvedTask(
   env: TaskRunEnv,
   task: ResolvedTask,
@@ -558,12 +571,12 @@ async function runResolvedTaskUnlocked(
     p.model = task.model?.id;
 
     // ── Session action handling ───────────────────────────────────────
-    if (task.action === "close") {
+    if (task.sessionAction === "close") {
       if (!task.sessionId) {
         return finishTask(
           env,
           p,
-          failTask(task, "action='close' requires sessionId."),
+          failTask(task, "sessionAction='close' requires sessionId."),
         );
       }
       // The per-session lock for action-based operations is already held by the
@@ -583,7 +596,7 @@ async function runResolvedTaskUnlocked(
       );
     }
 
-    if (task.action === "list") {
+    if (task.sessionAction === "list") {
       return finishTask(
         env,
         p,
@@ -599,6 +612,10 @@ async function runResolvedTaskUnlocked(
     let cumulativeTokens = 0;
     let cumulativeToolUses = 0;
     const taskStartedAt = Date.now();
+    const deadlineAt =
+      task.deadlineMs && task.deadlineMs > 0
+        ? taskStartedAt + task.deadlineMs
+        : undefined;
     let accumulatedUsage = emptyUsage();
 
     const onAttemptProgress = (u: AgentProgressUpdate): void => {
@@ -651,7 +668,10 @@ async function runResolvedTaskUnlocked(
 
         // Snapshot git status before the run so touchedFiles can diff after.
         // AgentSession owns retry/compaction internally — runAgentSession just
-        // drives the prompt and maps events to the progress model.
+        // drives the prompt and maps events to the progress model. Git failures
+        // degrade to an undefined baseline, which tells the runner to skip
+        // git-based attribution entirely; see getGitChangedFiles for the
+        // contract.
         const gitBaseline = await getGitChangedFiles(task.cwd);
         let r = await runAgentSessionForTesting(
           acquired.session,
@@ -660,7 +680,8 @@ async function runResolvedTaskUnlocked(
           env.signal,
           onProgress,
           gitBaseline,
-          Date.now(),
+          taskStartedAt,
+          deadlineAt,
         );
 
         cumulativeTokens += r.tokens;
@@ -682,7 +703,11 @@ async function runResolvedTaskUnlocked(
             // Pool misses (including resumeFrom) transfer ownership only on
             // successful completion; failures are owned by lifecycle and must
             // be disposed in this finally path.
-            if (!r.error && r.failureKind !== "stalled") {
+            if (
+              !r.error &&
+              r.failureKind !== "stalled" &&
+              r.failureKind !== "deadline_exceeded"
+            ) {
               const committed = pool.commit(task.sessionId, {
                 session: acquired.session,
                 sessionManager: acquired.sessionManager,
@@ -699,28 +724,37 @@ async function runResolvedTaskUnlocked(
               sessionReleased = sessionReleased || committed;
             }
           } else {
-            // A stalled pooled attempt is not safe to keep; remove from the
-            // pool and let the lifecycle-owned finalizer handle disposal.
-            if (r.failureKind === "stalled") {
+            // A stalled, parent-aborted, or mid-prompt deadline-exceeded pooled
+            // attempt is not safe to keep; the session may have been mutated.
+            // A pre-prompt deadline (runner never called session.prompt()) left
+            // the session in its pre-task state, so return it to the pool intact.
+            if (
+              r.failureKind === "stalled" ||
+              r.error === "Aborted" ||
+              (r.failureKind === "deadline_exceeded" && r.prompted !== false)
+            ) {
               try {
                 sessionReleased =
                   (await pool._closePooledAgentWithoutLock(task.sessionId)) ||
                   sessionReleased;
               } catch (error) {
-                // Preserve the primary stalled result while logging the cleanup
+                // Preserve the primary failure result while logging the cleanup
                 // failure explicitly. A pooled session may still be removed by
                 // the pool; a pool-miss remains lifecycle-owned and is handled
                 // by the finally path above.
                 console.error(
-                  `[delegate] failed to dispose stalled pooled session '${task.sessionId}'`,
+                  `[delegate] failed to dispose aborted, stalled, or deadline-exceeded pooled session '${task.sessionId}'`,
                   error,
                 );
               }
-            } else {
-              // Pool hits stay owned by the pool, and non-stalled completions
-              // (including failed attempts) must still count usage.
+            } else if (r.failureKind !== "deadline_exceeded") {
+              // Pool hits stay owned by the pool, and non-stalled, non-aborted
+              // completions (including failed attempts) must still count usage.
               pool.recordUse(task.sessionId, r.tokens);
             }
+            // Pre-prompt deadline (prompted === false): the pooled session was
+            // checked out but never used. Leave it in the pool with no usage
+            // recorded.
           }
         }
 
@@ -728,6 +762,7 @@ async function runResolvedTaskUnlocked(
         cumulativeToolUses += attemptToolUsesObserved;
 
         return {
+          id: task.id,
           agent: task.agentName,
           output: r.output,
           error: r.error,
@@ -747,6 +782,7 @@ async function runResolvedTaskUnlocked(
           usage: r.usage,
           sessionFile,
           touchedFiles: r.touchedFiles,
+          attributedFiles: r.attributedFiles ?? [],
         };
       } finally {
         // This runs for ordinary success, normal provider failure, whole-task
@@ -756,9 +792,30 @@ async function runResolvedTaskUnlocked(
       }
     };
 
+    const buildDeadlineExceededResult = (prior?: TaskResult): TaskResult => {
+      const budgetMs = Math.max(0, (deadlineAt ?? 0) - taskStartedAt);
+      return {
+        id: task.id,
+        agent: task.agentName,
+        output: prior?.output ?? "",
+        error: formatDeadlineExceededError(budgetMs),
+        failureKind: "deadline_exceeded",
+        durationMs: prior?.durationMs ?? 0,
+        tokens: prior?.tokens ?? 0,
+        usage: prior?.usage ?? emptyUsage(),
+        sessionFile: prior?.sessionFile,
+        touchedFiles: prior?.touchedFiles ?? [],
+        attributedFiles: prior?.attributedFiles ?? [],
+      };
+    };
+
     let result: TaskResult;
     try {
-      result = await runAttempt();
+      if (deadlineAt && Date.now() >= deadlineAt) {
+        result = buildDeadlineExceededResult(undefined);
+      } else {
+        result = await runAttempt();
+      }
     } catch (err) {
       const failure = failTask(
         task,
@@ -781,7 +838,7 @@ async function runResolvedTaskUnlocked(
     ) {
       const delayMs = baseDelayMs * 2 ** retry;
       p.durationMs = Math.max(p.durationMs, Date.now() - taskStartedAt);
-      await sleepForWholeTaskRetry(env.signal, delayMs);
+      await sleepForWholeTaskRetry(env.signal, delayMs, deadlineAt);
       if (env.signal?.aborted) {
         // Preserve any partial output/session path from the last failed attempt
         // while recording that the retry loop was aborted. The task already
@@ -795,6 +852,11 @@ async function runResolvedTaskUnlocked(
           touchedFiles: result.touchedFiles,
           sessionFile: result.sessionFile,
         };
+        break;
+      }
+
+      if (deadlineAt && Date.now() >= deadlineAt) {
+        result = buildDeadlineExceededResult(result);
         break;
       }
 

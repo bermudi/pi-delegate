@@ -3,6 +3,7 @@ export { default } from "./extension.ts";
 export type {
   AgentConfig,
   SessionAction,
+  TicketAction,
   DelegateAction,
   DelegateArguments,
   TaskDef,
@@ -99,6 +100,8 @@ export {
   indent,
   formatFailedTask,
   formatCompletedTask,
+  findTouchedOverlaps,
+  formatTouchedOverlapWarning,
 } from "./format.ts";
 export {
   parseFrontmatter,

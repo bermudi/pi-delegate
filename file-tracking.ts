@@ -2,9 +2,19 @@ import { execFile } from "node:child_process";
 import * as path from "node:path";
 import type { ToolActivity } from "./types.ts";
 
-/** Return absolute paths reported as changed by Git in the task cwd.
- * Git failures degrade to an empty set because file tracking is observational. */
-export async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
+/**
+ * Return absolute paths reported as changed by Git in the task cwd.
+ *
+ * Touched-file tracking is best-effort, not authoritative. On success this
+ * returns the set of changed paths (possibly empty for a clean repo). On
+ * failure (non-git directory, git unavailable, timeout) it returns `undefined`
+ * so callers can tell "git failed" from "clean repo". A failed baseline
+ * suppresses git-based attribution in the runner; only explicit edit/write tool
+ * activity is captured by {@link extractTouchedFromActivities}.
+ */
+export async function getGitChangedFiles(
+  cwd: string,
+): Promise<Set<string> | undefined> {
   try {
     const runGit = (args: string[]) =>
       new Promise<string>((resolve, reject) => {
@@ -37,11 +47,22 @@ export async function getGitChangedFiles(cwd: string): Promise<Set<string>> {
     }
     return files;
   } catch {
-    return new Set();
+    return undefined;
   }
 }
 
-/** Extract file paths mutated by edit/write from the activity log. */
+/**
+ * Extract file paths from explicit edit/write tool calls in the activity log.
+ *
+ * This is the reliable, activity-based contribution to touched-file tracking.
+ * Only completed, successful tool calls are counted: an activity must have a
+ * terminal `result` and `result.isError` must be false. Interrupted or in-flight
+ * calls (no `result`) and failed calls (`result.isError` true) are skipped,
+ * because they did not actually mutate the file. bash mutations are NOT captured
+ * here; they are only captured by git diff when the task cwd is inside a git
+ * repo with git available. The combined touchedFiles list is therefore a lower
+ * bound: absence does not mean a file was unchanged.
+ */
 export function extractTouchedFromActivities(
   activities: ToolActivity[],
   cwd: string,
@@ -49,6 +70,7 @@ export function extractTouchedFromActivities(
   const files = new Set<string>();
   for (const a of activities) {
     if (a.name !== "edit" && a.name !== "write") continue;
+    if (!a.result || a.result.isError) continue;
     const raw = a.args?.path ?? a.args?.file_path ?? a.args?.filePath;
     if (typeof raw !== "string" || !raw) continue;
     files.add(path.resolve(cwd, raw));

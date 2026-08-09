@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { AgentSession } from "@earendil-works/pi-coding-agent";
+import { AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createTestSession } from "@marcfargas/pi-test-harness";
 // The test harness loads the extension via jiti. Under bun, jiti shares its
 // module graph with native imports, so the `ticketRegistry`/
@@ -43,6 +43,13 @@ import {
   configFor,
   listPooledAgents,
 } from "./pool.ts";
+import { emptyUsage } from "./usage.ts";
+import type {
+  ResolvedTask,
+  TaskRunEnv,
+  TaskProgress,
+  AgentProgressUpdate,
+} from "./types.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
 
@@ -146,6 +153,49 @@ function getExecContext(ts: TestSession) {
   const runner = ts.session.extensionRunner;
   if (!runner) throw new Error("No extensionRunner on session");
   return runner.createContext();
+}
+
+/** Minimal ResolvedTask factory for direct runResolvedTask tests. */
+function makeBaseTask(overrides: Partial<ResolvedTask> = {}): ResolvedTask {
+  return {
+    id: undefined,
+    prompt: "test prompt",
+    agent: undefined,
+    model: { id: "test-model", api: "openai" } as never,
+    tools: ["read", "write", "edit", "bash"],
+    thinking: "off",
+    systemPrompt: "",
+    cwd: process.cwd(),
+    agentName: "ad-hoc",
+    warnings: [],
+    ...overrides,
+  };
+}
+
+/** Minimal TaskRunEnv for direct runResolvedTask tests. */
+function makeTestEnv(overrides: Partial<TaskRunEnv> = {}): TaskRunEnv {
+  return {
+    signal: undefined,
+    modelRegistry: { resolveModel: () => undefined } as never,
+    parentSessionManager: undefined,
+    delegateStartedAt: Date.now(),
+    onProgress: () => {},
+    ...overrides,
+  };
+}
+
+/** Progress callback that captures the latest TaskProgress. */
+function makeProgressCapture(): {
+  latest: () => TaskProgress | undefined;
+  onProgress: (p: TaskProgress, u: AgentProgressUpdate) => void;
+} {
+  let current: TaskProgress | undefined;
+  return {
+    latest: () => current,
+    onProgress: (p: TaskProgress) => {
+      current = p;
+    },
+  };
 }
 
 // ── Test Suite ─────────────────────────────────────────────────────────────
@@ -368,7 +418,11 @@ describe("delegate task lifecycle integration", () => {
       path.join(os.tmpdir(), "delegate-prompt-embedded-"),
     );
     try {
-      fs.writeFileSync(path.join(taskCwd, "AGENTS.md"), projectInstruction, "utf-8");
+      fs.writeFileSync(
+        path.join(taskCwd, "AGENTS.md"),
+        projectInstruction,
+        "utf-8",
+      );
 
       const toolDef = getDelegateTool(ts);
       const ctx = getExecContext(ts);
@@ -694,7 +748,7 @@ describe("delegate task lifecycle integration", () => {
     // Verify pool state via the list action (goes through the extension's own pool)
     const listResult = await toolDef.execute(
       "tc-pool-create-1-list",
-      { tasks: [{ action: "list" }] },
+      { tasks: [{ sessionAction: "list" }] },
       undefined,
       undefined,
       ctx,
@@ -754,7 +808,7 @@ describe("delegate task lifecycle integration", () => {
     // Verify the pool shows the session with 2 prompts via list action
     const listResult = await toolDef.execute(
       "tc-pool-reuse-2-list",
-      { tasks: [{ action: "list" }] },
+      { tasks: [{ sessionAction: "list" }] },
       undefined,
       undefined,
       ctx,
@@ -801,7 +855,7 @@ describe("delegate task lifecycle integration", () => {
 
     const listed = await toolDef.execute(
       "tc-pool-failed-use-list",
-      { tasks: [{ action: "list" }] },
+      { tasks: [{ sessionAction: "list" }] },
       undefined,
       undefined,
       ctx,
@@ -835,7 +889,7 @@ describe("delegate task lifecycle integration", () => {
 
     const listed = await toolDef.execute(
       "tc-pool-failed-miss-list",
-      { tasks: [{ action: "list" }] },
+      { tasks: [{ sessionAction: "list" }] },
       undefined,
       undefined,
       ctx,
@@ -866,7 +920,7 @@ describe("delegate task lifecycle integration", () => {
     // Verify it's there
     const listBefore = await toolDef.execute(
       "tc-close-1-list",
-      { tasks: [{ action: "list" }] },
+      { tasks: [{ sessionAction: "list" }] },
       undefined,
       undefined,
       ctx,
@@ -878,7 +932,7 @@ describe("delegate task lifecycle integration", () => {
     // Close
     const result = await toolDef.execute(
       "tc-close-2",
-      { tasks: [{ action: "close", sessionId: "close-me" }] },
+      { tasks: [{ sessionAction: "close", sessionId: "close-me" }] },
       undefined,
       undefined,
       ctx,
@@ -893,7 +947,7 @@ describe("delegate task lifecycle integration", () => {
     // Verify it's gone
     const listAfter = await toolDef.execute(
       "tc-close-2-list",
-      { tasks: [{ action: "list" }] },
+      { tasks: [{ sessionAction: "list" }] },
       undefined,
       undefined,
       ctx,
@@ -924,7 +978,7 @@ describe("delegate task lifecycle integration", () => {
     // List
     const result = await toolDef.execute(
       "tc-list-2",
-      { tasks: [{ action: "list" }] },
+      { tasks: [{ sessionAction: "list" }] },
       undefined,
       undefined,
       ctx,
@@ -962,7 +1016,7 @@ describe("delegate task lifecycle integration", () => {
     for (let i = 0; i < 50; i++) {
       pollResult = await toolDef.execute(
         `tc-async-1-poll-${i}`,
-        { action: "poll", ticket: ticketId },
+        { ticketAction: "poll", ticket: ticketId },
         undefined,
         undefined,
         ctx,
@@ -1946,7 +2000,7 @@ describe("delegate pool-miss with resumeFrom and sessionId", () => {
     // Verify the session is in the pool with 2 prompts.
     const listResult = await toolDef.execute(
       "tc-pool-resume-list",
-      { tasks: [{ action: "list" }] },
+      { tasks: [{ sessionAction: "list" }] },
       undefined,
       undefined,
       ctx,
@@ -2030,6 +2084,7 @@ describe("whole-task retry gating", () => {
             },
           },
           touchedFiles: [],
+          attributedFiles: [],
         } as never;
       },
     );
@@ -2164,6 +2219,7 @@ describe("whole-task retry gating", () => {
               },
             },
             touchedFiles: [],
+            attributedFiles: [],
           } as never;
         }
 
@@ -2187,6 +2243,7 @@ describe("whole-task retry gating", () => {
             },
           },
           touchedFiles: [],
+          attributedFiles: [],
         } as never;
       },
     );
@@ -2333,6 +2390,7 @@ describe("whole-task retry gating", () => {
             },
           },
           touchedFiles: [],
+          attributedFiles: [],
         } as never;
       },
     );
@@ -2403,6 +2461,913 @@ describe("whole-task retry gating", () => {
       expect(result.tokens).toBe(progressRow.tokens);
       expect(progressRow.durationMs).toBeGreaterThanOrEqual(10);
       expect(progressRow.durationMs).toBe(result.durationMs);
+    } finally {
+      if (timer) clearTimeout(timer);
+      _setRunAgentSessionForTesting(undefined);
+      _setWholeTaskRetryForTesting(undefined);
+    }
+  });
+});
+
+describe("delegate retry and deadline", () => {
+  test("wakes from retry backoff before the full delay when the deadline passes first", async () => {
+    const task = makeBaseTask({ deadlineMs: 100 });
+    const env = makeTestEnv();
+
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    const { onProgress, latest } = makeProgressCapture();
+    env.onProgress = onProgress;
+
+    let runAttempts = 0;
+    _setWholeTaskRetryForTesting({ maxRetries: 2, baseDelayMs: 2000 });
+    _setRunAgentSessionForTesting(async () => {
+      runAttempts += 1;
+      await new Promise((r) => setTimeout(r, 5));
+      return {
+        output: "",
+        error: "connection refused",
+        durationMs: 5,
+        tokens: 5,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+      } as never;
+    });
+
+    try {
+      const result = await runResolvedTask(env, task, progress as never, 0);
+      expect(runAttempts).toBe(1);
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(result.error).not.toBe("connection refused");
+      expect(result.tokens).toBe(5);
+      expect(result.durationMs).toBeLessThan(500);
+    } finally {
+      _setWholeTaskRetryForTesting(undefined);
+      _setRunAgentSessionForTesting(undefined);
+    }
+  });
+
+  test("does not whole-task retry a deadline_exceeded result", async () => {
+    const task = makeBaseTask();
+    const env = makeTestEnv();
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    let runAttempts = 0;
+    _setWholeTaskRetryForTesting({ maxRetries: 3, baseDelayMs: 0 });
+    _setRunAgentSessionForTesting(async () => {
+      runAttempts++;
+      return {
+        output: "",
+        error:
+          "Deadline exceeded: task exceeded its 1ms wall-clock budget and was cooperatively aborted (not a hard kill).",
+        durationMs: 1,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+        failureKind: "deadline_exceeded",
+        prompted: false,
+      } as never;
+    });
+
+    try {
+      const result = await runResolvedTask(env, task, progress as never, 0);
+      expect(runAttempts).toBe(1);
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+    } finally {
+      _setWholeTaskRetryForTesting(undefined);
+      _setRunAgentSessionForTesting(undefined);
+    }
+  });
+});
+
+// ── Pre-prompt deadline vs. mid-prompt deadline ───────────────────────────
+// Runner surfaces a `prompted` flag on deadline_exceeded. Lifecycle must keep
+// an existing pooled session intact when the deadline fired before prompt(), and
+// must still dispose it when the session was actually prompted.
+
+describe("delegate pre-prompt deadline and pool", () => {
+  function makeFakeAgentSession(sessionFile: string): AgentSession {
+    return {
+      subscribe: () => () => {},
+      prompt: async () => {},
+      abort: async () => {},
+      dispose: () => {},
+      abortCompaction: () => {},
+      abortBranchSummary: () => {},
+      get isIdle() {
+        return true;
+      },
+      get isCompacting() {
+        return false;
+      },
+      get messages() {
+        return [];
+      },
+      get state() {
+        return {};
+      },
+      getSessionStats: () => ({
+        sessionFile,
+        sessionId: "test",
+        userMessages: 0,
+        assistantMessages: 0,
+        toolCalls: 0,
+        toolResults: 0,
+        totalMessages: 0,
+        tokens: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0,
+        },
+        cost: 0,
+      }),
+    } as unknown as AgentSession;
+  }
+
+  function makeFakeSessionManager(sessionFile: string): SessionManager {
+    return {
+      getSessionFile: () => sessionFile,
+      _rewriteFile: () => {},
+    } as unknown as SessionManager;
+  }
+
+  test("pre-expired deadline during acquisition keeps a pooled session intact and reusable", async () => {
+    _resetPoolForTesting();
+    const tmpDir = fs.mkdtempSync("/tmp/delegate-pre-prompt-pool-");
+    const sessionFile = path.join(tmpDir, "session.jsonl");
+    fs.writeFileSync(sessionFile, "");
+
+    const task = makeBaseTask({
+      sessionId: "pre-prompt-pool",
+      cwd: tmpDir,
+    });
+
+    const fakeSession = makeFakeAgentSession(sessionFile);
+    const fakeSessionManager = makeFakeSessionManager(sessionFile);
+
+    let runCalls = 0;
+    _setRunAgentSessionForTesting(
+      async (session, _prompt, _config, _signal, _onProgress) => {
+        runCalls++;
+        if (runCalls === 1) {
+          // Simulates a deadline that fires before the runner ever calls
+          // session.prompt() (e.g., during getHostDeps or git baseline).
+          expect(session).toBe(fakeSession);
+          return {
+            output: "(no output)",
+            error:
+              "Deadline exceeded: task exceeded its 0ms wall-clock budget and was cooperatively aborted (not a hard kill).",
+            durationMs: 0,
+            tokens: 0,
+            usage: emptyUsage(),
+            touchedFiles: [],
+            attributedFiles: [],
+            failureKind: "deadline_exceeded",
+            prompted: false,
+          } as never;
+        }
+        expect(session).toBe(fakeSession);
+        return {
+          output: "reused",
+          durationMs: 1,
+          tokens: 5,
+          usage: emptyUsage(),
+          touchedFiles: [],
+          attributedFiles: [],
+        } as never;
+      },
+    );
+
+    const env = makeTestEnv();
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    try {
+      const inserted = commit("pre-prompt-pool", {
+        session: fakeSession,
+        sessionManager: fakeSessionManager,
+        sessionFile,
+        frozen: {
+          systemPrompt: task.systemPrompt,
+          model: task.model,
+          thinking: task.thinking,
+          tools: task.tools,
+          cwd: task.cwd,
+        },
+        tokens: 0,
+      });
+      expect(inserted).toBe(true);
+
+      const firstResult = await runResolvedTask(
+        env,
+        task,
+        progress as never,
+        0,
+      );
+      expect(firstResult.failureKind).toBe("deadline_exceeded");
+      expect(firstResult.error).toContain("Deadline exceeded");
+      expect(configFor("pre-prompt-pool")).toBeDefined();
+      expect(
+        listPooledAgents().some((line) => line.includes("pre-prompt-pool")),
+      ).toBe(true);
+
+      const secondProgress = { ...progress };
+      const secondResult = await runResolvedTask(
+        env,
+        task,
+        secondProgress as never,
+        0,
+      );
+      expect(secondResult.error).toBeUndefined();
+      expect(secondResult.output).toBe("reused");
+      expect(secondResult.tokens).toBe(5);
+      expect(configFor("pre-prompt-pool")).toBeDefined();
+      expect(
+        listPooledAgents().some((line) => line.includes("pre-prompt-pool")),
+      ).toBe(true);
+      expect(runCalls).toBe(2);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _resetPoolForTesting();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("mid-prompt deadline still disposes a pooled session", async () => {
+    _resetPoolForTesting();
+    const tmpDir = fs.mkdtempSync("/tmp/delegate-mid-prompt-pool-");
+    const sessionFile = path.join(tmpDir, "session.jsonl");
+    fs.writeFileSync(sessionFile, "");
+
+    const task = makeBaseTask({
+      sessionId: "mid-prompt-pool",
+      cwd: tmpDir,
+    });
+
+    const fakeSession = makeFakeAgentSession(sessionFile);
+    const fakeSessionManager = makeFakeSessionManager(sessionFile);
+
+    _setRunAgentSessionForTesting(async () => {
+      // Simulates a deadline that fires after session.prompt() was called.
+      return {
+        output: "partial",
+        error:
+          "Deadline exceeded: task exceeded its wall-clock budget and was cooperatively aborted (not a hard kill).",
+        durationMs: 1,
+        tokens: 3,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+        failureKind: "deadline_exceeded",
+        prompted: true,
+      } as never;
+    });
+
+    const env = makeTestEnv();
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    try {
+      commit("mid-prompt-pool", {
+        session: fakeSession,
+        sessionManager: fakeSessionManager,
+        sessionFile,
+        frozen: {
+          systemPrompt: task.systemPrompt,
+          model: task.model,
+          thinking: task.thinking,
+          tools: task.tools,
+          cwd: task.cwd,
+        },
+        tokens: 0,
+      });
+
+      const result = await runResolvedTask(env, task, progress as never, 0);
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(configFor("mid-prompt-pool")).toBeUndefined();
+      expect(
+        listPooledAgents().every((line) => !line.includes("mid-prompt-pool")),
+      ).toBe(true);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _resetPoolForTesting();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("pre-prompt deadline on a pooled session does not record usage or bump its prompt count", async () => {
+    _resetPoolForTesting();
+    const tmpDir = fs.mkdtempSync("/tmp/delegate-pre-prompt-pool-usage-");
+    const sessionFile = path.join(tmpDir, "session.jsonl");
+    fs.writeFileSync(sessionFile, "");
+
+    const task = makeBaseTask({
+      sessionId: "pre-prompt-pool-usage",
+      cwd: tmpDir,
+    });
+
+    const fakeSession = makeFakeAgentSession(sessionFile);
+    const fakeSessionManager = makeFakeSessionManager(sessionFile);
+
+    let runCalls = 0;
+    _setRunAgentSessionForTesting(
+      async (session, _prompt, _config, _signal, _onProgress) => {
+        runCalls++;
+        expect(session).toBe(fakeSession);
+        if (runCalls === 1) {
+          return {
+            output: "(no output)",
+            error:
+              "Deadline exceeded: task exceeded its 0ms wall-clock budget and was cooperatively aborted (not a hard kill).",
+            durationMs: 0,
+            tokens: 0,
+            usage: emptyUsage(),
+            touchedFiles: [],
+            attributedFiles: [],
+            failureKind: "deadline_exceeded",
+            prompted: false,
+          } as never;
+        }
+        return {
+          output: "reused",
+          durationMs: 1,
+          tokens: 5,
+          usage: emptyUsage(),
+          touchedFiles: [],
+          attributedFiles: [],
+        } as never;
+      },
+    );
+
+    const env = makeTestEnv();
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    try {
+      const inserted = commit("pre-prompt-pool-usage", {
+        session: fakeSession,
+        sessionManager: fakeSessionManager,
+        sessionFile,
+        frozen: {
+          systemPrompt: task.systemPrompt,
+          model: task.model,
+          thinking: task.thinking,
+          tools: task.tools,
+          cwd: task.cwd,
+        },
+        tokens: 100,
+      });
+      expect(inserted).toBe(true);
+
+      const firstResult = await runResolvedTask(
+        env,
+        task,
+        progress as never,
+        0,
+      );
+      expect(firstResult.failureKind).toBe("deadline_exceeded");
+      expect(firstResult.error).toContain("Deadline exceeded");
+
+      const listText = listPooledAgents().find((line) =>
+        line.includes("pre-prompt-pool-usage"),
+      );
+      expect(listText).toBeDefined();
+      expect(listText).toContain("1 prompts");
+      expect(listText).toContain("100 tokens");
+
+      const secondProgress = { ...progress };
+      const secondResult = await runResolvedTask(
+        env,
+        task,
+        secondProgress as never,
+        0,
+      );
+      expect(secondResult.error).toBeUndefined();
+      expect(secondResult.output).toBe("reused");
+      expect(secondResult.tokens).toBe(5);
+      expect(runCalls).toBe(2);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _resetPoolForTesting();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("mid-prompt deadline on a pooled session disposes the session", async () => {
+    _resetPoolForTesting();
+    const tmpDir = fs.mkdtempSync("/tmp/delegate-mid-prompt-pool-dispose-");
+    const sessionFile = path.join(tmpDir, "session.jsonl");
+    fs.writeFileSync(sessionFile, "");
+
+    const task = makeBaseTask({
+      sessionId: "mid-prompt-pool-dispose",
+      cwd: tmpDir,
+    });
+
+    let disposed = false;
+    const fakeSession = {
+      ...makeFakeAgentSession(sessionFile),
+      dispose: () => {
+        disposed = true;
+      },
+    } as unknown as AgentSession;
+    const fakeSessionManager = makeFakeSessionManager(sessionFile);
+
+    _setRunAgentSessionForTesting(
+      async () =>
+        ({
+          output: "partial",
+          error:
+            "Deadline exceeded: task exceeded its 0ms wall-clock budget and was cooperatively aborted (not a hard kill).",
+          durationMs: 1,
+          tokens: 3,
+          usage: emptyUsage(),
+          touchedFiles: [],
+          attributedFiles: [],
+          failureKind: "deadline_exceeded",
+          prompted: true,
+        }) as never,
+    );
+
+    const env = makeTestEnv();
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    try {
+      commit("mid-prompt-pool-dispose", {
+        session: fakeSession,
+        sessionManager: fakeSessionManager,
+        sessionFile,
+        frozen: {
+          systemPrompt: task.systemPrompt,
+          model: task.model,
+          thinking: task.thinking,
+          tools: task.tools,
+          cwd: task.cwd,
+        },
+        tokens: 0,
+      });
+
+      const result = await runResolvedTask(env, task, progress as never, 0);
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(disposed).toBe(true);
+      expect(configFor("mid-prompt-pool-dispose")).toBeUndefined();
+      expect(
+        listPooledAgents().every(
+          (line) => !line.includes("mid-prompt-pool-dispose"),
+        ),
+      ).toBe(true);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _resetPoolForTesting();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("parent abort of a pooled session disposes it and does not record use", async () => {
+    _resetPoolForTesting();
+    const tmpDir = fs.mkdtempSync("/tmp/delegate-parent-abort-pool-");
+    const sessionFile = path.join(tmpDir, "session.jsonl");
+    fs.writeFileSync(sessionFile, "");
+
+    const task = makeBaseTask({
+      sessionId: "parent-abort-pool",
+      cwd: tmpDir,
+    });
+
+    let disposed = false;
+    const fakeSession = {
+      ...makeFakeAgentSession(sessionFile),
+      dispose: () => {
+        disposed = true;
+      },
+    } as unknown as AgentSession;
+    const fakeSessionManager = makeFakeSessionManager(sessionFile);
+
+    _setRunAgentSessionForTesting(
+      async () =>
+        ({
+          output: "partial",
+          error: "Aborted",
+          durationMs: 1,
+          tokens: 5,
+          usage: emptyUsage(),
+          touchedFiles: [],
+          attributedFiles: [],
+          // Parent abort is not a deadline: no failureKind, but the prompt was
+          // invoked and may have mutated the conversation.
+          prompted: true,
+        }) as never,
+    );
+
+    const env = makeTestEnv();
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    try {
+      const inserted = commit("parent-abort-pool", {
+        session: fakeSession,
+        sessionManager: fakeSessionManager,
+        sessionFile,
+        frozen: {
+          systemPrompt: task.systemPrompt,
+          model: task.model,
+          thinking: task.thinking,
+          tools: task.tools,
+          cwd: task.cwd,
+        },
+        tokens: 0,
+      });
+      expect(inserted).toBe(true);
+
+      const result = await runResolvedTask(env, task, progress as never, 0);
+      expect(result.error).toBe("Aborted");
+      expect(result.failureKind).toBeUndefined();
+      expect(disposed).toBe(true);
+      expect(configFor("parent-abort-pool")).toBeUndefined();
+      expect(
+        listPooledAgents().every((line) => !line.includes("parent-abort-pool")),
+      ).toBe(true);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _resetPoolForTesting();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Deadline on a pool miss (lifecycle-owned session) ─────────────────────
+// A sessionId that is not yet in the pool must not be inserted if the run
+// hits a deadline; the lifecycle-owned session must be disposed instead.
+
+describe("delegate deadline on pool miss", () => {
+  test("deadline_exceeded on a pool miss is not inserted and the session is disposed", async () => {
+    _resetPoolForTesting();
+    const tmpDir = fs.mkdtempSync("/tmp/delegate-pool-miss-deadline-");
+
+    const task = makeBaseTask({
+      sessionId: "pool-miss-deadline",
+      cwd: tmpDir,
+    });
+
+    let runCalls = 0;
+    _setRunAgentSessionForTesting(async () => {
+      runCalls++;
+      return {
+        output: "(no output)",
+        error:
+          "Deadline exceeded: task exceeded its 0ms wall-clock budget and was cooperatively aborted (not a hard kill).",
+        durationMs: 0,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+        failureKind: "deadline_exceeded",
+        prompted: false,
+      } as never;
+    });
+
+    let disposed = 0;
+    const originalDispose = AgentSession.prototype.dispose;
+    AgentSession.prototype.dispose = function disposeForTest(
+      this: AgentSession,
+    ) {
+      disposed++;
+      return originalDispose.call(this);
+    };
+
+    const env = makeTestEnv();
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    _setWholeTaskRetryForTesting({ maxRetries: 3, baseDelayMs: 0 });
+
+    try {
+      const result = await runResolvedTask(env, task, progress as never, 0);
+      expect(runCalls).toBe(1);
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(configFor("pool-miss-deadline")).toBeUndefined();
+      expect(
+        listPooledAgents().every(
+          (line) => !line.includes("pool-miss-deadline"),
+        ),
+      ).toBe(true);
+      expect(disposed).toBeGreaterThanOrEqual(1);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setWholeTaskRetryForTesting(undefined);
+      _resetPoolForTesting();
+      AgentSession.prototype.dispose = originalDispose;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Lifecycle-level deadline and abort races ─────────────────────────────
+// These tests pin the seams where the wall-clock deadline, the parent abort
+// signal, and the whole-task retry budget intersect.
+
+describe("lifecycle-level deadline and abort races", () => {
+  test("pre-attempt deadline returns deadline_exceeded before the first runAttempt", async () => {
+    const task = makeBaseTask({ deadlineMs: 5 });
+    const env = makeTestEnv({ delegateStartedAt: 0 });
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    let runAttempts = 0;
+    _setWholeTaskRetryForTesting({ maxRetries: 3, baseDelayMs: 0 });
+    _setRunAgentSessionForTesting(async () => {
+      runAttempts++;
+      return {
+        output: "should not run",
+        durationMs: 0,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+      } as never;
+    });
+
+    const originalDateNow = Date.now;
+    try {
+      let callCount = 0;
+      Date.now = () => {
+        callCount++;
+        const base = originalDateNow();
+        if (callCount === 2) return base + 10;
+        return base;
+      };
+
+      const result = await runResolvedTask(env, task, progress as never, 0);
+      expect(runAttempts).toBe(0);
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(result.durationMs).toBe(0);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setWholeTaskRetryForTesting(undefined);
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("parent abort before the deadline during retry sleep returns Aborted", async () => {
+    const controller = new AbortController();
+    const task = makeBaseTask({ deadlineMs: 200 });
+    const env = makeTestEnv({ signal: controller.signal });
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    let runAttempts = 0;
+    _setWholeTaskRetryForTesting({ maxRetries: 3, baseDelayMs: 2000 });
+    _setRunAgentSessionForTesting(async () => {
+      runAttempts++;
+      return {
+        output: "",
+        error: "connection refused",
+        durationMs: 5,
+        tokens: 5,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+      } as never;
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const running = runResolvedTask(env, task, progress as never, 0);
+      timer = setTimeout(() => controller.abort(), 50);
+      const result = await running;
+
+      expect(runAttempts).toBe(1);
+      expect(result.error).toBe("Aborted");
+      expect(result.failureKind).toBeUndefined();
+      expect(result.tokens).toBe(5);
+      expect(result.durationMs).toBeLessThan(200);
+    } finally {
+      if (timer) clearTimeout(timer);
+      _setRunAgentSessionForTesting(undefined);
+      _setWholeTaskRetryForTesting(undefined);
+    }
+  });
+
+  test("parent abort before runAttempt returns Aborted and skips session acquisition", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const task = makeBaseTask();
+    const env = makeTestEnv({ signal: controller.signal });
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    let runAttempts = 0;
+    _setRunAgentSessionForTesting(async () => {
+      runAttempts++;
+      return {
+        output: "should not run",
+        durationMs: 0,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+      } as never;
+    });
+
+    try {
+      const result = await runResolvedTask(env, task, progress as never, 0);
+      expect(runAttempts).toBe(0);
+      expect(result.error).toBe("Aborted");
+      expect(result.failureKind).toBeUndefined();
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+    }
+  });
+
+  test("parent abort during the first attempt wins over a later deadline", async () => {
+    const controller = new AbortController();
+    const task = makeBaseTask({ deadlineMs: 300 });
+    const env = makeTestEnv({ signal: controller.signal });
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    let runAttempts = 0;
+    _setRunAgentSessionForTesting(async () => {
+      runAttempts++;
+      await new Promise((r) => setTimeout(r, 50));
+      return {
+        output: "partial",
+        durationMs: 50,
+        tokens: 5,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+      } as never;
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const running = runResolvedTask(env, task, progress as never, 0);
+      timer = setTimeout(() => controller.abort(), 30);
+      const result = await running;
+
+      expect(runAttempts).toBe(1);
+      expect(result.error).toBe("Aborted");
+      expect(result.failureKind).toBeUndefined();
+      expect(result.tokens).toBe(5);
+      expect(result.durationMs).toBeLessThan(300);
+    } finally {
+      if (timer) clearTimeout(timer);
+      _setRunAgentSessionForTesting(undefined);
+    }
+  });
+
+  test("deadline before a later parent abort during retry sleep returns deadline_exceeded", async () => {
+    const controller = new AbortController();
+    const task = makeBaseTask({ deadlineMs: 50 });
+    const env = makeTestEnv({ signal: controller.signal });
+    const progress = {
+      index: 0,
+      agent: "ad-hoc",
+      task: "test prompt",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    } as TaskProgress;
+
+    let runAttempts = 0;
+    _setWholeTaskRetryForTesting({ maxRetries: 3, baseDelayMs: 2000 });
+    _setRunAgentSessionForTesting(async () => {
+      runAttempts++;
+      return {
+        output: "",
+        error: "connection refused",
+        durationMs: 5,
+        tokens: 5,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+      } as never;
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const running = runResolvedTask(env, task, progress as never, 0);
+      timer = setTimeout(() => controller.abort(), 500);
+      const result = await running;
+
+      expect(runAttempts).toBe(1);
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+      expect(result.error).not.toBe("Aborted");
+      expect(result.tokens).toBe(5);
     } finally {
       if (timer) clearTimeout(timer);
       _setRunAgentSessionForTesting(undefined);

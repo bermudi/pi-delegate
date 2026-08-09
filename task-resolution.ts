@@ -37,40 +37,32 @@ const PROJECT_CONTEXT_END = "\n</project_context>\n";
  *
  * The AGENTS.md/CLAUDE.md content is inserted verbatim inside
  * `<project_instructions>...</project_instructions>` blocks. A file that
- * itself contains `\n</project_context>\n` would otherwise terminate the
- * scan early and leak the remainder of the parent context (P1). We therefore
- * treat a candidate closing marker as valid only when it is *outside* any
- * open `<project_instructions>` block — i.e. the first `PROJECT_CONTEXT_END`
- * after `start` that is not nested. That matches the generated section's
- * final closing marker while ignoring embedded fakes. A trailing
- * `</project_context>` in post-context prompt text (skills/cwd) would also be
- * outside, but such text is controlled by Pi and far less likely; picking the
- * first outside marker preserves trailing prompt content instead of
- * over-consuming it.
+ * itself contains `\n</project_context>\n` can therefore forge an early
+ * closing marker. It could also include a forged `</project_instructions>` to
+ * balance the open tag, making the fake `</project_context>` look like the
+ * section end. A content-controlled marker can only ever appear *inside* the
+ * generated `<project_context>` block, before the real `</project_context>`
+ * that Pi appends after the last file. Skills escape angle brackets, the
+ * `appendSystemPrompt` text is added before this section, and the trailing
+ * `Current working directory:` line contains no such marker, so the real
+ * closing marker is the final raw `\n</project_context>\n` in the prompt.
+ * We therefore match the Pi-generated opening marker to the final matching
+ * closing marker, deterministically stripping the whole generated section.
  */
 export function stripInheritedProjectContext(
   prompt: string | undefined,
 ): string | undefined {
   if (!prompt) return prompt;
+
   const start = prompt.indexOf(PROJECT_CONTEXT_START);
   if (start < 0) return prompt;
-  let searchFrom = start + PROJECT_CONTEXT_START.length;
-  let end = -1;
-  while (true) {
-    const candidate = prompt.indexOf(PROJECT_CONTEXT_END, searchFrom);
-    if (candidate < 0) break;
-    const before = prompt.slice(start, candidate);
-    const openCount = (before.match(/<project_instructions/g) || []).length;
-    const closeCount = (before.match(/<\/project_instructions>/g) || []).length;
-    if (openCount > closeCount) {
-      // Inside a file block — embedded fake, skip it.
-      searchFrom = candidate + PROJECT_CONTEXT_END.length;
-      continue;
-    }
-    end = candidate;
-    break; // first valid outside block is the true closing
-  }
-  if (end < 0) return prompt;
+
+  // The real closing marker is the final occurrence: child content cannot
+  // place a `</project_context>` after the one Pi generates to close the
+  // section.
+  const end = prompt.lastIndexOf(PROJECT_CONTEXT_END);
+  if (end < start) return prompt;
+
   return `${prompt.slice(0, start)}${prompt.slice(end + PROJECT_CONTEXT_END.length)}`;
 }
 
@@ -84,6 +76,11 @@ function noticeResult(
     content: [{ type: "text", text }],
     details: { tasks, results: [], progress: [], parentModel },
   };
+}
+
+/** Format a task reference for error messages: one-based index with an optional caller id. */
+function formatTaskRef(index: number, id: string | undefined): string {
+  return `Task ${index + 1}${id ? `#${id}` : ""}`;
 }
 
 /** Pre-dispatch validation: duplicate sessionIds, sessions busy with an async
@@ -119,6 +116,24 @@ export function validateTasks(
       tasks,
       parentModelId,
     );
+  }
+
+  // Disallow duplicate caller-provided task ids within one dispatch.
+  const seenIds = new Map<string, number>();
+  const duplicateIds: string[] = [];
+  for (const [index, task] of tasks.entries()) {
+    if (task.id) {
+      if (seenIds.has(task.id)) {
+        duplicateIds.push(
+          `task ${index + 1}: duplicate id '${task.id}' — ids must be unique within one dispatch.`,
+        );
+      } else {
+        seenIds.set(task.id, index);
+      }
+    }
+  }
+  if (duplicateIds.length) {
+    return noticeResult(duplicateIds.join(" "), tasks, parentModelId);
   }
 
   const unknown: string[] = [];
@@ -187,17 +202,47 @@ export function resolveTasks(
     // it. The assembled parent project-context section was stripped above;
     // the child ResourceLoader supplies context for this task's cwd.
     const pooledConfig = t.sessionId ? configFor(t.sessionId) : undefined;
+    const isPoolHit = pooledConfig !== undefined;
+    const parentNativeTools = parentDefaults.tools.filter((name) =>
+      Object.hasOwn(TOOL_FACTORIES, name),
+    );
+    let tools: string[] = [];
+    const warnings: string[] = [];
 
     // Prompt is required for fresh tasks. ResumeFrom provides context already.
     if (
-      t.action !== "close" &&
-      t.action !== "list" &&
+      t.sessionAction !== "close" &&
+      t.sessionAction !== "list" &&
       !t.resumeFrom &&
       !t.prompt?.trim()
     ) {
       throw new Error(
-        `Task ${i}: prompt is required unless action is 'close'/'list' or resumeFrom is set.`,
+        `${formatTaskRef(i, t.id)}: prompt is required unless sessionAction is 'close'/'list' or resumeFrom is set.`,
       );
+    }
+
+    // Resolve tools — warn about unknown tool names.
+    // For active pooled sessions, fall back to the frozen pooled config so
+    // "continue with only sessionId" works without re-supplying tools.
+    // Explicit overrides that don't match get rejected by acquireAgentSession.
+    if (t.sessionAction !== "close" && t.sessionAction !== "list") {
+      tools = resolveToolGroups(
+        t.tools ??
+          agentOverride?.tools ??
+          agent?.tools ??
+          (isDefaultAgent ? parentNativeTools : undefined) ??
+          (isPoolHit ? pooledConfig?.tools : undefined) ??
+          DEFAULT_TOOLS,
+      );
+      const unknownTools = tools.filter(
+        (name) => !Object.hasOwn(TOOL_FACTORIES, name),
+      );
+      if (unknownTools.length) {
+        warnings.push(
+          `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`,
+        );
+      }
+      tools = tools.filter((name) => Object.hasOwn(TOOL_FACTORIES, name));
     }
 
     // System prompt resolution. AgentSession's resource loader owns
@@ -206,21 +251,34 @@ export function resolveTasks(
     // explicit task prompt → named agent body → sanitized parent prompt →
     // default. The resolved base is passed as the loader's customPrompt (see
     // buildDelegateSession).
-    // Keep explicit intent separate: a bare `{ prompt, sessionId }` continues
-    // the frozen prompt even if the parent prompt has since changed, while an
-    // explicit task/profile prompt must not be silently ignored on reuse.
+    //
+    // The *requested* system prompt is what the reuse check compares against the
+    // frozen pooled value. A bare `{ prompt, sessionId }` omits it so the pool
+    // can keep using the frozen prompt even if the parent prompt changed. An
+    // explicit task/profile prompt is used as-is. The built-in `default` profile
+    // intentionally mirrors the live parent, so its requested prompt is the
+    // *sanitized* parent prompt — the same form that would be stored as the
+    // frozen base, avoiding a false mismatch when the inherited default prompt
+    // gets its stale tool inventory stripped.
+    const resolvedBasePrompt = buildSubagentSystemPrompt({
+      taskSystemPrompt: t.systemPrompt,
+      agentSystemPrompt: agent?.systemPrompt,
+      parentSystemPrompt,
+      tools,
+    });
     const requestedSystemPrompt = t.systemPrompt?.trim()
       ? t.systemPrompt
       : agent?.systemPrompt?.trim()
         ? agent.systemPrompt
         : isDefaultAgent
-          ? parentSystemPrompt
+          ? resolvedBasePrompt
           : undefined;
     const systemPrompt = buildSubagentSystemPrompt({
       taskSystemPrompt: t.systemPrompt,
       agentSystemPrompt: agent?.systemPrompt,
       parentSystemPrompt,
       pooledSystemPrompt: pooledConfig?.systemPrompt,
+      tools,
     });
 
     // Build prompt — wrap with parent context if using with-parent-transcript
@@ -252,11 +310,9 @@ export function resolveTasks(
     let model: Model<Api> | undefined;
     let requestedModel: Model<Api> | undefined;
     let modelSuffix: ThinkingLevel | undefined;
-    let tools: string[] = [];
     let thinking: ThinkingLevel = "off";
-    const warnings: string[] = [];
 
-    if (t.action !== "close" && t.action !== "list") {
+    if (t.sessionAction !== "close" && t.sessionAction !== "list") {
       // A pool hit always runs its frozen model, but an explicitly requested
       // task/profile model still has to be resolved so checkout can reject a
       // contradictory request rather than silently discarding it. Naming the
@@ -278,7 +334,7 @@ export function resolveTasks(
           modelSuffix = requested.strippedSuffix;
           if (!requestedModel) {
             throw new Error(
-              `Task ${i}: requested model '${requestedModelSpec}' is not available. Check provider config or remove the model field to continue the pooled session.`,
+              `${formatTaskRef(i, t.id)}: requested model '${requestedModelSpec}' is not available. Check provider config or remove the model field to continue the pooled session.`,
             );
           }
         } else if (isDefaultAgent) {
@@ -309,7 +365,7 @@ export function resolveTasks(
         const explicitRequest = t.model ?? agentOverride?.model;
         if (explicitRequest && !resolvedModel) {
           throw new Error(
-            `Task ${i}: requested model '${explicitRequest}' is not available. Check provider config or remove the model field to use the parent model.`,
+            `${formatTaskRef(i, t.id)}: requested model '${explicitRequest}' is not available. Check provider config or remove the model field to use the parent model.`,
           );
         }
 
@@ -322,30 +378,7 @@ export function resolveTasks(
 
       if (!model) {
         throw new Error(
-          `Task ${i}: no model available — parent session has no model set.`,
-        );
-      }
-
-      // Resolve tools — warn about unknown tool names.
-      // For active pooled sessions, fall back to the frozen pooled config so
-      // "continue with only sessionId" works without re-supplying tools.
-      // Explicit overrides that don't match get rejected by acquireAgentSession.
-      const isPoolHit = pooledConfig !== undefined;
-      const parentNativeTools = parentDefaults.tools.filter(
-        (name) => name in TOOL_FACTORIES,
-      );
-      tools = resolveToolGroups(
-        t.tools ??
-          agentOverride?.tools ??
-          agent?.tools ??
-          (isDefaultAgent ? parentNativeTools : undefined) ??
-          (isPoolHit ? pooledConfig?.tools : undefined) ??
-          DEFAULT_TOOLS,
-      );
-      const unknownTools = tools.filter((name) => !(name in TOOL_FACTORIES));
-      if (unknownTools.length) {
-        warnings.push(
-          `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`,
+          `${formatTaskRef(i, t.id)}: no model available — parent session has no model set.`,
         );
       }
 
@@ -381,6 +414,7 @@ export function resolveTasks(
     }
     return {
       ...t,
+      id: t.id,
       cwd,
       systemPrompt,
       model: model!,

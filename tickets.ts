@@ -11,21 +11,28 @@ import {
   fmtDuration,
   fmtTokens,
   formatCompletedTask,
+  formatTaskId,
   shortenPath,
   trunc,
   getActivityAge,
   formatActivityLabel,
   taskMetaBase,
   relativeTouchedSummary,
+  findTouchedOverlaps,
+  formatTouchedOverlapWarning,
 } from "./format.ts";
 import { renderOutputForPoll } from "./spill.ts";
 import { scheduleDeadline } from "./timer.ts";
+import { emptyUsage } from "./usage.ts";
 import type {
   AsyncTicket,
   DelegateDetails,
+  ResolvedTask,
   TaskResult,
   TicketWaiter,
 } from "./types.ts";
+
+const PENDING_RESULT_ERROR = "PENDING — result not available";
 
 const busyTicketIdsBySession = new Map<string, Set<string>>();
 const busySessionsByTicket = new Map<string, Set<string>>();
@@ -187,12 +194,22 @@ export function formatCompletedTicket(
     const r = ticket.results[i];
     const t = ticket.resolved[i]!;
     if (!r) {
-      parts.push(`=== ${t.agentName}: ${trunc(t.prompt || "", 80)} ===`);
+      parts.push(
+        `=== ${t.agentName}${formatTaskId(t.id)}: ${trunc(t.prompt || "", 80)} ===`,
+      );
       parts.push(`[${pendingLabelFor(i)}]`);
       continue;
     }
     parts.push(...formatCompletedTask(t, r));
   }
+
+  const completedResults = ticket.results.filter(
+    (r): r is TaskResult => r !== undefined && "touchedFiles" in r,
+  );
+  const overlapWarning = formatTouchedOverlapWarning(
+    findTouchedOverlaps(completedResults),
+  );
+  if (overlapWarning) parts.push("", overlapWarning);
 
   if (ticket.status === "cancelled") {
     parts.push(
@@ -206,7 +223,11 @@ export function formatCompletedTicket(
     details: {
       tasks: ticket.tasks,
       results: [...ticket.results].map(
-        (r, index) => r ?? { error: pendingLabelFor(index) },
+        (r, index) =>
+          r ?? {
+            ...pendingResultPlaceholder(ticket.resolved[index]),
+            error: pendingLabelFor(index),
+          },
       ),
       progress: [...ticket.progress],
       parentModel: ticket.parentModelId,
@@ -214,22 +235,49 @@ export function formatCompletedTicket(
       // the human sees which ticket they polled, even in the rich tree path.
       ticketId: ticket.id,
       status: ticket.status,
+      overlapWarning: overlapWarning || undefined,
     },
   };
 }
 
 // ── Waiter helpers ─────────────────────────────────────────────────────────
 
+function pendingResultPlaceholder(task: ResolvedTask | undefined): TaskResult {
+  return {
+    id: task?.id,
+    agent: task?.agentName ?? "unknown",
+    output: "",
+    durationMs: 0,
+    tokens: 0,
+    usage: emptyUsage(),
+    touchedFiles: [],
+    attributedFiles: [],
+    // Machine-visible and human-readable marker so structured consumers do not
+    // mistake a pending placeholder for a successful result.
+    error: PENDING_RESULT_ERROR,
+  };
+}
+
 function buildWaitDetails(ticket: AsyncTicket): DelegateDetails {
+  const completedResults = ticket.results.filter(
+    (r): r is TaskResult => r !== undefined && "touchedFiles" in r,
+  );
+  const overlapWarning = formatTouchedOverlapWarning(
+    findTouchedOverlaps(completedResults),
+  );
+  const results: TaskResult[] = [];
+  for (let i = 0; i < ticket.resolved.length; i++) {
+    const r = ticket.results[i];
+    results.push(r ?? pendingResultPlaceholder(ticket.resolved[i]));
+  }
   return {
     tasks: ticket.tasks,
-    results: ticket.results.map(
-      (r) => r ?? { error: "PENDING — result not available" },
-    ),
+    results,
     progress: [...ticket.progress],
     parentModel: ticket.parentModelId,
     ticketId: ticket.id,
     status: ticket.status,
+    overlapWarning: overlapWarning || undefined,
   };
 }
 
@@ -251,9 +299,13 @@ function buildWaitRunningUpdate(
   if (failed > 0) parts.push(`${failed} failed`);
   if (pending > 0) parts.push(`${pending} queued`);
 
+  const details = buildWaitDetails(ticket);
+  const text =
+    parts.join(" · ") +
+    (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
   return {
-    content: [{ type: "text", text: parts.join(" · ") }],
-    details: buildWaitDetails(ticket),
+    content: [{ type: "text", text }],
+    details,
   };
 }
 
@@ -261,28 +313,26 @@ function buildWaitTimeoutResult(
   ticket: AsyncTicket,
   timeoutMs: number,
 ): AgentToolResult<DelegateDetails> {
+  const details = buildWaitDetails(ticket);
+  const base = `Ticket ${ticket.id} still ${ticket.status} after ${fmtDuration(timeoutMs)} · wait timed out (ticket continues in background)`;
+  const text =
+    base + (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
   return {
-    content: [
-      {
-        type: "text",
-        text: `Ticket ${ticket.id} still ${ticket.status} after ${fmtDuration(timeoutMs)} · wait timed out (ticket continues in background)`,
-      },
-    ],
-    details: buildWaitDetails(ticket),
+    content: [{ type: "text", text }],
+    details,
   };
 }
 
 function buildWaitAbortResult(
   ticket: AsyncTicket,
 ): AgentToolResult<DelegateDetails> {
+  const details = buildWaitDetails(ticket);
+  const base = `Wait for ticket ${ticket.id} aborted · ticket continues ${ticket.status} in the background`;
+  const text =
+    base + (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
   return {
-    content: [
-      {
-        type: "text",
-        text: `Wait for ticket ${ticket.id} aborted · ticket continues ${ticket.status} in the background`,
-      },
-    ],
-    details: buildWaitDetails(ticket),
+    content: [{ type: "text", text }],
+    details,
   };
 }
 
@@ -434,7 +484,7 @@ export function handlePoll(
               "No async tickets.",
               "",
               "To spawn a subagent: delegate({ tasks: [{ agent, prompt }] }).",
-              "For the full manual and agent list, call delegate({ tasks: [] }) with no top-level `action`.",
+              "For the full manual and agent list, call delegate({ tasks: [] }) with no top-level `ticketAction`.",
             ].join("\n"),
           },
         ],
@@ -467,9 +517,9 @@ export function handlePoll(
       // Copy-pasteable controls for running/cancelling tickets — a human can grab these
       // straight out of the TUI without retyping the ticket id.
       if (t.status === "running" || t.status === "cancelling") {
-        line += `\n     poll:   delegate({ action: "poll", ticket: "${t.id}" })`;
+        line += `\n     poll:   delegate({ ticketAction: "poll", ticket: "${t.id}" })`;
         if (t.status === "running") {
-          line += `\n     cancel: delegate({ action: "cancel", ticket: "${t.id}", force: true })`;
+          line += `\n     cancel: delegate({ ticketAction: "cancel", ticket: "${t.id}", force: true })`;
         }
       }
       return line;
@@ -537,9 +587,9 @@ export function handlePoll(
         if (r.touchedFiles.length > 0) {
           const t = ticket.resolved[i]!;
           const touched = relativeTouchedSummary(r.touchedFiles, t.cwd);
-          if (touched) meta.push(`touched: ${touched}`);
+          if (touched) meta.push(`touched (best-effort): ${touched}`);
         }
-        lines.push(`✓ ${r.agent} · ${meta.join(" · ")}`);
+        lines.push(`✓ ${r.agent}${formatTaskId(r.id)} · ${meta.join(" · ")}`);
         if (r.output && r.output !== "(no output)") {
           lines.push(renderOutputForPoll(r.output));
         }
@@ -549,10 +599,12 @@ export function handlePoll(
         if (r.touchedFiles.length > 0) {
           const t = ticket.resolved[i]!;
           const touched = relativeTouchedSummary(r.touchedFiles, t.cwd);
-          if (touched) meta.push(`touched: ${touched}`);
+          if (touched) meta.push(`touched (best-effort): ${touched}`);
         }
         const errorText = r.error ?? "unknown error";
-        lines.push(`✗ ${r.agent} · ${errorText} · ${meta.join(" · ")}`);
+        lines.push(
+          `✗ ${r.agent}${formatTaskId(r.id)} · ${errorText} · ${meta.join(" · ")}`,
+        );
         if (r.sessionFile)
           lines.push(`  session: ${shortenPath(r.sessionFile)}`);
         if (r.output && r.output !== "(no output)")
@@ -565,11 +617,18 @@ export function handlePoll(
         if (p.tokens > 0) parts.push(`${fmtTokens(p.tokens)} tokens`);
         const age = getActivityAge(p.lastActivityAt);
         if (age) parts.push(age);
-        lines.push(`⏳ ${p.agent} · ${parts.join(" · ")}`);
+        lines.push(`⏳ ${p.agent}${formatTaskId(p.id)} · ${parts.join(" · ")}`);
       } else {
-        lines.push(`○ ${p.agent} · waiting…`);
+        lines.push(`○ ${p.agent}${formatTaskId(p.id)} · waiting…`);
       }
     }
+
+    const completedForOverlap = completedResults.filter(
+      (r): r is TaskResult => r !== undefined,
+    );
+    const overlapWarning = formatTouchedOverlapWarning(
+      findTouchedOverlaps(completedForOverlap),
+    );
 
     const headerStatus =
       ticket.status === "cancelling" ? "CANCELLING" : "RUNNING";
@@ -597,13 +656,13 @@ export function handlePoll(
       content: [
         {
           type: "text",
-          text: `${header}\n${lines.join("\n")}${guidance ? `\n\n${guidance}` : ""}`,
+          text: `${header}\n${lines.join("\n")}${guidance ? `\n\n${guidance}` : ""}${overlapWarning ? `\n\n${overlapWarning}` : ""}`,
         },
       ],
       details: {
         tasks: ticket.tasks,
         results: completedResults.map(
-          (r) => r ?? { error: "PENDING — result not available" },
+          (r, i) => r ?? pendingResultPlaceholder(ticket.resolved[i]),
         ),
         progress: [...ticket.progress],
         parentModel: ticket.parentModelId,
@@ -611,6 +670,7 @@ export function handlePoll(
         // (friction #2). The LLM-facing content still names the ticket id too.
         ticketId: ticket.id,
         status: ticket.status,
+        overlapWarning: overlapWarning || undefined,
       },
     };
   }
@@ -633,9 +693,9 @@ function buildCancelPreview(ticket: AsyncTicket): string {
   for (let i = 0; i < ticket.progress.length; i++) {
     const p = ticket.progress[i]!;
     if (p.status === "done") {
-      lines.push(`✓ ${p.agent} · completed`);
+      lines.push(`✓ ${p.agent}${formatTaskId(p.id)} · completed`);
     } else if (p.status === "failed") {
-      lines.push(`✗ ${p.agent} · ${p.error ?? "failed"}`);
+      lines.push(`✗ ${p.agent}${formatTaskId(p.id)} · ${p.error ?? "failed"}`);
     } else if (p.status === "running") {
       const parts: string[] = [formatActivityLabel(p)];
       if (p.toolUses > 0)
@@ -643,16 +703,16 @@ function buildCancelPreview(ticket: AsyncTicket): string {
       if (p.tokens > 0) parts.push(`${fmtTokens(p.tokens)} tokens`);
       const age = getActivityAge(p.lastActivityAt);
       if (age) parts.push(age);
-      lines.push(`⏳ ${p.agent} · ${parts.join(" · ")}`);
+      lines.push(`⏳ ${p.agent}${formatTaskId(p.id)} · ${parts.join(" · ")}`);
     } else {
-      lines.push(`○ ${p.agent} · waiting…`);
+      lines.push(`○ ${p.agent}${formatTaskId(p.id)} · waiting…`);
     }
   }
 
   lines.push(
     "",
     "WARNING: Cancelling now will abort active subagents. Files already written or shell commands already executed are NOT rolled back.",
-    `To proceed, call delegate({ action: "cancel", ticket: "${ticket.id}", force: true }).`,
+    `To proceed, call delegate({ ticketAction: "cancel", ticket: "${ticket.id}", force: true }).`,
   );
   return lines.join("\n");
 }
@@ -668,7 +728,7 @@ export function handleCancel(params: {
   if (!ticketId) {
     return {
       content: [
-        { type: "text", text: "action='cancel' requires a ticket ID." },
+        { type: "text", text: "ticketAction='cancel' requires a ticket ID." },
       ],
       details: { tasks: [], results: [], progress: [] },
     };
@@ -692,29 +752,32 @@ export function handleCancel(params: {
     };
   }
   if (!params.force) {
+    const details = buildWaitDetails(ticket);
+    const text =
+      buildCancelPreview(ticket) +
+      (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
     return {
-      content: [{ type: "text", text: buildCancelPreview(ticket) }],
-      details: buildWaitDetails(ticket),
+      content: [{ type: "text", text }],
+      details,
     };
   }
   ticket.controller.abort();
   ticket.status = "cancelling";
   syncTicketBusyIndex(ticket);
+  const details = buildWaitDetails(ticket);
+  const base = `Ticket '${ticketId}' is cancelling; workers are settling. Poll for final status.`;
+  const text =
+    base + (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
   return {
-    content: [
-      {
-        type: "text",
-        text: `Ticket '${ticketId}' is cancelling; workers are settling. Poll for final status.`,
-      },
-    ],
-    details: buildWaitDetails(ticket),
+    content: [{ type: "text", text }],
+    details,
   };
 }
 
 /** Block until a ticket reaches a terminal state or `timeoutMs` expires.
  *  Progress is streamed through `onUpdate` without consuming model turns.
  *  Parent-tool abort or timeout detaches the waiter and leaves the ticket
- *  running; cancellation remains explicit (`action: "cancel"`). */
+ *  running; cancellation remains explicit (`ticketAction: "cancel"`). */
 export function handleWait(
   params: { ticket?: string; timeoutMs?: number },
   signal: AbortSignal | undefined,
@@ -727,7 +790,9 @@ export function handleWait(
   const ticketId = params.ticket;
   if (!ticketId) {
     return Promise.resolve({
-      content: [{ type: "text", text: "action='wait' requires a ticket ID." }],
+      content: [
+        { type: "text", text: "ticketAction='wait' requires a ticket ID." },
+      ],
       details: {
         tasks: [],
         results: [],

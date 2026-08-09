@@ -1,16 +1,26 @@
 {
   "name": "@bermudi/pi-delegate",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Delegate tool for the Pi coding agent.",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bermudi/pi-delegate.git"
   },
   "type": "module",
-  "files": ["*.ts", "!*.test.ts", "!*.bundle.ts", "README.md", "patches"],
+  "files": [
+    "*.ts",
+    "!*.test.ts",
+    "!*.bundle.ts",
+    "README.md",
+    "patches"
+  ],
   "pi": {
-    "extensions": ["./delegate.ts"]
+    "extensions": [
+      "./delegate.ts"
+    ]
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "^0.80.9",

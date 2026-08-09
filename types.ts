@@ -25,18 +25,37 @@ export interface AgentConfig {
 }
 
 // ── Tool parameter types — derived from the TypeBox schema ────────────────
-// `delegateArgumentsSchema` in schema.ts is the single source of truth; these are
-// projections of it, so schema and types cannot drift. Field semantics live
-// in the schema's `description`s (which the calling model also sees).
-// The import is type-only, so the schema.ts ↔ types.ts cycle is erased at
-// compile time.
+// `delegateArgumentsSchema` in schema.ts is the canonical provider-visible
+// shape. The public types add deprecated `action` aliases so existing TypeScript
+// callers remain source-compatible without advertising the overloaded fields to
+// models. The import is type-only, so the schema.ts ↔ types.ts cycle is erased
+// at compile time.
 
-export type DelegateArguments = Static<typeof delegateArgumentsSchema>;
-export type TaskDef = NonNullable<DelegateArguments["tasks"]>[number];
+type CanonicalDelegateArguments = Static<typeof delegateArgumentsSchema>;
+type CanonicalTaskDef = NonNullable<
+  CanonicalDelegateArguments["tasks"]
+>[number];
+
 /** Top-level async ticket action: "poll" | "cancel" | "wait". */
-export type DelegateAction = NonNullable<DelegateArguments["action"]>;
+export type TicketAction = NonNullable<
+  CanonicalDelegateArguments["ticketAction"]
+>;
 /** Per-task session action: "prompt" | "close" | "list". */
-export type SessionAction = NonNullable<TaskDef["action"]>;
+export type SessionAction = NonNullable<CanonicalTaskDef["sessionAction"]>;
+
+export type TaskDef = CanonicalTaskDef & {
+  /** @deprecated Use `sessionAction` instead. Runtime normalization still accepts this alias. */
+  action?: SessionAction;
+};
+
+export type DelegateArguments = Omit<CanonicalDelegateArguments, "tasks"> & {
+  /** @deprecated Use `ticketAction` instead. Runtime normalization still accepts this alias. */
+  action?: TicketAction;
+  tasks?: TaskDef[];
+};
+
+/** @deprecated Use `TicketAction` instead. */
+export type DelegateAction = TicketAction;
 
 // ── Async Ticket Types ─────────────────────────────────────────────────────
 
@@ -81,6 +100,7 @@ export interface ReuseIntent {
 }
 
 export interface ResolvedTask {
+  id?: string;
   prompt: string;
   agent?: string;
   model: Model<Api>;
@@ -90,8 +110,10 @@ export interface ResolvedTask {
   cwd: string;
   context?: "fresh" | "with-parent-transcript";
   sessionId?: string;
-  action?: SessionAction;
+  sessionAction?: SessionAction;
   resumeFrom?: string;
+  /** Hard wall-clock budget in milliseconds, measured from task start. */
+  deadlineMs?: number;
   agentName: string;
   warnings: string[];
   /** Explicit settings that must match a live pooled session on reuse. */
@@ -117,10 +139,14 @@ export interface ToolActivity {
  *  - `model_error`: the failure is attributable to the resolved model/provider
  *    (account usage limit, quota exhausted, auth lost) — not transient for that
  *    model, so same-model retry is pointless. The parent should resume with a
- *    different `model` (see `resumeFrom` + `model`). */
-export type TaskFailureKind = "stalled" | "model_error";
+ *    different `model` (see `resumeFrom` + `model`).
+ *  - `deadline_exceeded`: the task's `deadlineMs` wall-clock budget expired
+ *    (measured from when the task left the concurrency queue). The prompt was
+ *    cooperatively aborted; completed side effects are not rolled back. */
+export type TaskFailureKind = "stalled" | "model_error" | "deadline_exceeded";
 
 export interface TaskProgress {
+  id?: string;
   index: number;
   agent: string;
   task: string;
@@ -146,9 +172,13 @@ export interface DelegateDetails {
   ticketId?: string;
   /** Terminal/live ticket status when this result comes from an async ticket. */
   status?: AsyncTicket["status"];
+  /** Global overlap warning derived from result.attributedFiles, surfaced in both
+   *  the textual content and the custom TUI. */
+  overlapWarning?: string;
 }
 
 export interface TaskResult {
+  id?: string;
   agent: string;
   output: string;
   error?: string;
@@ -167,7 +197,14 @@ export interface TaskResult {
    *  Pi sums `cost.total` for nested usage anyway. */
   usage: Usage;
   sessionFile?: string;
+  /** All files the subagent is known to have touched, including bash mutations
+   *  captured via git diff and other tasks' concurrent git changes. This is a
+   *  best-effort, repository-wide list for display, not for attribution. */
   touchedFiles: string[];
+  /** Files directly attributable to this task's edit/write tool calls. Used
+   *  for overlap detection so concurrent tasks in the same repo do not
+   *  fabricate false conflicts from shared git snapshots. */
+  attributedFiles?: string[];
 }
 
 /** Single source of truth for a subagent's runtime configuration.
