@@ -87,9 +87,9 @@ describe("leaf tracking", () => {
 
   test("a ticket spawned on the current leaf is not cross-leaf", () => {
     recordTreeNavigation("leaf-2");
-    expect(isCrossLeafTicket(mkCompletedTicket({ spawnLeafId: "leaf-2" }))).toBe(
-      false,
-    );
+    expect(
+      isCrossLeafTicket(mkCompletedTicket({ spawnLeafId: "leaf-2" })),
+    ).toBe(false);
   });
 
   test("a ticket spawned before any navigation becomes cross-leaf once the session moves", () => {
