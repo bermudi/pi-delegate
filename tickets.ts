@@ -25,6 +25,7 @@ import { isCrossLeafTicket } from "./leaf.ts";
 import { renderOutputForPoll } from "./spill.ts";
 import { scheduleDeadline } from "./timer.ts";
 import { emptyUsage } from "./usage.ts";
+import { recordCall } from "./telemetry.ts";
 import type {
   AsyncTicket,
   DelegateDetails,
@@ -125,6 +126,15 @@ export function cancelTicketForShutdown(ticket: AsyncTicket): void {
   ticket.completedAt = Date.now();
   syncTicketBusyIndex(ticket);
   settleTicketWaiters(ticket);
+  if (ticket.callRecord) {
+    recordCall({
+      ...ticket.callRecord,
+      status: "cancelled",
+      wall_ms: ticket.completedAt - (ticket.callStartedAt ?? ticket.created),
+      total_tokens: 0,
+      total_cost: 0,
+    });
+  }
 }
 
 /** Request cooperative cancellation of a live ticket: abort the workers and

@@ -30,6 +30,7 @@ import {
   notifyActiveTicketsOnSettled,
   syncDelegateStatus,
 } from "./status.ts";
+import { beginCall } from "./telemetry.ts";
 import type { DelegateArguments } from "./types.ts";
 
 /** Register the delegate tool and clean up its parent-session resources. */
@@ -45,23 +46,70 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     prepareArguments: normalizeDelegateArguments,
 
     async execute(_id, params: DelegateArguments, signal, onUpdate, ctx) {
+      const parentModelId = ctx.model?.id;
+      const tasks = params.tasks ?? [];
+      const parentSessionFile = (
+        ctx as { sessionManager?: { getSessionFile?(): string | undefined } }
+      ).sessionManager?.getSessionFile?.();
+
+      let mode: string;
+      if (params.ticketAction) {
+        mode = params.ticketAction;
+      } else if (tasks.length === 0) {
+        mode = "manual";
+      } else if (params.async) {
+        mode = "async";
+      } else {
+        mode = "sync";
+      }
+      const taskCount = params.ticketAction ? 0 : tasks.length;
+      const callSpan = beginCall({
+        parentModel: parentModelId,
+        mode,
+        taskCount,
+        parentSessionFile,
+      });
+
+      function failCall(): void {
+        callSpan.finish({
+          status: "failed",
+          totalTokens: 0,
+          totalCost: 0,
+          wallMs: Date.now() - callSpan.startedAt,
+        });
+      }
+
+      function succeedCall(): void {
+        callSpan.finish({
+          status: "success",
+          totalTokens: 0,
+          totalCost: 0,
+          wallMs: Date.now() - callSpan.startedAt,
+        });
+      }
+
       // Guard against pi dropping/renaming a symbol this extension imports
       // before any operation-specific validation or early return.
       const compatError = hostCompatError();
-      if (compatError) return compatError;
-
-      const parentModelId = ctx.model?.id;
-      const tasks = params.tasks ?? [];
+      if (compatError) {
+        failCall();
+        return compatError;
+      }
 
       const operationResult = validateDelegateOperationResult(
         params,
         parentModelId,
       );
-      if (operationResult) return operationResult;
+      if (operationResult) {
+        failCall();
+        return operationResult;
+      }
 
       // ── Poll action ───────────────────────────────────────────────────
       if (params.ticketAction === "poll") {
-        return handlePoll(params, ctx);
+        const result = handlePoll(params, ctx);
+        succeedCall();
+        return result;
       }
 
       // ── Cancel action ─────────────────────────────────────────────────
@@ -70,12 +118,20 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         // A forced cancel flips the ticket to "cancelling" — keep the
         // footer status in step (deduped; the preview path is a no-op).
         syncDelegateStatus(ctx);
+        succeedCall();
         return result;
       }
 
       // ── Wait action ────────────────────────────────────────────────────
       if (params.ticketAction === "wait") {
-        return handleWait(params, signal, onUpdate, ctx);
+        try {
+          const result = await handleWait(params, signal, onUpdate, ctx);
+          succeedCall();
+          return result;
+        } catch (err) {
+          failCall();
+          throw err;
+        }
       }
 
       // Agent discovery is intentionally parent-cwd-scoped: agent profiles are a
@@ -87,6 +143,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // ── Help mode ─────────────────────────────────────────────────
       if (!tasks.length) {
+        succeedCall();
         return {
           content: [{ type: "text", text: getSubagentManualMarkdown(agents) }],
           details: {
@@ -108,19 +165,25 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // across dispatches: edits to auth/models/settings/context files must be
       // visible without restarting Pi.
       invalidateHostDepsCache();
-      return dispatchDelegate({
-        pi,
-        params,
-        ctx,
-        agents,
-        parentModelId,
-        parentDefaults: {
-          thinking: pi.getThinkingLevel(),
-          tools: pi.getActiveTools(),
-        },
-        signal,
-        onUpdate,
-      });
+      try {
+        return await dispatchDelegate({
+          pi,
+          params,
+          ctx,
+          agents,
+          parentModelId,
+          parentDefaults: {
+            thinking: pi.getThinkingLevel(),
+            tools: pi.getActiveTools(),
+          },
+          signal,
+          onUpdate,
+          callSpan,
+        });
+      } catch (err) {
+        failCall();
+        throw err;
+      }
     },
 
     renderCall: renderDelegateCall,
