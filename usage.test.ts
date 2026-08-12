@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
   addUsage,
+  aggregateTaskResults,
   emptyUsage,
   sumUsage,
   usageDelta,
@@ -83,6 +84,28 @@ describe("nested usage accounting", () => {
     expect(sum.input).toBe(10);
     expect(a.input).toBe(4);
     expect(b.input).toBe(6);
+  });
+
+  test("aggregates only completed task results", () => {
+    const result = (tokens: number, cost: number) => ({
+      agent: "a",
+      output: "",
+      durationMs: 0,
+      tokens,
+      usage: {
+        ...emptyUsage(),
+        totalTokens: tokens,
+        cost: { ...emptyUsage().cost, total: cost },
+      },
+      touchedFiles: [],
+    });
+    const totals = aggregateTaskResults([
+      result(12, 0.1),
+      undefined,
+      result(8, 0.2),
+    ]);
+    expect(totals.totalTokens).toBe(20);
+    expect(totals.totalCost).toBeCloseTo(0.3);
   });
 
   test("sumUsage skips undefined entries", () => {

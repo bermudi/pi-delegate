@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { getTelemetryConfig } from "./config.ts";
 import type { ResolvedTask, TaskProgress, TaskResult } from "./types.ts";
@@ -69,8 +70,18 @@ interface TelemetryBackend {
 }
 
 let backend: TelemetryBackend | undefined;
+let backendGeneration: number | undefined;
 let backendFailed = false;
+/** Monotonic runtime identity. A late worker from a previous runtime may not
+ * write into the next runtime's backend after a bounded shutdown drain. */
+let telemetryGeneration = 0;
+/** A closed runtime must not lazily reopen SQLite for stale work that is still
+ * unwinding. The next extension registration explicitly reopens the lifecycle. */
+let telemetryClosed = false;
 let testingRecorder: TelemetryRecorder | undefined;
+
+const TELEMETRY_SCHEMA_VERSION = 1;
+const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 function defaultDbPath(): string {
   return path.join(os.homedir(), ".pi", "agent", "delegate-usage.db");
@@ -112,15 +123,6 @@ function resolveDelegatePackageJson(): string | undefined {
   }
 }
 
-function resolvePiPackageJson(): string | undefined {
-  try {
-    const req = createRequire(import.meta.url);
-    return req.resolve("@earendil-works/pi-coding-agent/package.json");
-  } catch {
-    return undefined;
-  }
-}
-
 let delegateVersion: string | undefined;
 let piVersion: string | undefined;
 
@@ -134,69 +136,206 @@ function getDelegateVersion(): string | undefined {
 
 function getPiVersion(): string | undefined {
   if (piVersion === undefined) {
-    const packageJson = resolvePiPackageJson();
-    piVersion = packageJson ? readPackageVersion(packageJson) : undefined;
+    const candidate = (piCodingAgent as Record<string, unknown>).VERSION;
+    piVersion =
+      typeof candidate === "string" && candidate.length > 0
+        ? candidate
+        : undefined;
   }
   return piVersion;
 }
 
+type TelemetryColumn = readonly [name: string, definition: string];
+type TelemetryTable = {
+  name: "calls" | "tasks";
+  columns: readonly TelemetryColumn[];
+  createSql: string;
+};
+
+const TELEMETRY_TABLES: readonly TelemetryTable[] = [
+  {
+    name: "calls",
+    columns: [
+      ["id", "TEXT PRIMARY KEY"],
+      ["ts", "INTEGER"],
+      ["version", "TEXT"],
+      ["pi_version", "TEXT"],
+      ["mode", "TEXT"],
+      ["parent_model", "TEXT"],
+      ["task_count", "INTEGER"],
+      ["wall_ms", "INTEGER"],
+      ["status", "TEXT"],
+      ["total_tokens", "INTEGER"],
+      ["total_cost", "REAL"],
+      ["parent_session_file", "TEXT"],
+    ],
+    createSql: `
+      CREATE TABLE IF NOT EXISTS calls(
+        id TEXT PRIMARY KEY,
+        ts INTEGER,
+        version TEXT,
+        pi_version TEXT,
+        mode TEXT,
+        parent_model TEXT,
+        task_count INTEGER,
+        wall_ms INTEGER,
+        status TEXT,
+        total_tokens INTEGER,
+        total_cost REAL,
+        parent_session_file TEXT
+      );
+    `,
+  },
+  {
+    name: "tasks",
+    columns: [
+      ["id", "TEXT PRIMARY KEY"],
+      ["call_id", "TEXT"],
+      ["ts", "INTEGER"],
+      ["version", "TEXT"],
+      ["pi_version", "TEXT"],
+      ["idx", "INTEGER"],
+      ["agent", "TEXT"],
+      ["model", "TEXT"],
+      ["thinking", "TEXT"],
+      ["tools", "TEXT"],
+      ["outcome", "TEXT"],
+      ["failure_kind", "TEXT"],
+      ["duration_ms", "INTEGER"],
+      ["tokens", "INTEGER"],
+      ["cost", "REAL"],
+      ["tool_uses", "INTEGER"],
+      ["retries", "INTEGER"],
+      ["prompt_chars", "INTEGER"],
+      ["output_chars", "INTEGER"],
+      ["session_file", "TEXT"],
+      ["async", "INTEGER"],
+    ],
+    createSql: `
+      CREATE TABLE IF NOT EXISTS tasks(
+        id TEXT PRIMARY KEY,
+        call_id TEXT,
+        ts INTEGER,
+        version TEXT,
+        pi_version TEXT,
+        idx INTEGER,
+        agent TEXT,
+        model TEXT,
+        thinking TEXT,
+        tools TEXT,
+        outcome TEXT,
+        failure_kind TEXT,
+        duration_ms INTEGER,
+        tokens INTEGER,
+        cost REAL,
+        tool_uses INTEGER,
+        retries INTEGER,
+        prompt_chars INTEGER,
+        output_chars INTEGER,
+        session_file TEXT,
+        async INTEGER
+      );
+    `,
+  },
+];
+
+function existingTableType(
+  db: DatabaseSync,
+  tableName: TelemetryTable["name"],
+): string | undefined {
+  const row = db
+    .prepare("SELECT type FROM sqlite_master WHERE name = ?")
+    .get(tableName) as { type?: unknown } | undefined;
+  return typeof row?.type === "string" ? row.type : undefined;
+}
+
+function existingTableColumns(
+  db: DatabaseSync,
+  tableName: TelemetryTable["name"],
+): Set<string> {
+  const rows = db
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all() as unknown as Array<{ name?: unknown }>;
+  return new Set(
+    rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
+  );
+}
+
+/**
+ * Create or repair the small telemetry schema as one transaction. The version
+ * marker is deliberately written last: an interrupted migration must leave a
+ * version-0 database that can be retried, not a version-1 database whose
+ * tables are only half present. Existing version-1 databases still pass
+ * through the same ensure/repair path so a process killed during an older
+ * migration can recover missing tables or columns.
+ */
 function initSchema(db: DatabaseSync): void {
-  const row = db.prepare("PRAGMA user_version").get() as
-    { user_version?: number } | undefined;
-  const currentVersion = row?.user_version ?? 0;
-  if (currentVersion >= 1) return;
+  let transactionStarted = false;
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
 
-  db.exec(`
-    PRAGMA user_version = 1;
+    const row = db.prepare("PRAGMA user_version").get() as
+      { user_version?: number } | undefined;
+    const currentVersion = row?.user_version ?? 0;
+    if (currentVersion > TELEMETRY_SCHEMA_VERSION) {
+      throw new Error(
+        `Unsupported telemetry schema version ${currentVersion}; expected at most ${TELEMETRY_SCHEMA_VERSION}`,
+      );
+    }
 
-    CREATE TABLE IF NOT EXISTS calls(
-      id TEXT PRIMARY KEY,
-      ts INTEGER,
-      version TEXT,
-      pi_version TEXT,
-      mode TEXT,
-      parent_model TEXT,
-      task_count INTEGER,
-      wall_ms INTEGER,
-      status TEXT,
-      total_tokens INTEGER,
-      total_cost REAL,
-      parent_session_file TEXT
-    );
+    for (const table of TELEMETRY_TABLES) {
+      const type = existingTableType(db, table.name);
+      if (type !== undefined && type !== "table") {
+        throw new Error(
+          `Telemetry object ${table.name} is ${type}, not a table`,
+        );
+      }
+      db.exec(table.createSql);
 
-    CREATE TABLE IF NOT EXISTS tasks(
-      id TEXT PRIMARY KEY,
-      call_id TEXT,
-      ts INTEGER,
-      version TEXT,
-      pi_version TEXT,
-      idx INTEGER,
-      agent TEXT,
-      model TEXT,
-      thinking TEXT,
-      tools TEXT,
-      outcome TEXT,
-      failure_kind TEXT,
-      duration_ms INTEGER,
-      tokens INTEGER,
-      cost REAL,
-      tool_uses INTEGER,
-      retries INTEGER,
-      prompt_chars INTEGER,
-      output_chars INTEGER,
-      session_file TEXT,
-      async INTEGER
-    );
-  `);
+      const columns = existingTableColumns(db, table.name);
+      for (const [name, definition] of table.columns) {
+        if (columns.has(name)) continue;
+        if (name === "id") {
+          throw new Error(
+            `Telemetry table ${table.name} is missing its id column`,
+          );
+        }
+        db.exec(`ALTER TABLE ${table.name} ADD COLUMN ${name} ${definition}`);
+      }
+    }
+
+    // Set the marker only after every table/column operation succeeded.
+    db.exec(`PRAGMA user_version = ${TELEMETRY_SCHEMA_VERSION}`);
+    db.exec("COMMIT");
+    transactionStarted = false;
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        db.exec("ROLLBACK");
+      } catch (rollbackError) {
+        console.error(
+          "[delegate] telemetry schema rollback failed",
+          rollbackError,
+        );
+      }
+    }
+    throw error;
+  }
 }
 
 class SqliteTelemetryBackend implements TelemetryBackend {
   private db: DatabaseSync;
   private insertCall: StatementSync;
   private insertTask: StatementSync;
+  private readonly onFailure: (operation: string, error: unknown) => void;
 
-  constructor(db: DatabaseSync) {
+  constructor(
+    db: DatabaseSync,
+    onFailure: (operation: string, error: unknown) => void,
+  ) {
     this.db = db;
+    this.onFailure = onFailure;
     this.insertCall = db.prepare(
       `INSERT OR REPLACE INTO calls(
         id, ts, version, pi_version, mode, parent_model, task_count,
@@ -229,7 +368,7 @@ class SqliteTelemetryBackend implements TelemetryBackend {
         record.parent_session_file ?? null,
       );
     } catch (error) {
-      console.error("[delegate] telemetry recordCall failed", error);
+      this.onFailure("recordCall", error);
     }
   }
 
@@ -259,27 +398,36 @@ class SqliteTelemetryBackend implements TelemetryBackend {
         record.async,
       );
     } catch (error) {
-      console.error("[delegate] telemetry recordTask failed", error);
+      this.onFailure("recordTask", error);
     }
   }
 
   close(): void {
     try {
       this.db.close();
-    } catch {
-      // close is best-effort
+    } catch (error) {
+      console.error("[delegate] telemetry database close failed", error);
     }
   }
 }
 
 class RecorderBackend implements TelemetryBackend {
-  constructor(private recorder: TelemetryRecorder) {}
+  private readonly recorder: TelemetryRecorder;
+  private readonly onFailure: (operation: string, error: unknown) => void;
+
+  constructor(
+    recorder: TelemetryRecorder,
+    onFailure: (operation: string, error: unknown) => void,
+  ) {
+    this.recorder = recorder;
+    this.onFailure = onFailure;
+  }
 
   recordCall(record: CallRecord): void {
     try {
       this.recorder.recordCall(record);
     } catch (error) {
-      console.error("[delegate] telemetry recorder recordCall failed", error);
+      this.onFailure("recordCall", error);
     }
   }
 
@@ -287,43 +435,89 @@ class RecorderBackend implements TelemetryBackend {
     try {
       this.recorder.recordTask(record);
     } catch (error) {
-      console.error("[delegate] telemetry recorder recordTask failed", error);
+      this.onFailure("recordTask", error);
     }
   }
 
   close(): void {}
 }
 
+function disableBackend(operation: string, error: unknown): void {
+  if (backendFailed) return;
+  backendFailed = true;
+  const failedBackend = backend;
+  backend = undefined;
+  try {
+    failedBackend?.close();
+  } catch (closeError) {
+    console.error("[delegate] telemetry backend close failed", closeError);
+  }
+  console.error(
+    `[delegate] telemetry ${operation} failed; disabling telemetry`,
+    error,
+  );
+}
+
 function openBackend(): TelemetryBackend | undefined {
   const config = getTelemetryConfig();
   if (config.enabled === false) return undefined;
+  if (backendFailed || telemetryClosed) return undefined;
   if (testingRecorder) {
-    return new RecorderBackend(testingRecorder);
+    return new RecorderBackend(testingRecorder, disableBackend);
   }
-  if (backendFailed) return undefined;
+
   if (!DatabaseSyncCtor) {
     backendFailed = true;
     return undefined;
   }
 
   const dbPath = config.dbPath ?? defaultDbPath();
+  let db: DatabaseSync | undefined;
   try {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    const db = new DatabaseSyncCtor(dbPath);
+    db = new DatabaseSyncCtor(dbPath, {
+      timeout: SQLITE_BUSY_TIMEOUT_MS,
+    });
+    // Set the timeout before any operation that can contend with another
+    // process. The constructor option covers the initial open; this pragma
+    // also makes the configured value observable and explicit.
+    db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
     db.exec("PRAGMA journal_mode = WAL;");
-    db.exec("PRAGMA busy_timeout = 5000;");
     initSchema(db);
-    return new SqliteTelemetryBackend(db);
+    return new SqliteTelemetryBackend(db, disableBackend);
   } catch (error) {
+    try {
+      db?.close();
+    } catch (closeError) {
+      console.error("[delegate] telemetry database close failed", closeError);
+    }
     backendFailed = true;
     console.error("[delegate] telemetry database failed to open", error);
     return undefined;
   }
 }
 
-function getBackend(): TelemetryBackend | undefined {
-  if (backend) return backend;
+function getBackend(generation?: number): TelemetryBackend | undefined {
+  if (telemetryClosed) return undefined;
+  if (generation !== undefined && generation !== telemetryGeneration) {
+    return undefined;
+  }
+  if (backend) {
+    if (backendGeneration !== telemetryGeneration) {
+      // A previous runtime left its handle open while its bounded shutdown
+      // drain timed out. Dispose that stale handle before opening this one.
+      const stale = backend;
+      backend = undefined;
+      backendGeneration = undefined;
+      stale.close();
+    } else if (generation !== undefined && backendGeneration !== generation) {
+      return undefined;
+    } else {
+      return backend;
+    }
+  }
   backend = openBackend();
+  if (backend) backendGeneration = telemetryGeneration;
   return backend;
 }
 
@@ -344,6 +538,8 @@ export interface CallSpanFinish {
 export interface CallSpan {
   readonly id: string;
   readonly startedAt: number;
+  /** Runtime generation captured at call creation; stale calls cannot write. */
+  readonly generation: number;
   /** Snapshot of the call row as it would be written at spawn. */
   baseRecord(): CallRecord;
   spawn(): void;
@@ -353,6 +549,7 @@ export interface CallSpan {
 class CallSpanImpl implements CallSpan {
   readonly id: string;
   readonly startedAt: number;
+  readonly generation = telemetryGeneration;
   private readonly input: CallSpanInput;
 
   constructor(input: CallSpanInput) {
@@ -379,13 +576,13 @@ class CallSpanImpl implements CallSpan {
   }
 
   spawn(): void {
-    const b = getBackend();
+    const b = getBackend(this.generation);
     if (!b) return;
     b.recordCall(this.baseRecord());
   }
 
   finish(finish: CallSpanFinish): void {
-    const b = getBackend();
+    const b = getBackend(this.generation);
     if (!b) return;
     const record = this.baseRecord();
     record.wall_ms = finish.wallMs;
@@ -400,14 +597,16 @@ export function beginCall(input: CallSpanInput): CallSpan {
   return new CallSpanImpl(input);
 }
 
-export function recordCall(record: CallRecord): void {
-  const b = getBackend();
+export function recordCall(record: CallRecord, generation?: number): void {
+  const b = getBackend(generation);
   if (!b) return;
   b.recordCall(record);
 }
 
 export interface TaskSpanInput {
   callId: string;
+  /** Runtime generation captured by the dispatch that owns this task. */
+  generation?: number;
   async: boolean;
   taskIndex: number;
   task: ResolvedTask;
@@ -424,7 +623,7 @@ function outcomeFromResult(result: TaskResult): string {
 }
 
 export function recordTask(input: TaskSpanInput): void {
-  const b = getBackend();
+  const b = getBackend(input.generation);
   if (!b) return;
 
   const { callId, async, taskIndex, task, progress, result, retries } = input;
@@ -454,12 +653,76 @@ export function recordTask(input: TaskSpanInput): void {
   b.recordTask(record);
 }
 
+/** Prevent this runtime's late workers from writing after a bounded shutdown
+ * drain. Invalidate the generation and close the old handle immediately: a
+ * later runtime must never inherit a backend that stale workers can reach.
+ * Returns false when a newer runtime already owns the lifecycle. */
+export function sealTelemetryWrites(expectedGeneration?: number): boolean {
+  if (
+    expectedGeneration !== undefined &&
+    expectedGeneration !== telemetryGeneration
+  ) {
+    return false;
+  }
+  telemetryGeneration++;
+  telemetryClosed = true;
+  const current = backend;
+  backend = undefined;
+  backendGeneration = undefined;
+  current?.close();
+  return true;
+}
+
+/** Close the current telemetry backend and prevent stale work from reopening
+ * it after the parent runtime starts shutting down. `expectedGeneration`
+ * prevents an old shutdown handler from closing a newer runtime's handle. */
+export function closeTelemetry(expectedGeneration?: number): void {
+  if (
+    expectedGeneration !== undefined &&
+    expectedGeneration !== telemetryGeneration
+  ) {
+    return;
+  }
+  telemetryClosed = true;
+  const current = backend;
+  backend = undefined;
+  backendGeneration = undefined;
+  current?.close();
+}
+
+/** Current runtime identity for lifecycle owners such as session_shutdown. */
+export function getTelemetryGeneration(): number {
+  return telemetryGeneration;
+}
+
+/** Mark the start of a fresh extension runtime after a reload. */
+export function prepareTelemetryForSession(): void {
+  if (!telemetryClosed) return;
+
+  // A timed-out old runtime may have left its handle open. Close it before
+  // advancing the generation so the old shutdown handler cannot close the new
+  // runtime's backend later.
+  const stale = backend;
+  backend = undefined;
+  backendGeneration = undefined;
+  stale?.close();
+
+  telemetryGeneration++;
+  telemetryClosed = false;
+}
+
 export function _setTelemetryForTesting(
   recorder: TelemetryRecorder | undefined,
 ): void {
+  if (backend) {
+    backend.close();
+    backend = undefined;
+    backendGeneration = undefined;
+  }
   testingRecorder = recorder;
-  backend = undefined;
   backendFailed = false;
+  telemetryGeneration++;
+  telemetryClosed = false;
 }
 
 export function _resetTelemetryForTesting(): void {
@@ -467,6 +730,9 @@ export function _resetTelemetryForTesting(): void {
   if (backend) {
     backend.close();
     backend = undefined;
+    backendGeneration = undefined;
   }
   backendFailed = false;
+  telemetryGeneration++;
+  telemetryClosed = false;
 }

@@ -15,7 +15,14 @@ import {
   _resetDelegateStatusForTesting,
   syncDelegateStatus,
 } from "./status.ts";
-import { ticketRegistry } from "./tickets.ts";
+import { cancelTicketForShutdown, ticketRegistry } from "./tickets.ts";
+import {
+  _resetTelemetryForTesting,
+  _setTelemetryForTesting,
+  beginCall,
+  type CallRecord,
+  type TaskRecord,
+} from "./telemetry.ts";
 import type { ResolvedTask, TaskDef, TaskProgress } from "./types.ts";
 
 interface FakeSession {
@@ -24,6 +31,7 @@ interface FakeSession {
   subscribe: () => () => void;
   prompt: () => Promise<void>;
   abort: () => Promise<void>;
+  dispose: () => void;
   isIdle: boolean;
   isCompacting: boolean;
   messages: unknown[];
@@ -50,6 +58,7 @@ function makeFakeSession(
     subscribe: () => () => {},
     prompt: async () => {},
     abort: async () => {},
+    dispose: () => {},
     isIdle: true,
     isCompacting: false,
     messages: [],
@@ -90,6 +99,7 @@ describe("dispatchSync touched-file overlap warning", () => {
     _setRunAgentSessionForTesting(undefined);
     _resetGlobalConcurrencyForTesting();
     _resetPoolForTesting();
+    _resetTelemetryForTesting();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -250,6 +260,96 @@ describe("dispatchSync touched-file overlap warning", () => {
     expect(result.details.progress[1]!.id).toBe("task-b");
     // Result arrays stay index-aligned; ids are per-entry, not keys.
     expect(result.details.results).toHaveLength(2);
+  });
+
+  test("shutdown records usage from a worker that settles after cancellation", async () => {
+    const calls: CallRecord[] = [];
+    const tasks: TaskRecord[] = [];
+    _setTelemetryForTesting({
+      recordCall: (record) => calls.push(record),
+      recordTask: (record) => tasks.push(record),
+    });
+
+    let workerEntered!: () => void;
+    let releaseWorker!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      workerEntered = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    _setRunAgentSessionForTesting(async () => {
+      workerEntered();
+      await release;
+      return {
+        output: "late result",
+        durationMs: 10,
+        tokens: 23,
+        usage: {
+          input: 10,
+          output: 13,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 23,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0.23,
+          },
+        },
+        touchedFiles: [],
+        attributedFiles: [],
+      } as any;
+    });
+
+    const task = setupTask("late-shutdown", "late", []);
+    const callSpan = beginCall({
+      parentModel: "model",
+      mode: "async",
+      taskCount: 1,
+    });
+    let deliveries = 0;
+    const acknowledgment = dispatchAsync({
+      pi: {
+        sendMessage: () => {
+          deliveries++;
+        },
+      } as any,
+      ctx: {
+        cwd: tmpDir,
+        modelRegistry: {} as any,
+        sessionManager: undefined,
+      },
+      tasks: [{ prompt: "late work" }] as TaskDef[],
+      resolved: [task.resolved],
+      progress: [task.progress],
+      parentModelId: "model",
+      callSpan,
+    });
+    const ticket = ticketRegistry.get(acknowledgment.details.ticketId!);
+    if (!ticket) throw new Error("async ticket was not registered");
+    const completion = ticket.completion;
+    if (!completion) throw new Error("async ticket has no completion promise");
+
+    // Ensure shutdown happens while the worker is inside the delayed run.
+    await entered;
+    cancelTicketForShutdown(ticket);
+    expect(calls.at(-1)?.status).toBe("cancelled");
+    expect(calls.at(-1)?.total_tokens).toBe(0);
+
+    // The completion handler must wait for this late result and rewrite the
+    // cancelled call row, but must not send a stale follow-up UI message.
+    releaseWorker();
+    await completion;
+
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.tokens).toBe(23);
+    expect(calls.at(-1)?.status).toBe("cancelled");
+    expect(calls.at(-1)?.total_tokens).toBe(23);
+    expect(calls.at(-1)?.total_cost).toBe(0.23);
+    expect(deliveries).toBe(0);
   });
 
   test("deadlineMs is measured from run start, not dispatch time", async () => {

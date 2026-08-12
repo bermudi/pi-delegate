@@ -1,5 +1,6 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
+import type { TaskResult } from "./types.ts";
 
 /** Snapshot of the cumulative session usage fields we read for delta accounting. */
 export interface SessionUsageSnapshot {
@@ -118,4 +119,22 @@ export function sumUsage(usages: readonly (Usage | undefined)[]): Usage {
     (total, usage) => (usage ? addUsage(total, usage) : total),
     emptyUsage(),
   );
+}
+
+/** Aggregate the completed result rows used by async call telemetry. */
+export function aggregateTaskResults(
+  results: readonly (TaskResult | undefined)[],
+): { totalTokens: number; totalCost: number } {
+  return results
+    .filter(
+      (result): result is TaskResult =>
+        result !== undefined && "touchedFiles" in result,
+    )
+    .reduce(
+      (total, result) => ({
+        totalTokens: total.totalTokens + result.tokens,
+        totalCost: total.totalCost + (result.usage?.cost?.total ?? 0),
+      }),
+      { totalTokens: 0, totalCost: 0 },
+    );
 }

@@ -1,10 +1,15 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   _setTelemetryForTesting,
   _resetTelemetryForTesting,
   beginCall,
+  sealTelemetryWrites,
   recordCall,
   recordTask,
   type CallRecord,
@@ -37,6 +42,94 @@ function makeRecorder(): {
 function loadRepoVersion(): string {
   const pkg = JSON.parse(fs.readFileSync("package.json", "utf-8"));
   return pkg.version as string;
+}
+
+const configModule = pathToFileURL(
+  path.join(import.meta.dir, "config.ts"),
+).href;
+const telemetryModule = pathToFileURL(
+  path.join(import.meta.dir, "telemetry.ts"),
+).href;
+
+function runNodeScript(
+  source: string,
+  dbPath: string,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.env.PI_DELEGATE_NODE_BINARY ?? "node",
+      ["--experimental-strip-types", "--input-type=module", "-e", source],
+      {
+        env: { ...process.env, PI_DELEGATE_TEST_DB: dbPath },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(`Node telemetry worker exited with ${code}: ${stderr}`),
+        );
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function telemetryWorkerSource(): string {
+  return `
+    import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
+    import { _resetTelemetryForTesting, beginCall } from ${JSON.stringify(telemetryModule)};
+    const dbPath = process.env.PI_DELEGATE_TEST_DB;
+    if (!dbPath) throw new Error("missing test database path");
+    _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath } });
+    _resetTelemetryForTesting();
+    const span = beginCall({ mode: "sync", taskCount: 1 });
+    span.spawn();
+    span.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+  `;
+}
+
+async function readNodeDatabase(dbPath: string): Promise<{
+  calls: number;
+  tasks: number;
+  userVersion: number;
+  journalMode: string;
+  piVersion: string | null;
+}> {
+  const result = await runNodeScript(
+    `
+      import { DatabaseSync } from "node:sqlite";
+      const dbPath = process.env.PI_DELEGATE_TEST_DB;
+      const db = new DatabaseSync(dbPath);
+      const one = (sql) => db.prepare(sql).get();
+      console.log(JSON.stringify({
+        calls: one("SELECT count(*) AS n FROM calls").n,
+        tasks: one("SELECT count(*) AS n FROM tasks").n,
+        userVersion: one("PRAGMA user_version").user_version,
+        journalMode: one("PRAGMA journal_mode").journal_mode,
+        piVersion: one("SELECT pi_version FROM calls LIMIT 1").pi_version,
+      }));
+      db.close();
+    `,
+    dbPath,
+  );
+  return JSON.parse(result.stdout.trim()) as {
+    calls: number;
+    tasks: number;
+    userVersion: number;
+    journalMode: string;
+    piVersion: string | null;
+  };
 }
 
 describe("telemetry", () => {
@@ -310,6 +403,118 @@ describe("telemetry", () => {
 
     expect(calls).toHaveLength(0);
     expect(tasks).toHaveLength(0);
+  });
+
+  test("includes the installed Pi version on rows", () => {
+    const { calls, recorder } = makeRecorder();
+    _setTelemetryForTesting(recorder);
+
+    beginCall({ mode: "sync", taskCount: 1 }).spawn();
+    expect(calls[0]!.pi_version).toBe(piCodingAgent.VERSION);
+  });
+
+  test(
+    "Node SQLite backend records rows and repairs an incomplete v1 schema",
+    { timeout: 15_000 },
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-node-"),
+      );
+      const dbPath = path.join(dir, "usage.db");
+      try {
+        await runNodeScript(
+          `
+          import { DatabaseSync } from "node:sqlite";
+          const db = new DatabaseSync(process.env.PI_DELEGATE_TEST_DB, { timeout: 5000 });
+          db.exec("PRAGMA user_version = 1; CREATE TABLE calls(id TEXT PRIMARY KEY);");
+          db.close();
+        `,
+          dbPath,
+        );
+        await runNodeScript(telemetryWorkerSource(), dbPath);
+        await expect(readNodeDatabase(dbPath)).resolves.toEqual({
+          calls: 1,
+          tasks: 0,
+          userVersion: 1,
+          journalMode: "wal",
+          piVersion: piCodingAgent.VERSION,
+        });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
+    "Node SQLite backend survives simultaneous first opens",
+    { timeout: 15_000 },
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-race-"),
+      );
+      const dbPath = path.join(dir, "usage.db");
+      try {
+        await Promise.all(
+          Array.from({ length: 8 }, () =>
+            runNodeScript(telemetryWorkerSource(), dbPath),
+          ),
+        );
+        await expect(readNodeDatabase(dbPath)).resolves.toEqual({
+          calls: 8,
+          tasks: 0,
+          userVersion: 1,
+          journalMode: "wal",
+          piVersion: piCodingAgent.VERSION,
+        });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("a recorder write failure disables telemetry after the first attempt", () => {
+    let attempts = 0;
+    _setTelemetryForTesting({
+      recordCall: () => {
+        attempts += 1;
+        throw new Error("test telemetry write failure");
+      },
+      recordTask: () => {},
+    });
+
+    const span = beginCall({ mode: "sync", taskCount: 1 });
+    expect(() => span.spawn()).not.toThrow();
+    expect(() =>
+      span.finish({
+        status: "success",
+        totalTokens: 1,
+        totalCost: 0,
+        wallMs: 1,
+      }),
+    ).not.toThrow();
+    expect(attempts).toBe(1);
+  });
+
+  test("stale call spans cannot write after a new runtime starts", () => {
+    const old = makeRecorder();
+    _setTelemetryForTesting(old.recorder);
+    const oldSpan = beginCall({ mode: "async", taskCount: 1 });
+    oldSpan.spawn();
+    expect(old.calls).toHaveLength(1);
+
+    sealTelemetryWrites();
+    const current = makeRecorder();
+    _setTelemetryForTesting(current.recorder);
+    oldSpan.finish({
+      status: "cancelled",
+      totalTokens: 99,
+      totalCost: 0.99,
+      wallMs: 10,
+    });
+    expect(current.calls).toHaveLength(0);
+
+    beginCall({ mode: "sync", taskCount: 0 }).spawn();
+    expect(current.calls).toHaveLength(1);
   });
 
   test("includes delegate package version on rows", () => {

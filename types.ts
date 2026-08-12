@@ -93,6 +93,10 @@ export interface AsyncTicket {
   callStartedAt?: number;
   /** Snapshot of the call row at spawn, used to write the cancelled/settled row. */
   callRecord?: CallRecord;
+  /** Runtime generation for rejecting shutdown writes from stale tickets. */
+  telemetryGeneration?: number;
+  /** Resolves after every async worker has settled, including shutdown aborts. */
+  completion?: Promise<void>;
 }
 
 /** Live parent settings captured when a delegate call starts. The built-in
@@ -254,6 +258,8 @@ export interface TaskRunEnv {
   onStatusChange?: () => void;
   /** Telemetry call id for this dispatch. undefined when telemetry is disabled or not started. */
   telemetryCallId?: string;
+  /** Runtime generation for rejecting writes from a stale shutdown worker. */
+  telemetryGeneration?: number;
   /** Whether this task is part of an async ticket. */
   async?: boolean;
 }

@@ -1,6 +1,12 @@
 import { describe, expect, test, afterEach, mock } from "bun:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { cancelTicketForShutdown, ticketRegistry } from "./tickets.ts";
+import {
+  _resetTelemetryForTesting,
+  _setTelemetryForTesting,
+  type CallRecord,
+  type TelemetryRecorder,
+} from "./telemetry.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import {
   _resetDelegateStatusForTesting,
@@ -97,6 +103,7 @@ afterEach(() => {
   ticketRegistry.clear();
   _resetDelegateStatusForTesting();
   resetLeafTracking();
+  _resetTelemetryForTesting();
 });
 
 // ── Summary + status text ───────────────────────────────────────────────────
@@ -428,6 +435,63 @@ describe("session teardown", () => {
     const { ctx, calls } = mkCtx();
     syncDelegateStatus(ctx);
     expect(calls.setStatus).toEqual(["⏳ 1 subagent · a"]);
+  });
+
+  test("shutdown cancellation preserves completed task usage", () => {
+    const calls: CallRecord[] = [];
+    const recorder: TelemetryRecorder = {
+      recordCall: (record) => calls.push(record),
+      recordTask: () => {},
+    };
+    _setTelemetryForTesting(recorder);
+
+    const ticket = mkTicket("usage-shutdown", {
+      callStartedAt: Date.now() - 100,
+      callRecord: {
+        id: "call-usage-shutdown",
+        ts: Date.now() - 100,
+        version: "delegate",
+        pi_version: "pi",
+        mode: "async",
+        parent_model: "model",
+        task_count: 2,
+        wall_ms: 0,
+        status: "running",
+        total_tokens: 0,
+        total_cost: 0,
+        parent_session_file: undefined,
+      },
+      results: [
+        {
+          agent: "a",
+          output: "done",
+          durationMs: 10,
+          tokens: 12,
+          usage: {
+            input: 5,
+            output: 7,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 12,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0.12,
+            },
+          },
+          touchedFiles: [],
+        },
+        undefined,
+      ],
+    });
+    cancelTicketForShutdown(ticket);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.status).toBe("cancelled");
+    expect(calls[0]!.total_tokens).toBe(12);
+    expect(calls[0]!.total_cost).toBe(0.12);
   });
 
   test("cancelTicketForShutdown flips running → cancelled, never via cancelling", () => {

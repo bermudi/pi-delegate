@@ -15,6 +15,45 @@ export interface TelemetryConfig {
   dbPath?: string;
 }
 
+const DEFAULT_TELEMETRY_CONFIG: TelemetryConfig = {
+  enabled: true,
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Validate the user-editable telemetry block at its boundary. An explicitly
+ * malformed block disables telemetry rather than silently turning it on with
+ * the default database path. Missing telemetry is different: it means the
+ * user did not configure the feature, so the default remains enabled.
+ */
+export function normalizeTelemetryConfig(raw: unknown): TelemetryConfig {
+  if (raw === undefined) return { ...DEFAULT_TELEMETRY_CONFIG };
+  if (!isRecord(raw)) return { enabled: false };
+
+  const hasEnabled = Object.prototype.hasOwnProperty.call(raw, "enabled");
+  const hasDbPath = Object.prototype.hasOwnProperty.call(raw, "dbPath");
+  const enabled = raw.enabled;
+  const dbPath = raw.dbPath;
+
+  if (hasEnabled && typeof enabled !== "boolean") {
+    return { enabled: false };
+  }
+  if (hasDbPath && (typeof dbPath !== "string" || dbPath.trim().length === 0)) {
+    return { enabled: false };
+  }
+
+  const normalizedEnabled =
+    typeof enabled === "boolean" ? enabled : DEFAULT_TELEMETRY_CONFIG.enabled;
+  const normalizedDbPath = typeof dbPath === "string" ? dbPath : undefined;
+  return {
+    enabled: normalizedEnabled,
+    ...(normalizedDbPath === undefined ? {} : { dbPath: normalizedDbPath }),
+  };
+}
+
 export interface DelegateConfig {
   agent: {
     /** Global default model for all agent types. */
@@ -153,10 +192,7 @@ export function loadDelegateConfig(): DelegateConfig {
       },
       retry: { ...DEFAULT_DELEGATE_CONFIG.retry, ...(parsed.retry ?? {}) },
       providerExtensions: resolveProviderExtensions(parsed.providerExtensions),
-      telemetry: {
-        ...DEFAULT_DELEGATE_CONFIG.telemetry,
-        ...(parsed.telemetry ?? {}),
-      },
+      telemetry: normalizeTelemetryConfig(parsed.telemetry),
       output: { ...DEFAULT_DELEGATE_CONFIG.output, ...(parsed.output ?? {}) },
     } as DelegateConfig;
   } catch {
@@ -220,10 +256,7 @@ export function _setDelegateConfigForTesting(
       ...(config.retry ?? {}),
     },
     providerExtensions: resolveProviderExtensions(config.providerExtensions),
-    telemetry: {
-      ...DEFAULT_DELEGATE_CONFIG.telemetry,
-      ...(config.telemetry ?? {}),
-    },
+    telemetry: normalizeTelemetryConfig(config.telemetry),
     output: {
       ...DEFAULT_DELEGATE_CONFIG.output,
       ...(config.output ?? {}),
@@ -382,8 +415,5 @@ export function resolveModelSpec(options: {
 export function getTelemetryConfig(
   config: DelegateConfig = __delegateConfig,
 ): TelemetryConfig {
-  return {
-    ...DEFAULT_DELEGATE_CONFIG.telemetry,
-    ...config.telemetry,
-  };
+  return normalizeTelemetryConfig(config.telemetry);
 }

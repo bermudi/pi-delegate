@@ -24,7 +24,7 @@ import {
 import { isCrossLeafTicket } from "./leaf.ts";
 import { renderOutputForPoll } from "./spill.ts";
 import { scheduleDeadline } from "./timer.ts";
-import { emptyUsage } from "./usage.ts";
+import { aggregateTaskResults, emptyUsage } from "./usage.ts";
 import { recordCall } from "./telemetry.ts";
 import type {
   AsyncTicket,
@@ -127,13 +127,17 @@ export function cancelTicketForShutdown(ticket: AsyncTicket): void {
   syncTicketBusyIndex(ticket);
   settleTicketWaiters(ticket);
   if (ticket.callRecord) {
-    recordCall({
-      ...ticket.callRecord,
-      status: "cancelled",
-      wall_ms: ticket.completedAt - (ticket.callStartedAt ?? ticket.created),
-      total_tokens: 0,
-      total_cost: 0,
-    });
+    const { totalTokens, totalCost } = aggregateTaskResults(ticket.results);
+    recordCall(
+      {
+        ...ticket.callRecord,
+        status: "cancelled",
+        wall_ms: ticket.completedAt - (ticket.callStartedAt ?? ticket.created),
+        total_tokens: totalTokens,
+        total_cost: totalCost,
+      },
+      ticket.telemetryGeneration,
+    );
   }
 }
 
