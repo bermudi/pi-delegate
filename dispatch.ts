@@ -24,6 +24,7 @@ import {
 import { validateDelegateOperation } from "./schema.ts";
 import { notifyCrossLeafDelivery, syncDelegateStatus } from "./status.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
+import type { CallSpan } from "./telemetry.ts";
 import type {
   AgentConfig,
   AsyncTicket,
@@ -113,6 +114,7 @@ export interface AsyncDispatchInput {
   resolved: ResolvedTask[];
   progress: TaskProgress[];
   parentModelId: string | undefined;
+  callSpan?: CallSpan;
 }
 
 /** Inputs needed by the sync (blocking) dispatch path. */
@@ -124,6 +126,7 @@ export interface SyncDispatchInput {
   parentModelId: string | undefined;
   signal: AbortSignal | undefined;
   fire: () => void;
+  callSpan?: CallSpan;
 }
 
 /** Inputs for the normal task-validation, resolution, and dispatch path. */
@@ -136,6 +139,7 @@ export interface DelegateDispatchInput {
   parentDefaults: ParentAgentDefaults;
   signal: AbortSignal | undefined;
   onUpdate: AgentToolUpdateCallback<DelegateDetails> | undefined;
+  callSpan?: CallSpan;
 }
 
 /** Validate, resolve, and dispatch a non-short-circuit delegate operation. */
@@ -151,11 +155,20 @@ export async function dispatchDelegate(
     parentDefaults,
     signal,
     onUpdate,
+    callSpan,
   } = input;
   const tasks = params.tasks ?? [];
 
   const validationError = validateTasks(tasks, agents, parentModelId);
-  if (validationError) return validationError;
+  if (validationError) {
+    callSpan?.finish({
+      status: "failed",
+      totalTokens: 0,
+      totalCost: 0,
+      wallMs: Date.now() - callSpan.startedAt,
+    });
+    return validationError;
+  }
 
   const resolved = resolveTasks(tasks, ctx, agents, parentDefaults);
   const progress = initProgress(resolved);
@@ -176,6 +189,7 @@ export async function dispatchDelegate(
       resolved,
       progress,
       parentModelId,
+      callSpan,
     });
   }
 
@@ -187,6 +201,7 @@ export async function dispatchDelegate(
     parentModelId,
     signal,
     fire,
+    callSpan,
   });
 }
 
@@ -199,17 +214,45 @@ function finishTicketDelivery(pi: ExtensionAPI, ticket: AsyncTicket): void {
   }
 }
 
+function isTelemetryTaskResult(r: TaskResult | undefined): r is TaskResult {
+  return r !== undefined && "touchedFiles" in r;
+}
+
+function settleAsyncCall(
+  ticket: AsyncTicket,
+  callSpan: CallSpan | undefined,
+): void {
+  if (!callSpan) return;
+  const completed = ticket.results.filter(isTelemetryTaskResult);
+  const totalTokens = completed.reduce((sum, r) => sum + r.tokens, 0);
+  const totalCost = completed.reduce((sum, r) => sum + r.usage.cost.total, 0);
+  const wallMs = (ticket.completedAt ?? Date.now()) - callSpan.startedAt;
+  const status =
+    ticket.status === "done"
+      ? "done"
+      : ticket.status === "cancelled"
+        ? "cancelled"
+        : "failed";
+  callSpan.finish({ status, totalTokens, totalCost, wallMs });
+}
+
 /** Fire-and-forget background execution. Registers an `AsyncTicket`, kicks off
  *  the concurrent run, and returns the ticket acknowledgment immediately.
  *  Results are delivered via `deliverTicketResults` when all tasks settle. */
 export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
-  const { pi, ctx, tasks, resolved, progress, parentModelId } = input;
+  const { pi, ctx, tasks, resolved, progress, parentModelId, callSpan } = input;
 
   sweepTickets();
   const runningCount = [...ticketRegistry.values()].filter(
     (t) => t.status === "running" || t.status === "cancelling",
   ).length;
   if (runningCount >= getMaxAsyncTickets()) {
+    callSpan?.finish({
+      status: "failed",
+      totalTokens: 0,
+      totalCost: 0,
+      wallMs: Date.now() - (callSpan?.startedAt ?? Date.now()),
+    });
     return {
       content: [
         {
@@ -236,8 +279,12 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     // Leaf affinity for delivery: a ticket that outlives a /tree navigation
     // must not wake the agent on the branch the user moved to (issue #30).
     spawnLeafId: getCurrentLeafId(),
+    callId: callSpan?.id,
+    callStartedAt: callSpan?.startedAt,
+    callRecord: callSpan ? { ...callSpan.baseRecord() } : undefined,
   };
   ticketRegistry.set(ticketId, ticket);
+  callSpan?.spawn();
   // Footer visibility for the new background work (see status.ts). Uses the
   // ctx cached from the dispatch path in extension.ts — DelegateToolCtx is
   // the intentionally narrowed surface and does not carry `ui`.
@@ -254,6 +301,8 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     parentSessionManager: ctx.sessionManager,
     ticketId,
     delegateStartedAt: ticket.created,
+    telemetryCallId: callSpan?.id,
+    async: true,
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
       notifyWaiters(ticket);
@@ -309,6 +358,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         syncTicketBusyIndex(ticket);
       }
       syncDelegateStatus();
+      settleAsyncCall(ticket, callSpan);
       finishTicketDelivery(pi, ticket);
     })
     .catch((err) => {
@@ -324,6 +374,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       ticket.completedAt = Date.now();
       syncTicketBusyIndex(ticket);
       syncDelegateStatus();
+      settleAsyncCall(ticket, callSpan);
       finishTicketDelivery(pi, ticket);
     });
 
@@ -357,7 +408,16 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
 export async function dispatchSync(
   input: SyncDispatchInput,
 ): Promise<DelegateToolResult> {
-  const { ctx, tasks, resolved, progress, parentModelId, signal, fire } = input;
+  const {
+    ctx,
+    tasks,
+    resolved,
+    progress,
+    parentModelId,
+    signal,
+    fire,
+    callSpan,
+  } = input;
 
   const startedAt = Date.now();
   const syncEnv: TaskRunEnv = {
@@ -366,6 +426,8 @@ export async function dispatchSync(
     parentSessionManager: ctx.sessionManager,
     ticketId: undefined,
     delegateStartedAt: startedAt,
+    telemetryCallId: callSpan?.id,
+    async: false,
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
       fire();
@@ -400,6 +462,19 @@ export async function dispatchSync(
     findTouchedOverlaps(finalResults),
   );
   if (overlapWarning) parts.push("", overlapWarning);
+
+  const status = finalResults.some((r) => r.error) ? "failed" : "success";
+  const totalTokens = finalResults.reduce((sum, r) => sum + r.tokens, 0);
+  const totalCost = finalResults.reduce(
+    (sum, r) => sum + r.usage.cost.total,
+    0,
+  );
+  callSpan?.finish({
+    status,
+    totalTokens,
+    totalCost,
+    wallMs: Date.now() - callSpan.startedAt,
+  });
 
   return {
     content: [{ type: "text", text: parts.join("\n\n") }],

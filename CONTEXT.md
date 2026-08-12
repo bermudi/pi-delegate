@@ -67,3 +67,39 @@ same session, so a live ticket survives it; delivering with `triggerTurn` would
 then wake the agent on a branch that never asked for the work. A cross-leaf
 ticket is delivered with `deliverAs: "nextTurn"` and announced to the human
 instead.
+
+## Telemetry
+
+**Telemetry call span** — one row in `calls` per `execute()` return path. Created
+in `extension.ts` and finished by the dispatch/short-circuit path. Sync calls
+write a single terminal row; async calls write a spawn row (`status='running'`)
+that is updated when the ticket settles (or cancelled on shutdown).
+
+**Telemetry task row** — one row in `tasks` per completed `runResolvedTask`.
+Written at the final `finishTask()` in `lifecycle.ts` after `failureKind`,
+duration, tokens, and retries are settled. Never contains prompt/output text;
+only `prompt_chars` / `output_chars` and a `session_file` pointer to the
+subagent `.jsonl`.
+
+The SQLite store is in `~/.pi/agent/delegate-usage.db` by default (overridable
+via `delegate.json` `telemetry.dbPath`), uses WAL mode with a 5s busy timeout,
+and is fail-open: any write failure disables the backend for the process.
+`node:sqlite` is not available under Bun, so tests always inject the in-memory
+recorder via `_setTelemetryForTesting`. Example queries:
+
+```sql
+-- success rate by version
+SELECT version, ROUND(SUM(outcome='success')*100.0/COUNT(*),1) pct, COUNT(*) n
+FROM tasks GROUP BY version ORDER BY MAX(ts) DESC;
+
+-- failure-kind breakdown by version
+SELECT version, failure_kind, COUNT(*) FROM tasks
+WHERE outcome='failed' GROUP BY version, failure_kind;
+
+-- per-model stall / retry behavior
+SELECT model, COUNT(*), SUM(failure_kind='stalled') stalls, AVG(retries)
+FROM tasks GROUP BY model;
+
+-- token / cost trend by version
+SELECT version, SUM(tokens), SUM(cost) FROM tasks GROUP BY version;
+```

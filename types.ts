@@ -12,6 +12,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
 import type { delegateArgumentsSchema } from "./schema.ts";
+import type { CallRecord } from "./telemetry.ts";
 
 export interface AgentConfig {
   name: string;
@@ -86,6 +87,12 @@ export interface AsyncTicket {
   spawnLeafId?: string | null;
   /** Active blocking waiters. Resolved by terminal delivery or timeout/abort. */
   waiters?: TicketWaiter[];
+  /** Telemetry call span id attached to this async ticket. */
+  callId?: string;
+  /** Telemetry call span start timestamp for accurate wall-time on cancellation. */
+  callStartedAt?: number;
+  /** Snapshot of the call row at spawn, used to write the cancelled/settled row. */
+  callRecord?: CallRecord;
 }
 
 /** Live parent settings captured when a delegate call starts. The built-in
@@ -245,6 +252,10 @@ export interface TaskRunEnv {
   onProgress: (p: TaskProgress, u: AgentProgressUpdate) => void;
   /** Called after every TaskProgress mutation (early-returns, completion). Sync uses this to fire onUpdate. */
   onStatusChange?: () => void;
+  /** Telemetry call id for this dispatch. undefined when telemetry is disabled or not started. */
+  telemetryCallId?: string;
+  /** Whether this task is part of an async ticket. */
+  async?: boolean;
 }
 
 /** Structural subset of Pi's `ExtensionContext` used by delegate's

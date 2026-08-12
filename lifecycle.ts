@@ -27,6 +27,7 @@ import { resolveCwd, validateResumeFromPath } from "./utils.ts";
 import { getWholeTaskMaxRetries, getWholeTaskBaseDelayMs } from "./config.ts";
 import { addUsage, emptyUsage } from "./usage.ts";
 import { scheduleDeadline } from "./timer.ts";
+import { recordTask } from "./telemetry.ts";
 
 /** Internal seam for lifecycle-level tests without replacing session ownership. */
 type RunAgentSession = typeof runAgentSession;
@@ -187,8 +188,21 @@ function finishTask(
   env: TaskRunEnv,
   p: TaskProgress,
   r: TaskResult,
+  task: ResolvedTask,
+  retries = 0,
 ): TaskResult {
   updateProgressFromResult(p, r);
+  if (env.telemetryCallId) {
+    recordTask({
+      callId: env.telemetryCallId,
+      async: env.async ?? false,
+      taskIndex: p.index,
+      task,
+      progress: p,
+      result: r,
+      retries,
+    });
+  }
   env.onStatusChange?.();
   return r;
 }
@@ -553,7 +567,7 @@ async function runResolvedTaskUnlocked(
   try {
     // ── Aborted before we started? ───────────────────────────────────
     if (env.signal?.aborted) {
-      return finishTask(env, p, failTask(task, "Aborted"));
+      return finishTask(env, p, failTask(task, "Aborted"), task);
     }
 
     // ── Session busy guard (defense-in-depth) ────────────────────────
@@ -563,7 +577,7 @@ async function runResolvedTaskUnlocked(
       const busyTicketId = isSessionBusy(task.sessionId);
       if (busyTicketId && busyTicketId !== env.ticketId) {
         const msg = `Session '${task.sessionId}' is already in use by ticket ${busyTicketId}. Each session can only handle one task at a time.`;
-        return finishTask(env, p, failTask(task, msg));
+        return finishTask(env, p, failTask(task, msg), task);
       }
     }
 
@@ -577,6 +591,7 @@ async function runResolvedTaskUnlocked(
           env,
           p,
           failTask(task, "sessionAction='close' requires sessionId."),
+          task,
         );
       }
       // The per-session lock for action-based operations is already held by the
@@ -593,6 +608,7 @@ async function runResolvedTaskUnlocked(
             : `Session '${task.sessionId}' not found.`,
           Date.now() - env.delegateStartedAt,
         ),
+        task,
       );
     }
 
@@ -605,6 +621,7 @@ async function runResolvedTaskUnlocked(
           `Active sessions:\n${pool.listPooledAgents().join("\n")}`,
           Date.now() - env.delegateStartedAt,
         ),
+        task,
       );
     }
 
@@ -821,16 +838,22 @@ async function runResolvedTaskUnlocked(
         task,
         err instanceof Error ? err.message : String(err),
       );
-      return finishTask(env, p, {
-        ...failure,
-        durationMs: Math.max(failure.durationMs, Date.now() - taskStartedAt),
-        tokens: accumulatedUsage.totalTokens,
-        usage: accumulatedUsage,
-      });
+      return finishTask(
+        env,
+        p,
+        {
+          ...failure,
+          durationMs: Math.max(failure.durationMs, Date.now() - taskStartedAt),
+          tokens: accumulatedUsage.totalTokens,
+          usage: accumulatedUsage,
+        },
+        task,
+      );
     }
 
     const maxRetries = resolvedWholeTaskMaxRetries();
     const baseDelayMs = resolvedWholeTaskBaseDelayMs();
+    let retriesExecuted = 0;
     for (
       let retry = 0;
       retry < maxRetries && canRetryWholeTask(task, result, hasBashExecution);
@@ -864,6 +887,7 @@ async function runResolvedTaskUnlocked(
       p.error = undefined;
       p.failureKind = undefined;
       env.onStatusChange?.();
+      retriesExecuted++;
       try {
         result = await runAttempt();
       } catch (err) {
@@ -881,12 +905,18 @@ async function runResolvedTaskUnlocked(
       }
     }
 
-    return finishTask(env, p, {
-      ...result,
-      durationMs: Math.max(result.durationMs, Date.now() - taskStartedAt),
-      tokens: Math.max(cumulativeTokens, accumulatedUsage.totalTokens),
-      usage: accumulatedUsage,
-    });
+    return finishTask(
+      env,
+      p,
+      {
+        ...result,
+        durationMs: Math.max(result.durationMs, Date.now() - taskStartedAt),
+        tokens: Math.max(cumulativeTokens, accumulatedUsage.totalTokens),
+        usage: accumulatedUsage,
+      },
+      task,
+      retriesExecuted,
+    );
   } catch (err) {
     // Any acquired session is released by runAttempt's finally before an
     // exception reaches this boundary. This outer catch handles unexpected
@@ -896,6 +926,7 @@ async function runResolvedTaskUnlocked(
       env,
       p,
       failTask(task, err instanceof Error ? err.message : String(err)),
+      task,
     );
   }
 }

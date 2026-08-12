@@ -8,6 +8,13 @@ import {
   OUTPUT_SPILL_THRESHOLD_CHARS,
 } from "./constants.ts";
 
+export interface TelemetryConfig {
+  /** Whether to record delegate calls to the local SQLite store. Default true. */
+  enabled?: boolean;
+  /** Path to the SQLite database. Defaults to `~/.pi/agent/delegate-usage.db`. */
+  dbPath?: string;
+}
+
 export interface DelegateConfig {
   agent: {
     /** Global default model for all agent types. */
@@ -41,6 +48,8 @@ export interface DelegateConfig {
   providerExtensions?: {
     [provider: string]: readonly string[];
   };
+  /** Local SQLite telemetry for usage/health analytics. See `telemetry.ts`. */
+  telemetry?: TelemetryConfig;
   /** LLM-facing output bounding: over-threshold final output is spilled to a
    *  temp file with a tail kept in-context. See `spill.ts`. */
   output?: {
@@ -108,6 +117,9 @@ const DEFAULT_DELEGATE_CONFIG: DelegateConfig = {
     wholeTaskBaseDelayMs: 1_000,
   },
   providerExtensions: DEFAULT_PROVIDER_EXTENSIONS,
+  telemetry: {
+    enabled: true,
+  },
   output: {
     spillThresholdChars: OUTPUT_SPILL_THRESHOLD_CHARS,
     spillTailChars: OUTPUT_SPILL_TAIL_CHARS,
@@ -119,6 +131,7 @@ let __delegateConfig: DelegateConfig = {
   ...DEFAULT_DELEGATE_CONFIG,
   agent: { ...DEFAULT_DELEGATE_CONFIG.agent },
   concurrency: { ...DEFAULT_DELEGATE_CONFIG.concurrency },
+  telemetry: { ...DEFAULT_DELEGATE_CONFIG.telemetry },
 };
 let stallTimeoutOverrideForTesting: number | undefined;
 
@@ -140,6 +153,10 @@ export function loadDelegateConfig(): DelegateConfig {
       },
       retry: { ...DEFAULT_DELEGATE_CONFIG.retry, ...(parsed.retry ?? {}) },
       providerExtensions: resolveProviderExtensions(parsed.providerExtensions),
+      telemetry: {
+        ...DEFAULT_DELEGATE_CONFIG.telemetry,
+        ...(parsed.telemetry ?? {}),
+      },
       output: { ...DEFAULT_DELEGATE_CONFIG.output, ...(parsed.output ?? {}) },
     } as DelegateConfig;
   } catch {
@@ -203,6 +220,10 @@ export function _setDelegateConfigForTesting(
       ...(config.retry ?? {}),
     },
     providerExtensions: resolveProviderExtensions(config.providerExtensions),
+    telemetry: {
+      ...DEFAULT_DELEGATE_CONFIG.telemetry,
+      ...(config.telemetry ?? {}),
+    },
     output: {
       ...DEFAULT_DELEGATE_CONFIG.output,
       ...(config.output ?? {}),
@@ -355,4 +376,14 @@ export function resolveModelSpec(options: {
   return candidates.find(
     (v): v is string => typeof v === "string" && v.length > 0,
   );
+}
+
+/** Get the configured telemetry settings. */
+export function getTelemetryConfig(
+  config: DelegateConfig = __delegateConfig,
+): TelemetryConfig {
+  return {
+    ...DEFAULT_DELEGATE_CONFIG.telemetry,
+    ...config.telemetry,
+  };
 }
