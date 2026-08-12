@@ -195,6 +195,7 @@ function finishTask(
   if (env.telemetryCallId) {
     recordTask({
       callId: env.telemetryCallId,
+      generation: env.telemetryGeneration,
       async: env.async ?? false,
       taskIndex: p.index,
       task,

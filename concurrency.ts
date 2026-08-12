@@ -115,7 +115,17 @@ async function mapConcurrent<T, R>(
       results[i] = await fn(items[i]!, i);
     }
   };
-  await Promise.all(Array.from({ length: limit }, () => worker()));
+  // Promise.all would reject as soon as one task throws while sibling workers
+  // are still unwinding. Wait for every worker first so callers can safely use
+  // this promise as the batch-settled barrier (notably shutdown telemetry).
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: limit }, () => worker()),
+  );
+  const rejection = outcomes.find(
+    (outcome): outcome is PromiseRejectedResult =>
+      outcome.status === "rejected",
+  );
+  if (rejection) throw rejection.reason;
   return results;
 }
 
@@ -155,8 +165,10 @@ export async function mapConcurrentByModel<T, R>(
     group.indices.push(i);
   }
 
-  // Run all groups in parallel, each with its own concurrency limit + global cap
-  await Promise.all(
+  // Run all groups in parallel, each with its own concurrency limit + global cap.
+  // As above, wait for every group before surfacing an unexpected rejection so
+  // a late sibling cannot mutate a ticket after its completion barrier resolves.
+  const outcomes = await Promise.allSettled(
     [...groups.entries()].map(([, group]) => {
       const groupItems = group.indices.map((i) => items[i]!);
       return mapConcurrent(
@@ -185,5 +197,10 @@ export async function mapConcurrentByModel<T, R>(
       );
     }),
   );
+  const rejection = outcomes.find(
+    (outcome): outcome is PromiseRejectedResult =>
+      outcome.status === "rejected",
+  );
+  if (rejection) throw rejection.reason;
   return results;
 }

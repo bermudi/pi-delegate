@@ -92,6 +92,7 @@ export type { ActiveTicketSummary } from "./status.ts";
 export { getHostDeps, invalidateHostDepsCache } from "./host.ts";
 export type { HostDeps, HostDepsOptions } from "./host.ts";
 export {
+  aggregateTaskResults,
   emptyUsage,
   snapshotSessionUsage,
   usageDelta,

@@ -4,6 +4,7 @@ import {
   _setDelegateConfigForTesting,
   getSubagentProviderExtensionMap,
   getSubagentProviderExtensionsForProvider,
+  getTelemetryConfig,
   type DelegateConfig,
 } from "./config.ts";
 
@@ -97,6 +98,35 @@ describe("providerExtensions normalization (via public seam)", () => {
     expect(getSubagentProviderExtensionMap()["openai-codex"]).toEqual([
       "npm:@ogulcancelik/pi-codex-compaction",
     ]);
+  });
+});
+
+describe("telemetry config normalization", () => {
+  beforeEach(() => _resetDelegateConfigForTesting());
+  afterEach(() => _resetDelegateConfigForTesting());
+
+  test("rejects string booleans instead of treating them as enabled", () => {
+    _setDelegateConfigForTesting({
+      telemetry: { enabled: "false" } as unknown as { enabled: boolean },
+    });
+    expect(getTelemetryConfig().enabled).toBe(false);
+  });
+
+  test("rejects malformed telemetry blocks", () => {
+    _setDelegateConfigForTesting({
+      telemetry: "false" as unknown as { enabled: boolean },
+    });
+    expect(getTelemetryConfig().enabled).toBe(false);
+  });
+
+  test("keeps valid telemetry settings", () => {
+    _setDelegateConfigForTesting({
+      telemetry: { enabled: true, dbPath: " /tmp/delegate.db " },
+    });
+    expect(getTelemetryConfig()).toEqual({
+      enabled: true,
+      dbPath: " /tmp/delegate.db ",
+    });
   });
 });
 

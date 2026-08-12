@@ -12,7 +12,7 @@ import {
 import { getConcurrencyLimit, getMaxAsyncTickets } from "./config.ts";
 import { getCurrentLeafId } from "./leaf.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
-import { sumUsage } from "./usage.ts";
+import { aggregateTaskResults, sumUsage } from "./usage.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
 import {
   fmtDuration,
@@ -214,18 +214,12 @@ function finishTicketDelivery(pi: ExtensionAPI, ticket: AsyncTicket): void {
   }
 }
 
-function isTelemetryTaskResult(r: TaskResult | undefined): r is TaskResult {
-  return r !== undefined && "touchedFiles" in r;
-}
-
 function settleAsyncCall(
   ticket: AsyncTicket,
   callSpan: CallSpan | undefined,
 ): void {
   if (!callSpan) return;
-  const completed = ticket.results.filter(isTelemetryTaskResult);
-  const totalTokens = completed.reduce((sum, r) => sum + r.tokens, 0);
-  const totalCost = completed.reduce((sum, r) => sum + r.usage.cost.total, 0);
+  const { totalTokens, totalCost } = aggregateTaskResults(ticket.results);
   const wallMs = (ticket.completedAt ?? Date.now()) - callSpan.startedAt;
   const status =
     ticket.status === "done"
@@ -282,6 +276,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     callId: callSpan?.id,
     callStartedAt: callSpan?.startedAt,
     callRecord: callSpan ? { ...callSpan.baseRecord() } : undefined,
+    telemetryGeneration: callSpan?.generation,
   };
   ticketRegistry.set(ticketId, ticket);
   callSpan?.spawn();
@@ -302,6 +297,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     ticketId,
     delegateStartedAt: ticket.created,
     telemetryCallId: callSpan?.id,
+    telemetryGeneration: callSpan?.generation,
     async: true,
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
@@ -320,7 +316,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
   // Worker must store the TaskResult back into ticket.results, since
   // formatCompletedTicket/handlePoll read from there. Without the write,
   // completed async tasks would be reported as PENDING.
-  mapConcurrentByModel(
+  const completion = mapConcurrentByModel(
     resolved,
     (t) => getModelKey(t.model),
     getConcurrencyLimit,
@@ -332,12 +328,14 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     ticketSignal,
   )
     .then(() => {
-      // A ticket that is already terminally "cancelled" at this point was
-      // finalized by cancelTicketForShutdown (user cancels pass through
-      // "cancelling" first): the extension runtime is being torn down, the
-      // captured `pi` is stale or about to be, and a follow-up message has
-      // no live session to land in. Skip delivery entirely.
-      if (ticket.status === "cancelled") return;
+      // Shutdown marks the ticket terminal before cooperative worker aborts
+      // have finished. Still write one final aggregate after every result has
+      // landed; the immediate shutdown snapshot may have missed late usage.
+      // The runtime is being torn down, so never attempt UI delivery here.
+      if (ticket.status === "cancelled") {
+        settleAsyncCall(ticket, callSpan);
+        return;
+      }
       // All tasks settled — determine final ticket status.
       // Use progress (set by runResolvedTask) for settled-ness so the
       // status reflects work completion, not just result-array density.
@@ -363,8 +361,12 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     })
     .catch((err) => {
       // Defense-in-depth — should not happen if individual tasks catch properly.
-      // Same shutdown guard as the .then path above.
-      if (ticket.status === "cancelled") return;
+      // Even an unexpected worker rejection must leave the shutdown aggregate
+      // with every result that did settle, without touching the stale UI.
+      if (ticket.status === "cancelled") {
+        settleAsyncCall(ticket, callSpan);
+        return;
+      }
       if (ticket.status === "cancelling") {
         ticket.status = "cancelled";
       } else if (ticket.status === "running") {
@@ -377,6 +379,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       settleAsyncCall(ticket, callSpan);
       finishTicketDelivery(pi, ticket);
     });
+  ticket.completion = completion;
 
   return {
     content: [
@@ -427,6 +430,7 @@ export async function dispatchSync(
     ticketId: undefined,
     delegateStartedAt: startedAt,
     telemetryCallId: callSpan?.id,
+    telemetryGeneration: callSpan?.generation,
     async: false,
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
