@@ -139,7 +139,7 @@ export const delegateArgumentsSchema = Type.Object({
     Type.Number({
       minimum: 0,
       description:
-        "Bounds wait (ms); omit to block until settled. Timeout never cancels the ticket.",
+        "Bounds wait (ms); omit to block until settled. Timeout returns a snapshot; do not poll afterward.",
     }),
   ),
   tasks: Type.Optional(

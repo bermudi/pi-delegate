@@ -339,13 +339,25 @@ function buildWaitTimeoutResult(
   ticket: AsyncTicket,
   timeoutMs: number,
 ): AgentToolResult<DelegateDetails> {
-  const details = buildWaitDetails(ticket);
+  // A timeout must not be an information cliff. Reuse the same rich snapshot
+  // as poll so the caller can see activity and consume any completed outputs
+  // without making a second tool call.
+  const snapshot = handlePoll({ ticket: ticket.id }, {} as ExtensionContext);
+  const snapshotText = snapshot.content
+    .filter((item) => item.type === "text")
+    .map((item) => item.text)
+    .join("\n");
   const base = `Ticket ${ticket.id} still ${ticket.status} after ${fmtDuration(timeoutMs)} · wait timed out (ticket continues in background)`;
-  const text =
-    base + (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
+  const guidance =
+    "If you need the final result in this turn, call wait once with timeoutMs omitted; do not poll after a timeout. Otherwise stop calling ticket controls and let the final result auto-deliver.";
   return {
-    content: [{ type: "text", text }],
-    details,
+    content: [
+      {
+        type: "text",
+        text: `${base}\n\n${snapshotText}\n\n${guidance}`,
+      },
+    ],
+    details: snapshot.details,
   };
 }
 
@@ -707,12 +719,10 @@ export function handlePoll(
     const header = headerParts.join(" · ");
     const guidance =
       ticket.status === "cancelling"
-        ? "Cancellation requested. Active subagents are aborting and returning partial results; poll again for the final status."
+        ? "Cancellation requested. Active subagents are aborting and returning partial results. Wait without timeoutMs for final status; do not repeatedly poll."
         : settledCount === totalCount
           ? ""
-          : settledCount > 0
-            ? "Tasks are progressing. Do other work while remaining tasks finish — results will be delivered automatically when all complete."
-            : "Tasks are still running. Do other work while you wait — polling again immediately will not speed them up. Results are delivered automatically when all tasks complete.";
+          : "If you need the final result in this turn, call wait once with timeoutMs omitted. Otherwise stop calling ticket controls and let the final result auto-deliver after this turn; repeated polling will not speed it up.";
 
     return {
       content: [

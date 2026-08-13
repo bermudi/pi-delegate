@@ -7037,8 +7037,76 @@ describe("async delegate integration", () => {
       {} as any,
     );
     expect(result.content[0].text).toContain("wait timed out");
+    expect(result.content[0].text).toContain("0/1 finalized");
+    expect(result.content[0].text).toContain("scout");
+    expect(result.content[0].text).toContain("timeoutMs omitted");
+    expect(result.content[0].text).toContain("do not poll after a timeout");
     expect(ticket.status).toBe("running");
     expect(controller.signal.aborted).toBe(false);
+  });
+
+  test("wait timeout includes completed output and remaining activity", async () => {
+    const ticket: AsyncTicket = {
+      id: "partial-wait-timeout",
+      created: Date.now() - 1000,
+      tasks: [{ prompt: "finished" }, { prompt: "working" }],
+      resolved: [
+        {
+          prompt: "finished",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "reviewer",
+          warnings: [],
+        },
+        {
+          prompt: "working",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "worker",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [
+        { ...mkResult(), agent: "reviewer", output: "finding: unsafe retry" },
+        undefined,
+      ],
+      progress: [
+        { ...mkProgress(["done"])[0]!, agent: "reviewer" },
+        {
+          ...mkProgress(["running"])[0]!,
+          index: 1,
+          agent: "worker",
+          toolUses: 2,
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set(ticket.id, ticket);
+
+    const result = await handleWait(
+      { ticket: ticket.id, timeoutMs: 0 },
+      undefined,
+      undefined,
+      {} as any,
+    );
+
+    expect(result.content[0].text).toContain("1/2 finalized");
+    expect(result.content[0].text).toContain("finding: unsafe retry");
+    expect(result.content[0].text).toContain("worker");
+    expect(result.content[0].text).toContain("2 tools");
+    expect(result.details.results).toHaveLength(2);
+    expect(result.details.results![0]?.output).toBe("finding: unsafe retry");
+    expect(result.details.results![1]?.error).toBe(
+      "PENDING — result not available",
+    );
   });
 
   test("wait details fill sparse result holes with placeholder TaskResult objects", async () => {
