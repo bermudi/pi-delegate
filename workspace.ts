@@ -309,7 +309,7 @@ async function deleteLeaseContentsAndRmdir(
 
 async function ensureScratchContainer(
   containerDir: string,
-  uid: number,
+  uid: number | undefined,
 ): Promise<void> {
   try {
     await fs.promises.mkdir(containerDir, { mode: 0o700 });
@@ -326,7 +326,7 @@ async function ensureScratchContainer(
   }
 
   const stat = await fs.promises.lstat(containerDir);
-  if (!stat.isDirectory() || stat.uid !== uid) {
+  if (!stat.isDirectory() || (uid !== undefined && stat.uid !== uid)) {
     throw new ScratchSetupError(
       `Scratch container directory '${containerDir}' is not a directory owned by the current user.`,
     );
@@ -580,8 +580,8 @@ export async function createScratchWorkspace(
 
     containerDir = path.join(path.dirname(sourceRoot), SCRATCH_CONTAINER_NAME);
     const uid = process.getuid?.();
+    await ensureScratchContainer(containerDir, uid);
     if (uid !== undefined) {
-      await ensureScratchContainer(containerDir, uid);
       await sweepStaleScratchLeases(containerDir);
       await sweepStaleScratchLeases(path.dirname(sourceRoot), {
         prefix: SCRATCH_LEGACY_PREFIX,
