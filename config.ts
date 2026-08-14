@@ -131,7 +131,7 @@ function normalizeProviderExtensions(
 // `providerExtensions` replaces a provider's entries (it does not append); an
 // empty array is ignored so the default persists.
 const DEFAULT_PROVIDER_EXTENSIONS: Record<string, readonly string[]> = {
-  "openai-codex": ["npm:@ogulcancelik/pi-codex-compaction"],
+  "openai-codex": ["git:github.com/bermudi/manaflow-pi-codex"],
 };
 
 function resolveProviderExtensions(
