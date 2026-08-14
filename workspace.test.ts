@@ -261,9 +261,11 @@ describe("scratch workspace stale cleanup", () => {
           const leasePath = path.join(container, c.name);
           fs.mkdirSync(leasePath, { mode: 0o700 });
           if (c.pid !== undefined) {
-            fs.writeFileSync(path.join(leasePath, ".owner"), c.pid, {
+            const ownerPath = path.join(leasePath, ".owner");
+            fs.writeFileSync(ownerPath, c.pid, {
               mode: c.mode,
             });
+            fs.chmodSync(ownerPath, c.mode);
           }
           if (c.project) {
             fs.mkdirSync(path.join(leasePath, "project"));
