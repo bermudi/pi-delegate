@@ -210,22 +210,31 @@ function parseOwnerPid(content: string): number | undefined {
   return Number.isSafeInteger(pid) ? pid : undefined;
 }
 
+type LeaseDeletionExpectations =
+  | {
+      hasProject: true;
+      lease: fs.Stats;
+      project: fs.Stats;
+      owner: fs.Stats;
+    }
+  | {
+      hasProject: false;
+      lease: fs.Stats;
+      owner: fs.Stats;
+    };
+
 async function deleteLeaseContentsAndRmdir(
   parentHandle: fs.promises.FileHandle,
   leaseName: string,
   leaseHandle: fs.promises.FileHandle,
-  hasProject: boolean = true,
-  expectedLeaseStat?: fs.Stats,
-  expectedProjectStat?: fs.Stats,
-  expectedOwnerStat?: fs.Stats,
+  expectations: LeaseDeletionExpectations,
 ): Promise<void> {
   const leasePath = path.join(`/proc/self/fd/${parentHandle.fd}`, leaseName);
   const openLeaseStat = await leaseHandle.stat();
   const currentLeaseStat = await fs.promises.lstat(leasePath);
   if (
     !openLeaseStat.isDirectory() ||
-    (expectedLeaseStat &&
-      !sameFileIdentity(openLeaseStat, expectedLeaseStat)) ||
+    !sameFileIdentity(openLeaseStat, expectations.lease) ||
     !sameFileIdentity(currentLeaseStat, openLeaseStat)
   ) {
     throw new ScratchLeaseIdentityError(
@@ -234,7 +243,18 @@ async function deleteLeaseContentsAndRmdir(
   }
 
   await leaseHandle.chmod(0o700);
-  if (hasProject) {
+  const ownerPath = path.join(
+    `/proc/self/fd/${leaseHandle.fd}`,
+    SCRATCH_OWNER_NAME,
+  );
+  const initialOwnerStat = await fs.promises.lstat(ownerPath);
+  if (!sameFileIdentity(initialOwnerStat, expectations.owner)) {
+    throw new ScratchLeaseIdentityError(
+      "Scratch owner marker was replaced; refusing cleanup.",
+    );
+  }
+
+  if (expectations.hasProject) {
     const projectPath = path.join(
       `/proc/self/fd/${leaseHandle.fd}`,
       SCRATCH_TREE_NAME,
@@ -248,8 +268,7 @@ async function deleteLeaseContentsAndRmdir(
       const currentProjectStat = await fs.promises.lstat(projectPath);
       if (
         !openProjectStat.isDirectory() ||
-        (expectedProjectStat &&
-          !sameFileIdentity(openProjectStat, expectedProjectStat)) ||
+        !sameFileIdentity(openProjectStat, expectations.project) ||
         !sameFileIdentity(currentProjectStat, openProjectStat)
       ) {
         throw new ScratchLeaseIdentityError(
@@ -283,15 +302,8 @@ async function deleteLeaseContentsAndRmdir(
     }
   }
 
-  const ownerPath = path.join(
-    `/proc/self/fd/${leaseHandle.fd}`,
-    SCRATCH_OWNER_NAME,
-  );
   const currentOwnerStat = await fs.promises.lstat(ownerPath);
-  if (
-    expectedOwnerStat &&
-    !sameFileIdentity(currentOwnerStat, expectedOwnerStat)
-  ) {
+  if (!sameFileIdentity(currentOwnerStat, expectations.owner)) {
     throw new ScratchLeaseIdentityError(
       "Scratch owner marker was replaced; refusing cleanup.",
     );
@@ -494,15 +506,31 @@ async function sweepStaleScratchLeases(
         if (options.onLeaseValidated) {
           await options.onLeaseValidated(entry.name);
         }
-        await deleteLeaseContentsAndRmdir(
-          parentHandle,
-          entry.name,
-          leaseHandle,
-          hasProject,
-          scannedLeaseStat,
-          scannedProjectStat,
-          scannedOwnerStat,
-        );
+        if (hasProject) {
+          if (!scannedProjectStat) continue;
+          await deleteLeaseContentsAndRmdir(
+            parentHandle,
+            entry.name,
+            leaseHandle,
+            {
+              hasProject: true,
+              lease: scannedLeaseStat,
+              project: scannedProjectStat,
+              owner: scannedOwnerStat,
+            },
+          );
+        } else {
+          await deleteLeaseContentsAndRmdir(
+            parentHandle,
+            entry.name,
+            leaseHandle,
+            {
+              hasProject: false,
+              lease: scannedLeaseStat,
+              owner: scannedOwnerStat,
+            },
+          );
+        }
       } catch (error) {
         if (error instanceof ScratchLeaseIdentityError) continue;
         if (
@@ -565,6 +593,7 @@ export async function createScratchWorkspace(
   let scratchRoot: string | undefined;
   let copiedLeaseStat: fs.Stats | undefined;
   let copiedRootStat: fs.Stats | undefined;
+  let copiedOwnerStat: fs.Stats | undefined;
   try {
     if (signal?.aborted) controller.abort(signal.reason);
     throwIfSetupCancelled(controller.signal, signal);
@@ -672,6 +701,9 @@ export async function createScratchWorkspace(
     // fails, the catch below restores permissions and removes the partial copy.
     copiedLeaseStat = await fs.promises.lstat(leaseRoot);
     copiedRootStat = await fs.promises.lstat(scratchRoot);
+    copiedOwnerStat = await fs.promises.lstat(
+      path.join(leaseRoot, SCRATCH_OWNER_NAME),
+    );
   } catch (error) {
     if (leaseRoot) {
       try {
@@ -710,6 +742,7 @@ export async function createScratchWorkspace(
   const completedRoot = scratchRoot!;
   const completedLeaseStat = copiedLeaseStat!;
   const completedRootStat = copiedRootStat!;
+  const completedOwnerStat = copiedOwnerStat!;
   const relativeCwd = path.relative(sourceRoot!, sourceCwd!);
   let cleaned = false;
   const resolveReportedPath = async (candidate: string): Promise<string> => {
@@ -818,9 +851,12 @@ export async function createScratchWorkspace(
             parentHandle,
             leaseName,
             leaseHandle,
-            true,
-            completedLeaseStat,
-            completedRootStat,
+            {
+              hasProject: true,
+              lease: completedLeaseStat,
+              project: completedRootStat,
+              owner: completedOwnerStat,
+            },
           );
           cleaned = true;
         } finally {
