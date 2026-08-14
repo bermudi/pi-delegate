@@ -28,6 +28,7 @@ import { getWholeTaskMaxRetries, getWholeTaskBaseDelayMs } from "./config.ts";
 import { addUsage, emptyUsage } from "./usage.ts";
 import { scheduleDeadline } from "./timer.ts";
 import { recordTask } from "./telemetry.ts";
+import { createScratchWorkspace, ScratchDeadlineError } from "./workspace.ts";
 
 /** Internal seam for lifecycle-level tests without replacing session ownership. */
 type RunAgentSession = typeof runAgentSession;
@@ -181,6 +182,11 @@ function updateProgressFromResult(p: TaskProgress, r: TaskResult): void {
   p.failureKind = r.failureKind;
 }
 
+const taskRetryCounts = new WeakMap<TaskResult, number>();
+/** The SQLite task id is part of the logical task, not the transient result
+ * object. Scratch wrapping clones results, so keep this alongside retry data. */
+const taskTelemetryIds = new WeakMap<TaskResult, string>();
+
 /** Apply a TaskResult to progress and notify the env (sync fires onUpdate).
  *  Used at every return point in runResolvedTask — mirrors the old fire() pattern
  *  that the duplicated sync/async bodies used after every early-return. */
@@ -192,8 +198,9 @@ function finishTask(
   retries = 0,
 ): TaskResult {
   updateProgressFromResult(p, r);
+  taskRetryCounts.set(r, retries);
   if (env.telemetryCallId) {
-    recordTask({
+    const id = recordTask({
       callId: env.telemetryCallId,
       generation: env.telemetryGeneration,
       async: env.async ?? false,
@@ -203,6 +210,7 @@ function finishTask(
       result: r,
       retries,
     });
+    if (id) taskTelemetryIds.set(r, id);
   }
   env.onStatusChange?.();
   return r;
@@ -494,15 +502,24 @@ async function acquireAgentSession(
   }
 
   // ── Fresh session (no resume) ────────────────────────────────────────────
-  const fresh = createSubagentSessionManager(
-    env.parentSessionManager,
-    task.cwd,
-  );
-  if (!fresh) {
-    return { error: failTask(task, "Internal: could not create session file") };
+  if (task.workspace === "scratch") {
+    // A discarded filesystem must not advertise a resumable conversation: a
+    // later resume would run against the source cwd and silently lose scratch
+    // isolation. Keep scratch transcripts in memory only.
+    sessionManager = SessionManager.inMemory(task.cwd);
+  } else {
+    const fresh = createSubagentSessionManager(
+      env.parentSessionManager,
+      task.cwd,
+    );
+    if (!fresh) {
+      return {
+        error: failTask(task, "Internal: could not create session file"),
+      };
+    }
+    sessionManager = fresh.manager;
+    sessionFile = fresh.file;
   }
-  sessionManager = fresh.manager;
-  sessionFile = fresh.file;
 
   const session = await buildDelegateSession(
     task,
@@ -564,6 +581,166 @@ async function runResolvedTaskUnlocked(
   task: ResolvedTask,
   p: TaskProgress,
   taskIndex: number,
+): Promise<TaskResult> {
+  if (task.workspace !== "scratch") {
+    return runResolvedTaskCore(env, task, p, taskIndex);
+  }
+  if (task.sessionId || task.resumeFrom || task.sessionAction) {
+    return finishTask(
+      env,
+      p,
+      failTask(
+        task,
+        "workspace 'scratch' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction.",
+      ),
+      task,
+    );
+  }
+
+  const startedAt = Date.now();
+  const deadlineAt =
+    task.deadlineMs && task.deadlineMs > 0
+      ? startedAt + task.deadlineMs
+      : undefined;
+  let workspace: Awaited<ReturnType<typeof createScratchWorkspace>>;
+  try {
+    workspace = await createScratchWorkspace(task.cwd, env.signal, deadlineAt);
+  } catch (error) {
+    const setupError = error instanceof Error ? error.message : String(error);
+    const deadlineExceeded =
+      !env.signal?.aborted && error instanceof ScratchDeadlineError;
+    return finishTask(
+      env,
+      p,
+      {
+        ...failTask(
+          task,
+          env.signal?.aborted
+            ? "Aborted"
+            : deadlineExceeded
+              ? formatDeadlineExceededError(task.deadlineMs ?? 0)
+              : setupError,
+        ),
+        failureKind: deadlineExceeded ? "deadline_exceeded" : undefined,
+        durationMs: Date.now() - startedAt,
+      },
+      task,
+    );
+  }
+
+  const executionTask: ResolvedTask = {
+    ...task,
+    cwd: workspace.cwd,
+  };
+  let result: TaskResult | undefined;
+  let cleanupError: string | undefined;
+  let needsCorrection = false;
+  let telemetryTaskId: string | undefined;
+  let retries = 0;
+  try {
+    const preMappingResult = await runResolvedTaskCore(
+      env,
+      executionTask,
+      p,
+      taskIndex,
+      {
+        taskStartedAt: startedAt,
+        deadlineAt,
+      },
+    );
+    result = preMappingResult;
+    // Capture metadata before scratch wrapping creates a new result object.
+    // Both values belong to the logical task and must survive that clone.
+    telemetryTaskId = taskTelemetryIds.get(result);
+    retries = taskRetryCounts.get(result) ?? 0;
+    result = {
+      ...result,
+      workspace: "scratch",
+      sessionFile: undefined,
+      touchedFiles: await Promise.all(
+        result.touchedFiles.map((file) => workspace.resolveReportedPath(file)),
+      ),
+      // Writes inside scratch are discarded and cannot conflict. Explicit
+      // writes outside scratch (for example an absolute host path) persist and
+      // must remain attributable for overlap warnings. Resolve those paths
+      // physically so aliases to the same host file compare equally.
+      attributedFiles: (
+        await Promise.all(
+          (result.attributedFiles ?? []).map((file) =>
+            workspace.resolveAttributedPath(file),
+          ),
+        )
+      ).filter((file): file is string => file !== undefined),
+    };
+  } catch (error) {
+    result = {
+      ...failTask(task, error instanceof Error ? error.message : String(error)),
+      ...(result
+        ? {
+            tokens: result.tokens,
+            usage: result.usage,
+          }
+        : {}),
+      workspace: "scratch",
+      durationMs: Date.now() - startedAt,
+    };
+    // runResolvedTaskCore may already have recorded/notified a successful
+    // result before path mapping failed. Correct those observable outcomes.
+    needsCorrection = true;
+  } finally {
+    try {
+      await workspace.cleanup();
+    } catch (error) {
+      cleanupError = `Scratch workspace cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+      console.error("[delegate] scratch workspace cleanup failed", error);
+    }
+  }
+
+  if (!result) {
+    result = {
+      ...failTask(task, "Scratch task failed before producing a result."),
+      workspace: "scratch",
+      durationMs: Date.now() - startedAt,
+    };
+  }
+  if (cleanupError || needsCorrection) {
+    result = {
+      ...result,
+      error: cleanupError
+        ? result.error
+          ? `${result.error}\n${cleanupError}`
+          : cleanupError
+        : result.error,
+      durationMs: Math.max(result.durationMs, Date.now() - startedAt),
+    };
+    updateProgressFromResult(p, result);
+    if (env.telemetryCallId) {
+      // runResolvedTaskCore already recorded the pre-cleanup result. Telemetry
+      // rows are upserts, so replace it with the actual returned outcome while
+      // preserving the retry count captured by finishTask.
+      recordTask({
+        id: telemetryTaskId,
+        callId: env.telemetryCallId,
+        generation: env.telemetryGeneration,
+        async: env.async ?? false,
+        taskIndex: p.index,
+        task,
+        progress: p,
+        result,
+        retries,
+      });
+    }
+    env.onStatusChange?.();
+  }
+  return result;
+}
+
+async function runResolvedTaskCore(
+  env: TaskRunEnv,
+  task: ResolvedTask,
+  p: TaskProgress,
+  taskIndex: number,
+  timing?: { taskStartedAt: number; deadlineAt: number | undefined },
 ): Promise<TaskResult> {
   try {
     // ── Aborted before we started? ───────────────────────────────────
@@ -629,11 +806,12 @@ async function runResolvedTaskUnlocked(
     let hasBashExecution = false;
     let cumulativeTokens = 0;
     let cumulativeToolUses = 0;
-    const taskStartedAt = Date.now();
+    const taskStartedAt = timing?.taskStartedAt ?? Date.now();
     const deadlineAt =
-      task.deadlineMs && task.deadlineMs > 0
+      timing?.deadlineAt ??
+      (task.deadlineMs && task.deadlineMs > 0
         ? taskStartedAt + task.deadlineMs
-        : undefined;
+        : undefined);
     let accumulatedUsage = emptyUsage();
 
     const onAttemptProgress = (u: AgentProgressUpdate): void => {

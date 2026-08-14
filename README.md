@@ -38,6 +38,31 @@ Parent extension/MCP tools are not copied, and project instructions are rebuilt
 for the task's `cwd`. Omit `agent` when you want an ad-hoc task using delegate's
 normal inline defaults instead.
 
+### Disposable scratch workspace
+
+For review, tests, or other commands whose project changes should be thrown
+away, run a one-shot task in a CoW copy:
+
+```ts
+delegate({
+  tasks: [
+    { prompt: "Review this change and run its tests", workspace: "scratch" },
+  ],
+});
+```
+
+Delegate reflink-copies the containing Git repository beside the original, runs
+the subagent in the corresponding copied directory, then deletes the copy. It
+requires Linux with `/proc/self/fd`, GNU `cp`, and a reflink-capable filesystem
+such as Btrfs; it never falls back to an expensive full copy. Scratch mode
+cannot use `sessionId`,
+`resumeFrom`, session actions, linked Git worktrees, or project symlinks that
+point outside the copied tree.
+
+This protects the real project from ordinary relative writes. It is not a
+security sandbox: unrestricted commands and absolute paths can still reach the
+host filesystem.
+
 ### Token accounting
 
 Sync delegate calls report aggregate subagent `Usage` on the tool result, so Pi
@@ -98,7 +123,8 @@ over an installed extension.
 
 - **Delegate task** — One item in `delegate({ tasks: [...] })`. This is the
   core unit of work: a prompt plus optional overrides such as `agent`, `tools`,
-  `systemPrompt`, `thinking`, `cwd`, `context`, `sessionId`, or `resumeFrom`.
+  `systemPrompt`, `thinking`, `cwd`, `context`, `workspace`, `sessionId`, or
+  `resumeFrom`.
   `model` is also accepted but should be rare — subagents inherit the parent
   model by default.
 - **Default subagent** — The reserved built-in `agent: "default"` profile. It

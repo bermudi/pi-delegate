@@ -604,6 +604,8 @@ export function recordCall(record: CallRecord, generation?: number): void {
 }
 
 export interface TaskSpanInput {
+  /** Stable identity for correction writes of the same logical task row. */
+  id?: string;
   callId: string;
   /** Runtime generation captured by the dispatch that owns this task. */
   generation?: number;
@@ -622,13 +624,15 @@ function outcomeFromResult(result: TaskResult): string {
   return "success";
 }
 
-export function recordTask(input: TaskSpanInput): void {
+export function recordTask(input: TaskSpanInput): string | undefined {
   const b = getBackend(input.generation);
-  if (!b) return;
+  if (!b) return undefined;
 
   const { callId, async, taskIndex, task, progress, result, retries } = input;
   const record: TaskRecord = {
-    id: crypto.randomUUID(),
+    // Correction writes must reuse the provisional row's primary key. A fresh
+    // UUID here would make INSERT OR REPLACE append a second task row.
+    id: input.id ?? crypto.randomUUID(),
     call_id: callId,
     ts: Date.now(),
     version: getDelegateVersion(),
@@ -651,6 +655,7 @@ export function recordTask(input: TaskSpanInput): void {
     async: async ? 1 : 0,
   };
   b.recordTask(record);
+  return record.id;
 }
 
 /** Prevent this runtime's late workers from writing after a bounded shutdown

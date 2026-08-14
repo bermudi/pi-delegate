@@ -43,6 +43,8 @@ export type TicketAction = NonNullable<
 >;
 /** Per-task session action: "prompt" | "close" | "list". */
 export type SessionAction = NonNullable<CanonicalTaskDef["sessionAction"]>;
+/** Filesystem mode: shared source tree or an ephemeral CoW scratch copy. */
+export type WorkspaceMode = NonNullable<CanonicalTaskDef["workspace"]>;
 
 export type TaskDef = CanonicalTaskDef & {
   /** @deprecated Use `sessionAction` instead. Runtime normalization still accepts this alias. */
@@ -123,6 +125,7 @@ export interface ResolvedTask {
   thinking: ThinkingLevel;
   systemPrompt: string;
   cwd: string;
+  workspace?: WorkspaceMode;
   context?: "fresh" | "with-parent-transcript";
   sessionId?: string;
   sessionAction?: SessionAction;
@@ -211,6 +214,8 @@ export interface TaskResult {
    *  stay 0 because `getSessionStats()` exposes only the aggregate cost — and
    *  Pi sums `cost.total` for nested usage anyway. */
   usage: Usage;
+  /** Scratch results are excluded from shared-file conflict detection and never resumable. */
+  workspace?: WorkspaceMode;
   sessionFile?: string;
   /** All files the subagent is known to have touched, including bash mutations
    *  captured via git diff and other tasks' concurrent git changes. This is a
