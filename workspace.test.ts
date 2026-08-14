@@ -148,6 +148,24 @@ describe("scratch workspace stale cleanup", () => {
     },
   );
 
+  test(
+    "creates the container when uid lookup is unavailable",
+    async () => {
+      const tempDir = fs.mkdtempSync(
+        path.join(process.cwd(), ".delegate-scratch-test-"),
+      );
+      try {
+        const container = path.join(tempDir, _testHooks.SCRATCH_CONTAINER_NAME);
+        await _testHooks.ensureScratchContainer(container, undefined);
+
+        expect(fs.existsSync(container)).toBe(true);
+        expect(fs.statSync(container).mode & 0o777).toBe(0o700);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   fdTest(
     "sweep policy table: removes dead leases, preserves live/malformed/unexpected",
     async () => {
