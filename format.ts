@@ -517,7 +517,10 @@ export function relativeTouchedSummary(
  *  in the same repository do not fabricate false conflicts from shared
  *  repository-wide git snapshots. */
 export function findTouchedOverlaps(
-  results: readonly { attributedFiles?: string[] }[],
+  results: readonly {
+    attributedFiles?: string[];
+    workspace?: "shared" | "scratch";
+  }[],
 ): string[] {
   const counts = new Map<string, number>();
   for (const r of results) {

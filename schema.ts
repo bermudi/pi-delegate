@@ -103,6 +103,13 @@ export const delegateTaskSchema = Type.Object({
         "Wall-clock budget (ms) from run start after queueing. Cooperative abort; side effects remain. Omit disables.",
     }),
   ),
+  workspace: Type.Optional(
+    StringEnum(["shared", "scratch"], {
+      description:
+        "scratch=disposable CoW project copy; relative edits are discarded. Not security isolation. Default=shared.",
+      default: "shared",
+    }),
+  ),
 });
 
 // Single source of truth for registration and generated help. The exported
@@ -146,7 +153,7 @@ export const delegateArgumentsSchema = Type.Object({
     Type.Array(delegateTaskSchema, {
       minItems: 0,
       description:
-        "Tasks share the real filesystem and run concurrently; separate dependent/shared-file work. []=full manual.",
+        "Tasks run concurrently; shared workspaces share files. scratch uses a disposable CoW copy. []=full manual.",
     }),
   ),
 });
@@ -167,6 +174,7 @@ const TASK_FIELD_NAMES = [
   "sessionAction",
   "resumeFrom",
   "deadlineMs",
+  "workspace",
 ] as const;
 
 /** Every field a task entry may carry. Anything else is a model mistake —
@@ -316,6 +324,12 @@ export function validateDelegateOperation(
     }
     if (typeof rawTask.deadlineMs === "number" && !(rawTask.deadlineMs > 0)) {
       return `task ${index + 1}: deadlineMs must be a positive number of milliseconds.`;
+    }
+    if (
+      task.workspace === "scratch" &&
+      (task.sessionId || task.resumeFrom || sessionAction !== undefined)
+    ) {
+      return `task ${index + 1}: workspace 'scratch' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction.`;
     }
     if (sessionAction === "close") {
       if (!task.sessionId) {

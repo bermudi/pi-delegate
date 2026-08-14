@@ -208,6 +208,11 @@ export function resolveTasks(
     );
     let tools: string[] = [];
     const warnings: string[] = [];
+    if (t.workspace === "scratch") {
+      warnings.push(
+        "Scratch workspace: relative file changes run in a disposable CoW copy and are discarded.",
+      );
+    }
 
     // Prompt is required for fresh tasks. ResumeFrom provides context already.
     if (
@@ -418,6 +423,7 @@ export function resolveTasks(
       ...t,
       id: t.id,
       cwd,
+      workspace: t.workspace ?? "shared",
       systemPrompt,
       model: model!,
       tools,

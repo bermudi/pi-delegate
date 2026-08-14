@@ -33,6 +33,9 @@ const classWithStaticCreateAndOpen = class {
   static open(): never {
     throw new Error("should not call");
   }
+  static inMemory(): never {
+    throw new Error("should not call");
+  }
 };
 
 const ALL_PRESENT = {
@@ -68,7 +71,7 @@ describe("host-compat guard", () => {
     // All required exports/members should be called out (the count must stay
     // in sync with REQUIRED_EXPORTS in host-compat.ts — if you add a member,
     // bump this).
-    expect((text.match(/'/g) ?? []).length / 2).toBe(9);
+    expect((text.match(/'/g) ?? []).length / 2).toBe(10);
     expect(result!.details.tasks).toEqual([]);
     expect(result!.details.results).toEqual([]);
   });
@@ -92,6 +95,7 @@ describe("host-compat guard", () => {
     const text = (result!.content[0] as { text: string }).text;
     expect(text).toContain("'ModelRuntime.create'");
     expect(text).toContain("'SessionManager.open'");
+    expect(text).toContain("'SessionManager.inMemory'");
   });
 
   test("real installed pi exports all required symbols (no compat error)", () => {
