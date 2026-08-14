@@ -200,7 +200,16 @@ function isProcessAlive(pid: number): boolean {
 }
 
 function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
+  // dev+ino alone can alias after an unlink+mkdir reuses the same inode
+  // (observed on ext4 in CI: project replaced in the sweep race test
+  // reused the previous ino). Birthtime distinguishes a recreated entry
+  // and is stable across the chmod 0500→0700 transitions that update
+  // ctime. Where birthtime is unavailable (0) we fall back to dev+ino.
+  if (left.dev !== right.dev || left.ino !== right.ino) return false;
+  if (left.birthtimeMs !== 0 || right.birthtimeMs !== 0) {
+    return left.birthtimeMs === right.birthtimeMs;
+  }
+  return true;
 }
 
 function parseOwnerPid(content: string): number | undefined {
