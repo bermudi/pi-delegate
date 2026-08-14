@@ -58,7 +58,17 @@ function cleanTestDir(root: string): void {
     };
     makeWritable(root);
     fs.rmSync(root, { recursive: true, force: true });
-  } catch {}
+    return;
+  } catch (error) {
+    // 0500 lease roots make chmod/rm failures an expected recoverable case,
+    // so teardown stays non-fatal — but it must leave a visible signal.
+    console.warn(`[delegate] test teardown failed for '${root}':`, error);
+  }
+  if (fs.existsSync(root)) {
+    console.warn(
+      `[delegate] test teardown left '${root}' behind; remove it manually`,
+    );
+  }
 }
 
 function testParent(): string {
@@ -314,12 +324,28 @@ describe("scratch workspace stale cleanup", () => {
         });
         fs.mkdirSync(path.join(legacyLive, "project"));
 
+        // Markerless leases (pre-owner-marker versions, or a crash between
+        // mkdtemp and the marker write): only the empty one is reclaimed.
+        const legacyMarkerlessEmpty = path.join(
+          tempDir,
+          ".pi-delegate-scratch-markerless-empty",
+        );
+        fs.mkdirSync(legacyMarkerlessEmpty, { mode: 0o700 });
+        const legacyMarkerlessFull = path.join(
+          tempDir,
+          ".pi-delegate-scratch-markerless-full",
+        );
+        fs.mkdirSync(legacyMarkerlessFull, { mode: 0o700 });
+        fs.mkdirSync(path.join(legacyMarkerlessFull, "project"));
+
         await _testHooks.sweepStaleScratchLeases(tempDir, {
           prefix: _testHooks.SCRATCH_LEGACY_PREFIX,
         });
 
         expect(fs.existsSync(legacyDead)).toBe(false);
         expect(fs.existsSync(legacyLive)).toBe(true);
+        expect(fs.existsSync(legacyMarkerlessEmpty)).toBe(false);
+        expect(fs.existsSync(legacyMarkerlessFull)).toBe(true);
       } finally {
         fs.rmSync(tempDir, { recursive: true, force: true });
       }
@@ -516,11 +542,17 @@ describe("scratch workspace", () => {
   });
 
   scratchTest(
-    "preserves leases with missing or malformed owner markers",
+    "reclaims empty markerless leases, preserves non-empty or malformed ones",
     async () => {
       const parent = testParent();
       const repo = testRepo(parent);
-      const missingOwner = testLease(parent, "missing-owner");
+      // Empty and markerless: a pre-owner-marker legacy lease or a crash
+      // between mkdtemp and the marker write — unambiguously ours, reclaimed.
+      const emptyMarkerless = testLease(parent, "empty-markerless");
+      // Markerless but non-empty: may be an unrelated directory, preserved.
+      const markerlessFull = testLease(parent, "markerless-full", {
+        project: true,
+      });
       const malformedOwner = testLease(parent, "malformed-owner", {
         owner: "not-a-pid\n",
         project: true,
@@ -528,7 +560,8 @@ describe("scratch workspace", () => {
       try {
         const workspace = await createScratchWorkspace(repo);
         await workspace.cleanup();
-        expect(fs.existsSync(missingOwner)).toBe(true);
+        expect(fs.existsSync(emptyMarkerless)).toBe(false);
+        expect(fs.existsSync(markerlessFull)).toBe(true);
         expect(fs.existsSync(malformedOwner)).toBe(true);
       } finally {
         cleanTestDir(parent);
