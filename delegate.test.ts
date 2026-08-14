@@ -8221,10 +8221,10 @@ describe("getHostDeps extension policy and isolation", () => {
       os.homedir(),
       ".pi",
       "agent",
-      "npm",
-      "node_modules",
-      "@ogulcancelik",
-      "pi-codex-compaction",
+      "git",
+      "github.com",
+      "bermudi",
+      "manaflow-pi-codex",
     );
     // This environment-dependent check must not treat a project installation
     // as a valid substitute: project packages are intentionally rejected.
@@ -8237,7 +8237,7 @@ describe("getHostDeps extension policy and isolation", () => {
 
     const ext = deps.resourceLoader.getExtensions();
     const hasCodexCompaction = ext.extensions.some((entry) =>
-      entry.path.includes("@ogulcancelik/pi-codex-compaction"),
+      entry.path.endsWith("/manaflow-pi-codex/extensions/pi-codex.ts"),
     );
     expect(hasCodexCompaction).toBe(true);
   });

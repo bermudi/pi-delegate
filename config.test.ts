@@ -22,7 +22,7 @@ describe("providerExtensions normalization (via public seam)", () => {
 
   test("ships the codex remote-compaction default", () => {
     expect(getSubagentProviderExtensionMap()["openai-codex"]).toEqual([
-      "npm:@ogulcancelik/pi-codex-compaction",
+      "git:github.com/bermudi/manaflow-pi-codex",
     ]);
   });
 
@@ -40,7 +40,7 @@ describe("providerExtensions normalization (via public seam)", () => {
       providerExtensions: { "openai-codex": [] },
     });
     expect(getSubagentProviderExtensionMap()["openai-codex"]).toEqual([
-      "npm:@ogulcancelik/pi-codex-compaction",
+      "git:github.com/bermudi/manaflow-pi-codex",
     ]);
   });
 
@@ -96,7 +96,7 @@ describe("providerExtensions normalization (via public seam)", () => {
       },
     });
     expect(getSubagentProviderExtensionMap()["openai-codex"]).toEqual([
-      "npm:@ogulcancelik/pi-codex-compaction",
+      "git:github.com/bermudi/manaflow-pi-codex",
     ]);
   });
 });
@@ -175,7 +175,7 @@ describe("getSubagentProviderExtensionsForProvider", () => {
 
   test("resolves the shipped default for openai-codex", () => {
     expect(getSubagentProviderExtensionsForProvider("openai-codex")).toEqual([
-      "npm:@ogulcancelik/pi-codex-compaction",
+      "git:github.com/bermudi/manaflow-pi-codex",
     ]);
   });
 });
