@@ -40,7 +40,7 @@ export const delegateTaskSchema = Type.Object({
   agent: Type.Optional(
     Type.String({
       description:
-        "Use `default`: parent model/thinking/native tools/base prompt. Omit=ad-hoc; unknown fails call.",
+        "Built-ins: default, scout, coder, reviewer. Reviewer defaults to one-shot scratch. Omit for ad-hoc.",
     }),
   ),
   cwd: Type.Optional(
@@ -106,8 +106,7 @@ export const delegateTaskSchema = Type.Object({
   workspace: Type.Optional(
     StringEnum(["shared", "scratch"], {
       description:
-        "scratch=disposable CoW project copy; relative edits are discarded. Not security isolation. Default=shared.",
-      default: "shared",
+        "shared source; scratch disposable copy, one-shot; not security isolation. Reviewer=scratch; others=shared.",
     }),
   ),
 });
@@ -327,9 +326,10 @@ export function validateDelegateOperation(
     }
     if (
       task.workspace === "scratch" &&
+      !task.agent &&
       (task.sessionId || task.resumeFrom || sessionAction !== undefined)
     ) {
-      return `task ${index + 1}: workspace 'scratch' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction.`;
+      return `task ${index + 1}: workspace 'scratch' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction. Set workspace: "shared" to use a persistent agent.`;
     }
     if (sessionAction === "close") {
       if (!task.sessionId) {

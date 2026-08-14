@@ -24,6 +24,7 @@ import {
 import { validateDelegateOperation } from "./schema.ts";
 import { notifyCrossLeafDelivery, syncDelegateStatus } from "./status.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
+import { clearDelegateSettingsCache } from "./settings.ts";
 import type { CallSpan } from "./telemetry.ts";
 import type {
   AgentConfig,
@@ -146,6 +147,9 @@ export interface DelegateDispatchInput {
 export async function dispatchDelegate(
   input: DelegateDispatchInput,
 ): Promise<DelegateToolResult> {
+  // Settings are user-editable. Clear once at the dispatch boundary so every
+  // task in this batch observes one consistent settings snapshot.
+  clearDelegateSettingsCache();
   const {
     pi,
     params,

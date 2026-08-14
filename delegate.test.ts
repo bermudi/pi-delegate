@@ -74,6 +74,7 @@ import {
   invalidateHostDepsCache,
   readDelegateSettingsFile,
   loadDelegateSettings,
+  clearDelegateSettingsCache,
   getConcurrencyLimit,
   getMaxAsyncTickets,
   getStallTimeoutMs,
@@ -654,11 +655,14 @@ Global prompt.
     expect(agents.get("shared-agent")!.scope).toBe("project");
   });
 
-  test("returns empty map when no agent directories exist", () => {
+  test("always exposes the built-in profiles when no agent directories exist", () => {
     const agents = discoverAgents("/nonexistent");
-    // Custom agents are defined inline or persisted as Markdown files. There
-    // are no built-in defaults.
-    expect(agents.size).toBe(0);
+    expect([...agents.keys()]).toEqual([
+      "default",
+      "scout",
+      "coder",
+      "reviewer",
+    ]);
   });
 
   test("ignores a persisted profile named default because the built-in is reserved", () => {
@@ -677,7 +681,7 @@ Custom prompt.
     console.warn = (message?: unknown) => warnings.push(String(message));
     try {
       const agents = discoverAgents("/nonexistent");
-      expect(agents.has("default")).toBe(false);
+      expect(agents.get("default")?.builtin).toBe(true);
     } finally {
       console.warn = originalWarn;
     }
@@ -716,15 +720,18 @@ Prompt.
     expect(agents.has("txt")).toBe(false);
   });
 
-  test("returns empty map when no user agents found", () => {
+  test("returns only built-ins when no user agents are found", () => {
     const agents = discoverAgents(tmpDir);
-    expect(agents.size).toBe(0);
+    expect(agents.size).toBe(4);
   });
 
   // ── Project Markdown discovery ─────────────────────────────────────────
 
-  test("discovers a user Markdown custom agent by name", () => {
+  test("reserved built-in names cannot be shadowed by a user Markdown agent", () => {
     const projectDir = path.join(tmpDir, "project");
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
     writeAgent(
       path.join(projectDir, ".pi", "agents"),
       "scout.md",
@@ -736,11 +743,18 @@ tools: read
 Custom scout body.
 `,
     );
-    const agents = discoverAgents(projectDir);
-    const scout = agents.get("scout")!;
-    expect(scout.description).toBe("My custom scout");
-    expect(scout.systemPrompt).toBe("Custom scout body.");
-    expect(scout.scope).toBe("project");
+    try {
+      const agents = discoverAgents(projectDir);
+      const scout = agents.get("scout")!;
+      expect(scout.description).toBe(
+        "Investigate without modifying the source project.",
+      );
+      expect(scout.systemPrompt).toContain("Do not modify files.");
+      expect(scout.builtin).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.some((warning) => warning.includes("scout"))).toBe(true);
   });
 
   // ── Claude Code interchange ────────────────────────────────────────────
@@ -2592,6 +2606,178 @@ describe("loadDelegateSettings", () => {
     const result = loadDelegateSettings(projectDir);
     expect(result?.agentOverrides?.reviewer?.model).toBe("project/model");
   });
+
+  test("merges exact parent-model overrides by field with project precedence", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
+    writeFileSync(
+      path.join(projectDir, ".pi", "settings.json"),
+      JSON.stringify({
+        delegate: {
+          agentOverridesByParentModel: {
+            "openai-codex/gpt-5.6-sol": {
+              scout: { thinking: "high" },
+            },
+          },
+        },
+      }),
+    );
+
+    const userDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(
+      path.join(userDir, "settings.json"),
+      JSON.stringify({
+        delegate: {
+          agentOverridesByParentModel: {
+            "openai-codex/gpt-5.6-sol": {
+              scout: {
+                model: "openai-codex/gpt-5.6-luna",
+                tools: ["read"],
+                thinking: "low",
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const result = loadDelegateSettings(projectDir);
+    expect(
+      result?.agentOverridesByParentModel?.["openai-codex/gpt-5.6-sol"]?.scout,
+    ).toEqual({
+      model: "openai-codex/gpt-5.6-luna",
+      tools: ["read"],
+      thinking: "high",
+    });
+  });
+
+  test("clearing the cache makes changed settings visible", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const userDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(userDir, { recursive: true });
+    const settingsPath = path.join(userDir, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        delegate: { agentOverrides: { coder: { model: "first/model" } } },
+      }),
+    );
+    expect(loadDelegateSettings(projectDir)?.agentOverrides?.coder?.model).toBe(
+      "first/model",
+    );
+
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        delegate: { agentOverrides: { coder: { model: "second/model" } } },
+      }),
+    );
+    expect(loadDelegateSettings(projectDir)?.agentOverrides?.coder?.model).toBe(
+      "first/model",
+    );
+    clearDelegateSettingsCache();
+    expect(loadDelegateSettings(projectDir)?.agentOverrides?.coder?.model).toBe(
+      "second/model",
+    );
+  });
+
+  test("parent-model-scoped built-in overrides do not leak to another parent model", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const userDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(
+      path.join(userDir, "settings.json"),
+      JSON.stringify({
+        delegate: {
+          agentOverridesByParentModel: {
+            "openai-codex/gpt-5.6-sol": {
+              scout: {
+                model: "openai-codex/gpt-5.6-luna:high",
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const selected = {
+      provider: "openai-codex",
+      id: "gpt-5.6-luna",
+    } as any;
+    const registry = {
+      getAvailable: () => [selected],
+      find: (provider: string, id: string) =>
+        provider === selected.provider && id === selected.id ? selected : null,
+      hasConfiguredAuth: () => true,
+    } as any;
+    const codexParent = {
+      provider: "openai-codex",
+      id: "gpt-5.6-sol",
+    } as any;
+    const openrouterParent = {
+      provider: "openrouter",
+      id: "deepseek-v4-pro",
+    } as any;
+    const base = {
+      cwd: projectDir,
+      modelRegistry: registry,
+      sessionManager: undefined,
+      getSystemPrompt: () => "parent",
+    } as any;
+
+    const [codexTask] = resolveTasks(
+      [{ agent: "scout", prompt: "inspect" }] as any,
+      { ...base, model: codexParent },
+      discoverAgents(projectDir),
+      { thinking: "off", tools: DEFAULT_TOOLS },
+    );
+    expect(codexTask?.model).toBe(selected);
+    expect(codexTask?.thinking).toBe("high");
+
+    clearDelegateSettingsCache();
+    const [openrouterTask] = resolveTasks(
+      [{ agent: "scout", prompt: "inspect" }] as any,
+      { ...base, model: openrouterParent },
+      discoverAgents(projectDir),
+      { thinking: "medium", tools: DEFAULT_TOOLS },
+    );
+    expect(openrouterTask?.model).toBe(openrouterParent);
+    expect(openrouterTask?.thinking).toBe("medium");
+  });
+
+  test("rejects unsupported per-agent skill filtering with a warning", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const userDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(
+      path.join(userDir, "settings.json"),
+      JSON.stringify({
+        delegate: {
+          agentOverrides: {
+            scout: { model: "some/model", skills: ["security-review"] },
+          },
+        },
+      }),
+    );
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      expect(loadDelegateSettings(projectDir)?.agentOverrides?.scout).toBe(
+        undefined,
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(
+      warnings.some((warning) => warning.includes("skill filtering")),
+    ).toBe(true);
+  });
 });
 
 // ── Integration: tool registration ────────────────────────────────────────
@@ -2686,10 +2872,10 @@ describe("delegate extension integration", () => {
     expect(toolDef!.description).toContain("tasks:[]=full manual");
     expect(schema.properties.ticket.description).toContain("polling all");
     expect(tasksArraySchema.items.properties.agent.description).toContain(
-      "`default`",
+      "default, scout, coder, reviewer",
     );
     expect(tasksArraySchema.items.properties.agent.description).toContain(
-      "parent model/thinking/native tools/base prompt",
+      "Built-ins: default, scout, coder, reviewer",
     );
     expect(tasksArraySchema.items.properties.prompt.description).toContain(
       "cannot see this chat",
@@ -2717,7 +2903,7 @@ describe("delegate extension integration", () => {
       "scratch",
     ]);
     expect(tasksArraySchema.items.properties.workspace.description).toContain(
-      "Not security isolation",
+      "not security isolation",
     );
     expect(tasksArraySchema.items.properties.id.description).toContain(
       "correlation",

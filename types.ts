@@ -18,9 +18,15 @@ export interface AgentConfig {
   name: string;
   description: string;
   model?: string;
-  thinking: ThinkingLevel;
+  /** Markdown agents default invalid/omitted values to "off". Built-ins omit
+   *  this field so they can inherit the parent's thinking level. */
+  thinking?: ThinkingLevel;
   tools: string[];
   systemPrompt: string;
+  /** Built-in profiles are immutable and cannot be shadowed by Markdown. */
+  builtin?: boolean;
+  /** Default workspace for a built-in profile. Custom agents use shared. */
+  workspace?: WorkspaceMode;
   /** Origin of the profile. `claude` denotes imported .claude/agents files. */
   scope?: "project" | "global" | "claude";
 }
