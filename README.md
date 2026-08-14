@@ -53,8 +53,9 @@ delegate({
 
 Delegate reflink-copies the containing Git repository beside the original, runs
 the subagent in the corresponding copied directory, then deletes the copy. It
-requires GNU `cp` and a reflink-capable filesystem such as Btrfs; it never falls
-back to an expensive full copy. Scratch mode cannot use `sessionId`,
+requires Linux with `/proc/self/fd`, GNU `cp`, and a reflink-capable filesystem
+such as Btrfs; it never falls back to an expensive full copy. Scratch mode
+cannot use `sessionId`,
 `resumeFrom`, session actions, linked Git worktrees, or project symlinks that
 point outside the copied tree.
 

@@ -5,6 +5,7 @@ import { scheduleDeadline } from "./timer.ts";
 
 const SCRATCH_PREFIX = ".pi-delegate-scratch-";
 const SCRATCH_TREE_NAME = "project";
+const SCRATCH_OWNER_NAME = ".owner";
 const COPY_TIMEOUT_MS = 5 * 60 * 1000;
 
 export interface ScratchWorkspace {
@@ -30,6 +31,10 @@ export interface ScratchWorkspace {
   isDisposablePath(candidate: string): Promise<boolean>;
   cleanup(): Promise<void>;
 }
+
+export class ScratchSetupError extends Error {}
+
+export class ScratchDeadlineError extends ScratchSetupError {}
 
 class CommandError extends Error {
   constructor(
@@ -84,7 +89,7 @@ async function findCopyRoot(cwd: string, signal: AbortSignal): Promise<string> {
       })
     ).trim();
     if (!root) {
-      throw new Error("Git returned an empty repository root.");
+      throw new ScratchSetupError("Git returned an empty repository root.");
     }
     return await fs.promises.realpath(root);
   } catch (error) {
@@ -98,9 +103,12 @@ async function findCopyRoot(cwd: string, signal: AbortSignal): Promise<string> {
     ) {
       return cwd;
     }
-    throw new Error("Could not safely determine the scratch project root.", {
-      cause: error,
-    });
+    throw new ScratchSetupError(
+      "Could not safely determine the scratch project root.",
+      {
+        cause: error,
+      },
+    );
   }
 }
 
@@ -109,10 +117,11 @@ function throwIfSetupCancelled(
   parentSignal: AbortSignal | undefined,
 ): void {
   if (!signal.aborted) return;
-  throw new Error(
-    parentSignal?.aborted
-      ? "Scratch workspace creation was aborted."
-      : "Scratch workspace creation exceeded the task deadline.",
+  if (parentSignal?.aborted) {
+    throw new Error("Scratch workspace creation was aborted.");
+  }
+  throw new ScratchDeadlineError(
+    "Scratch workspace creation exceeded the task deadline.",
   );
 }
 
@@ -137,12 +146,12 @@ async function validateCopiedTree(
       // would each need the same independent validation as the root repository.
       if (entry.name === ".git") {
         if (!entry.isDirectory()) {
-          throw new Error(
+          throw new ScratchSetupError(
             `Scratch workspace cannot safely copy linked Git metadata at '${path.relative(root, candidate)}'.`,
           );
         }
         if (directory !== root) {
-          throw new Error(
+          throw new ScratchSetupError(
             `Scratch workspace does not support nested Git repositories at '${path.relative(root, candidate)}'.`,
           );
         }
@@ -155,7 +164,7 @@ async function validateCopiedTree(
       const target = await fs.promises.readlink(candidate);
       const resolvedTarget = path.resolve(path.dirname(candidate), target);
       if (path.isAbsolute(target) || !isWithin(root, resolvedTarget)) {
-        throw new Error(
+        throw new ScratchSetupError(
           `Scratch workspace cannot safely copy symlink '${path.relative(root, candidate)}' because it points outside the project.`,
         );
       }
@@ -171,6 +180,183 @@ function isWithin(root: string, candidate: string): boolean {
       !relative.startsWith(`..${path.sep}`) &&
       !path.isAbsolute(relative))
   );
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ESRCH"
+    );
+  }
+}
+
+/** Remove leases left behind by a process that is no longer running.
+ *
+ * The owner marker distinguishes our leases from unrelated prefix-matching
+ * directories. Live owners are never touched. The final removal still goes
+ * through opened descriptors and a non-recursive rmdir, so a replacement or
+ * active workspace fails closed.
+ */
+async function sweepStaleScratchLeases(parent: string): Promise<void> {
+  const uid = process.getuid?.();
+  if (uid === undefined) return;
+
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(parent, { withFileTypes: true });
+  } catch (error) {
+    console.error("[delegate] scratch lease sweep failed", error);
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.name.startsWith(SCRATCH_PREFIX) || !entry.isDirectory()) {
+      continue;
+    }
+    const leaseRoot = path.join(parent, entry.name);
+    try {
+      const leaseStat = await fs.promises.lstat(leaseRoot);
+      if (!leaseStat.isDirectory() || leaseStat.uid !== uid) continue;
+      const contents = await fs.promises.readdir(leaseRoot);
+      if (!contents.includes(SCRATCH_OWNER_NAME)) {
+        // Empty leases from versions without an owner marker are still safe
+        // to reclaim; anything else may be an unrelated directory.
+        if (contents.length === 0) await fs.promises.rmdir(leaseRoot);
+        continue;
+      }
+      const ownerPath = path.join(leaseRoot, SCRATCH_OWNER_NAME);
+      const ownerStat = await fs.promises.lstat(ownerPath);
+      if (
+        !ownerStat.isFile() ||
+        ownerStat.uid !== uid ||
+        ownerStat.mode & 0o077
+      ) {
+        continue;
+      }
+      const pid = Number.parseInt(
+        (await fs.promises.readFile(ownerPath, "utf8")).trim(),
+        10,
+      );
+      if (!Number.isSafeInteger(pid) || isProcessAlive(pid)) {
+        continue;
+      }
+
+      const projectRoot = path.join(leaseRoot, SCRATCH_TREE_NAME);
+      if (
+        contents.some(
+          (name) => name !== SCRATCH_OWNER_NAME && name !== SCRATCH_TREE_NAME,
+        )
+      ) {
+        continue;
+      }
+      let projectStat: fs.Stats | undefined;
+      try {
+        projectStat = await fs.promises.lstat(projectRoot);
+        if (!projectStat.isDirectory()) continue;
+      } catch (error) {
+        if (!(
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "ENOENT"
+        )) {
+          throw error;
+        }
+      }
+
+      // Open the parent and lease before removing anything. This repeats the
+      // same identity checks as normal cleanup against the directory found by
+      // the initial scan, rather than trusting a pathname that may be replaced.
+      const parentHandle = await fs.promises.open(
+        parent,
+        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
+      );
+      let leaseHandle: Awaited<ReturnType<typeof fs.promises.open>> | undefined;
+      let projectHandle:
+        Awaited<ReturnType<typeof fs.promises.open>> | undefined;
+      try {
+        leaseHandle = await fs.promises.open(
+          path.join(`/proc/self/fd/${parentHandle.fd}`, entry.name),
+          fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
+        );
+        const currentLeaseStat = await fs.promises.lstat(leaseRoot);
+        const openLeaseStat = await leaseHandle.stat();
+        if (
+          currentLeaseStat.dev !== leaseStat.dev ||
+          currentLeaseStat.ino !== leaseStat.ino ||
+          openLeaseStat.dev !== leaseStat.dev ||
+          openLeaseStat.ino !== leaseStat.ino
+        ) {
+          continue;
+        }
+        const currentOwnerPath = path.join(
+          `/proc/self/fd/${leaseHandle.fd}`,
+          SCRATCH_OWNER_NAME,
+        );
+        const currentOwnerStat = await fs.promises.lstat(currentOwnerPath);
+        const currentPid = Number.parseInt(
+          (await fs.promises.readFile(currentOwnerPath, "utf8")).trim(),
+          10,
+        );
+        if (
+          !currentOwnerStat.isFile() ||
+          currentOwnerStat.uid !== uid ||
+          currentOwnerStat.dev !== ownerStat.dev ||
+          currentOwnerStat.ino !== ownerStat.ino ||
+          !Number.isSafeInteger(currentPid) ||
+          isProcessAlive(currentPid)
+        ) {
+          continue;
+        }
+        if (projectStat) {
+          projectHandle = await fs.promises.open(
+            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
+            fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
+          );
+          const openProjectStat = await projectHandle.stat();
+          if (
+            openProjectStat.dev !== projectStat.dev ||
+            openProjectStat.ino !== projectStat.ino
+          ) {
+            continue;
+          }
+        }
+        await leaseHandle.chmod(0o700);
+        if (projectStat) {
+          await fs.promises.rm(
+            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
+            { recursive: true, force: false },
+          );
+        }
+        await fs.promises.rm(currentOwnerPath, { force: false });
+        await fs.promises.rmdir(
+          path.join(`/proc/self/fd/${parentHandle.fd}`, entry.name),
+        );
+      } finally {
+        await projectHandle?.close();
+        await leaseHandle?.close();
+        await parentHandle.close();
+      }
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error.code === "ENOENT" || error.code === "ENOTDIR")
+      ) {
+        continue;
+      }
+      // A concurrent creator/remover can legitimately win this race. Other
+      // failures are still reported, but must not block a new scratch task.
+      console.error(
+        `[delegate] failed to sweep stale scratch lease '${leaseRoot}'`,
+        error,
+      );
+    }
+  }
 }
 
 /**
@@ -218,15 +404,21 @@ export async function createScratchWorkspace(
     sourceRoot = await findCopyRoot(sourceCwd, controller.signal);
     throwIfSetupCancelled(controller.signal, signal);
     if (!isWithin(sourceRoot, sourceCwd)) {
-      throw new Error(
+      throw new ScratchSetupError(
         "Scratch workspace could not map the task cwd into its project root.",
       );
     }
 
+    await sweepStaleScratchLeases(path.dirname(sourceRoot));
     leaseRoot = await fs.promises.mkdtemp(
       path.join(path.dirname(sourceRoot), SCRATCH_PREFIX),
     );
     await fs.promises.chmod(leaseRoot, 0o700);
+    await fs.promises.writeFile(
+      path.join(leaseRoot, SCRATCH_OWNER_NAME),
+      `${process.pid}\n`,
+      { mode: 0o600 },
+    );
     scratchRoot = path.join(leaseRoot, SCRATCH_TREE_NAME);
     await fs.promises.mkdir(scratchRoot, { mode: 0o700 });
     // `source/.` copies the contents into the already-created private directory.
@@ -287,7 +479,7 @@ export async function createScratchWorkspace(
         !isWithin(scratchRoot, effectiveGitDir) ||
         !isWithin(scratchRoot, effectiveCommonDir)
       ) {
-        throw new Error(
+        throw new ScratchSetupError(
           "Scratch workspace Git configuration redirects its worktree or metadata outside the copied project.",
         );
       }
@@ -315,23 +507,17 @@ export async function createScratchWorkspace(
       }
     }
     if (controller.signal.aborted) {
-      throw new Error(
-        signal?.aborted
-          ? "Scratch workspace creation was aborted."
-          : "Scratch workspace creation exceeded the task deadline.",
+      if (signal?.aborted) {
+        throw new Error("Scratch workspace creation was aborted.", {
+          cause: error,
+        });
+      }
+      throw new ScratchDeadlineError(
+        "Scratch workspace creation exceeded the task deadline.",
         { cause: error },
       );
     }
-    if (
-      error instanceof Error &&
-      (error.message.includes("Scratch workspace cannot safely copy") ||
-        error.message.includes("Scratch workspace Git configuration") ||
-        error.message.includes("Scratch workspace does not support") ||
-        error.message.includes("safely determine") ||
-        error.message.includes("could not map"))
-    ) {
-      throw error;
-    }
+    if (error instanceof ScratchSetupError) throw error;
     throw new Error(
       "Could not create a CoW scratch workspace. The project and scratch directory must be on a reflink-capable filesystem (for example Btrfs).",
       { cause: error },
@@ -392,81 +578,94 @@ export async function createScratchWorkspace(
     },
     async cleanup(): Promise<void> {
       if (cleaned) return;
-      if (
-        path.dirname(completedLeaseRoot) !== path.dirname(sourceRoot!) ||
-        !path.basename(completedLeaseRoot).startsWith(SCRATCH_PREFIX) ||
-        path.dirname(completedRoot) !== completedLeaseRoot ||
-        path.basename(completedRoot) !== SCRATCH_TREE_NAME
-      ) {
-        throw new Error(
-          "Refusing to clean an unrecognised scratch workspace path.",
-        );
-      }
-      // Open the parent first, then resolve the lease through that handle. The
-      // descriptor identifies the checked directory even if its pathname is
-      // renamed or replaced while cleanup is running.
-      const parentHandle = await fs.promises.open(
-        path.dirname(completedLeaseRoot),
-        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
-      );
-      let leaseHandle: Awaited<ReturnType<typeof fs.promises.open>> | undefined;
-      let rootHandle: Awaited<ReturnType<typeof fs.promises.open>> | undefined;
       try {
-        leaseHandle = await fs.promises.open(
-          path.join(
-            `/proc/self/fd/${parentHandle.fd}`,
-            path.basename(completedLeaseRoot),
-          ),
-          fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
-        );
-        rootHandle = await fs.promises.open(
-          path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
-          fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
-        );
-        const currentLeaseStat = await fs.promises.lstat(completedLeaseRoot);
-        const currentRootStat = await fs.promises.lstat(completedRoot);
-        const openLeaseStat = await leaseHandle.stat();
-        const openRootStat = await rootHandle.stat();
         if (
-          !currentLeaseStat.isDirectory() ||
-          currentLeaseStat.dev !== completedLeaseStat.dev ||
-          currentLeaseStat.ino !== completedLeaseStat.ino ||
-          !currentRootStat.isDirectory() ||
-          currentRootStat.dev !== completedRootStat.dev ||
-          currentRootStat.ino !== completedRootStat.ino ||
-          !openLeaseStat.isDirectory() ||
-          openLeaseStat.dev !== completedLeaseStat.dev ||
-          openLeaseStat.ino !== completedLeaseStat.ino ||
-          !openRootStat.isDirectory() ||
-          openRootStat.dev !== completedRootStat.dev ||
-          openRootStat.ino !== completedRootStat.ino
+          path.dirname(completedLeaseRoot) !== path.dirname(sourceRoot!) ||
+          !path.basename(completedLeaseRoot).startsWith(SCRATCH_PREFIX) ||
+          path.dirname(completedRoot) !== completedLeaseRoot ||
+          path.basename(completedRoot) !== SCRATCH_TREE_NAME
         ) {
           throw new Error(
-            "Scratch workspace root was moved or replaced; refusing to report cleanup success.",
+            "Refusing to clean an unrecognised scratch workspace path.",
           );
         }
-        await leaseHandle.chmod(0o700);
-        // Remove the project through the opened lease descriptor. The
-        // recursive operation never resolves the disposable root pathname.
-        await fs.promises.rm(
-          path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
-          { recursive: true, force: false },
+        // Open the parent first, then resolve the lease through that handle. The
+        // descriptor identifies the checked directory even if its pathname is
+        // renamed or replaced while cleanup is running.
+        const parentHandle = await fs.promises.open(
+          path.dirname(completedLeaseRoot),
+          fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
         );
-        // The lease is empty now. Remove only its directory entry through the
-        // opened parent. This is deliberately non-recursive: if a cooperating
-        // process replaced the lease with a populated directory, rmdir fails
-        // instead of deleting the replacement's contents.
-        await fs.promises.rmdir(
-          path.join(
-            `/proc/self/fd/${parentHandle.fd}`,
-            path.basename(completedLeaseRoot),
-          ),
+        let leaseHandle:
+          Awaited<ReturnType<typeof fs.promises.open>> | undefined;
+        let rootHandle:
+          Awaited<ReturnType<typeof fs.promises.open>> | undefined;
+        try {
+          leaseHandle = await fs.promises.open(
+            path.join(
+              `/proc/self/fd/${parentHandle.fd}`,
+              path.basename(completedLeaseRoot),
+            ),
+            fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
+          );
+          rootHandle = await fs.promises.open(
+            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
+            fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
+          );
+          const currentLeaseStat = await fs.promises.lstat(completedLeaseRoot);
+          const currentRootStat = await fs.promises.lstat(completedRoot);
+          const openLeaseStat = await leaseHandle.stat();
+          const openRootStat = await rootHandle.stat();
+          if (
+            !currentLeaseStat.isDirectory() ||
+            currentLeaseStat.dev !== completedLeaseStat.dev ||
+            currentLeaseStat.ino !== completedLeaseStat.ino ||
+            !currentRootStat.isDirectory() ||
+            currentRootStat.dev !== completedRootStat.dev ||
+            currentRootStat.ino !== completedRootStat.ino ||
+            !openLeaseStat.isDirectory() ||
+            openLeaseStat.dev !== completedLeaseStat.dev ||
+            openLeaseStat.ino !== completedLeaseStat.ino ||
+            !openRootStat.isDirectory() ||
+            openRootStat.dev !== completedRootStat.dev ||
+            openRootStat.ino !== completedRootStat.ino
+          ) {
+            throw new Error(
+              "Scratch workspace root was moved or replaced; refusing to report cleanup success.",
+            );
+          }
+          await leaseHandle.chmod(0o700);
+          // Remove the project through the opened lease descriptor. The
+          // recursive operation never resolves the disposable root pathname.
+          await fs.promises.rm(
+            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
+            { recursive: true, force: false },
+          );
+          await fs.promises.rm(
+            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_OWNER_NAME),
+            { force: false },
+          );
+          // The lease is empty now. Remove only its directory entry through the
+          // opened parent. This is deliberately non-recursive: if a cooperating
+          // process replaced the lease with a populated directory, rmdir fails
+          // instead of deleting the replacement's contents.
+          await fs.promises.rmdir(
+            path.join(
+              `/proc/self/fd/${parentHandle.fd}`,
+              path.basename(completedLeaseRoot),
+            ),
+          );
+          cleaned = true;
+        } finally {
+          await rootHandle?.close();
+          await leaseHandle?.close();
+          await parentHandle.close();
+        }
+      } catch (error) {
+        throw new Error(
+          `Scratch workspace cleanup failed for lease '${completedLeaseRoot}': ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
         );
-        cleaned = true;
-      } finally {
-        await rootHandle?.close();
-        await leaseHandle?.close();
-        await parentHandle.close();
       }
     },
   };

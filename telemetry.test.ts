@@ -34,7 +34,11 @@ function makeRecorder(): {
     tasks,
     recorder: {
       recordCall: (r) => calls.push(r),
-      recordTask: (r) => tasks.push(r),
+      recordTask: (r) => {
+        const existing = tasks.findIndex((task) => task.id === r.id);
+        if (existing === -1) tasks.push(r);
+        else tasks[existing] = r;
+      },
     },
   };
 }
@@ -257,6 +261,34 @@ describe("telemetry", () => {
       retries: 2,
     });
 
+    recordTask({
+      id: "stable-task-row",
+      callId: "call-1",
+      async: false,
+      taskIndex: 0,
+      task,
+      progress: {
+        ...progress,
+        status: "failed",
+        durationMs: 20,
+        tokens: 75,
+        toolUses: 4,
+      },
+      result: {
+        ...result,
+        output: "updated",
+        error: "failed",
+        durationMs: 20,
+        tokens: 75,
+        usage: {
+          ...result.usage,
+          totalTokens: 75,
+          cost: { ...result.usage.cost, total: 0.02 },
+        },
+      },
+      retries: 3,
+    });
+
     expect(tasks).toHaveLength(1);
     const row = tasks[0]!;
     expect(row.id).toBe("stable-task-row");
@@ -266,14 +298,14 @@ describe("telemetry", () => {
     expect(row.model).toBe("test/model");
     expect(row.thinking).toBe("low");
     expect(row.tools).toBe(JSON.stringify(["read", "bash"]));
-    expect(row.tokens).toBe(50);
-    expect(row.cost).toBe(0.01);
-    expect(row.tool_uses).toBe(3);
-    expect(row.retries).toBe(2);
+    expect(row.tokens).toBe(75);
+    expect(row.cost).toBe(0.02);
+    expect(row.tool_uses).toBe(4);
+    expect(row.retries).toBe(3);
     expect(row.prompt_chars).toBe(11);
-    expect(row.output_chars).toBe(2);
+    expect(row.output_chars).toBe(7);
     expect(row.async).toBe(0);
-    expect(row.outcome).toBe("success");
+    expect(row.outcome).toBe("failed");
     expect(row.failure_kind).toBeUndefined();
   });
 

@@ -28,7 +28,7 @@ import { getWholeTaskMaxRetries, getWholeTaskBaseDelayMs } from "./config.ts";
 import { addUsage, emptyUsage } from "./usage.ts";
 import { scheduleDeadline } from "./timer.ts";
 import { recordTask } from "./telemetry.ts";
-import { createScratchWorkspace } from "./workspace.ts";
+import { createScratchWorkspace, ScratchDeadlineError } from "./workspace.ts";
 
 /** Internal seam for lifecycle-level tests without replacing session ownership. */
 type RunAgentSession = typeof runAgentSession;
@@ -608,7 +608,7 @@ async function runResolvedTaskUnlocked(
   } catch (error) {
     const setupError = error instanceof Error ? error.message : String(error);
     const deadlineExceeded =
-      !env.signal?.aborted && setupError.includes("exceeded the task deadline");
+      !env.signal?.aborted && error instanceof ScratchDeadlineError;
     return finishTask(
       env,
       p,
@@ -638,10 +638,17 @@ async function runResolvedTaskUnlocked(
   let telemetryTaskId: string | undefined;
   let retries = 0;
   try {
-    result = await runResolvedTaskCore(env, executionTask, p, taskIndex, {
-      taskStartedAt: startedAt,
-      deadlineAt,
-    });
+    const preMappingResult = await runResolvedTaskCore(
+      env,
+      executionTask,
+      p,
+      taskIndex,
+      {
+        taskStartedAt: startedAt,
+        deadlineAt,
+      },
+    );
+    result = preMappingResult;
     // Capture metadata before scratch wrapping creates a new result object.
     // Both values belong to the logical task and must survive that clone.
     telemetryTaskId = taskTelemetryIds.get(result);
@@ -668,6 +675,12 @@ async function runResolvedTaskUnlocked(
   } catch (error) {
     result = {
       ...failTask(task, error instanceof Error ? error.message : String(error)),
+      ...(result
+        ? {
+            tokens: result.tokens,
+            usage: result.usage,
+          }
+        : {}),
       workspace: "scratch",
       durationMs: Date.now() - startedAt,
     };
