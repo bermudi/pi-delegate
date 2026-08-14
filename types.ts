@@ -251,8 +251,6 @@ export interface TaskRunEnv {
   /** Abort signal — parent's for sync, ticket's for async. May be undefined when no parent signal is available. */
   signal: AbortSignal | undefined;
   modelRegistry: ModelRegistry;
-  /** Parent session manager — used to link subagent sessions for /resume. */
-  parentSessionManager: { getSessionFile?(): string | undefined } | undefined;
   /** Ticket id for busy-guard self-checks. undefined for sync. */
   ticketId?: string;
   /** When the delegate started. Used for close/list progress (elapsed time). */

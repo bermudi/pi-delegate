@@ -18,7 +18,6 @@ import { isSessionBusy } from "./tickets.ts";
 import {
   createSubagentSessionManager,
   persistSessionHeader,
-  setParentSession,
 } from "./sessions.ts";
 import { runAgentSession, formatDeadlineExceededError } from "./runner.ts";
 import { getGitChangedFiles } from "./file-tracking.ts";
@@ -329,8 +328,8 @@ async function sleepForWholeTaskRetry(
 }
 
 /** Build the AgentSession for a fresh or resumed subagent via createAgentSession.
- *  Reuses the caller-supplied sessionManager (so parent-linking + per-task .jsonl
- *  files stay under our control). Extension-free host deps may be cached, while
+ *  Reuses the caller-supplied sessionManager (so per-task .jsonl files stay under
+ *  our control). Extension-free host deps may be cached, while
  *  provider-configured or allowlisted-extension deps are session-local because
  *  Pi binds mutable extension callbacks onto each loader runtime. */
 async function buildDelegateSession(
@@ -484,10 +483,6 @@ async function acquireAgentSession(
       };
     }
 
-    // Link resumed session to parent for /resume discoverability.
-    const parentFile = env.parentSessionManager?.getSessionFile?.();
-    if (parentFile) setParentSession(resumed, parentFile);
-
     const session = await buildDelegateSession(
       task,
       resumed,
@@ -508,10 +503,7 @@ async function acquireAgentSession(
     // isolation. Keep scratch transcripts in memory only.
     sessionManager = SessionManager.inMemory(task.cwd);
   } else {
-    const fresh = createSubagentSessionManager(
-      env.parentSessionManager,
-      task.cwd,
-    );
+    const fresh = createSubagentSessionManager(task.cwd);
     if (!fresh) {
       return {
         error: failTask(task, "Internal: could not create session file"),

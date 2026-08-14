@@ -1,66 +1,25 @@
 import * as fs from "node:fs";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import { SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-/** Link a subagent session to its parent and persist the header when possible. */
-export function setParentSession(sm: SessionManager, parentPath: string): void {
-  const inner = sm as unknown as {
-    fileEntries: Array<{ type: string; parentSession?: string }>;
-    getSessionFile?: () => string | undefined;
-    _rewriteFile?: () => void;
-  };
-  const header = inner.fileEntries[0];
-  if (header && header.type === "session") {
-    header.parentSession = parentPath;
-    // For a *resumed* session the file already exists on disk and the manager
-    // is flushed (SessionManager.open/setSessionFile sets flushed=true). The
-    // in-memory header mutation above is otherwise lost: upstream _persist()
-    // only *appends* new entries once flushed — it never rewrites the header.
-    // So a resumeFrom session would never surface as a child in /resume despite
-    // the link being set in memory. Rewrite the whole file (header + entries)
-    // so the parentSession field is actually persisted. Fresh sessions skip
-    // this (file doesn't exist yet); their first _persist() writes the mutated
-    // header along with the rest, and rewriting early would trip the
-    // duplicate-header bug in _persist()'s not-yet-flushed path.
-    const file = inner.getSessionFile?.();
-    if (file && fs.existsSync(file)) {
-      try {
-        inner._rewriteFile?.();
-      } catch {
-        /* best effort — link stays in-memory; not fatal */
-      }
-    }
-  }
+/** Persistent storage for delegate-only conversations. */
+export function getDelegateSessionDir(): string {
+  return join(getAgentDir(), "delegate-sessions");
 }
 
 /**
  * Create a session manager for a subagent run.
  *
- * Always creates a standalone session file in the target cwd.
- * Sets `parentSession` in the header so subagent work is discoverable
- * as a child of the parent session in `/resume`.
- *
- * Returns the concrete `SessionManager` (ready to hand to `createAgentSession`)
- * and its file path (for result reporting + pool bookkeeping).
+ * Delegate sessions are deliberately standalone and live in their own
+ * directory. They are not attached to the parent's session tree.
  */
 export function createSubagentSessionManager(
-  parentSessionManager: unknown,
   cwd: string,
 ): { manager: SessionManager; file: string } | undefined {
-  // Resolve parent session file path for linking.
-  const parentFile = (
-    parentSessionManager as
-      { getSessionFile?(): string | undefined } | undefined
-  )?.getSessionFile?.();
-
-  // Always persist subagent work so the main agent can search it later.
-  const sm = SessionManager.create(cwd);
+  // Always persist subagent work separately from the parent's session tree.
+  const sm = SessionManager.create(cwd, getDelegateSessionDir());
   const sessionFile = sm.getSessionFile();
   if (!sessionFile) return undefined;
-
-  // Link to parent session so subagent appears as a child in /resume.
-  if (parentFile) {
-    setParentSession(sm, parentFile);
-  }
 
   return { manager: sm, file: sessionFile };
 }

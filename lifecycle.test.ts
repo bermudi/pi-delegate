@@ -177,7 +177,6 @@ function makeTestEnv(overrides: Partial<TaskRunEnv> = {}): TaskRunEnv {
   return {
     signal: undefined,
     modelRegistry: { resolveModel: () => undefined } as never,
-    parentSessionManager: undefined,
     delegateStartedAt: Date.now(),
     onProgress: () => {},
     ...overrides,
@@ -2092,7 +2091,6 @@ describe("whole-task retry gating", () => {
     const env = {
       signal: undefined,
       modelRegistry: {} as never,
-      parentSessionManager: undefined,
       delegateStartedAt: Date.now(),
       onProgress: (
         p: {
@@ -2251,7 +2249,6 @@ describe("whole-task retry gating", () => {
     const env = {
       signal: undefined,
       modelRegistry: {} as never,
-      parentSessionManager: undefined,
       delegateStartedAt: Date.now(),
       onProgress: (
         p: {
@@ -2398,7 +2395,6 @@ describe("whole-task retry gating", () => {
     const env = {
       signal: controller.signal,
       modelRegistry: {} as never,
-      parentSessionManager: undefined,
       delegateStartedAt: Date.now(),
       onProgress: (
         p: {
