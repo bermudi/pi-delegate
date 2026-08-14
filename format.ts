@@ -7,6 +7,7 @@ import type {
   TaskProgress,
   TaskResult,
   ToolActivity,
+  WorkspaceMode,
 } from "./types.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -519,7 +520,7 @@ export function relativeTouchedSummary(
 export function findTouchedOverlaps(
   results: readonly {
     attributedFiles?: string[];
-    workspace?: "shared" | "scratch";
+    workspace?: WorkspaceMode;
   }[],
 ): string[] {
   const counts = new Map<string, number>();
