@@ -3,7 +3,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { scheduleDeadline } from "./timer.ts";
 
-const SCRATCH_PREFIX = ".pi-delegate-scratch-";
+const SCRATCH_CONTAINER_NAME = ".pi-delegate-scratch";
+const SCRATCH_LEASE_PREFIX = "lease-";
+const SCRATCH_LEGACY_PREFIX = ".pi-delegate-scratch-";
 const SCRATCH_TREE_NAME = "project";
 const SCRATCH_OWNER_NAME = ".owner";
 const COPY_TIMEOUT_MS = 5 * 60 * 1000;
@@ -35,6 +37,8 @@ export interface ScratchWorkspace {
 export class ScratchSetupError extends Error {}
 
 export class ScratchDeadlineError extends ScratchSetupError {}
+
+class ScratchLeaseIdentityError extends Error {}
 
 class CommandError extends Error {
   constructor(
@@ -195,168 +199,331 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function parseOwnerPid(content: string): number | undefined {
+  const value = content.trim();
+  if (!/^[1-9][0-9]*$/.test(value)) return undefined;
+  const pid = Number(value);
+  return Number.isSafeInteger(pid) ? pid : undefined;
+}
+
+async function deleteLeaseContentsAndRmdir(
+  parentHandle: fs.promises.FileHandle,
+  leaseName: string,
+  leaseHandle: fs.promises.FileHandle,
+  hasProject: boolean = true,
+  expectedLeaseStat?: fs.Stats,
+  expectedProjectStat?: fs.Stats,
+  expectedOwnerStat?: fs.Stats,
+): Promise<void> {
+  const leasePath = path.join(`/proc/self/fd/${parentHandle.fd}`, leaseName);
+  const openLeaseStat = await leaseHandle.stat();
+  const currentLeaseStat = await fs.promises.lstat(leasePath);
+  if (
+    !openLeaseStat.isDirectory() ||
+    (expectedLeaseStat &&
+      !sameFileIdentity(openLeaseStat, expectedLeaseStat)) ||
+    !sameFileIdentity(currentLeaseStat, openLeaseStat)
+  ) {
+    throw new ScratchLeaseIdentityError(
+      "Scratch lease was moved or replaced; refusing cleanup.",
+    );
+  }
+
+  await leaseHandle.chmod(0o700);
+  if (hasProject) {
+    const projectPath = path.join(
+      `/proc/self/fd/${leaseHandle.fd}`,
+      SCRATCH_TREE_NAME,
+    );
+    const projectHandle = await fs.promises.open(
+      projectPath,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
+    );
+    try {
+      const openProjectStat = await projectHandle.stat();
+      const currentProjectStat = await fs.promises.lstat(projectPath);
+      if (
+        !openProjectStat.isDirectory() ||
+        (expectedProjectStat &&
+          !sameFileIdentity(openProjectStat, expectedProjectStat)) ||
+        !sameFileIdentity(currentProjectStat, openProjectStat)
+      ) {
+        throw new ScratchLeaseIdentityError(
+          "Scratch project was moved or replaced; refusing cleanup.",
+        );
+      }
+
+      // Remove children through the opened project directory, not the project
+      // pathname.  This means a replacement at `project` is never recursively
+      // traversed.  The final rmdir is still a pathname operation; the identity
+      // is checked again immediately beforehand, so this is fail-closed for
+      // the deterministic replacement races we can observe, not an atomic
+      // guarantee against a cooperating same-user process.
+      for (const name of await fs.promises.readdir(
+        `/proc/self/fd/${projectHandle.fd}`,
+      )) {
+        await fs.promises.rm(
+          path.join(`/proc/self/fd/${projectHandle.fd}`, name),
+          { recursive: true, force: false },
+        );
+      }
+      const finalProjectStat = await fs.promises.lstat(projectPath);
+      if (!sameFileIdentity(finalProjectStat, openProjectStat)) {
+        throw new ScratchLeaseIdentityError(
+          "Scratch project was moved or replaced; refusing cleanup.",
+        );
+      }
+      await fs.promises.rmdir(projectPath);
+    } finally {
+      await projectHandle.close();
+    }
+  }
+
+  const ownerPath = path.join(
+    `/proc/self/fd/${leaseHandle.fd}`,
+    SCRATCH_OWNER_NAME,
+  );
+  const currentOwnerStat = await fs.promises.lstat(ownerPath);
+  if (
+    expectedOwnerStat &&
+    !sameFileIdentity(currentOwnerStat, expectedOwnerStat)
+  ) {
+    throw new ScratchLeaseIdentityError(
+      "Scratch owner marker was replaced; refusing cleanup.",
+    );
+  }
+  await fs.promises.rm(ownerPath, { force: false });
+
+  const finalLeaseStat = await fs.promises.lstat(leasePath);
+  if (!sameFileIdentity(finalLeaseStat, openLeaseStat)) {
+    throw new ScratchLeaseIdentityError(
+      "Scratch lease was moved or replaced; refusing cleanup.",
+    );
+  }
+  await fs.promises.rmdir(leasePath);
+}
+
+async function ensureScratchContainer(
+  containerDir: string,
+  uid: number,
+): Promise<void> {
+  try {
+    await fs.promises.mkdir(containerDir, { mode: 0o700 });
+    await fs.promises.chmod(containerDir, 0o700);
+    return;
+  } catch (error) {
+    if (!(
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "EEXIST"
+    )) {
+      throw error;
+    }
+  }
+
+  const stat = await fs.promises.lstat(containerDir);
+  if (!stat.isDirectory() || stat.uid !== uid) {
+    throw new ScratchSetupError(
+      `Scratch container directory '${containerDir}' is not a directory owned by the current user.`,
+    );
+  }
+  if ((stat.mode & 0o7777) !== 0o700) {
+    await fs.promises.chmod(containerDir, 0o700);
+  }
+}
+
+interface SweepOptions {
+  prefix?: string;
+  onLeaseOpened?: (leaseName: string, leaseFd: number) => Promise<void> | void;
+  onLeaseValidated?: (leaseName: string) => Promise<void> | void;
+}
+
 /** Remove leases left behind by a process that is no longer running.
  *
  * The owner marker distinguishes our leases from unrelated prefix-matching
- * directories. Live owners are never touched. The final removal still goes
- * through opened descriptors and a non-recursive rmdir, so a replacement or
- * active workspace fails closed.
+ * directories. Live owners are never touched. Descriptors make the scan
+ * independent of a renamed parent, while pathname identity checks ensure that
+ * a lease renamed or replaced after it was opened is left alone. These checks
+ * are snapshots rather than an atomic cross-process locking primitive.
  */
-async function sweepStaleScratchLeases(parent: string): Promise<void> {
+async function sweepStaleScratchLeases(
+  container: string,
+  options: SweepOptions = {},
+): Promise<void> {
   const uid = process.getuid?.();
   if (uid === undefined) return;
 
-  let entries: fs.Dirent[];
+  let parentHandle: fs.promises.FileHandle;
   try {
-    entries = await fs.promises.readdir(parent, { withFileTypes: true });
-  } catch (error) {
-    console.error("[delegate] scratch lease sweep failed", error);
+    parentHandle = await fs.promises.open(
+      container,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
+    );
+  } catch {
     return;
   }
 
-  for (const entry of entries) {
-    if (!entry.name.startsWith(SCRATCH_PREFIX) || !entry.isDirectory()) {
-      continue;
-    }
-    const leaseRoot = path.join(parent, entry.name);
+  try {
+    const parentStat = await parentHandle.stat();
+    if (!parentStat.isDirectory() || parentStat.uid !== uid) return;
+
+    let entries: fs.Dirent[];
     try {
-      const leaseStat = await fs.promises.lstat(leaseRoot);
-      if (!leaseStat.isDirectory() || leaseStat.uid !== uid) continue;
-      const contents = await fs.promises.readdir(leaseRoot);
-      if (!contents.includes(SCRATCH_OWNER_NAME)) {
-        // Without an owner marker we cannot prove that this is one of our
-        // leases, including for an empty directory left by an older version.
-        // Preserve it rather than turning a naming convention into authority
-        // to delete an unrelated directory.
-        continue;
-      }
-      const ownerPath = path.join(leaseRoot, SCRATCH_OWNER_NAME);
-      const ownerStat = await fs.promises.lstat(ownerPath);
-      if (
-        !ownerStat.isFile() ||
-        ownerStat.uid !== uid ||
-        ownerStat.mode & 0o077
-      ) {
-        continue;
-      }
-      const pid = Number.parseInt(
-        (await fs.promises.readFile(ownerPath, "utf8")).trim(),
-        10,
-      );
-      if (!Number.isSafeInteger(pid) || isProcessAlive(pid)) {
-        continue;
-      }
+      entries = await fs.promises.readdir(`/proc/self/fd/${parentHandle.fd}`, {
+        withFileTypes: true,
+      });
+    } catch (error) {
+      console.error("[delegate] scratch lease sweep failed", error);
+      return;
+    }
 
-      const projectRoot = path.join(leaseRoot, SCRATCH_TREE_NAME);
-      if (
-        contents.some(
-          (name) => name !== SCRATCH_OWNER_NAME && name !== SCRATCH_TREE_NAME,
-        )
-      ) {
-        continue;
-      }
-      let projectStat: fs.Stats | undefined;
-      try {
-        projectStat = await fs.promises.lstat(projectRoot);
-        if (!projectStat.isDirectory()) continue;
-      } catch (error) {
-        if (!(
-          error instanceof Error &&
-          "code" in error &&
-          error.code === "ENOENT"
-        )) {
-          throw error;
-        }
-      }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (options.prefix && !entry.name.startsWith(options.prefix)) continue;
 
-      // Open the parent and lease before removing anything. This repeats the
-      // same identity checks as normal cleanup against the directory found by
-      // the initial scan, rather than trusting a pathname that may be replaced.
-      const parentHandle = await fs.promises.open(
-        parent,
-        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
-      );
-      let leaseHandle: Awaited<ReturnType<typeof fs.promises.open>> | undefined;
-      let projectHandle:
-        Awaited<ReturnType<typeof fs.promises.open>> | undefined;
+      let leaseHandle: fs.promises.FileHandle | undefined;
       try {
+        const leasePath = path.join(
+          `/proc/self/fd/${parentHandle.fd}`,
+          entry.name,
+        );
         leaseHandle = await fs.promises.open(
-          path.join(`/proc/self/fd/${parentHandle.fd}`, entry.name),
+          leasePath,
           fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
         );
-        const currentLeaseStat = await fs.promises.lstat(leaseRoot);
-        const openLeaseStat = await leaseHandle.stat();
+        const openedLeaseStat = await leaseHandle.stat();
+        const scannedLeaseStat = await fs.promises.lstat(leasePath);
         if (
-          currentLeaseStat.dev !== leaseStat.dev ||
-          currentLeaseStat.ino !== leaseStat.ino ||
-          openLeaseStat.dev !== leaseStat.dev ||
-          openLeaseStat.ino !== leaseStat.ino
+          !openedLeaseStat.isDirectory() ||
+          openedLeaseStat.uid !== uid ||
+          !sameFileIdentity(scannedLeaseStat, openedLeaseStat)
         ) {
           continue;
         }
-        const currentOwnerPath = path.join(
+
+        // Snapshot the identities before the test hook / concurrent work. If
+        // either pathname changes, the opened descriptor is not used for
+        // deletion. In particular, a rename must not turn this into cleanup of
+        // a lease that merely moved elsewhere.
+        const ownerPath = path.join(
           `/proc/self/fd/${leaseHandle.fd}`,
           SCRATCH_OWNER_NAME,
         );
-        const currentOwnerStat = await fs.promises.lstat(currentOwnerPath);
-        const currentPid = Number.parseInt(
-          (await fs.promises.readFile(currentOwnerPath, "utf8")).trim(),
-          10,
-        );
-        if (
-          !currentOwnerStat.isFile() ||
-          currentOwnerStat.uid !== uid ||
-          currentOwnerStat.dev !== ownerStat.dev ||
-          currentOwnerStat.ino !== ownerStat.ino ||
-          !Number.isSafeInteger(currentPid) ||
-          isProcessAlive(currentPid)
-        ) {
-          continue;
-        }
-        if (projectStat) {
-          projectHandle = await fs.promises.open(
-            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
-            fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
-          );
-          const openProjectStat = await projectHandle.stat();
+        let scannedOwnerStat: fs.Stats;
+        try {
+          scannedOwnerStat = await fs.promises.lstat(ownerPath);
+        } catch (error) {
           if (
-            openProjectStat.dev !== projectStat.dev ||
-            openProjectStat.ino !== projectStat.ino
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "ENOENT"
           ) {
             continue;
           }
+          throw error;
         }
-        await leaseHandle.chmod(0o700);
-        if (projectStat) {
-          await fs.promises.rm(
+        let scannedProjectStat: fs.Stats | undefined;
+        try {
+          scannedProjectStat = await fs.promises.lstat(
             path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
-            { recursive: true, force: false },
           );
+        } catch (error) {
+          if (!(
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "ENOENT"
+          )) {
+            throw error;
+          }
         }
-        await fs.promises.rm(currentOwnerPath, { force: false });
-        await fs.promises.rmdir(
-          path.join(`/proc/self/fd/${parentHandle.fd}`, entry.name),
+
+        if (options.onLeaseOpened) {
+          await options.onLeaseOpened(entry.name, leaseHandle.fd);
+        }
+
+        const currentLeaseStat = await fs.promises.lstat(leasePath);
+        if (!sameFileIdentity(currentLeaseStat, scannedLeaseStat)) continue;
+        const currentOwnerStat = await fs.promises.lstat(ownerPath);
+        if (!sameFileIdentity(currentOwnerStat, scannedOwnerStat)) continue;
+        if (scannedProjectStat) {
+          const currentProjectStat = await fs.promises.lstat(
+            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
+          );
+          if (!sameFileIdentity(currentProjectStat, scannedProjectStat)) {
+            continue;
+          }
+        }
+
+        if (
+          !currentOwnerStat.isFile() ||
+          currentOwnerStat.uid !== uid ||
+          (currentOwnerStat.mode & 0o077) !== 0
+        ) {
+          continue;
+        }
+
+        const ownerContent = await fs.promises.readFile(ownerPath, "utf8");
+        const pid = parseOwnerPid(ownerContent);
+        if (pid === undefined || isProcessAlive(pid)) continue;
+
+        const contents = await fs.promises.readdir(
+          `/proc/self/fd/${leaseHandle.fd}`,
+        );
+        if (
+          contents.some(
+            (name) => name !== SCRATCH_OWNER_NAME && name !== SCRATCH_TREE_NAME,
+          )
+        ) {
+          continue;
+        }
+
+        const hasProject = contents.includes(SCRATCH_TREE_NAME);
+        if (
+          hasProject &&
+          (!scannedProjectStat ||
+            !scannedProjectStat.isDirectory() ||
+            scannedProjectStat.isSymbolicLink())
+        ) {
+          continue;
+        }
+
+        if (options.onLeaseValidated) {
+          await options.onLeaseValidated(entry.name);
+        }
+        await deleteLeaseContentsAndRmdir(
+          parentHandle,
+          entry.name,
+          leaseHandle,
+          hasProject,
+          scannedLeaseStat,
+          scannedProjectStat,
+          scannedOwnerStat,
+        );
+      } catch (error) {
+        if (error instanceof ScratchLeaseIdentityError) continue;
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          (error.code === "ENOENT" ||
+            error.code === "ENOTDIR" ||
+            error.code === "ENOTEMPTY")
+        ) {
+          continue;
+        }
+        console.error(
+          `[delegate] failed to sweep stale scratch lease '${entry.name}'`,
+          error,
         );
       } finally {
-        await projectHandle?.close();
         await leaseHandle?.close();
-        await parentHandle.close();
       }
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        "code" in error &&
-        (error.code === "ENOENT" || error.code === "ENOTDIR")
-      ) {
-        continue;
-      }
-      // A concurrent creator/remover can legitimately win this race. Other
-      // failures are still reported, but must not block a new scratch task.
-      console.error(
-        `[delegate] failed to sweep stale scratch lease '${leaseRoot}'`,
-        error,
-      );
     }
+  } finally {
+    await parentHandle.close();
   }
 }
 
@@ -393,6 +560,7 @@ export async function createScratchWorkspace(
 
   let sourceCwd: string;
   let sourceRoot: string;
+  let containerDir: string;
   let leaseRoot: string | undefined;
   let scratchRoot: string | undefined;
   let copiedLeaseStat: fs.Stats | undefined;
@@ -410,9 +578,18 @@ export async function createScratchWorkspace(
       );
     }
 
-    await sweepStaleScratchLeases(path.dirname(sourceRoot));
+    containerDir = path.join(path.dirname(sourceRoot), SCRATCH_CONTAINER_NAME);
+    const uid = process.getuid?.();
+    if (uid !== undefined) {
+      await ensureScratchContainer(containerDir, uid);
+      await sweepStaleScratchLeases(containerDir);
+      await sweepStaleScratchLeases(path.dirname(sourceRoot), {
+        prefix: SCRATCH_LEGACY_PREFIX,
+      });
+    }
+
     leaseRoot = await fs.promises.mkdtemp(
-      path.join(path.dirname(sourceRoot), SCRATCH_PREFIX),
+      path.join(containerDir, SCRATCH_LEASE_PREFIX),
     );
     await fs.promises.chmod(leaseRoot, 0o700);
     await fs.promises.writeFile(
@@ -581,8 +758,8 @@ export async function createScratchWorkspace(
       if (cleaned) return;
       try {
         if (
-          path.dirname(completedLeaseRoot) !== path.dirname(sourceRoot!) ||
-          !path.basename(completedLeaseRoot).startsWith(SCRATCH_PREFIX) ||
+          path.dirname(completedLeaseRoot) !== containerDir ||
+          !path.basename(completedLeaseRoot).startsWith(SCRATCH_LEASE_PREFIX) ||
           path.dirname(completedRoot) !== completedLeaseRoot ||
           path.basename(completedRoot) !== SCRATCH_TREE_NAME
         ) {
@@ -594,7 +771,7 @@ export async function createScratchWorkspace(
         // descriptor identifies the checked directory even if its pathname is
         // renamed or replaced while cleanup is running.
         const parentHandle = await fs.promises.open(
-          path.dirname(completedLeaseRoot),
+          containerDir,
           fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
         );
         let leaseHandle:
@@ -602,59 +779,48 @@ export async function createScratchWorkspace(
         let rootHandle:
           Awaited<ReturnType<typeof fs.promises.open>> | undefined;
         try {
+          const leaseName = path.basename(completedLeaseRoot);
           leaseHandle = await fs.promises.open(
-            path.join(
-              `/proc/self/fd/${parentHandle.fd}`,
-              path.basename(completedLeaseRoot),
-            ),
+            path.join(`/proc/self/fd/${parentHandle.fd}`, leaseName),
             fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
           );
           rootHandle = await fs.promises.open(
             path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
             fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
           );
-          const currentLeaseStat = await fs.promises.lstat(completedLeaseRoot);
-          const currentRootStat = await fs.promises.lstat(completedRoot);
           const openLeaseStat = await leaseHandle.stat();
           const openRootStat = await rootHandle.stat();
+          const currentLeaseStat = await fs.promises.lstat(
+            path.join(`/proc/self/fd/${parentHandle.fd}`, leaseName),
+          );
+          const currentRootStat = await fs.promises.lstat(
+            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
+          );
           if (
-            !currentLeaseStat.isDirectory() ||
-            currentLeaseStat.dev !== completedLeaseStat.dev ||
-            currentLeaseStat.ino !== completedLeaseStat.ino ||
-            !currentRootStat.isDirectory() ||
-            currentRootStat.dev !== completedRootStat.dev ||
-            currentRootStat.ino !== completedRootStat.ino ||
             !openLeaseStat.isDirectory() ||
-            openLeaseStat.dev !== completedLeaseStat.dev ||
-            openLeaseStat.ino !== completedLeaseStat.ino ||
+            !sameFileIdentity(openLeaseStat, completedLeaseStat) ||
+            !sameFileIdentity(currentLeaseStat, completedLeaseStat) ||
             !openRootStat.isDirectory() ||
-            openRootStat.dev !== completedRootStat.dev ||
-            openRootStat.ino !== completedRootStat.ino
+            !sameFileIdentity(openRootStat, completedRootStat) ||
+            !sameFileIdentity(currentRootStat, completedRootStat)
           ) {
             throw new Error(
               "Scratch workspace root was moved or replaced; refusing to report cleanup success.",
             );
           }
-          await leaseHandle.chmod(0o700);
-          // Remove the project through the opened lease descriptor. The
-          // recursive operation never resolves the disposable root pathname.
-          await fs.promises.rm(
-            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_TREE_NAME),
-            { recursive: true, force: false },
-          );
-          await fs.promises.rm(
-            path.join(`/proc/self/fd/${leaseHandle.fd}`, SCRATCH_OWNER_NAME),
-            { force: false },
-          );
-          // The lease is empty now. Remove only its directory entry through the
-          // opened parent. This is deliberately non-recursive: if a cooperating
-          // process replaced the lease with a populated directory, rmdir fails
-          // instead of deleting the replacement's contents.
-          await fs.promises.rmdir(
-            path.join(
-              `/proc/self/fd/${parentHandle.fd}`,
-              path.basename(completedLeaseRoot),
-            ),
+
+          // The identity checks are snapshots. The primitive repeats them and
+          // removes project children through its opened descriptor, so a
+          // replacement observed before removal is preserved. This is not an
+          // atomic guarantee against a cooperating process changing the path
+          // after the final check.
+          await deleteLeaseContentsAndRmdir(
+            parentHandle,
+            leaseName,
+            leaseHandle,
+            true,
+            completedLeaseStat,
+            completedRootStat,
           );
           cleaned = true;
         } finally {
@@ -671,3 +837,14 @@ export async function createScratchWorkspace(
     },
   };
 }
+
+export const _testHooks = {
+  sweepStaleScratchLeases,
+  ensureScratchContainer,
+  deleteLeaseContentsAndRmdir,
+  SCRATCH_CONTAINER_NAME,
+  SCRATCH_LEASE_PREFIX,
+  SCRATCH_LEGACY_PREFIX,
+  SCRATCH_TREE_NAME,
+  SCRATCH_OWNER_NAME,
+};
