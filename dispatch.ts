@@ -293,7 +293,6 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
   const asyncEnv: TaskRunEnv = {
     signal: ticketSignal,
     modelRegistry,
-    parentSessionManager: ctx.sessionManager,
     ticketId,
     delegateStartedAt: ticket.created,
     telemetryCallId: callSpan?.id,
@@ -426,7 +425,6 @@ export async function dispatchSync(
   const syncEnv: TaskRunEnv = {
     signal,
     modelRegistry: ctx.modelRegistry,
-    parentSessionManager: ctx.sessionManager,
     ticketId: undefined,
     delegateStartedAt: startedAt,
     telemetryCallId: callSpan?.id,
