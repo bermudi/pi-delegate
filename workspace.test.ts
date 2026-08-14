@@ -44,7 +44,146 @@ function testParent(): string {
   return parent;
 }
 
+const SCRATCH_PREFIX = ".pi-delegate-scratch-";
+const DEAD_PID = 2_000_000_000;
+
+function testRepo(parent: string): string {
+  const repo = path.join(parent, "repo");
+  fs.mkdirSync(repo);
+  execFileSync("git", ["init", "--quiet"], { cwd: repo });
+  return repo;
+}
+
+function testLease(
+  parent: string,
+  name: string,
+  options: {
+    owner?: string;
+    project?: boolean;
+    unexpectedFile?: boolean;
+  } = {},
+): string {
+  const lease = path.join(parent, `${SCRATCH_PREFIX}${name}`);
+  fs.mkdirSync(lease, { mode: 0o700 });
+  if (options.owner !== undefined) {
+    fs.writeFileSync(path.join(lease, ".owner"), options.owner, {
+      mode: 0o600,
+    });
+  }
+  if (options.project) fs.mkdirSync(path.join(lease, "project"));
+  if (options.unexpectedFile) {
+    fs.writeFileSync(path.join(lease, "unexpected"), "not a project");
+  }
+  return lease;
+}
+
 describe("scratch workspace", () => {
+  scratchTest("removes leases owned by dead processes", async () => {
+    const parent = testParent();
+    const repo = testRepo(parent);
+    const staleLease = testLease(parent, "dead", {
+      owner: `${DEAD_PID}\n`,
+      project: true,
+    });
+    try {
+      const workspace = await createScratchWorkspace(repo);
+      await workspace.cleanup();
+      expect(fs.existsSync(staleLease)).toBe(false);
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  scratchTest("preserves leases owned by live processes", async () => {
+    const parent = testParent();
+    const repo = testRepo(parent);
+    const liveLease = testLease(parent, "live", {
+      owner: `${process.pid}\n`,
+      project: true,
+    });
+    try {
+      const workspace = await createScratchWorkspace(repo);
+      await workspace.cleanup();
+      expect(fs.existsSync(liveLease)).toBe(true);
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  scratchTest(
+    "preserves leases with missing or malformed owner markers",
+    async () => {
+      const parent = testParent();
+      const repo = testRepo(parent);
+      const missingOwner = testLease(parent, "missing-owner");
+      const malformedOwner = testLease(parent, "malformed-owner", {
+        owner: "not-a-pid\n",
+        project: true,
+      });
+      try {
+        const workspace = await createScratchWorkspace(repo);
+        await workspace.cleanup();
+        expect(fs.existsSync(missingOwner)).toBe(true);
+        expect(fs.existsSync(malformedOwner)).toBe(true);
+      } finally {
+        fs.rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  scratchTest("preserves leases containing unexpected files", async () => {
+    const parent = testParent();
+    const repo = testRepo(parent);
+    const unexpectedLease = testLease(parent, "unexpected", {
+      owner: `${DEAD_PID}\n`,
+      project: true,
+      unexpectedFile: true,
+    });
+    try {
+      const workspace = await createScratchWorkspace(repo);
+      await workspace.cleanup();
+      expect(fs.existsSync(unexpectedLease)).toBe(true);
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  scratchTest(
+    "does not remove a lease directory replaced during the sweep",
+    async () => {
+      const parent = testParent();
+      const repo = testRepo(parent);
+      const replacedLease = testLease(parent, "replaced", {
+        owner: `${DEAD_PID}\n`,
+        project: true,
+      });
+      const originalOpen = fs.promises.open;
+      let replaced = false;
+      fs.promises.open = async (
+        ...args: Parameters<typeof originalOpen>
+      ): ReturnType<typeof originalOpen> => {
+        const handle = await originalOpen(...args);
+        if (!replaced && args[0] === parent) {
+          replaced = true;
+          fs.rmSync(replacedLease, { recursive: true, force: true });
+          fs.mkdirSync(replacedLease, { mode: 0o700 });
+          fs.writeFileSync(path.join(replacedLease, "replacement"), "keep");
+        }
+        return handle;
+      };
+      try {
+        const workspace = await createScratchWorkspace(repo);
+        await workspace.cleanup();
+        expect(fs.existsSync(path.join(replacedLease, "replacement"))).toBe(
+          true,
+        );
+      } finally {
+        fs.promises.open = originalOpen;
+        fs.rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
   scratchTest(
     "copies the full Git tree, maps a nested cwd, and discards mutations",
     async () => {
@@ -152,7 +291,9 @@ describe("scratch workspace", () => {
       );
       fs.symlinkSync("git-pointer", path.join(repo, ".git"));
       try {
-        await expect(createScratchWorkspace(repo)).rejects.toThrow();
+        await expect(createScratchWorkspace(repo)).rejects.toThrow(
+          "linked Git metadata",
+        );
       } finally {
         fs.rmSync(parent, { recursive: true, force: true });
       }

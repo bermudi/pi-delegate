@@ -3185,7 +3185,11 @@ describe("lifecycle-level deadline and abort races", () => {
       expect(runAttempts).toBe(0);
       expect(result.failureKind).toBe("deadline_exceeded");
       expect(result.error).toContain("Deadline exceeded");
-      expect(result.durationMs).toBe(0);
+      // The deadline is detected before any attempt starts, but wall-clock
+      // bookkeeping can still advance by a millisecond between Date.now()
+      // reads.
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
+      expect(result.durationMs).toBeLessThan(100);
     } finally {
       _setRunAgentSessionForTesting(undefined);
       _setWholeTaskRetryForTesting(undefined);

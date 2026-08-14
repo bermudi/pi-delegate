@@ -224,9 +224,10 @@ async function sweepStaleScratchLeases(parent: string): Promise<void> {
       if (!leaseStat.isDirectory() || leaseStat.uid !== uid) continue;
       const contents = await fs.promises.readdir(leaseRoot);
       if (!contents.includes(SCRATCH_OWNER_NAME)) {
-        // Empty leases from versions without an owner marker are still safe
-        // to reclaim; anything else may be an unrelated directory.
-        if (contents.length === 0) await fs.promises.rmdir(leaseRoot);
+        // Without an owner marker we cannot prove that this is one of our
+        // leases, including for an empty directory left by an older version.
+        // Preserve it rather than turning a naming convention into authority
+        // to delete an unrelated directory.
         continue;
       }
       const ownerPath = path.join(leaseRoot, SCRATCH_OWNER_NAME);
