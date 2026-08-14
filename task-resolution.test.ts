@@ -341,8 +341,14 @@ describe("built-in agent profiles", () => {
 
   const builtins = new Map(Object.entries(BUILTIN_AGENT_CONFIGS));
 
-  beforeEach(() => _resetDelegateConfigForTesting());
-  afterEach(() => _resetDelegateConfigForTesting());
+  beforeEach(() => {
+    _resetDelegateConfigForTesting();
+    _resetPoolForTesting();
+  });
+  afterEach(() => {
+    _resetDelegateConfigForTesting();
+    _resetPoolForTesting();
+  });
 
   test("all built-ins inherit the exact parent model and thinking by default", () => {
     const resolved = resolveTasks(
@@ -369,6 +375,33 @@ describe("built-in agent profiles", () => {
       "high",
       "high",
     ]);
+  });
+
+  test("default keeps the live parent thinking on pooled reuse", () => {
+    expect(
+      commit("default-thinking", {
+        session: {} as any,
+        sessionManager: {} as any,
+        sessionFile: "/tmp/default-thinking.jsonl",
+        frozen: {
+          systemPrompt: "parent prompt",
+          model: parentModel,
+          thinking: "off",
+          tools: ["read", "write", "edit", "bash"],
+          cwd: process.cwd(),
+        },
+        tokens: 0,
+      }),
+    ).toBe(true);
+
+    const [task] = resolveTasks(
+      [{ agent: "default", sessionId: "default-thinking", prompt: "continue" }],
+      makeCtx(),
+      builtins,
+      { thinking: "high", tools: ["read", "write", "edit", "bash"] },
+    );
+
+    expect(task?.thinking).toBe("high");
   });
 
   test("legacy delegate.json model overrides do not replace the parent model", () => {

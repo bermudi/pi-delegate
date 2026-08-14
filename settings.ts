@@ -116,15 +116,25 @@ function normalizeOverrides(
   }
 
   const result: Record<string, AgentOverride> = {};
+  const seenNames = new Map<string, string>();
   for (const [agentName, value] of Object.entries(raw)) {
-    if (agentName.trim().length === 0) {
+    const normalizedAgentName = agentName.trim();
+    if (normalizedAgentName.length === 0) {
       console.warn(
         `[delegate] ignoring malformed settings override in ${source}: agent name must be nonempty.`,
       );
       continue;
     }
-    const override = normalizeOverride(value, source, agentName);
-    if (override) result[agentName] = override;
+    const previousName = seenNames.get(normalizedAgentName);
+    if (previousName !== undefined) {
+      console.warn(
+        `[delegate] ignoring duplicate settings override in ${source}: agent keys '${previousName}' and '${agentName}' both normalize to '${normalizedAgentName}'.`,
+      );
+      continue;
+    }
+    seenNames.set(normalizedAgentName, agentName);
+    const override = normalizeOverride(value, source, normalizedAgentName);
+    if (override) result[normalizedAgentName] = override;
   }
   return result;
 }
@@ -141,16 +151,26 @@ function normalizeOverridesByParentModel(
   }
 
   const result: Record<string, Record<string, AgentOverride>> = {};
+  const seenModels = new Map<string, string>();
   for (const [parentModel, overrides] of Object.entries(raw)) {
-    if (parentModel.trim().length === 0) {
+    const normalizedParentModel = parentModel.trim();
+    if (normalizedParentModel.length === 0) {
       console.warn(
         `[delegate] ignoring malformed parent-model override in ${source}: model key must be nonempty.`,
       );
       continue;
     }
-    result[parentModel] = normalizeOverrides(
+    const previousModel = seenModels.get(normalizedParentModel);
+    if (previousModel !== undefined) {
+      console.warn(
+        `[delegate] ignoring duplicate parent-model override in ${source}: model keys '${previousModel}' and '${parentModel}' both normalize to '${normalizedParentModel}'.`,
+      );
+      continue;
+    }
+    seenModels.set(normalizedParentModel, parentModel);
+    result[normalizedParentModel] = normalizeOverrides(
       overrides,
-      `${source} (parent model '${parentModel}')`,
+      `${source} (parent model '${normalizedParentModel}')`,
     );
   }
   return result;

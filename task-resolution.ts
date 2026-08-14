@@ -445,13 +445,21 @@ export function resolveTasks(
       // pooled fallback is reachable only when parentDefaults.thinking is
       // undefined (headless parent without a thinking level).
       const thinkingRaw = isBuiltinAgent
-        ? (t.thinking ??
-          parentModelOverride?.thinking ??
-          agentOverride?.thinking ??
-          (isPoolHit ? pooledConfig?.thinking : undefined) ??
-          modelSuffix ??
-          parentDefaults.thinking ??
-          "off")
+        ? isDefaultAgent
+          ? (t.thinking ??
+            parentModelOverride?.thinking ??
+            agentOverride?.thinking ??
+            modelSuffix ??
+            parentDefaults.thinking ??
+            (isPoolHit ? pooledConfig?.thinking : undefined) ??
+            "off")
+          : (t.thinking ??
+            parentModelOverride?.thinking ??
+            agentOverride?.thinking ??
+            (isPoolHit ? pooledConfig?.thinking : undefined) ??
+            modelSuffix ??
+            parentDefaults.thinking ??
+            "off")
         : (t.thinking ??
           agentOverride?.thinking ??
           agent?.thinking ??
