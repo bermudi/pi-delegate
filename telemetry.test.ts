@@ -247,6 +247,7 @@ describe("telemetry", () => {
     };
 
     recordTask({
+      id: "stable-task-row",
       callId: "call-1",
       async: false,
       taskIndex: 0,
@@ -258,6 +259,7 @@ describe("telemetry", () => {
 
     expect(tasks).toHaveLength(1);
     const row = tasks[0]!;
+    expect(row.id).toBe("stable-task-row");
     expect(row.call_id).toBe("call-1");
     expect(row.idx).toBe(0);
     expect(row.agent).toBe("ad-hoc");

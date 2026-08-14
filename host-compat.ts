@@ -23,6 +23,7 @@ const REQUIRED_EXPORTS: ExportCheck[] = [
   { name: "SettingsManager", requiredMember: "create" },
   { name: "SessionManager", requiredMember: "create" },
   { name: "SessionManager", requiredMember: "open" },
+  { name: "SessionManager", requiredMember: "inMemory" },
   { name: "DefaultResourceLoader" },
   { name: "DefaultPackageManager" },
   { name: "createAgentSession" },

@@ -2712,6 +2712,13 @@ describe("delegate extension integration", () => {
     expect(tasksArraySchema.items.properties.resumeFrom.description).toContain(
       "never a ticket ID",
     );
+    expect(tasksArraySchema.items.properties.workspace.enum).toEqual([
+      "shared",
+      "scratch",
+    ]);
+    expect(tasksArraySchema.items.properties.workspace.description).toContain(
+      "Not security isolation",
+    );
     expect(tasksArraySchema.items.properties.id.description).toContain(
       "correlation",
     );
@@ -2722,7 +2729,10 @@ describe("delegate extension integration", () => {
     // Orchestration invariants from #27 are model-visible in the schema.
     expect(toolDef!.description).toContain("Sync");
     expect(toolDef!.description).toContain("async");
-    expect(schema.properties.tasks.description).toContain("real filesystem");
+    expect(schema.properties.tasks.description).toContain("shared workspaces");
+    expect(schema.properties.tasks.description).toContain(
+      "disposable CoW copy",
+    );
     expect(schema.properties.tasks.description).toContain("run concurrently");
     expect(schema.properties.tasks.description).toContain("[]=full manual");
     expect(schema.properties.async.description).toContain("auto-deliver");
