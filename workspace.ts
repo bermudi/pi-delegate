@@ -434,6 +434,19 @@ async function sweepStaleScratchLeases(
             "code" in error &&
             error.code === "ENOENT"
           ) {
+            // Leases from versions without an owner marker, or partial leases
+            // from a crash between mkdtemp and the marker write: reclaim only
+            // when empty. Anything else may be an unrelated directory. The
+            // identity re-check keeps the rmdir anchored to the scanned lease.
+            const contents = await fs.promises.readdir(
+              `/proc/self/fd/${leaseHandle.fd}`,
+            );
+            if (contents.length === 0) {
+              const currentLeaseStat = await fs.promises.lstat(leasePath);
+              if (sameFileIdentity(currentLeaseStat, scannedLeaseStat)) {
+                await fs.promises.rmdir(leasePath);
+              }
+            }
             continue;
           }
           throw error;
