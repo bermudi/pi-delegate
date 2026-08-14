@@ -259,10 +259,31 @@ describe("validateDelegateOperation task-field whitelist", () => {
           sessionAction: "prompt",
           resumeFrom: "/tmp/s.jsonl",
           deadlineMs: 1000,
+          workspace: "shared",
         },
       ],
     });
     expect(err).toBeUndefined();
+  });
+
+  test("rejects scratch workspace with persistent sessions or resume", () => {
+    expect(
+      validateDelegateOperation({
+        tasks: [{ prompt: "x", workspace: "scratch", sessionId: "s1" }],
+      }),
+    ).toContain("workspace 'scratch' is one-shot");
+    expect(
+      validateDelegateOperation({
+        tasks: [
+          { prompt: "x", workspace: "scratch", resumeFrom: "/tmp/s.jsonl" },
+        ],
+      }),
+    ).toContain("workspace 'scratch' is one-shot");
+    expect(
+      validateDelegateOperation({
+        tasks: [{ prompt: "x", workspace: "scratch", sessionAction: "prompt" }],
+      }),
+    ).toContain("workspace 'scratch' is one-shot");
   });
 
   test("rejects non-positive deadlineMs", () => {

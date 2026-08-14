@@ -3,6 +3,7 @@ export { default } from "./extension.ts";
 export type {
   AgentConfig,
   SessionAction,
+  WorkspaceMode,
   TicketAction,
   DelegateAction,
   DelegateArguments,
@@ -77,6 +78,8 @@ export {
   isCrossLeafTicket,
 } from "./leaf.ts";
 export { runAgentSession } from "./runner.ts";
+export { createScratchWorkspace } from "./workspace.ts";
+export type { ScratchWorkspace } from "./workspace.ts";
 export {
   activeTicketSummary,
   buildStatusText,

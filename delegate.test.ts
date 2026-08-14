@@ -2712,6 +2712,13 @@ describe("delegate extension integration", () => {
     expect(tasksArraySchema.items.properties.resumeFrom.description).toContain(
       "never a ticket ID",
     );
+    expect(tasksArraySchema.items.properties.workspace.enum).toEqual([
+      "shared",
+      "scratch",
+    ]);
+    expect(tasksArraySchema.items.properties.workspace.description).toContain(
+      "Not security isolation",
+    );
     expect(tasksArraySchema.items.properties.id.description).toContain(
       "correlation",
     );
@@ -2722,7 +2729,10 @@ describe("delegate extension integration", () => {
     // Orchestration invariants from #27 are model-visible in the schema.
     expect(toolDef!.description).toContain("Sync");
     expect(toolDef!.description).toContain("async");
-    expect(schema.properties.tasks.description).toContain("real filesystem");
+    expect(schema.properties.tasks.description).toContain("shared workspaces");
+    expect(schema.properties.tasks.description).toContain(
+      "disposable CoW copy",
+    );
     expect(schema.properties.tasks.description).toContain("run concurrently");
     expect(schema.properties.tasks.description).toContain("[]=full manual");
     expect(schema.properties.async.description).toContain("auto-deliver");
@@ -8211,10 +8221,10 @@ describe("getHostDeps extension policy and isolation", () => {
       os.homedir(),
       ".pi",
       "agent",
-      "npm",
-      "node_modules",
-      "@ogulcancelik",
-      "pi-codex-compaction",
+      "git",
+      "github.com",
+      "bermudi",
+      "manaflow-pi-codex",
     );
     // This environment-dependent check must not treat a project installation
     // as a valid substitute: project packages are intentionally rejected.
@@ -8227,7 +8237,7 @@ describe("getHostDeps extension policy and isolation", () => {
 
     const ext = deps.resourceLoader.getExtensions();
     const hasCodexCompaction = ext.extensions.some((entry) =>
-      entry.path.includes("@ogulcancelik/pi-codex-compaction"),
+      entry.path.endsWith("/manaflow-pi-codex/extensions/pi-codex.ts"),
     );
     expect(hasCodexCompaction).toBe(true);
   });
