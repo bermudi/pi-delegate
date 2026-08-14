@@ -39,7 +39,7 @@ function schemaTable(properties: Record<string, TSchema>): string {
 export function getSubagentManualMarkdown(
   agents: Map<string, AgentConfig>,
 ): string {
-  const entries = [...agents];
+  const entries = [...agents].filter(([, a]) => !a.builtin);
   const agentList = entries.length
     ? entries
         .map(([n, a]) => {
@@ -95,11 +95,14 @@ export function getSubagentManualMarkdown(
     "- Git failures degrade to an empty diff.",
     "- A path missing from `touched:` does **not** mean the file was unchanged. Delegate does not isolate file access or roll back writes.",
     "",
-    "## Built-in Agent",
+    "## Built-in Agents",
     "",
-    "- **default**: mirrors the live parent model, thinking level, delegatable native tools, and base system prompt.",
+    "- **default**: mirrors the live parent model, thinking level, delegatable native tools, and base prompt. It uses the shared workspace.",
+    "- **scout**: investigates without modifying files. Tools: `read`, `grep`, `find`, `ls`. Shared workspace.",
+    "- **coder**: implements and verifies changes. Tools: `read`, `write`, `edit`, `bash`. Shared workspace.",
+    '- **reviewer**: reviews the current snapshot and reports findings. Tools: `read`, `bash`. Defaults to a disposable scratch workspace; set `workspace: "shared"` for a persistent reviewer with `sessionId`.',
     "",
-    "Parent extension/MCP tools are not copied. Parent-global `AGENTS.md` instructions are also excluded. Project-local context is rebuilt safely for the task's `cwd`; per-task fields remain explicit overrides.",
+    "Fresh built-ins inherit the parent's exact model object and thinking level unless task fields or settings override them. Parent extension/MCP tools are not copied. Parent-global `AGENTS.md` instructions are also excluded. Project-local context and skills are rebuilt for the task's `cwd`; per-task fields remain explicit overrides.",
     "",
     "## Available Custom Agents",
     "",
@@ -199,7 +202,7 @@ export function getSubagentManualMarkdown(
     "- Dispatch validation is batch-wide and runs before spawning: one invalid task rejects the call without starting its siblings.",
     "- `*` means read/write/edit/bash, not every tool. `grep`, `find`, and `ls` are valid explicit tools and are the `ro` preset.",
     '- `tasks` is an array. The tool recovers common stringified calls for compatibility, but canonical calls use `{ tasks: [{ prompt: "..." }] }`.',
-    '- Use `agent: "default"` for the parent\'s live model/thinking/native tools/base prompt. Omitting `agent` creates an ad-hoc task with delegate defaults.',
+    '- Use `agent: "default"` for the parent\'s live model/thinking/native tools/base prompt. Built-ins are `default`, `scout`, `coder`, and `reviewer`; omitting `agent` creates an ad-hoc task.',
     "- An ad-hoc task with no `tools` uses `*`; a named custom task uses its profile; a profile with no tools uses `*`.",
     "- Subagents inherit all skills discovered in their `cwd` (via AgentSession's resource loader). Per-task skill filtering is not supported — curate the cwd's skill set instead.",
     `- Sync \`delegate\` runs at most ${getMaxConcurrent()} tasks at once (the rest queue, not fail). Use \`async: true\` to move work to the background.`,
@@ -211,7 +214,7 @@ export function getSubagentManualMarkdown(
     "",
     "## Config",
     "",
-    "Tunables live in `~/.pi/agent/delegate.json`: `maxConcurrent` (sync ceiling), `maxAsyncTickets` (background ticket cap), `stallTimeoutMs` (inactivity watchdog; default 900000, 0 disables), per-model/per-provider concurrency limits, and per-agent model overrides.",
+    "Tunables live in `~/.pi/agent/delegate.json`: `maxConcurrent` (sync ceiling), `maxAsyncTickets` (background ticket cap), `stallTimeoutMs` (inactivity watchdog; default 900000, 0 disables), per-model/per-provider concurrency limits, and legacy custom-agent model overrides. Built-in model/thinking/tools overrides live in `settings.json`; `agentOverridesByParentModel` uses an exact `provider/model-id` key and project settings take precedence.",
     "The inactivity watchdog requests cooperative `AgentSession.abort()` cancellation and waits for the subagent to become idle; it is not a hard wall-clock execution deadline.",
     "",
     `Output bounding: subagent outputs longer than ${OUTPUT_SPILL_THRESHOLD_CHARS} characters are spilled to a temp file, and only the last ${OUTPUT_SPILL_TAIL_CHARS} characters stay in the LLM-facing result. Adjust with \`output.spillThresholdChars\` and \`output.spillTailChars\`. Spill files are written to the system temp directory with owner-only permissions; the full output is always available in the expanded TUI view and the spilled file.`,

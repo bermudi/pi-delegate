@@ -513,10 +513,10 @@ describe("delegate task lifecycle integration", () => {
       const agentDir = path.join(taskCwd, ".pi", "agents");
       fs.mkdirSync(agentDir, { recursive: true });
       fs.writeFileSync(
-        path.join(agentDir, "reviewer.md"),
+        path.join(agentDir, "named-reviewer.md"),
         [
           "---",
-          "name: reviewer",
+          "name: named-reviewer",
           "description: Reviews code",
           "tools: *",
           "---",
@@ -535,7 +535,7 @@ describe("delegate task lifecycle integration", () => {
 
       const result = await toolDef.execute(
         "tc-named-prompt",
-        { tasks: [{ agent: "reviewer", prompt: "review" }] },
+        { tasks: [{ agent: "named-reviewer", prompt: "review" }] },
         undefined,
         undefined,
         ctx,

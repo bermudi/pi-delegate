@@ -1,6 +1,7 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
+  BUILTIN_AGENT_NAMES,
   DEFAULT_AGENT_NAME,
   DEFAULT_TOOLS,
   VALID_THINKING,
@@ -8,7 +9,7 @@ import {
 import { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
 import { configFor } from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
-import { buildSubagentSystemPrompt } from "./agents.ts";
+import { BUILTIN_AGENT_CONFIGS, buildSubagentSystemPrompt } from "./agents.ts";
 import { buildParentTranscript } from "./parent-context.ts";
 import { findAvailableAlternative, resolveModelRequest } from "./model.ts";
 import { resolveModelSpec } from "./config.ts";
@@ -91,6 +92,52 @@ export function validateTasks(
   agents: Map<string, AgentConfig>,
   parentModelId: string | undefined,
 ): DelegateToolResult | null {
+  const unknown: string[] = [];
+  for (const task of tasks) {
+    if (
+      task.agent &&
+      !(BUILTIN_AGENT_NAMES as readonly string[]).includes(task.agent) &&
+      !agents.has(task.agent)
+    ) {
+      unknown.push(task.agent);
+    }
+  }
+  if (unknown.length) {
+    const names = [...new Set([...BUILTIN_AGENT_NAMES, ...agents.keys()])];
+    return noticeResult(
+      `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with an empty tasks array for help.`,
+      tasks,
+      parentModelId,
+    );
+  }
+
+  // Scratch sessions are deliberately one-shot. This check uses the
+  // effective workspace, so reviewer gets the same protection even when the
+  // caller omits workspace. Explicit scratch is never silently promoted to
+  // shared.
+  for (const [index, task] of tasks.entries()) {
+    const agent = task.agent
+      ? (agents.get(task.agent) ?? BUILTIN_AGENT_CONFIGS[task.agent])
+      : undefined;
+    const workspace = task.workspace ?? agent?.workspace ?? "shared";
+    const sessionAction = task.sessionAction ?? task.action;
+    if (
+      workspace === "scratch" &&
+      (task.sessionId || task.resumeFrom || sessionAction !== undefined)
+    ) {
+      const defaultText =
+        task.workspace === undefined && agent?.workspace === "scratch"
+          ? "defaults to workspace `scratch`"
+          : "uses workspace `scratch`";
+      const persistentAgent = task.agent ?? "agent";
+      return noticeResult(
+        `${formatTaskRef(index, task.id)}: Agent \`${persistentAgent}\` ${defaultText}, which is one-shot and cannot use \`sessionId\`, \`resumeFrom\`, or session actions. Set \`workspace: "shared"\` to use a persistent ${persistentAgent}.`,
+        tasks,
+        parentModelId,
+      );
+    }
+  }
+
   // Disallow same sessionId across multiple parallel tasks (one agent can't serve two prompts concurrently).
   const sessionIds = tasks.map((t) => t.sessionId).filter(Boolean) as string[];
   const duplicateSessions = sessionIds.filter(
@@ -136,21 +183,6 @@ export function validateTasks(
     return noticeResult(duplicateIds.join(" "), tasks, parentModelId);
   }
 
-  const unknown: string[] = [];
-  for (const t of tasks) {
-    if (t.agent && t.agent !== DEFAULT_AGENT_NAME && !agents.has(t.agent)) {
-      unknown.push(t.agent);
-    }
-  }
-  if (unknown.length) {
-    const names = [DEFAULT_AGENT_NAME, ...agents.keys()];
-    return noticeResult(
-      `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with an empty tasks array for help.`,
-      tasks,
-      parentModelId,
-    );
-  }
-
   return null;
 }
 
@@ -187,11 +219,21 @@ export function resolveTasks(
 
   return tasks.map((t, i) => {
     const isDefaultAgent = t.agent === DEFAULT_AGENT_NAME;
-    const agent = t.agent && !isDefaultAgent ? agents.get(t.agent) : undefined;
+    const agent = t.agent
+      ? (agents.get(t.agent) ?? BUILTIN_AGENT_CONFIGS[t.agent])
+      : undefined;
+    const isBuiltinAgent = agent?.builtin === true;
     const cwd = resolveCwd(t.cwd ?? ctx.cwd, ctx.cwd);
 
     // Load settings-based overrides for this agent
     const settings = loadDelegateSettings(cwd);
+    const parentModelKey = ctx.model
+      ? `${ctx.model.provider}/${ctx.model.id}`
+      : undefined;
+    const parentModelOverride =
+      t.agent && !isDefaultAgent && parentModelKey
+        ? settings?.agentOverridesByParentModel?.[parentModelKey]?.[t.agent]
+        : undefined;
     const agentOverride =
       t.agent && !isDefaultAgent && settings?.agentOverrides?.[t.agent]
         ? settings.agentOverrides[t.agent]
@@ -208,7 +250,8 @@ export function resolveTasks(
     );
     let tools: string[] = [];
     const warnings: string[] = [];
-    if (t.workspace === "scratch") {
+    const workspace = t.workspace ?? agent?.workspace ?? "shared";
+    if (workspace === "scratch") {
       warnings.push(
         "Scratch workspace: relative file changes run in a disposable CoW copy and are discarded.",
       );
@@ -233,9 +276,11 @@ export function resolveTasks(
     if (t.sessionAction !== "close" && t.sessionAction !== "list") {
       tools = resolveToolGroups(
         t.tools ??
+          parentModelOverride?.tools ??
           agentOverride?.tools ??
-          agent?.tools ??
           (isDefaultAgent ? parentNativeTools : undefined) ??
+          (isBuiltinAgent ? agent?.tools : undefined) ??
+          agent?.tools ??
           (isPoolHit ? pooledConfig?.tools : undefined) ??
           DEFAULT_TOOLS,
       );
@@ -318,20 +363,32 @@ export function resolveTasks(
     let thinking: ThinkingLevel = "off";
 
     if (t.sessionAction !== "close" && t.sessionAction !== "list") {
+      const agentType = t.agent ?? "inline";
+      // The built-in `default` profile bypasses delegate/settings model
+      // overrides for backwards compatibility. The other built-ins accept
+      // task and settings.json model overrides, but deliberately ignore the
+      // legacy delegate.json agent model map so they inherit the parent unless
+      // an explicit modern override wins.
+      const modelSpec = isDefaultAgent
+        ? t.model
+        : isBuiltinAgent
+          ? (t.model ?? parentModelOverride?.model ?? agentOverride?.model)
+          : resolveModelSpec({
+              taskModel:
+                t.model ?? parentModelOverride?.model ?? agentOverride?.model,
+              agentType,
+              frontmatterModel: agent?.model,
+            });
+
       // A pool hit always runs its frozen model, but an explicitly requested
       // task/profile model still has to be resolved so checkout can reject a
       // contradictory request rather than silently discarding it. Naming the
       // built-in `default` profile is also explicit: it requests the live
       // parent model, so reuse fails clearly if the pool was frozen differently.
       if (pooledConfig) {
-        const requestedModelSpec =
-          t.model ??
-          (t.agent && !isDefaultAgent
-            ? (agentOverride?.model ?? agent?.model)
-            : undefined);
-        if (requestedModelSpec) {
+        if (modelSpec) {
           const requested = resolveModelRequest(
-            requestedModelSpec,
+            modelSpec,
             ctx.modelRegistry,
             ctx.model,
           );
@@ -339,7 +396,7 @@ export function resolveTasks(
           modelSuffix = requested.strippedSuffix;
           if (!requestedModel) {
             throw new Error(
-              `${formatTaskRef(i, t.id)}: requested model '${requestedModelSpec}' is not available. Check provider config or remove the model field to continue the pooled session.`,
+              `${formatTaskRef(i, t.id)}: requested model '${modelSpec}' is not available. Check provider config or remove the model field to continue the pooled session.`,
             );
           }
         } else if (isDefaultAgent) {
@@ -347,17 +404,6 @@ export function resolveTasks(
         }
         model = pooledConfig.model;
       } else {
-        // The built-in `default` profile bypasses delegate.json and settings:
-        // absent a task override, it means this exact live parent Model object.
-        // Other tasks retain the normal task > config > frontmatter chain.
-        const agentType = t.agent ?? "inline";
-        const modelSpec = isDefaultAgent
-          ? t.model
-          : resolveModelSpec({
-              taskModel: t.model ?? agentOverride?.model,
-              agentType,
-              frontmatterModel: agent?.model,
-            });
         const resolvedRequest = modelSpec
           ? resolveModelRequest(modelSpec, ctx.modelRegistry, ctx.model)
           : undefined;
@@ -376,7 +422,7 @@ export function resolveTasks(
           );
         }
 
-        model = isDefaultAgent
+        model = isBuiltinAgent
           ? (resolvedModel ?? ctx.model)
           : (resolvedModel ??
             findAvailableAlternative(ctx.model, ctx.modelRegistry) ??
@@ -398,15 +444,20 @@ export function resolveTasks(
       // changed, rather than silently reusing a stale frozen value. The final
       // pooled fallback is reachable only when parentDefaults.thinking is
       // undefined (headless parent without a thinking level).
-      const thinkingRaw =
-        t.thinking ??
-        agentOverride?.thinking ??
-        agent?.thinking ??
-        (isPoolHit && !isDefaultAgent ? pooledConfig?.thinking : undefined) ??
-        modelSuffix ??
-        (isDefaultAgent ? parentDefaults.thinking : undefined) ??
-        (isPoolHit ? pooledConfig?.thinking : undefined) ??
-        "off";
+      const thinkingRaw = isBuiltinAgent
+        ? (t.thinking ??
+          parentModelOverride?.thinking ??
+          agentOverride?.thinking ??
+          (isPoolHit ? pooledConfig?.thinking : undefined) ??
+          modelSuffix ??
+          parentDefaults.thinking ??
+          "off")
+        : (t.thinking ??
+          agentOverride?.thinking ??
+          agent?.thinking ??
+          (isPoolHit ? pooledConfig?.thinking : undefined) ??
+          modelSuffix ??
+          "off");
       thinking = VALID_THINKING.has(thinkingRaw)
         ? (thinkingRaw as ThinkingLevel)
         : "off";
@@ -423,7 +474,7 @@ export function resolveTasks(
       ...t,
       id: t.id,
       cwd,
-      workspace: t.workspace ?? "shared",
+      workspace,
       systemPrompt,
       model: model!,
       tools,
@@ -433,9 +484,7 @@ export function resolveTasks(
       prompt: prompt ?? "",
       // Keep the built-in selector visible in progress/results. Omitted-agent
       // inline tasks retain the established `ad-hoc` label and config namespace.
-      agentName: isDefaultAgent
-        ? DEFAULT_AGENT_NAME
-        : (agent?.name ?? "ad-hoc"),
+      agentName: agent?.name ?? "ad-hoc",
       warnings,
       reuseIntent: {
         model: requestedModel,

@@ -7,8 +7,13 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter as parsePiFrontmatter } from "@earendil-works/pi-coding-agent";
 import {
+  BUILTIN_AGENT_NAMES,
+  CODER_AGENT_NAME,
   DEFAULT_AGENT_NAME,
   DEFAULT_TOOLS,
+  READONLY_TOOLS,
+  REVIEWER_AGENT_NAME,
+  SCOUT_AGENT_NAME,
   VALID_THINKING,
 } from "./constants.ts";
 import { resolveToolGroups } from "./tools.ts";
@@ -109,6 +114,50 @@ export function parseFrontmatter(
 }
 
 // ── Agent Discovery ───────────────────────────────────────────────────────
+
+/** Built-in profiles are always available and cannot vary with Markdown files. */
+export const BUILTIN_AGENT_CONFIGS: Readonly<Record<string, AgentConfig>> = {
+  [DEFAULT_AGENT_NAME]: {
+    name: DEFAULT_AGENT_NAME,
+    description:
+      "Mirror the live parent model, thinking level, native tools, and base prompt.",
+    tools: DEFAULT_TOOLS,
+    systemPrompt: "",
+    builtin: true,
+    workspace: "shared",
+  },
+  [SCOUT_AGENT_NAME]: {
+    name: SCOUT_AGENT_NAME,
+    description: "Investigate without modifying the source project.",
+    tools: READONLY_TOOLS,
+    systemPrompt:
+      "Explore the codebase to answer the assigned question. Do not modify files. Trace relevant code, tests, documentation, and history when useful. Return concise findings with concrete paths, symbols, and any uncertainty. Prefer evidence over speculation.",
+    builtin: true,
+    workspace: "shared",
+  },
+  [CODER_AGENT_NAME]: {
+    name: CODER_AGENT_NAME,
+    description: "Implement and verify changes in the shared source tree.",
+    tools: DEFAULT_TOOLS,
+    systemPrompt:
+      "Implement the assigned change. Read the existing code and project instructions first. Prefer the smallest maintainable solution that follows existing conventions. Surface failures clearly. Run focused tests or checks and report what changed, what passed, and any remaining risk.",
+    builtin: true,
+    workspace: "shared",
+  },
+  [REVIEWER_AGENT_NAME]: {
+    name: REVIEWER_AGENT_NAME,
+    description: "Inspect the current snapshot and report actionable findings.",
+    tools: ["read", "bash"],
+    systemPrompt:
+      "Review the current snapshot for correctness, regressions, security problems, and missing tests. Do not modify the source project. Run focused checks when useful. Report actionable findings ordered by severity, with concrete paths and locations. If there are no material findings, say so plainly; do not invent issues or merely summarize the implementation.",
+    builtin: true,
+    workspace: "scratch",
+  },
+};
+
+export function isBuiltinAgentName(name: string): boolean {
+  return (BUILTIN_AGENT_NAMES as readonly string[]).includes(name);
+}
 
 /** Find the nearest ancestor containing project-scoped agent files. */
 export function findProjectRoot(cwd: string): string | null {
@@ -330,7 +379,9 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
     scope: "claude",
   });
 
-  const agents = new Map<string, AgentConfig>();
+  const agents = new Map<string, AgentConfig>(
+    Object.entries(BUILTIN_AGENT_CONFIGS),
+  );
   const loadDir = (
     { dir, scope }: { dir: string; scope: AgentConfig["scope"] },
     loader: (fp: string) => AgentConfig | null,
@@ -345,9 +396,9 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
       if (!e.name.endsWith(".md") || e.name.endsWith(".chain.md")) continue;
       const filePath = path.join(dir, e.name);
       const cfg = loader(filePath);
-      if (cfg?.name === DEFAULT_AGENT_NAME) {
+      if (cfg && isBuiltinAgentName(cfg.name)) {
         console.warn(
-          `[delegate] ignoring agent profile '${DEFAULT_AGENT_NAME}' from ${filePath}: the name is reserved for the built-in parent-mirroring profile.`,
+          `[delegate] ignoring agent profile '${cfg.name}' from ${filePath}: the name is reserved for a built-in delegate profile.`,
         );
         continue;
       }

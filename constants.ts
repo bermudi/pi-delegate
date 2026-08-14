@@ -1,6 +1,23 @@
 /** Reserved built-in profile that mirrors the live parent configuration. */
 export const DEFAULT_AGENT_NAME = "default";
 
+/** Reserved built-in profile for read-only investigation. */
+export const SCOUT_AGENT_NAME = "scout";
+
+/** Reserved built-in profile for shared-workspace implementation work. */
+export const CODER_AGENT_NAME = "coder";
+
+/** Reserved built-in profile for isolated review work. */
+export const REVIEWER_AGENT_NAME = "reviewer";
+
+/** All names reserved by delegate's built-in profiles. */
+export const BUILTIN_AGENT_NAMES = [
+  DEFAULT_AGENT_NAME,
+  SCOUT_AGENT_NAME,
+  CODER_AGENT_NAME,
+  REVIEWER_AGENT_NAME,
+] as const;
+
 /** Full-capability agent set. Inline-task default and the `*` shorthand.
  *  Bash subsumes search, so the dedicated grep/find/ls tools are excluded. */
 export const DEFAULT_TOOLS = ["read", "write", "edit", "bash"];

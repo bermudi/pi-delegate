@@ -38,6 +38,19 @@ Parent extension/MCP tools are not copied, and project instructions are rebuilt
 for the task's `cwd`. Omit `agent` when you want an ad-hoc task using delegate's
 normal inline defaults instead.
 
+The other built-ins are:
+
+- `scout` — read-only investigation with `read`, `grep`, `find`, and `ls`.
+- `coder` — implementation and verification with `read`, `write`, `edit`, and
+  `bash` in the shared workspace.
+- `reviewer` — review with `read` and `bash`, using a disposable scratch copy by
+  default. Set `workspace: "shared"` when a reviewer needs a persistent
+  `sessionId`.
+
+Fresh built-ins inherit the parent's exact model object and thinking level.
+Task-level overrides win; settings can provide unconditional overrides or exact
+parent-model overrides under `delegate.agentOverridesByParentModel`.
+
 ### Disposable scratch workspace
 
 For review, tests, or other commands whose project changes should be thrown
@@ -136,7 +149,7 @@ over an installed extension.
   rare override. Markdown agents are examples of custom agents.
 - **Named agent** / **Markdown agent** — A reusable custom agent persisted as a
   Markdown file in `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`. The frontmatter
-  defines its name, description, model, tools, thinking level, and skills; the
+  defines its name, description, model, tools, and thinking level; the
   Markdown body is its system prompt.
 - **Ad-hoc subagent** — A subagent created from inline task fields instead of a
   named Markdown agent profile. In current output this is labeled `ad-hoc`.

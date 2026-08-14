@@ -24,6 +24,10 @@ export type { DelegateConfig } from "./config.ts";
 
 export {
   DEFAULT_AGENT_NAME,
+  SCOUT_AGENT_NAME,
+  CODER_AGENT_NAME,
+  REVIEWER_AGENT_NAME,
+  BUILTIN_AGENT_NAMES,
   DEFAULT_TOOLS,
   READONLY_TOOLS,
   MAX_CONCURRENCY,
@@ -123,6 +127,8 @@ export {
   loadAgentFile,
   loadClaudeAgentFile,
   discoverAgents,
+  BUILTIN_AGENT_CONFIGS,
+  isBuiltinAgentName,
   buildSubagentSystemPrompt,
   DEFAULT_SUBAGENT_SYSTEM_PROMPT,
 } from "./agents.ts";
@@ -133,7 +139,12 @@ export {
   resolveModelRequest,
   findAvailableAlternative,
 } from "./model.ts";
-export { readDelegateSettingsFile, loadDelegateSettings } from "./settings.ts";
+export {
+  readDelegateSettingsFile,
+  loadDelegateSettings,
+  clearDelegateSettingsCache,
+} from "./settings.ts";
+export type { AgentOverride } from "./settings.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";
 export {
   decideSpill,

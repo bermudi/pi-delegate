@@ -4,8 +4,12 @@ import {
   validateTasks,
   resolveTasks,
 } from "./task-resolution.ts";
+import { BUILTIN_AGENT_CONFIGS } from "./agents.ts";
 import { _resetPoolForTesting, commit } from "./pool.ts";
-import { _resetDelegateConfigForTesting } from "./config.ts";
+import {
+  _resetDelegateConfigForTesting,
+  _setDelegateConfigForTesting,
+} from "./config.ts";
 import type { AgentConfig, TaskDef } from "./types.ts";
 
 const START =
@@ -307,5 +311,162 @@ describe("resolveTasks tool resolution", () => {
     expect(resolved[0].warnings).toEqual([
       "Unknown tool(s) ignored: WebSearch. Available: read, write, edit, bash, grep, find, ls",
     ]);
+  });
+});
+
+describe("built-in agent profiles", () => {
+  const parentModel = {
+    provider: "openrouter",
+    id: "deepseek-v4-pro",
+  } as any;
+
+  function makeRegistry(models: any[] = []) {
+    return {
+      getAvailable: () => models,
+      find: (provider: string, id: string) =>
+        models.find((m) => m.provider === provider && m.id === id) ?? null,
+      hasConfiguredAuth: () => true,
+    } as any;
+  }
+
+  function makeCtx(model = parentModel, models: any[] = []) {
+    return {
+      cwd: process.cwd(),
+      model,
+      modelRegistry: makeRegistry(models),
+      sessionManager: undefined,
+      getSystemPrompt: () => "parent prompt",
+    } as any;
+  }
+
+  const builtins = new Map(Object.entries(BUILTIN_AGENT_CONFIGS));
+
+  beforeEach(() => _resetDelegateConfigForTesting());
+  afterEach(() => _resetDelegateConfigForTesting());
+
+  test("all built-ins inherit the exact parent model and thinking by default", () => {
+    const resolved = resolveTasks(
+      [
+        { agent: "default", prompt: "one" },
+        { agent: "scout", prompt: "two" },
+        { agent: "coder", prompt: "three" },
+        { agent: "reviewer", prompt: "four" },
+      ] as any,
+      makeCtx(),
+      builtins,
+      { thinking: "high", tools: ["read", "write", "edit", "bash"] },
+    );
+
+    expect(resolved.map((task) => task.model)).toEqual([
+      parentModel,
+      parentModel,
+      parentModel,
+      parentModel,
+    ]);
+    expect(resolved.map((task) => task.thinking)).toEqual([
+      "high",
+      "high",
+      "high",
+      "high",
+    ]);
+  });
+
+  test("legacy delegate.json model overrides do not replace the parent model", () => {
+    _setDelegateConfigForTesting({
+      agent: {
+        default: "legacy/default-model",
+        scout: "legacy/scout-model",
+        coder: "legacy/coder-model",
+        reviewer: "legacy/reviewer-model",
+      },
+    });
+
+    const resolved = resolveTasks(
+      [
+        { agent: "scout", prompt: "inspect" },
+        { agent: "coder", prompt: "implement" },
+        { agent: "reviewer", prompt: "review" },
+      ] as any,
+      makeCtx(),
+      builtins,
+      { thinking: "off", tools: ["read"] },
+    );
+
+    expect(resolved.map((task) => task.model)).toEqual([
+      parentModel,
+      parentModel,
+      parentModel,
+    ]);
+  });
+
+  test("built-ins resolve their fixed tools and reviewer defaults to scratch", () => {
+    const resolved = resolveTasks(
+      [
+        { agent: "scout", prompt: "inspect" },
+        { agent: "coder", prompt: "implement" },
+        { agent: "reviewer", prompt: "review" },
+        { agent: "reviewer", prompt: "review shared", workspace: "shared" },
+      ] as any,
+      makeCtx(),
+      builtins,
+      { thinking: "off", tools: ["read"] },
+    );
+
+    expect(resolved[0]?.tools).toEqual(["read", "grep", "find", "ls"]);
+    expect(resolved[1]?.tools).toEqual(["read", "write", "edit", "bash"]);
+    expect(resolved[2]?.tools).toEqual(["read", "bash"]);
+    expect(resolved[2]?.workspace).toBe("scratch");
+    expect(resolved[3]?.workspace).toBe("shared");
+  });
+
+  test("reviewer sessionId gets a corrective shared-workspace error", () => {
+    const result = validateTasks(
+      [{ agent: "reviewer", sessionId: "review-1", prompt: "review" }],
+      builtins,
+      "parent",
+    );
+    expect(result?.content[0]?.text).toContain(
+      'Set `workspace: "shared"` to use a persistent reviewer.',
+    );
+    expect(
+      validateTasks(
+        [
+          {
+            agent: "reviewer",
+            workspace: "shared",
+            sessionId: "review-1",
+            prompt: "review",
+          },
+        ],
+        builtins,
+        "parent",
+      ),
+    ).toBeNull();
+  });
+
+  test("task model and thinking override built-in suffix and parent defaults", () => {
+    const selected = {
+      provider: "openai-codex",
+      id: "gpt-5.6-terra",
+    } as any;
+    const [task] = resolveTasks(
+      [
+        {
+          agent: "coder",
+          prompt: "implement",
+          model: "openai-codex/gpt-5.6-terra:xhigh",
+          thinking: "low",
+        },
+      ] as any,
+      makeCtx(parentModel, [selected]),
+      builtins,
+      { thinking: "medium", tools: ["read"] },
+    );
+
+    expect(task?.model).toBe(selected);
+    expect(task?.thinking).toBe("low");
+    expect(task?.warnings).toContain(
+      "Model ':xhigh' suffix ignored — thinking resolved to 'low' from a higher-precedence source.",
+    );
   });
 });
