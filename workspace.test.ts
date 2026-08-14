@@ -601,6 +601,32 @@ describe("scratch workspace", () => {
   );
 
   scratchTest(
+    "identity: cleanup refuses to remove a replaced owner marker",
+    async () => {
+      const parent = testParent();
+      const repo = testRepo(parent);
+      try {
+        const workspace = await createScratchWorkspace(repo);
+        const leaseRoot = path.dirname(workspace.scratchRoot);
+        const ownerPath = path.join(leaseRoot, ".owner");
+
+        fs.chmodSync(leaseRoot, 0o700);
+        fs.renameSync(ownerPath, path.join(leaseRoot, ".owner-old"));
+        fs.writeFileSync(ownerPath, `${process.pid}\n`, { mode: 0o600 });
+        fs.chmodSync(leaseRoot, 0o500);
+
+        await expect(workspace.cleanup()).rejects.toThrow(
+          "owner marker was replaced",
+        );
+        expect(fs.existsSync(workspace.scratchRoot)).toBe(true);
+        expect(fs.existsSync(ownerPath)).toBe(true);
+      } finally {
+        cleanTestDir(parent);
+      }
+    },
+  );
+
+  scratchTest(
     "copies the full Git tree, maps a nested cwd, and discards mutations",
     async () => {
       const parent = testParent();
