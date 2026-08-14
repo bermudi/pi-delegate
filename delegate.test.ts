@@ -2652,6 +2652,86 @@ describe("loadDelegateSettings", () => {
     });
   });
 
+  test("trims agent and parent-model override keys", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const userDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(
+      path.join(userDir, "settings.json"),
+      JSON.stringify({
+        delegate: {
+          agentOverrides: {
+            " scout ": { thinking: "high" },
+          },
+          agentOverridesByParentModel: {
+            " openai-codex/gpt-5.6-sol ": {
+              " scout ": { model: "openai-codex/gpt-5.6-luna" },
+            },
+          },
+        },
+      }),
+    );
+
+    const result = loadDelegateSettings(projectDir);
+    expect(result?.agentOverrides?.scout).toEqual({ thinking: "high" });
+    expect(
+      result?.agentOverridesByParentModel?.["openai-codex/gpt-5.6-sol"]?.scout,
+    ).toEqual({ model: "openai-codex/gpt-5.6-luna" });
+    expect(result?.agentOverrides?.[" scout "]).toBeUndefined();
+  });
+
+  test("warns and keeps the first override when keys collide after trimming", () => {
+    const projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const userDir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(
+      path.join(userDir, "settings.json"),
+      JSON.stringify({
+        delegate: {
+          agentOverrides: {
+            scout: { model: "first/agent-model" },
+            " scout ": { model: "second/agent-model" },
+          },
+          agentOverridesByParentModel: {
+            "openai-codex/gpt-5.6-sol": {
+              scout: { model: "first/parent-model" },
+            },
+            " openai-codex/gpt-5.6-sol ": {
+              scout: { model: "second/parent-model" },
+            },
+          },
+        },
+      }),
+    );
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      const result = loadDelegateSettings(projectDir);
+      expect(result?.agentOverrides?.scout?.model).toBe("first/agent-model");
+      expect(
+        result?.agentOverridesByParentModel?.["openai-codex/gpt-5.6-sol"]?.scout
+          ?.model,
+      ).toBe("first/parent-model");
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(
+      warnings.some((warning) =>
+        warning.includes("duplicate settings override"),
+      ),
+    ).toBe(true);
+    expect(
+      warnings.some((warning) =>
+        warning.includes("duplicate parent-model override"),
+      ),
+    ).toBe(true);
+  });
+
   test("clearing the cache makes changed settings visible", () => {
     const projectDir = path.join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
