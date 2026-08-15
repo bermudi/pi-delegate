@@ -666,28 +666,21 @@ Global prompt.
     ]);
   });
 
-  test("ignores a persisted profile named default because the built-in is reserved", () => {
+  test("a persisted profile named default can override the built-in", () => {
     writeAgent(
       path.join(tmpDir, ".pi", "agent", "agents"),
       "default.md",
       `---
 name: default
-description: Must not shadow the built-in
+description: My custom default
 ---
 Custom prompt.
 `,
     );
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown) => warnings.push(String(message));
-    try {
-      const agents = discoverAgents("/nonexistent");
-      expect(agents.get("default")?.builtin).toBe(true);
-    } finally {
-      console.warn = originalWarn;
-    }
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("name is reserved");
+    const agents = discoverAgents("/nonexistent");
+    expect(agents.get("default")?.description).toBe("My custom default");
+    expect(agents.get("default")?.systemPrompt).toBe("Custom prompt.");
+    expect(agents.get("default")?.builtin).toBeFalsy();
   });
 
   test("skips .chain.md files", () => {
@@ -728,11 +721,8 @@ Prompt.
 
   // ── Project Markdown discovery ─────────────────────────────────────────
 
-  test("reserved built-in names cannot be shadowed by a user Markdown agent", () => {
+  test("a Markdown agent can override a built-in like scout", () => {
     const projectDir = path.join(tmpDir, "project");
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown) => warnings.push(String(message));
     writeAgent(
       path.join(projectDir, ".pi", "agents"),
       "scout.md",
@@ -744,18 +734,73 @@ tools: read
 Custom scout body.
 `,
     );
-    try {
-      const agents = discoverAgents(projectDir);
-      const scout = agents.get("scout")!;
-      expect(scout.description).toBe(
-        "Investigate without modifying the source project.",
-      );
-      expect(scout.systemPrompt).toContain("Do not modify files.");
-      expect(scout.builtin).toBe(true);
-    } finally {
-      console.warn = originalWarn;
-    }
-    expect(warnings.some((warning) => warning.includes("scout"))).toBe(true);
+    const agents = discoverAgents(projectDir);
+    const scout = agents.get("scout")!;
+    expect(scout.description).toBe("My custom scout");
+    expect(scout.systemPrompt).toBe("Custom scout body.");
+    expect(scout.tools).toEqual(["read"]);
+    expect(scout.builtin).toBeFalsy();
+    expect(scout.scope).toBe("project");
+  });
+
+  test("a prompt-only Markdown override preserves the built-in tools and workspace", () => {
+    const projectDir = path.join(tmpDir, "project");
+    // No tools field — should keep scout's readonly set, not escalate to DEFAULT_TOOLS.
+    writeAgent(
+      path.join(projectDir, ".pi", "agents"),
+      "scout.md",
+      `---
+name: scout
+description: My custom scout
+---
+Custom scout body.
+`,
+    );
+    // No workspace field — reviewer should keep its scratch workspace.
+    writeAgent(
+      path.join(projectDir, ".pi", "agents"),
+      "reviewer.md",
+      `---
+name: reviewer
+description: My custom reviewer
+---
+Custom reviewer body.
+`,
+    );
+    const agents = discoverAgents(projectDir);
+    const scout = agents.get("scout")!;
+    expect(scout.tools).toEqual(["read", "grep", "find", "ls"]);
+    expect(scout.systemPrompt).toBe("Custom scout body.");
+    const reviewer = agents.get("reviewer")!;
+    expect(reviewer.workspace).toBe("scratch");
+    expect(reviewer.tools).toEqual(["read", "bash"]);
+  });
+
+  test("project Markdown overrides global for the same built-in name", () => {
+    const projectDir = path.join(tmpDir, "project");
+    writeAgent(
+      path.join(projectDir, ".pi", "agents"),
+      "coder.md",
+      `---
+name: coder
+description: Project coder
+---
+Project body.
+`,
+    );
+    writeAgent(
+      path.join(tmpDir, ".pi", "agent", "agents"),
+      "coder.md",
+      `---
+name: coder
+description: Global coder
+---
+Global body.
+`,
+    );
+    const agents = discoverAgents(projectDir);
+    expect(agents.get("coder")!.description).toBe("Project coder");
+    expect(agents.get("coder")!.systemPrompt).toBe("Project body.");
   });
 
   // ── Claude Code interchange ────────────────────────────────────────────

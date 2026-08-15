@@ -278,7 +278,11 @@ export function resolveTasks(
         t.tools ??
           parentModelOverride?.tools ??
           agentOverride?.tools ??
-          (isDefaultAgent ? parentNativeTools : undefined) ??
+          (isDefaultAgent
+            ? agent?.explicitTools
+              ? agent.tools
+              : parentNativeTools
+            : undefined) ??
           (isBuiltinAgent ? agent?.tools : undefined) ??
           agent?.tools ??
           (isPoolHit ? pooledConfig?.tools : undefined) ??
