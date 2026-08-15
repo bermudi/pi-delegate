@@ -274,6 +274,20 @@ export function resolveTasks(
     // "continue with only sessionId" works without re-supplying tools.
     // Explicit overrides that don't match get rejected by acquireAgentSession.
     if (t.sessionAction !== "close" && t.sessionAction !== "list") {
+      // For `default` a deny-only override (no explicit allowlist) is not
+      // materialized at discovery; apply its denylist to the parent's actual
+      // tools here so a read-only parent stays read-only.
+      let effectiveParentTools = parentNativeTools;
+      if (
+        isDefaultAgent &&
+        agent?.deniedTools?.length &&
+        !agent?.explicitTools
+      ) {
+        const denied = new Set(agent.deniedTools);
+        effectiveParentTools = parentNativeTools.filter(
+          (t) => !denied.has(t),
+        );
+      }
       tools = resolveToolGroups(
         t.tools ??
           parentModelOverride?.tools ??
@@ -281,7 +295,7 @@ export function resolveTasks(
           (isDefaultAgent
             ? agent?.explicitTools
               ? agent.tools
-              : parentNativeTools
+              : effectiveParentTools
             : undefined) ??
           (isBuiltinAgent ? agent?.tools : undefined) ??
           agent?.tools ??
@@ -373,10 +387,16 @@ export function resolveTasks(
       // task and settings.json model overrides, but deliberately ignore the
       // legacy delegate.json agent model map so they inherit the parent unless
       // an explicit modern override wins.
+      // Overridden built-ins can still provide an explicit `model` in their
+      // Markdown frontmatter – when `explicitModel` is set, honor it instead
+      // of silently ignoring it (which would contradict the Markdown contract).
       const modelSpec = isDefaultAgent
-        ? t.model
+        ? (t.model ?? (agent?.explicitModel ? agent.model : undefined))
         : isBuiltinAgent
-          ? (t.model ?? parentModelOverride?.model ?? agentOverride?.model)
+          ? (t.model ??
+            parentModelOverride?.model ??
+            agentOverride?.model ??
+            (agent?.explicitModel ? agent.model : undefined))
           : resolveModelSpec({
               taskModel:
                 t.model ?? parentModelOverride?.model ?? agentOverride?.model,
@@ -453,6 +473,7 @@ export function resolveTasks(
           ? (t.thinking ??
             parentModelOverride?.thinking ??
             agentOverride?.thinking ??
+            (agent?.explicitThinking ? agent.thinking : undefined) ??
             modelSuffix ??
             parentDefaults.thinking ??
             (isPoolHit ? pooledConfig?.thinking : undefined) ??
@@ -460,6 +481,7 @@ export function resolveTasks(
           : (t.thinking ??
             parentModelOverride?.thinking ??
             agentOverride?.thinking ??
+            (agent?.explicitThinking ? agent.thinking : undefined) ??
             (isPoolHit ? pooledConfig?.thinking : undefined) ??
             modelSuffix ??
             parentDefaults.thinking ??

@@ -414,6 +414,8 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
           let rawTools: string | undefined;
           let rawWorkspace: string | undefined;
           let rawDisallowedTools: string | undefined;
+          let rawModel: string | undefined;
+          let rawThinking: string | undefined;
           try {
             const content = fs.readFileSync(filePath, "utf-8");
             const { data } = parseFrontmatter(content, filePath);
@@ -421,6 +423,8 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
             rawWorkspace = (data as Record<string, string>).workspace;
             rawDisallowedTools = (data as Record<string, string>)
               .disallowedTools;
+            rawModel = data.model;
+            rawThinking = data.thinking;
           } catch {
             // ignore, keep parsed tools/workspace
           }
@@ -437,7 +441,46 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
             rawWorkspace !== undefined &&
             rawWorkspace.trim() !== "" &&
             !hasExplicitWorkspace;
-          if (!hasExplicitAllowlist && hasDenylist && existing.tools) {
+          const hasExplicitModel =
+            rawModel !== undefined &&
+            rawModel.trim() !== "" &&
+            rawModel.trim().toLowerCase() !== "inherit";
+          const hasExplicitThinking =
+            rawThinking !== undefined &&
+            rawThinking.trim() !== "" &&
+            VALID_THINKING.has(rawThinking.trim());
+          if (
+            cfg.name === DEFAULT_AGENT_NAME &&
+            !hasExplicitAllowlist &&
+            hasDenylist
+          ) {
+            // For `default`, a deny-only override must be applied to the
+            // parent's actual tools at resolution, not to the static
+            // DEFAULT_TOOLS at discovery. Materializing against DEFAULT_TOOLS
+            // would grant write/edit when the parent is read-only.
+            const denied = new Set(
+              (rawDisallowedTools ?? "")
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean)
+                .map(
+                  (n) =>
+                    (CLAUDE_TOOL_ALIASES as Record<string, string>)[
+                      n.toLowerCase()
+                    ] ?? null,
+                )
+                .filter((n): n is string => n !== null),
+            );
+            cfg.deniedTools = [...denied];
+            cfg.explicitTools = false;
+            // Keep tools display as the built-in default; resolution will
+            // filter parentNativeTools instead.
+            cfg.tools = existing.tools;
+          } else if (
+            !hasExplicitAllowlist &&
+            hasDenylist &&
+            existing.tools
+          ) {
             // No explicit allowlist but a Claude denylist is present – apply
             // the denylist to the built-in's own toolset, not the generic
             // full set, to avoid turning a denylist into an escalation
@@ -451,10 +494,15 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
                 .filter((n): n is string => n !== null),
             );
             cfg.tools = existing.tools.filter((t) => !denied.has(t));
-          } else if (!hasExplicitTools && existing.tools) {
-            cfg.tools = existing.tools;
+            cfg.explicitTools = true;
+          } else {
+            if (!hasExplicitTools && existing.tools) {
+              cfg.tools = existing.tools;
+            }
+            cfg.explicitTools = hasExplicitTools;
           }
-          cfg.explicitTools = hasExplicitTools;
+          cfg.explicitModel = hasExplicitModel;
+          cfg.explicitThinking = hasExplicitThinking;
           // Preserve built-in semantics for model/thinking/workspace handling
           // in task-resolution – the overridden profile is still a built-in
           // by name, just with a custom prompt/tools.
