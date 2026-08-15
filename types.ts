@@ -31,6 +31,12 @@ export interface AgentConfig {
   scope?: "project" | "global" | "claude";
   /** Whether `tools` was explicitly set in the Markdown frontmatter (vs inherited default). */
   explicitTools?: boolean;
+  /** Whether `model` was explicitly set in the Markdown frontmatter. */
+  explicitModel?: boolean;
+  /** Whether `thinking` was explicitly set in the Markdown frontmatter. */
+  explicitThinking?: boolean;
+  /** Denylist applied to a built-in `default` override with no explicit allowlist – materialized against parentNativeTools at resolution. */
+  deniedTools?: string[];
 }
 
 // ── Tool parameter types — derived from the TypeBox schema ────────────────
