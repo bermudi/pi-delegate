@@ -18,7 +18,10 @@ import {
 } from "./dispatch.ts";
 import { renderDelegateCall, renderDelegateResult } from "./render-result.ts";
 import { hostCompatError } from "./host-compat.ts";
-import { invalidateHostDepsCache } from "./host.ts";
+import {
+  invalidateHostDepsCache,
+  registerProviderExtensionNotifier,
+} from "./host.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import { closeAllPooledAgents } from "./pool.ts";
 import {
@@ -122,6 +125,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     prepareArguments: normalizeDelegateArguments,
 
     async execute(_id, params: DelegateArguments, signal, onUpdate, ctx) {
+      // Prime the UI notice for best-effort provider extensions that load for
+      // subagents (host.ts consumes it where the fact is discovered). Every
+      // execute re-primes so a stale ctx never sticks.
+      registerProviderExtensionNotifier((message) =>
+        ctx.ui.notify(message, "info"),
+      );
       const parentModelId = ctx.model?.id;
       const tasks = params.tasks ?? [];
       const parentSessionFile = (

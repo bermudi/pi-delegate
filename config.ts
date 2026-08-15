@@ -129,9 +129,15 @@ function normalizeProviderExtensions(
 // Provider-scoped opt-in extension map for subagents. Keep this aligned with
 // the currently shipped codex remote-compaction integration. `delegate.json`
 // `providerExtensions` replaces a provider's entries (it does not append); an
-// empty array is ignored so the default persists.
+// empty array is ignored so the default persists. Provenance is classification
+// by config presence: every source the user lists is required and fails
+// closed when missing, unverifiable, or broken — including an exact re-listing
+// of a shipped default. Shipped defaults (providers the user never mentioned)
+// are best-effort: they degrade silently to extension-free subagents on Pi's
+// native compaction, because absence of an optional integration is not a
+// warning condition — that is Pi's normal operation.
 const DEFAULT_PROVIDER_EXTENSIONS: Record<string, readonly string[]> = {
-  "openai-codex": ["git:github.com/bermudi/manaflow-pi-codex"],
+  "openai-codex": ["npm:@bermudi/pi-codex"],
 };
 
 function resolveProviderExtensions(
@@ -155,7 +161,7 @@ const DEFAULT_DELEGATE_CONFIG: DelegateConfig = {
     wholeTaskMaxRetries: 3,
     wholeTaskBaseDelayMs: 1_000,
   },
-  providerExtensions: DEFAULT_PROVIDER_EXTENSIONS,
+  providerExtensions: {},
   telemetry: {
     enabled: true,
   },
@@ -174,7 +180,15 @@ let __delegateConfig: DelegateConfig = {
 };
 let stallTimeoutOverrideForTesting: number | undefined;
 
-/** Read delegate config from disk. Returns defaults if file missing or corrupt. */
+/** Read delegate config from disk. Returns defaults if file missing or corrupt.
+ *
+ *  The returned `providerExtensions` is the *user-only* view — exactly what the
+ *  file said, defaults excluded. `getSubagentProviderExtensionMap()` is the
+ *  merged (defaults + user) view, and
+ *  `getSubagentProviderExtensionSourcesForProvider()` is the provenance-tagged
+ *  view. Keeping the raw user map here is what lets the sources getter
+ *  distinguish "the user listed this" from "this is a shipped default" by
+ *  config presence rather than string identity. */
 export function loadDelegateConfig(): DelegateConfig {
   try {
     const raw = fs.readFileSync(DELEGATE_CONFIG_PATH, "utf-8");
@@ -191,7 +205,9 @@ export function loadDelegateConfig(): DelegateConfig {
         ...(parsed.concurrency ?? {}),
       },
       retry: { ...DEFAULT_DELEGATE_CONFIG.retry, ...(parsed.retry ?? {}) },
-      providerExtensions: resolveProviderExtensions(parsed.providerExtensions),
+      providerExtensions: normalizeProviderExtensions(
+        parsed.providerExtensions,
+      ),
       telemetry: normalizeTelemetryConfig(parsed.telemetry),
       output: { ...DEFAULT_DELEGATE_CONFIG.output, ...(parsed.output ?? {}) },
     } as DelegateConfig;
@@ -255,7 +271,7 @@ export function _setDelegateConfigForTesting(
       ...DEFAULT_DELEGATE_CONFIG.retry,
       ...(config.retry ?? {}),
     },
-    providerExtensions: resolveProviderExtensions(config.providerExtensions),
+    providerExtensions: normalizeProviderExtensions(config.providerExtensions),
     telemetry: normalizeTelemetryConfig(config.telemetry),
     output: {
       ...DEFAULT_DELEGATE_CONFIG.output,
@@ -266,7 +282,11 @@ export function _setDelegateConfigForTesting(
 }
 
 /**
- * Get the configured provider-scoped extension allowlist for subagents.
+ * Get the configured provider-scoped extension allowlist for subagents:
+ * the merged view (shipped defaults + user config, user entries replacing a
+ * provider's defaults). The stored `config.providerExtensions` itself is the
+ * user-only view; the merge happens here so provenance survives until a
+ * consumer asks for it (`getSubagentProviderExtensionSourcesForProvider`).
  * Explicit configs are normalized here too, so callers using the injected
  * config form get the same case-insensitive and replace-per-provider
  * semantics as the file-backed singleton.
@@ -293,6 +313,47 @@ export function getSubagentProviderExtensionsForProvider(
   return Object.prototype.hasOwnProperty.call(extensions, normalized)
     ? (extensions[normalized] ?? [])
     : [];
+}
+
+/** A provider-extension source together with how it entered the config. */
+export interface ProviderExtensionSource {
+  /** The normalized source string, as the package manager consumes it. */
+  readonly source: string;
+  /**
+   * Whether the user configured this source themselves (required) or it is a
+   * shipped default for a provider the user never mentioned (best-effort).
+   * Required sources fail closed when missing, unverifiable, or broken;
+   * best-effort defaults degrade silently to extension-free subagents on
+   * Pi's native compaction.
+   */
+  readonly required: boolean;
+}
+
+/**
+ * Get the provenance-tagged extension sources for a provider's subagents.
+ * Classification is by config presence, never by string identity: everything
+ * the user lists in `providerExtensions` is `required: true` — including an
+ * exact re-listing of a shipped default, because typing it into the config
+ * expresses intent. Providers the user never configured fall back to the
+ * shipped defaults, tagged `required: false` (best-effort).
+ */
+export function getSubagentProviderExtensionSourcesForProvider(
+  provider: string | undefined,
+  config: DelegateConfig = __delegateConfig,
+): readonly ProviderExtensionSource[] {
+  const normalized = provider?.trim().toLowerCase();
+  if (!normalized) return [];
+  const userMap = config.providerExtensions;
+  if (userMap && Object.prototype.hasOwnProperty.call(userMap, normalized)) {
+    return (userMap[normalized] ?? []).map((source) => ({
+      source,
+      required: true,
+    }));
+  }
+  return (DEFAULT_PROVIDER_EXTENSIONS[normalized] ?? []).map((source) => ({
+    source,
+    required: false,
+  }));
 }
 
 // ── Config Getters ───────────────────────────────────────────────────────

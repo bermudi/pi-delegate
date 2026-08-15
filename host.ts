@@ -16,7 +16,8 @@
  * must not run the parent's interactive extensions (custom UI, slash commands,
  * hooks that call `pi.appendEntry()`/`pi.sendMessage()`). A narrow,
  * provider-scoped allowlist is injected as `additionalExtensionPaths` for
- * safety-critical integrations. Those extension-bearing dependencies are
+ * provider-specific integrations (best-effort for shipped defaults). Those
+ * extension-bearing dependencies are
  * deliberately built per session: `AgentSession._buildRuntime` hands the
  * loader's `extensionsResult.runtime` to a new `ExtensionRunner`, whose
  * `bindCore()` overwrites mutable methods on that runtime (`sendMessage`,
@@ -37,7 +38,15 @@
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import {
   DefaultPackageManager,
   DefaultResourceLoader,
@@ -49,7 +58,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   getSubagentProviderExtensionMap,
-  getSubagentProviderExtensionsForProvider,
+  getSubagentProviderExtensionSourcesForProvider,
 } from "./config.ts";
 
 export interface HostDeps {
@@ -508,17 +517,84 @@ async function assertConfiguredNpmVersion(
   }
 }
 
+/** Result of resolving a provider's allowlisted extension sources. */
+interface ProviderExtensionResolution {
+  /** User-scope package roots to inject as subagent extension paths. */
+  paths: string[];
+  /** Roots originating from shipped best-effort defaults; these may degrade
+   * silently — see the drop-site comments for why silence is the design. */
+  bestEffortPaths: Set<string>;
+}
+
+/**
+ * UI notifier for the provider-extension-loaded notice, primed from
+ * extension.ts `execute` (the only place the real, ui-bearing ctx exists —
+ * host-dep construction itself has no UI context). Consumed defensively:
+ * a throw means the ctx went stale (headless run, torn-down TUI) and simply
+ * un-primes the notifier so the next live execute re-primes it.
+ */
+let providerExtensionNotifier: ((message: string) => void) | undefined;
+
+/**
+ * Prime the UI notifier used for the best-effort extension-loaded notice.
+ * Idempotent and cheap; called at the top of every delegate execute. Pass
+ * `undefined` to un-prime (tests) — an un-primed notifier makes the notice a
+ * no-op, which is also the default state in headless/test runs.
+ */
+export function registerProviderExtensionNotifier(
+  notify: ((message: string) => void) | undefined,
+): void {
+  providerExtensionNotifier = notify;
+}
+
+/** provider+root pairs already noticed this process. */
+const noticedProviderExtensionRoots = new Set<string>();
+
+/**
+ * Announce that a shipped best-effort provider integration actually loaded
+ * for delegated subagents. This is the deliberate inverse of the silent
+ * drop: absence of an optional integration is normal and never mentioned,
+ * but a default that IS active changes subagent behavior (remote compaction
+ * on codex models) invisibly — so it gets one info notice per process per
+ * provider+root, not one per dispatch. User-configured sources never get
+ * here: the user installed them knowingly and they fail closed.
+ */
+function noticeProviderExtensionLoaded(
+  provider: string | undefined,
+  root: string,
+): void {
+  const providerName = provider?.trim() || "provider";
+  const key = `${providerName.toLowerCase()}\0${root}`;
+  if (noticedProviderExtensionRoots.has(key)) return;
+  const notify = providerExtensionNotifier;
+  if (!notify) return;
+  const label = basename(root) || root;
+  try {
+    notify(`⚡ ${label} integration active for ${providerName} subagents`);
+    noticedProviderExtensionRoots.add(key);
+  } catch {
+    // Cosmetic notice on a stale ctx — fail open (status.ts precedent for
+    // cached-ctx notify): drop the notifier, keep the key un-noticed so a
+    // live ctx can still surface it later. Delegation is unaffected.
+    providerExtensionNotifier = undefined;
+  }
+}
+
 async function getProviderExtensionPaths(
   provider: string | undefined,
   cwd: string,
   agentDir: string,
   packageLookupSettingsManager: SettingsManager,
-): Promise<string[]> {
-  // Provider-key normalization (trim + lowercase) lives in `config.ts` —
-  // `getSubagentProviderExtensionsForProvider` is the single owner of that
-  // logic, so this module never re-implements it.
-  const requested = getSubagentProviderExtensionsForProvider(provider);
-  if (!requested.length) return [];
+): Promise<ProviderExtensionResolution> {
+  // Provider-key normalization (trim + lowercase) lives in `config.ts` — the
+  // sources getter is the single owner of that logic, so this module never
+  // re-implements it. Provenance (required vs best-effort) is decided there
+  // too, by config presence: user-listed sources fail closed; shipped
+  // defaults degrade silently — the extension-free path is Pi's normal
+  // operation, not a warning condition.
+  const requested = getSubagentProviderExtensionSourcesForProvider(provider);
+  if (!requested.length)
+    return { paths: [], bestEffortPaths: new Set<string>() };
 
   const packageManager = new DefaultPackageManager({
     cwd,
@@ -567,12 +643,15 @@ async function getProviderExtensionPaths(
 
   const installedPaths = new Map<string, string>();
   const missing: string[] = [];
-  for (const source of requested) {
+  for (const { source, required } of requested) {
     // Deliberately resolve only the user scope. Project-local packages are
     // untrusted input and must never become executable subagent extensions.
     const userPath = packageManager.getInstalledPath(source, "user");
     if (!userPath) {
-      missing.push(source);
+      if (required) missing.push(source);
+      // A best-effort default that is not installed is skipped silently: for
+      // most users the package was never installed at all, and its absence is
+      // the normal, correct state — not something to warn about.
       continue;
     }
     installedPaths.set(source, userPath);
@@ -587,23 +666,29 @@ async function getProviderExtensionPaths(
   }
 
   const paths = new Set<string>();
-  for (const source of requested) {
+  const bestEffortPaths = new Set<string>();
+  for (const { source, required } of requested) {
     const userPath = installedPaths.get(source);
-    // Every requested source was collected above; this guard keeps the map
-    // boundary explicit if that invariant changes later.
-    if (!userPath) {
-      throw new Error(
-        "A configured provider extension disappeared before validation; delegation stopped.",
-      );
-    }
-    validateInstalledPath(source, userPath);
-    if (hasNpmVersionSpecifier(source)) {
-      await assertConfiguredNpmVersion(packageManager, source, userPath);
+    // Best-effort defaults that were not installed never reached the map.
+    if (!userPath) continue;
+    try {
+      validateInstalledPath(source, userPath);
+      if (hasNpmVersionSpecifier(source)) {
+        await assertConfiguredNpmVersion(packageManager, source, userPath);
+      }
+    } catch (error) {
+      if (required) throw error;
+      // A best-effort default that cannot be verified is skipped, not loaded
+      // and not fatal. Silent by design: an installed-but-broken package also
+      // fails in the parent's own extension inventory, where Pi surfaces it;
+      // this path only mirrors a signal the user has already seen.
+      continue;
     }
     paths.add(userPath);
+    if (!required) bestEffortPaths.add(userPath);
   }
 
-  return [...paths];
+  return { paths: [...paths], bestEffortPaths };
 }
 
 /**
@@ -646,14 +731,16 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
       .map(([provider, entries]) => [provider, [...entries]] as const),
   );
   const providerConfigs = options.providerConfigs ?? [];
-  const requestedExtensions = getSubagentProviderExtensionsForProvider(
+  const requestedExtensions = getSubagentProviderExtensionSourcesForProvider(
     options.modelProvider,
   );
 
-  // Resolve provider extensions before deciding whether to use the cache. This
-  // fails closed for missing sources while keeping both package lookup and child
-  // resource loading isolated from executable project settings.
+  // Resolve provider extensions before deciding whether to use the cache.
+  // User-configured sources fail closed when missing; shipped defaults are
+  // best-effort and silently drop instead. Both package lookup and child
+  // resource loading stay isolated from executable project settings.
   let additionalExtensionPaths: string[] = [];
+  let bestEffortExtensionRoots = new Set<string>();
   if (requestedExtensions.length > 0) {
     // Package lookup is a user-scope trust boundary. Pi's legacy npm fallback
     // may execute the configured npmCommand to discover the global npm root,
@@ -663,12 +750,14 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
       agentDir,
       { projectTrusted: false },
     );
-    additionalExtensionPaths = await getProviderExtensionPaths(
+    const resolution = await getProviderExtensionPaths(
       options.modelProvider,
       options.cwd,
       agentDir,
       packageLookupSettingsManager,
     );
+    additionalExtensionPaths = resolution.paths;
+    bestEffortExtensionRoots = resolution.bestEffortPaths;
   }
 
   // Provider configs may contain functions (custom stream/OAuth handlers), so a
@@ -731,65 +820,111 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
     if (testRetryBaseMs !== undefined) {
       installFastRetry(resolvedSettingsManager, testRetryBaseMs);
     }
-    const resourceLoader = new DefaultResourceLoader({
-      cwd: options.cwd,
-      agentDir,
-      settingsManager: resolvedSettingsManager,
-      // Subagents are headless workers — they must not load the parent's
-      // interactive extension inventory. The only paths supplied here are the
-      // explicitly allowlisted, user-scoped provider extensions.
-      noExtensions: true,
-      // Global AGENTS.md files describe the parent harness, not the delegated
-      // task. Keep cwd/ancestor project context discovery, but remove Pi's
-      // global file and the legacy ~/.agents equivalent. This override also
-      // handles symlinked global files because it compares discovered paths.
-      agentsFilesOverride: ({ agentsFiles }) => ({
-        agentsFiles: agentsFiles.filter(
-          ({ path: contextPath }) =>
-            !isExcludedGlobalContextFile(contextPath, agentDir),
-        ),
-      }),
-      ...(additionalExtensionPaths.length ? { additionalExtensionPaths } : {}),
-      // When a named agent supplies a custom prompt, it becomes the loader's
-      // customPrompt — overriding the default system prompt AgentSession would
-      // otherwise build. `systemPrompt` (the source) wins over file discovery.
-      ...(options.systemPrompt !== undefined
-        ? { systemPrompt: options.systemPrompt }
-        : {}),
-    });
-    await resourceLoader.reload();
+    // Best-effort default sources that fail to load are dropped and the loader
+    // is rebuilt without them, so the subagent runs extension-free on Pi's
+    // native compaction — silently, per the drop-site rationale above.
+    // User-configured sources still fail closed below.
+    //
+    // Loop invariant: pi's ResourceLoader.reload() never *throws* for an
+    // extension's own failure — its loader wraps module import AND factory
+    // invocation in try/catch and returns them as `extensionsResult.errors`
+    // (verified in pi 0.80.x, core/extensions/loader.ts). A reload() throw is
+    // therefore environmental (settings reload, package resolution) and not
+    // attributable to any supplied root; letting it propagate is correct even
+    // when best-effort roots are present.
+    let extensionPaths = additionalExtensionPaths;
+    let resourceLoader: DefaultResourceLoader;
+    for (;;) {
+      resourceLoader = new DefaultResourceLoader({
+        cwd: options.cwd,
+        agentDir,
+        settingsManager: resolvedSettingsManager,
+        // Subagents are headless workers — they must not load the parent's
+        // interactive extension inventory. The only paths supplied here are
+        // the explicitly allowlisted, user-scoped provider extensions.
+        noExtensions: true,
+        // Global AGENTS.md files describe the parent harness, not the
+        // delegated task. Keep cwd/ancestor project context discovery, but
+        // remove Pi's global file and the legacy ~/.agents equivalent. This
+        // override also handles symlinked global files because it compares
+        // discovered paths.
+        agentsFilesOverride: ({ agentsFiles }) => ({
+          agentsFiles: agentsFiles.filter(
+            ({ path: contextPath }) =>
+              !isExcludedGlobalContextFile(contextPath, agentDir),
+          ),
+        }),
+        ...(extensionPaths.length
+          ? { additionalExtensionPaths: extensionPaths }
+          : {}),
+        // When a named agent supplies a custom prompt, it becomes the loader's
+        // customPrompt — overriding the default system prompt AgentSession
+        // would otherwise build. `systemPrompt` (the source) wins over file
+        // discovery.
+        ...(options.systemPrompt !== undefined
+          ? { systemPrompt: options.systemPrompt }
+          : {}),
+      });
+      await resourceLoader.reload();
 
-    const extensionsResult = resourceLoader.getExtensions();
-    const extensionErrors = extensionsResult.errors;
-    const loadedExtensionPaths = extensionsResult.extensions.map(
-      (extension) => extension.resolvedPath || extension.path,
-    );
-    // A package can resolve successfully while exposing only skills/prompts,
-    // or a malformed manifest can expose no loadable extension at all. Treat
-    // that as a failed provider integration rather than silently delegating
-    // without the safety-critical behavior the allowlist requested.
-    const missingExtensionRoots = additionalExtensionPaths.filter(
-      (root) =>
-        !loadedExtensionPaths.some((extensionPath) =>
-          isPathWithinDirectory(root, extensionPath),
-        ),
-    );
-    if (extensionErrors.length > 0 || missingExtensionRoots.length > 0) {
+      const extensionsResult = resourceLoader.getExtensions();
+      const extensionErrors = extensionsResult.errors;
+      const loadedExtensionPaths = extensionsResult.extensions.map(
+        (extension) => extension.resolvedPath || extension.path,
+      );
+      // A package can resolve successfully while exposing only skills/prompts,
+      // or a malformed manifest can expose no loadable extension at all.
+      const missingExtensionRoots = extensionPaths.filter(
+        (root) =>
+          !loadedExtensionPaths.some((extensionPath) =>
+            isPathWithinDirectory(root, extensionPath),
+          ),
+      );
       const failedRoots = new Set(
         missingExtensionRoots.concat(
-          additionalExtensionPaths.filter((root) =>
+          extensionPaths.filter((root) =>
             extensionErrors.some((error) =>
               isPathWithinDirectory(root, error.path),
             ),
           ),
         ),
       );
-      const failureCount = Math.max(failedRoots.size, extensionErrors.length);
-      const providerName =
-        options.modelProvider?.trim() || "the selected provider";
-      throw new Error(
-        `Failed to load ${failureCount} allowlisted provider extension(s) for ${providerName}; delegation stopped instead of running without the required integration.`,
+      // An error inside a best-effort root is attributable to that root; any
+      // other error (including one no supplied root claims) stays fatal.
+      const fatalErrors = extensionErrors.filter(
+        (error) =>
+          ![...bestEffortExtensionRoots].some((root) =>
+            isPathWithinDirectory(root, error.path),
+          ),
       );
+      const fatalRoots = [...failedRoots].filter(
+        (root) => !bestEffortExtensionRoots.has(root),
+      );
+      if (fatalErrors.length > 0 || fatalRoots.length > 0) {
+        const failureCount = Math.max(fatalRoots.length, fatalErrors.length);
+        const providerName =
+          options.modelProvider?.trim() || "the selected provider";
+        throw new Error(
+          `Failed to load ${failureCount} allowlisted provider extension(s) for ${providerName}; delegation stopped instead of running without the required integration.`,
+        );
+      }
+      const droppableRoots = [...failedRoots].filter((root) =>
+        bestEffortExtensionRoots.has(root),
+      );
+      if (droppableRoots.length === 0) break;
+      extensionPaths = extensionPaths.filter(
+        (root) => !droppableRoots.includes(root),
+      );
+    }
+
+    // Positive visibility for the invisible-by-design path: surviving
+    // best-effort roots each produced at least one loaded extension, and
+    // that changes subagent behavior without any user action — the one
+    // state worth a notice. Once per process per provider+root.
+    for (const root of extensionPaths) {
+      if (bestEffortExtensionRoots.has(root)) {
+        noticeProviderExtensionLoaded(options.modelProvider, root);
+      }
     }
 
     return {

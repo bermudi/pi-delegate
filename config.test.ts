@@ -4,6 +4,7 @@ import {
   _setDelegateConfigForTesting,
   getSubagentProviderExtensionMap,
   getSubagentProviderExtensionsForProvider,
+  getSubagentProviderExtensionSourcesForProvider,
   getTelemetryConfig,
   type DelegateConfig,
 } from "./config.ts";
@@ -22,7 +23,7 @@ describe("providerExtensions normalization (via public seam)", () => {
 
   test("ships the codex remote-compaction default", () => {
     expect(getSubagentProviderExtensionMap()["openai-codex"]).toEqual([
-      "git:github.com/bermudi/manaflow-pi-codex",
+      "npm:@bermudi/pi-codex",
     ]);
   });
 
@@ -40,7 +41,7 @@ describe("providerExtensions normalization (via public seam)", () => {
       providerExtensions: { "openai-codex": [] },
     });
     expect(getSubagentProviderExtensionMap()["openai-codex"]).toEqual([
-      "git:github.com/bermudi/manaflow-pi-codex",
+      "npm:@bermudi/pi-codex",
     ]);
   });
 
@@ -96,7 +97,7 @@ describe("providerExtensions normalization (via public seam)", () => {
       },
     });
     expect(getSubagentProviderExtensionMap()["openai-codex"]).toEqual([
-      "git:github.com/bermudi/manaflow-pi-codex",
+      "npm:@bermudi/pi-codex",
     ]);
   });
 });
@@ -175,7 +176,55 @@ describe("getSubagentProviderExtensionsForProvider", () => {
 
   test("resolves the shipped default for openai-codex", () => {
     expect(getSubagentProviderExtensionsForProvider("openai-codex")).toEqual([
-      "git:github.com/bermudi/manaflow-pi-codex",
+      "npm:@bermudi/pi-codex",
     ]);
+  });
+});
+
+describe("getSubagentProviderExtensionSourcesForProvider", () => {
+  beforeEach(() => _resetDelegateConfigForTesting());
+  afterEach(() => _resetDelegateConfigForTesting());
+
+  test("tags shipped defaults as best-effort", () => {
+    expect(
+      getSubagentProviderExtensionSourcesForProvider("openai-codex"),
+    ).toEqual([{ source: "npm:@bermudi/pi-codex", required: false }]);
+  });
+
+  test("tags user-configured sources as required, replacing defaults", () => {
+    _setDelegateConfigForTesting({
+      providerExtensions: { "openai-codex": ["npm:@example/ext"] },
+    });
+    expect(
+      getSubagentProviderExtensionSourcesForProvider("openai-codex"),
+    ).toEqual([{ source: "npm:@example/ext", required: true }]);
+  });
+
+  test("a user re-listing the exact default source is required, not best-effort", () => {
+    // Classification is config presence, never string identity: typing the
+    // source into delegate.json expresses intent, so it stops being a
+    // best-effort default and starts failing closed when missing.
+    _setDelegateConfigForTesting({
+      providerExtensions: { "openai-codex": ["npm:@bermudi/pi-codex"] },
+    });
+    expect(
+      getSubagentProviderExtensionSourcesForProvider("openai-codex"),
+    ).toEqual([{ source: "npm:@bermudi/pi-codex", required: true }]);
+  });
+
+  test("normalizes provider case and whitespace", () => {
+    expect(
+      getSubagentProviderExtensionSourcesForProvider(" OpenAI-Codex "),
+    ).toEqual([{ source: "npm:@bermudi/pi-codex", required: false }]);
+  });
+
+  test("undefined / blank / unknown providers resolve to no sources", () => {
+    expect(getSubagentProviderExtensionSourcesForProvider(undefined)).toEqual(
+      [],
+    );
+    expect(getSubagentProviderExtensionSourcesForProvider("   ")).toEqual([]);
+    expect(
+      getSubagentProviderExtensionSourcesForProvider("other-provider"),
+    ).toEqual([]);
   });
 });
