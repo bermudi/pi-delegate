@@ -42,7 +42,9 @@ function schemaTable(properties: Record<string, TSchema>): string {
 export function getSubagentManualMarkdown(
   agents: Map<string, AgentConfig>,
 ): string {
-  const builtinNames = new Set<string>(BUILTIN_AGENT_NAMES as readonly string[]);
+  const builtinNames = new Set<string>(
+    BUILTIN_AGENT_NAMES as readonly string[],
+  );
   const entries = [...agents].filter(
     ([name, a]) => !a.builtin && !builtinNames.has(name),
   );
@@ -53,14 +55,26 @@ export function getSubagentManualMarkdown(
       // `default` normally mirrors the parent's native tools; only show a
       // fixed list when the file explicitly overrode them. This avoids
       // advertising `read, write, edit, bash` when runtime will actually use
-      // the parent's active set.
-      const showTools = !isDefault || !!cfg.explicitTools;
-      const toolsPart = showTools ? ` Tools: \`${cfg.tools.join(", ")}\`.` : "";
+      // the parent's active set. A deny-only `default` (deniedTools with no
+      // explicit allowlist) filters the parent at runtime and must surface.
+      let toolsPart: string;
+      if (isDefault && cfg.deniedTools?.length && !cfg.explicitTools) {
+        toolsPart = ` Tools: parent tools minus \`${cfg.deniedTools.join(", ")}\`.`;
+      } else {
+        const showTools = !isDefault || !!cfg.explicitTools;
+        toolsPart = showTools ? ` Tools: \`${cfg.tools.join(", ")}\`.` : "";
+      }
+      const modelPart =
+        cfg.explicitModel && cfg.model ? ` Model: \`${cfg.model}\`.` : "";
+      const thinkingPart =
+        cfg.explicitThinking && cfg.thinking
+          ? ` Thinking: \`${cfg.thinking}\`.`
+          : "";
       const workspace =
         cfg.workspace === "scratch"
           ? `Defaults to a disposable scratch workspace; set \`workspace: "shared"\` for a persistent ${name} with \`sessionId\`.`
           : "Shared workspace.";
-      return `- **${name}**: ${cfg.description}${toolsPart} ${workspace}`;
+      return `- **${name}**: ${cfg.description}${toolsPart}${modelPart}${thinkingPart} ${workspace}`;
     },
   );
   const agentList = entries.length
@@ -122,7 +136,7 @@ export function getSubagentManualMarkdown(
     "",
     ...builtinLines,
     "",
-    "Fresh built-ins inherit the parent's exact model object and thinking level unless task fields or settings override them. Parent extension/MCP tools are not copied. Parent-global `AGENTS.md` instructions are also excluded. Project-local context and skills are rebuilt for the task's `cwd`; per-task fields remain explicit overrides.",
+    "Fresh built-ins inherit the parent's exact model object and thinking level. A same-named Markdown file can override any built-in (first definition wins); an explicit `model` or `thinking` in that file replaces parent inheritance. Task-level `model`/`thinking`/`tools` always win. For `scout`/`coder`/`reviewer`, settings overrides (`settings.json` `delegate.agentOverrides` and `delegate.agentOverridesByParentModel`) win over the Markdown file; `default` ignores settings and uses only an explicit Markdown `model`/`thinking` when present. A prompt-only Markdown override keeps the built-in's tools and workspace, so `scout` stays read-only and `reviewer` stays scratch unless the file explicitly changes them. Parent extension/MCP tools are not copied. Parent-global `AGENTS.md` instructions are also excluded. Project-local context and skills are rebuilt for the task's `cwd`; per-task fields remain explicit overrides.",
     "",
     "## Available Custom Agents",
     "",
