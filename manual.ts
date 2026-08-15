@@ -1,5 +1,6 @@
 import {
   BUILTIN_AGENT_NAMES,
+  DEFAULT_AGENT_NAME,
   DEFAULT_TOOLS,
   OUTPUT_SPILL_THRESHOLD_CHARS,
   OUTPUT_SPILL_TAIL_CHARS,
@@ -48,12 +49,18 @@ export function getSubagentManualMarkdown(
   const builtinLines = (BUILTIN_AGENT_NAMES as readonly string[]).map(
     (name) => {
       const cfg = agents.get(name) ?? BUILTIN_AGENT_CONFIGS[name]!;
-      const tools = cfg.tools.join(", ");
+      const isDefault = name === DEFAULT_AGENT_NAME;
+      // `default` normally mirrors the parent's native tools; only show a
+      // fixed list when the file explicitly overrode them. This avoids
+      // advertising `read, write, edit, bash` when runtime will actually use
+      // the parent's active set.
+      const showTools = !isDefault || !!cfg.explicitTools;
+      const toolsPart = showTools ? ` Tools: \`${cfg.tools.join(", ")}\`.` : "";
       const workspace =
         cfg.workspace === "scratch"
           ? 'Defaults to a disposable scratch workspace; set `workspace: "shared"` for a persistent reviewer with `sessionId`.'
           : "Shared workspace.";
-      return `- **${name}**: ${cfg.description} Tools: \`${tools}\`. ${workspace}`;
+      return `- **${name}**: ${cfg.description}${toolsPart} ${workspace}`;
     },
   );
   const agentList = entries.length
