@@ -103,6 +103,14 @@ const hostDepsInflight = new Map<string, Promise<HostDeps>>();
 /** Prevent a pre-invalidation build from repopulating or clearing newer state. */
 let hostDepsCacheGeneration = 0;
 
+// When the shipped best-effort default (npm:@bermudi/pi-codex) is absent — the
+// normal state for most users — Pi's DefaultPackageManager.getInstalledPath
+// would synchronously spawn `npm root -g` to check the legacy global fallback.
+// Doing that once per task in a fan-out blocks the event loop N times and
+// serializes the fan-out. Cache the *absence* per dispatch so only the first
+// task in a fan-out pays the cost; the rest skip the lookup entirely.
+const missingBestEffortNpmCache = new Set<string>();
+
 function canonicalPath(candidate: string): string {
   try {
     return realpathSync(candidate);
@@ -644,6 +652,25 @@ async function getProviderExtensionPaths(
   const installedPaths = new Map<string, string>();
   const missing: string[] = [];
   for (const { source, required } of requested) {
+    // For best-effort npm defaults that are absent — the normal state for the
+    // shipped optional integration — avoid Pi's legacy global npm fallback
+    // (`npm root -g`) on every task in a fan-out. The first task in a dispatch
+    // still pays the cost to discover the absence, but subsequent tasks with
+    // the same agentDir+source skip the synchronous spawn entirely. The cache
+    // is per-dispatch and cleared on invalidateHostDepsCache.
+    if (!required && source.trim().toLowerCase().startsWith("npm:")) {
+      const missingKey = `${agentDir}\0${source}`;
+      if (missingBestEffortNpmCache.has(missingKey)) {
+        continue;
+      }
+      const userPath = packageManager.getInstalledPath(source, "user");
+      if (!userPath) {
+        missingBestEffortNpmCache.add(missingKey);
+        continue;
+      }
+      installedPaths.set(source, userPath);
+      continue;
+    }
     // Deliberately resolve only the user scope. Project-local packages are
     // untrusted input and must never become executable subagent extensions.
     const userPath = packageManager.getInstalledPath(source, "user");
@@ -975,6 +1002,7 @@ export function invalidateHostDepsCache(): void {
   hostDepsCacheGeneration++;
   hostDepsCache.clear();
   hostDepsInflight.clear();
+  missingBestEffortNpmCache.clear();
 }
 
 /** Test-only alias retained for existing test setup. */
@@ -995,6 +1023,7 @@ export function _setModelRuntimeFactoryForTesting(
   testModelRuntimeFactory = factory;
   hostDepsCache.clear();
   hostDepsInflight.clear();
+  missingBestEffortNpmCache.clear();
 }
 
 /**
@@ -1018,6 +1047,7 @@ export function _setHostRetryBaseMsForTesting(
     // ensures newly-built ones come back unpatched.
     hostDepsCache.clear();
     hostDepsInflight.clear();
+    missingBestEffortNpmCache.clear();
     return;
   }
   for (const deps of hostDepsCache.values()) {

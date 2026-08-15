@@ -356,6 +356,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // captured pi) to touch. The cancelled completion path still writes one
       // final aggregate after late task results arrive, but never delivers UI.
       clearDelegateStatusContext();
+      registerProviderExtensionNotifier(undefined);
       // A replacement session starts on its own leaf; stale tracking would make
       // every ticket look cross-leaf (or, worse, look same-leaf by accident).
       resetLeafTracking();

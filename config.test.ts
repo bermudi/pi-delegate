@@ -227,4 +227,34 @@ describe("getSubagentProviderExtensionSourcesForProvider", () => {
       getSubagentProviderExtensionSourcesForProvider("other-provider"),
     ).toEqual([]);
   });
+
+  test("does not resolve inherited Object.prototype keys (constructor/__proto__)", () => {
+    expect(
+      getSubagentProviderExtensionSourcesForProvider("constructor"),
+    ).toEqual([]);
+    expect(
+      getSubagentProviderExtensionSourcesForProvider("__proto__"),
+    ).toEqual([]);
+    expect(
+      getSubagentProviderExtensionSourcesForProvider("hasOwnProperty"),
+    ).toEqual([]);
+  });
+
+  test("normalizes an explicitly injected, unnormalized config", () => {
+    const config = {
+      providerExtensions: { "  Custom-Provider  ": ["npm:x"] },
+    } as DelegateConfig;
+    expect(
+      getSubagentProviderExtensionSourcesForProvider(
+        "custom-provider",
+        config,
+      ),
+    ).toEqual([{ source: "npm:x", required: true }]);
+    expect(
+      getSubagentProviderExtensionSourcesForProvider(
+        "  CUSTOM-PROVIDER ",
+        config,
+      ),
+    ).toEqual([{ source: "npm:x", required: true }]);
+  });
 });
