@@ -23,12 +23,14 @@ export interface AgentConfig {
   thinking?: ThinkingLevel;
   tools: string[];
   systemPrompt: string;
-  /** Built-in profiles are immutable and cannot be shadowed by Markdown. */
+  /** Built-in profiles can be overridden by a same-named Markdown file. */
   builtin?: boolean;
   /** Default workspace for a built-in profile. Custom agents use shared. */
   workspace?: WorkspaceMode;
   /** Origin of the profile. `claude` denotes imported .claude/agents files. */
   scope?: "project" | "global" | "claude";
+  /** Whether `tools` was explicitly set in the Markdown frontmatter (vs inherited default). */
+  explicitTools?: boolean;
 }
 
 // ── Tool parameter types — derived from the TypeBox schema ────────────────

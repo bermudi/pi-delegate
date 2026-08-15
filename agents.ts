@@ -115,7 +115,7 @@ export function parseFrontmatter(
 
 // ── Agent Discovery ───────────────────────────────────────────────────────
 
-/** Built-in profiles are always available and cannot vary with Markdown files. */
+/** Built-in profiles are always available but can be overridden by a same-named Markdown file. */
 export const BUILTIN_AGENT_CONFIGS: Readonly<Record<string, AgentConfig>> = {
   [DEFAULT_AGENT_NAME]: {
     name: DEFAULT_AGENT_NAME,
@@ -396,13 +396,62 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
       if (!e.name.endsWith(".md") || e.name.endsWith(".chain.md")) continue;
       const filePath = path.join(dir, e.name);
       const cfg = loader(filePath);
-      if (cfg && isBuiltinAgentName(cfg.name)) {
-        console.warn(
-          `[delegate] ignoring agent profile '${cfg.name}' from ${filePath}: the name is reserved for a built-in delegate profile.`,
-        );
+      if (!cfg) continue;
+      if (isBuiltinAgentName(cfg.name)) {
+        const existing = agents.get(cfg.name);
+        if (existing?.builtin) {
+          // Markdown can override a built-in: first definition wins, replacing
+          // the default config. This lets users customize systemPrompt, tools,
+          // etc. via a Markdown file. Preserve builtin workspace when the file
+          // does not specify one (Markdown profiles have no workspace
+          // frontmatter today), and preserve builtin tools when the file omits
+          // the tools key so a prompt-only override does not silently escalate
+          // privileges (e.g. scout staying read-only). An explicit
+          // `disallowedTools` denylist counts as an explicit tools change and
+          // must not be undone.
+          let rawTools: string | undefined;
+          let rawWorkspace: string | undefined;
+          let rawDisallowedTools: string | undefined;
+          try {
+            const content = fs.readFileSync(filePath, "utf-8");
+            const { data } = parseFrontmatter(content, filePath);
+            rawTools = data.tools;
+            rawWorkspace = (data as Record<string, string>).workspace;
+            rawDisallowedTools = (data as Record<string, string>)
+              .disallowedTools;
+          } catch {
+            // ignore, keep parsed tools/workspace
+          }
+          const hasExplicitTools =
+            (rawTools !== undefined && rawTools.trim() !== "") ||
+            (rawDisallowedTools !== undefined &&
+              rawDisallowedTools.trim() !== "");
+          const hasExplicitWorkspace =
+            rawWorkspace === "shared" || rawWorkspace === "scratch";
+          const hasInvalidWorkspace =
+            rawWorkspace !== undefined &&
+            rawWorkspace.trim() !== "" &&
+            !hasExplicitWorkspace;
+          if (!hasExplicitTools && existing.tools) {
+            cfg.tools = existing.tools;
+          }
+          cfg.explicitTools = hasExplicitTools;
+          if (!rawWorkspace && existing.workspace) {
+            cfg.workspace = existing.workspace;
+          } else if (hasExplicitWorkspace) {
+            cfg.workspace = rawWorkspace as AgentConfig["workspace"];
+          } else if (hasInvalidWorkspace) {
+            console.warn(
+              `[delegate] invalid workspace '${rawWorkspace}' in ${filePath}; preserving built-in '${existing.workspace}'. Expected "shared" or "scratch".`,
+            );
+            if (existing.workspace) cfg.workspace = existing.workspace;
+          }
+          cfg.scope = scope;
+          agents.set(cfg.name, cfg);
+        }
         continue;
       }
-      if (cfg && !agents.has(cfg.name)) {
+      if (!agents.has(cfg.name)) {
         cfg.scope = scope;
         agents.set(cfg.name, cfg);
       }

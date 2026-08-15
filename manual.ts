@@ -1,4 +1,5 @@
 import {
+  BUILTIN_AGENT_NAMES,
   DEFAULT_TOOLS,
   OUTPUT_SPILL_THRESHOLD_CHARS,
   OUTPUT_SPILL_TAIL_CHARS,
@@ -7,6 +8,7 @@ import { getMaxAsyncTickets, getMaxConcurrent } from "./config.ts";
 import type { TSchema } from "@sinclair/typebox";
 import { delegateArgumentsSchema, delegateTaskSchema } from "./schema.ts";
 import type { AgentConfig } from "./types.ts";
+import { BUILTIN_AGENT_CONFIGS } from "./agents.ts";
 
 function schemaType(schema: TSchema): string {
   if (Array.isArray(schema.enum)) {
@@ -39,7 +41,21 @@ function schemaTable(properties: Record<string, TSchema>): string {
 export function getSubagentManualMarkdown(
   agents: Map<string, AgentConfig>,
 ): string {
-  const entries = [...agents].filter(([, a]) => !a.builtin);
+  const builtinNames = new Set<string>(BUILTIN_AGENT_NAMES as readonly string[]);
+  const entries = [...agents].filter(
+    ([name, a]) => !a.builtin && !builtinNames.has(name),
+  );
+  const builtinLines = (BUILTIN_AGENT_NAMES as readonly string[]).map(
+    (name) => {
+      const cfg = agents.get(name) ?? BUILTIN_AGENT_CONFIGS[name]!;
+      const tools = cfg.tools.join(", ");
+      const workspace =
+        cfg.workspace === "scratch"
+          ? 'Defaults to a disposable scratch workspace; set `workspace: "shared"` for a persistent reviewer with `sessionId`.'
+          : "Shared workspace.";
+      return `- **${name}**: ${cfg.description} Tools: \`${tools}\`. ${workspace}`;
+    },
+  );
   const agentList = entries.length
     ? entries
         .map(([n, a]) => {
@@ -97,10 +113,7 @@ export function getSubagentManualMarkdown(
     "",
     "## Built-in Agents",
     "",
-    "- **default**: mirrors the live parent model, thinking level, delegatable native tools, and base prompt. It uses the shared workspace.",
-    "- **scout**: investigates without modifying files. Tools: `read`, `grep`, `find`, `ls`. Shared workspace.",
-    "- **coder**: implements and verifies changes. Tools: `read`, `write`, `edit`, `bash`. Shared workspace.",
-    '- **reviewer**: reviews the current snapshot and reports findings. Tools: `read`, `bash`. Defaults to a disposable scratch workspace; set `workspace: "shared"` for a persistent reviewer with `sessionId`.',
+    ...builtinLines,
     "",
     "Fresh built-ins inherit the parent's exact model object and thinking level unless task fields or settings override them. Parent extension/MCP tools are not copied. Parent-global `AGENTS.md` instructions are also excluded. Project-local context and skills are rebuilt for the task's `cwd`; per-task fields remain explicit overrides.",
     "",
