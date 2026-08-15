@@ -253,12 +253,14 @@ export function loadAgentFile(filePath: string): AgentConfig | null {
   }
   const { data, body } = parseFrontmatter(content, filePath);
   if (!data.name || !data.description) return null;
+  const model = data.model?.trim() || undefined;
+  const thinking = data.thinking?.trim();
   return {
     name: data.name,
     description: data.description,
-    model: data.model,
-    thinking: VALID_THINKING.has(data.thinking ?? "")
-      ? (data.thinking as ThinkingLevel)
+    model,
+    thinking: VALID_THINKING.has(thinking ?? "")
+      ? (thinking as ThinkingLevel)
       : "off",
     // Omitted/blank `tools:` → inherit the full agent set (`*`), matching
     // CC/OpenCode/Devin. A previous version rejected empty tools; that was
@@ -295,6 +297,8 @@ export function loadClaudeAgentFile(filePath: string): AgentConfig | null {
   }
   const { data, body } = parseFrontmatter(content, filePath);
   if (!data.name || !data.description) return null;
+  const model = data.model?.trim();
+  const thinking = data.thinking?.trim();
 
   // Track whether the user wrote an explicit `tools:` allowlist. Omitted or
   // blank means "inherit the full default set" (`*`), and only in that case
@@ -327,13 +331,13 @@ export function loadClaudeAgentFile(filePath: string): AgentConfig | null {
     name: data.name,
     description: data.description,
     // `inherit` is Claude's "use parent" default — drop it so we fall through
-    // to parent-model inheritance. Any other value passes through verbatim.
+    // to parent-model inheritance. Other values are stored trimmed.
     model:
-      data.model && data.model.toLowerCase() === "inherit"
+      model && model.toLowerCase() === "inherit"
         ? undefined
-        : data.model,
-    thinking: VALID_THINKING.has(data.thinking ?? "")
-      ? (data.thinking as ThinkingLevel)
+        : model || undefined,
+    thinking: VALID_THINKING.has(thinking ?? "")
+      ? (thinking as ThinkingLevel)
       : "off",
     tools,
     systemPrompt: body,
@@ -476,11 +480,7 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
             // Keep tools display as the built-in default; resolution will
             // filter parentNativeTools instead.
             cfg.tools = existing.tools;
-          } else if (
-            !hasExplicitAllowlist &&
-            hasDenylist &&
-            existing.tools
-          ) {
+          } else if (!hasExplicitAllowlist && hasDenylist && existing.tools) {
             // No explicit allowlist but a Claude denylist is present – apply
             // the denylist to the built-in's own toolset, not the generic
             // full set, to avoid turning a denylist into an escalation
@@ -490,7 +490,12 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
                 .split(",")
                 .map((s) => s.trim())
                 .filter(Boolean)
-                .map((n) => (CLAUDE_TOOL_ALIASES as Record<string, string>)[n.toLowerCase()] ?? null)
+                .map(
+                  (n) =>
+                    (CLAUDE_TOOL_ALIASES as Record<string, string>)[
+                      n.toLowerCase()
+                    ] ?? null,
+                )
                 .filter((n): n is string => n !== null),
             );
             cfg.tools = existing.tools.filter((t) => !denied.has(t));
@@ -507,7 +512,7 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
           // in task-resolution – the overridden profile is still a built-in
           // by name, just with a custom prompt/tools.
           cfg.builtin = true;
-          if (!rawWorkspace && existing.workspace) {
+          if (!rawWorkspace?.trim() && existing.workspace) {
             cfg.workspace = existing.workspace;
           } else if (hasExplicitWorkspace) {
             cfg.workspace = rawWorkspace as AgentConfig["workspace"];
