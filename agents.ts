@@ -424,18 +424,34 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
           } catch {
             // ignore, keep parsed tools/workspace
           }
-          const hasExplicitTools =
-            (rawTools !== undefined && rawTools.trim() !== "") ||
-            (scope === "claude" &&
-              rawDisallowedTools !== undefined &&
-              rawDisallowedTools.trim() !== "");
+          const hasExplicitAllowlist =
+            rawTools !== undefined && rawTools.trim() !== "";
+          const hasDenylist =
+            scope === "claude" &&
+            rawDisallowedTools !== undefined &&
+            rawDisallowedTools.trim() !== "";
+          const hasExplicitTools = hasExplicitAllowlist || hasDenylist;
           const hasExplicitWorkspace =
             rawWorkspace === "shared" || rawWorkspace === "scratch";
           const hasInvalidWorkspace =
             rawWorkspace !== undefined &&
             rawWorkspace.trim() !== "" &&
             !hasExplicitWorkspace;
-          if (!hasExplicitTools && existing.tools) {
+          if (!hasExplicitAllowlist && hasDenylist && existing.tools) {
+            // No explicit allowlist but a Claude denylist is present – apply
+            // the denylist to the built-in's own toolset, not the generic
+            // full set, to avoid turning a denylist into an escalation
+            // (e.g. scout `disallowedTools: Bash` should stay read-only).
+            const denied = new Set(
+              (rawDisallowedTools ?? "")
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean)
+                .map((n) => (CLAUDE_TOOL_ALIASES as Record<string, string>)[n.toLowerCase()] ?? null)
+                .filter((n): n is string => n !== null),
+            );
+            cfg.tools = existing.tools.filter((t) => !denied.has(t));
+          } else if (!hasExplicitTools && existing.tools) {
             cfg.tools = existing.tools;
           }
           cfg.explicitTools = hasExplicitTools;
