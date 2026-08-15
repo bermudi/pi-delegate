@@ -416,6 +416,24 @@ You are a scout. Be concise.
     expect(cfg.systemPrompt).toBe("You are a scout. Be concise.");
   });
 
+  test("trims model and thinking frontmatter values before storing them", () => {
+    const filePath = path.join(tmpDir, "spaced-values.md");
+    writeFileSync(
+      filePath,
+      `---
+name: spaced-values
+description: Spaced values
+model: " anthropic/claude-haiku-4-5 "
+thinking: " high "
+---
+Prompt.
+`,
+    );
+    const cfg = loadAgentFile(filePath)!;
+    expect(cfg.model).toBe("anthropic/claude-haiku-4-5");
+    expect(cfg.thinking).toBe("high");
+  });
+
   test("named agent without tools field inherits the full agent set (*)", () => {
     const filePath = path.join(tmpDir, "no-tools.md");
     writeFileSync(
@@ -766,6 +784,7 @@ Custom scout body.
       `---
 name: reviewer
 description: My custom reviewer
+workspace: "   "
 ---
 Custom reviewer body.
 `,
