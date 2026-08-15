@@ -1,6 +1,6 @@
 {
   "name": "@bermudi/pi-delegate",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Delegate tool for the Pi coding agent.",
   "keywords": [
     "pi-package"
