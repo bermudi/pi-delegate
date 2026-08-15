@@ -382,6 +382,7 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
   const agents = new Map<string, AgentConfig>(
     Object.entries(BUILTIN_AGENT_CONFIGS),
   );
+  const overriddenBuiltins = new Set<string>();
   const loadDir = (
     { dir, scope }: { dir: string; scope: AgentConfig["scope"] },
     loader: (fp: string) => AgentConfig | null,
@@ -399,16 +400,17 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
       if (!cfg) continue;
       if (isBuiltinAgentName(cfg.name)) {
         const existing = agents.get(cfg.name);
-        if (existing?.builtin) {
+        if (existing?.builtin && !overriddenBuiltins.has(cfg.name)) {
           // Markdown can override a built-in: first definition wins, replacing
           // the default config. This lets users customize systemPrompt, tools,
           // etc. via a Markdown file. Preserve builtin workspace when the file
           // does not specify one (Markdown profiles have no workspace
           // frontmatter today), and preserve builtin tools when the file omits
           // the tools key so a prompt-only override does not silently escalate
-          // privileges (e.g. scout staying read-only). An explicit
-          // `disallowedTools` denylist counts as an explicit tools change and
-          // must not be undone.
+          // privileges (e.g. scout staying read-only).
+          // `disallowedTools` is only meaningful for Claude profiles (which
+          // actually implement the denylist); for native Pi loaders it is
+          // ignored, so it must not be treated as an explicit tools change.
           let rawTools: string | undefined;
           let rawWorkspace: string | undefined;
           let rawDisallowedTools: string | undefined;
@@ -424,7 +426,8 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
           }
           const hasExplicitTools =
             (rawTools !== undefined && rawTools.trim() !== "") ||
-            (rawDisallowedTools !== undefined &&
+            (scope === "claude" &&
+              rawDisallowedTools !== undefined &&
               rawDisallowedTools.trim() !== "");
           const hasExplicitWorkspace =
             rawWorkspace === "shared" || rawWorkspace === "scratch";
@@ -436,6 +439,10 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
             cfg.tools = existing.tools;
           }
           cfg.explicitTools = hasExplicitTools;
+          // Preserve built-in semantics for model/thinking/workspace handling
+          // in task-resolution – the overridden profile is still a built-in
+          // by name, just with a custom prompt/tools.
+          cfg.builtin = true;
           if (!rawWorkspace && existing.workspace) {
             cfg.workspace = existing.workspace;
           } else if (hasExplicitWorkspace) {
@@ -448,6 +455,7 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
           }
           cfg.scope = scope;
           agents.set(cfg.name, cfg);
+          overriddenBuiltins.add(cfg.name);
         }
         continue;
       }

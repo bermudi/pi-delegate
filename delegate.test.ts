@@ -680,7 +680,9 @@ Custom prompt.
     const agents = discoverAgents("/nonexistent");
     expect(agents.get("default")?.description).toBe("My custom default");
     expect(agents.get("default")?.systemPrompt).toBe("Custom prompt.");
-    expect(agents.get("default")?.builtin).toBeFalsy();
+    expect(agents.get("default")?.builtin).toBe(true);
+    // Overridden built-ins keep built-in semantics for model/thinking
+    expect(agents.get("default")?.explicitTools).toBe(false);
   });
 
   test("skips .chain.md files", () => {
@@ -739,7 +741,8 @@ Custom scout body.
     expect(scout.description).toBe("My custom scout");
     expect(scout.systemPrompt).toBe("Custom scout body.");
     expect(scout.tools).toEqual(["read"]);
-    expect(scout.builtin).toBeFalsy();
+    expect(scout.builtin).toBe(true);
+    expect(scout.explicitTools).toBe(true);
     expect(scout.scope).toBe("project");
   });
 
