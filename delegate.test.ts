@@ -100,6 +100,7 @@ import {
 import {
   _setHostRetryBaseMsForTesting,
   _resetHostDepsCacheForTesting,
+  registerProviderExtensionNotifier,
 } from "./host.ts";
 import { resolveTasks, validateTasks } from "./task-resolution.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
@@ -8487,10 +8488,10 @@ describe("getHostDeps extension policy and isolation", () => {
       os.homedir(),
       ".pi",
       "agent",
-      "git",
-      "github.com",
-      "bermudi",
-      "manaflow-pi-codex",
+      "npm",
+      "node_modules",
+      "@bermudi",
+      "pi-codex",
     );
     // This environment-dependent check must not treat a project installation
     // as a valid substitute: project packages are intentionally rejected.
@@ -8503,7 +8504,7 @@ describe("getHostDeps extension policy and isolation", () => {
 
     const ext = deps.resourceLoader.getExtensions();
     const hasCodexCompaction = ext.extensions.some((entry) =>
-      entry.path.endsWith("/manaflow-pi-codex/extensions/pi-codex.ts"),
+      entry.path.endsWith("/@bermudi/pi-codex/extensions/pi-codex.ts"),
     );
     expect(hasCodexCompaction).toBe(true);
   });
@@ -9202,7 +9203,37 @@ describe("getHostDeps extension policy and isolation", () => {
     }
   });
 
-  test("fails clearly when a required provider extension is absent", async () => {
+  test("runs extension-free when the default provider extension is absent", async () => {
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
+      undefined) as typeof originalGetInstalledPath;
+    const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-hostdeps-"));
+
+    try {
+      const deps = await getHostDeps({
+        cwd,
+        agentDir: cwd,
+        modelProvider: "openai-codex",
+      });
+      // The shipped codex integration is best-effort and most users never
+      // install it: absence is the normal state, so the drop is silent and
+      // delegation proceeds on native compaction.
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(0);
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+    }
+  });
+
+  test("treats a user re-listing of the default source as required", async () => {
+    // Config presence, not string identity, decides provenance: the user
+    // typed this source into delegate.json, so it must fail closed instead
+    // of inheriting the default's best-effort degradation.
+    _setDelegateConfigForTesting({
+      providerExtensions: { "openai-codex": ["npm:@bermudi/pi-codex"] },
+    });
     const originalGetInstalledPath =
       piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
     piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
@@ -9216,13 +9247,170 @@ describe("getHostDeps extension policy and isolation", () => {
           agentDir: cwd,
           modelProvider: "openai-codex",
         }),
-      ).rejects.toThrow(
-        "Provider extension(s) for openai-codex are not installed in the user scope",
-      );
+      ).rejects.toThrow("not installed in the user scope");
     } finally {
       piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
         originalGetInstalledPath;
       cleanup(cwd);
+    }
+  });
+
+  test("skips an unverifiable default provider extension instead of failing", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-hostdeps-"));
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-untrusted-default-"),
+    );
+    const roguePath = path.join(cwd, "rogue-extension");
+    mkdirSync(roguePath, { recursive: true });
+    writeFileSync(
+      path.join(roguePath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
+      roguePath) as typeof originalGetInstalledPath;
+
+    try {
+      // The default codex source resolving outside every trusted user root is
+      // dropped: never loaded, never fatal, silent by design. (An installed
+      // but broken package also fails in the parent's own extension inventory,
+      // where Pi surfaces it.)
+      const deps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "openai-codex",
+      });
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(0);
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("rebuilds without a default provider extension that fails to load", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "pi-delegate-hostdeps-"));
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-broken-default-"),
+    );
+    const brokenPath = path.join(agentDir, "broken-default-extension");
+    mkdirSync(brokenPath, { recursive: true });
+    writeFileSync(
+      path.join(brokenPath, "index.ts"),
+      "export default function(_api: unknown) { throw new Error('broken default extension'); }\n",
+      "utf-8",
+    );
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
+      brokenPath) as typeof originalGetInstalledPath;
+
+    try {
+      // The default codex source is trusted (under the agent dir) but its
+      // extension throws on load: the loader is rebuilt without it instead of
+      // stopping delegation.
+      const deps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "openai-codex",
+      });
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(0);
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("notifies once when a best-effort default provider extension loads", async () => {
+    const messages: string[] = [];
+    registerProviderExtensionNotifier((message) => messages.push(message));
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-hostdeps-notice-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-notice-"),
+    );
+    const extPath = path.join(agentDir, "pi-codex-notice-fixture");
+    mkdirSync(extPath, { recursive: true });
+    writeFileSync(
+      path.join(extPath, "index.ts"),
+      "export default function(_api: unknown) {}\n",
+      "utf-8",
+    );
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
+      extPath) as typeof originalGetInstalledPath;
+
+    try {
+      const deps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "openai-codex",
+      });
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(1);
+      // Extension-bearing deps build per session — a fan-out builds several —
+      // but the notice fires once per process per provider+root.
+      await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "openai-codex",
+      });
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain("openai-codex");
+      expect(messages[0]).toContain("pi-codex-notice-fixture");
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      registerProviderExtensionNotifier(undefined as never);
+      cleanup(cwd);
+      cleanup(agentDir);
+    }
+  });
+
+  test("drops a best-effort default that exposes no loadable extension", async () => {
+    const cwd = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-hostdeps-skills-only-"),
+    );
+    const agentDir = mkdtempSync(
+      path.join(tmpdir(), "pi-delegate-agent-skills-only-"),
+    );
+    // Same fixture shape as the required-side "fails when an allowlisted
+    // package exposes no extension" test: a package that resolves but ships
+    // only skills/prompts loads zero extensions from its root.
+    const skillsOnlyPath = path.join(agentDir, "skills-only-default");
+    mkdirSync(skillsOnlyPath, { recursive: true });
+    writeFileSync(
+      path.join(skillsOnlyPath, "package.json"),
+      JSON.stringify({
+        name: "skills-only-default",
+        version: "1.0.0",
+        pi: { skills: [] },
+      }),
+      "utf-8",
+    );
+    const originalGetInstalledPath =
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath;
+    piCodingAgent.DefaultPackageManager.prototype.getInstalledPath = (() =>
+      skillsOnlyPath) as typeof originalGetInstalledPath;
+
+    try {
+      const deps = await getHostDeps({
+        cwd,
+        agentDir,
+        modelProvider: "openai-codex",
+      });
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(0);
+    } finally {
+      piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
+        originalGetInstalledPath;
+      cleanup(cwd);
+      cleanup(agentDir);
     }
   });
 
@@ -9396,14 +9584,16 @@ describe("getHostDeps extension policy and isolation", () => {
     }) as typeof originalGetInstalledPath;
 
     try {
-      await expect(
-        getHostDeps({
-          cwd,
-          agentDir: cwd,
-          modelProvider: "openai-codex",
-        }),
-      ).rejects.toThrow("project-local installations are not allowed");
+      // The default codex source is best-effort and the user scope reports it
+      // missing: delegation proceeds extension-free and the project scope is
+      // never even probed.
+      const deps = await getHostDeps({
+        cwd,
+        agentDir: cwd,
+        modelProvider: "openai-codex",
+      });
       expect(scopes).toEqual(["user"]);
+      expect(deps.resourceLoader.getExtensions().extensions).toHaveLength(0);
     } finally {
       piCodingAgent.DefaultPackageManager.prototype.getInstalledPath =
         originalGetInstalledPath;
