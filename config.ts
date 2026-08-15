@@ -136,9 +136,10 @@ function normalizeProviderExtensions(
 // are best-effort: they degrade silently to extension-free subagents on Pi's
 // native compaction, because absence of an optional integration is not a
 // warning condition — that is Pi's normal operation.
-const DEFAULT_PROVIDER_EXTENSIONS: Record<string, readonly string[]> = {
-  "openai-codex": ["npm:@bermudi/pi-codex"],
-};
+const DEFAULT_PROVIDER_EXTENSIONS: Record<string, readonly string[]> =
+  Object.assign(Object.create(null) as Record<string, readonly string[]>, {
+    "openai-codex": ["npm:@bermudi/pi-codex"],
+  });
 
 function resolveProviderExtensions(
   raw: unknown,
@@ -343,12 +344,25 @@ export function getSubagentProviderExtensionSourcesForProvider(
 ): readonly ProviderExtensionSource[] {
   const normalized = provider?.trim().toLowerCase();
   if (!normalized) return [];
-  const userMap = config.providerExtensions;
-  if (userMap && Object.prototype.hasOwnProperty.call(userMap, normalized)) {
+  // Normalize the injected config map so an unnormalized key like " Custom-Provider "
+  // is handled, matching getSubagentProviderExtensionMap / getSubagentProviderExtensionsForProvider.
+  const rawUserMap = config.providerExtensions;
+  const userMap = rawUserMap
+    ? normalizeProviderExtensions(rawUserMap)
+    : (Object.create(null) as Record<string, readonly string[]>);
+  if (Object.prototype.hasOwnProperty.call(userMap, normalized)) {
     return (userMap[normalized] ?? []).map((source) => ({
       source,
       required: true,
     }));
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      DEFAULT_PROVIDER_EXTENSIONS,
+      normalized,
+    )
+  ) {
+    return [];
   }
   return (DEFAULT_PROVIDER_EXTENSIONS[normalized] ?? []).map((source) => ({
     source,
