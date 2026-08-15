@@ -47,9 +47,17 @@ The other built-ins are:
   default. Set `workspace: "shared"` when a reviewer needs a persistent
   `sessionId`.
 
-Fresh built-ins inherit the parent's exact model object and thinking level.
-Task-level overrides win; settings can provide unconditional overrides or exact
-parent-model overrides under `delegate.agentOverridesByParentModel`.
+A same-named Markdown file can override any built-in (first definition wins
+across `.pi/agents/`, `~/.pi/agent/agents/`, `~/.agents/`, `.claude/agents/`,
+`~/.claude/agents/`). A prompt-only override keeps the built-in's tools and
+workspace — `scout` stays read-only and `reviewer` stays scratch unless the
+file explicitly sets `tools` or `workspace`. Fresh built-ins inherit the
+parent's exact model object and thinking level; an explicit `model`/`thinking`
+in the Markdown file replaces that inheritance. Task fields always win, and for
+`scout`/`coder`/`reviewer` settings overrides (`settings.json`
+`delegate.agentOverrides` / `delegate.agentOverridesByParentModel`) win over the
+Markdown file, while `default` ignores settings and uses only an explicit
+Markdown `model`/`thinking` when present.
 
 ### Disposable scratch workspace
 
@@ -142,15 +150,22 @@ over an installed extension.
   model by default.
 - **Default subagent** — The reserved built-in `agent: "default"` profile. It
   mirrors the live parent's model, thinking level, delegatable native tools, and
-  base system prompt while preserving delegate's extension/context isolation.
+  base system prompt while preserving delegate's extension/context isolation;
+  a `default.md` Markdown file can override its prompt/tools/model/thinking
+  (first definition wins — a prompt-only file keeps the parent-mirrored tools
+  and thinking/model inheritance).
 - **Custom agent** — A subagent profile defined by the parent, either inline in
   a delegate task (`systemPrompt`, `tools`, and `thinking`) or persisted as a
   Markdown file. The subagent inherits the parent model by default; `model` is a
   rare override. Markdown agents are examples of custom agents.
 - **Named agent** / **Markdown agent** — A reusable custom agent persisted as a
-  Markdown file in `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`. The frontmatter
-  defines its name, description, model, tools, and thinking level; the
-  Markdown body is its system prompt.
+  Markdown file in `.pi/agents/*.md`, `~/.pi/agent/agents/*.md`, `~/.agents/*.md`,
+  `.claude/agents/*.md`, or `~/.claude/agents/*.md` (first definition wins). The frontmatter defines its name, description,
+  model, tools, and thinking level; the Markdown body is its system prompt. A
+  same-named file for a built-in (`default`/`scout`/`coder`/`reviewer`)
+  overrides that built-in; a prompt-only override keeps the built-in's tools
+  and workspace, and an explicit `model`/`thinking` replaces parent inheritance
+  (for `default` settings are ignored, for others settings win over the file).
 - **Ad-hoc subagent** — A subagent created from inline task fields instead of a
   named Markdown agent profile. In current output this is labeled `ad-hoc`.
 - **Inline task** — The task object itself when its configuration is supplied
