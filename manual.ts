@@ -58,7 +58,7 @@ export function getSubagentManualMarkdown(
       const toolsPart = showTools ? ` Tools: \`${cfg.tools.join(", ")}\`.` : "";
       const workspace =
         cfg.workspace === "scratch"
-          ? 'Defaults to a disposable scratch workspace; set `workspace: "shared"` for a persistent reviewer with `sessionId`.'
+          ? `Defaults to a disposable scratch workspace; set \`workspace: "shared"\` for a persistent ${name} with \`sessionId\`.`
           : "Shared workspace.";
       return `- **${name}**: ${cfg.description}${toolsPart} ${workspace}`;
     },
