@@ -6,27 +6,7 @@ import {
   validateDelegateOperation,
 } from "./schema.ts";
 import { getSubagentManualMarkdown } from "./manual.ts";
-import type { DelegateArguments, TaskDef } from "./types.ts";
-
-describe("legacy action type compatibility", () => {
-  test("keeps deprecated aliases in exported types without requiring them", () => {
-    const ticketCall: DelegateArguments = { action: "poll" };
-    const sessionTask: TaskDef = { action: "close", sessionId: "session-1" };
-    const canonicalCall: DelegateArguments = {
-      ticketAction: "wait",
-      ticket: "ticket-1",
-    };
-    const canonicalTask: TaskDef = {
-      sessionAction: "prompt",
-      prompt: "continue",
-    };
-
-    expect(ticketCall.action).toBe("poll");
-    expect(sessionTask.action).toBe("close");
-    expect(canonicalCall.ticketAction).toBe("wait");
-    expect(canonicalTask.sessionAction).toBe("prompt");
-  });
-});
+import type { DelegateArguments } from "./types.ts";
 
 describe("normalizeDelegateArguments", () => {
   test("passes well-formed arguments through unchanged", () => {
@@ -71,16 +51,6 @@ describe("normalizeDelegateArguments", () => {
     expect(result.tasks).toEqual([{ prompt: "bg" }]);
   });
 
-  test("folds a flat task-level close action into sessionAction on the wrapped task", () => {
-    const result = normalizeDelegateArguments({
-      action: "close",
-      sessionId: "s1",
-    });
-    expect(result.tasks).toEqual([{ sessionAction: "close", sessionId: "s1" }]);
-    expect(result.action).toBeUndefined();
-    expect(result.ticketAction).toBeUndefined();
-  });
-
   test("does not wrap when a ticket action is present", () => {
     for (const ticketAction of ["poll", "cancel", "wait"] as const) {
       const result = normalizeDelegateArguments({
@@ -93,46 +63,6 @@ describe("normalizeDelegateArguments", () => {
     }
   });
 
-  test("normalizes legacy top-level ticket action to ticketAction", () => {
-    const result = normalizeDelegateArguments({
-      action: "poll",
-      ticket: "t1",
-    });
-    expect(result.ticketAction).toBe("poll");
-    expect(result.ticket).toBe("t1");
-    expect(result.action).toBeUndefined();
-  });
-
-  for (const action of ["cancel", "wait"] as const) {
-    test(`normalizes legacy top-level ticket action '${action}' to ticketAction`, () => {
-      const result = normalizeDelegateArguments({
-        action,
-        ticket: "t1",
-      });
-      expect(result.ticketAction).toBe(action);
-      expect(result.ticket).toBe("t1");
-      expect(result.action).toBeUndefined();
-    });
-  }
-
-  test("normalizes legacy per-task session action to sessionAction", () => {
-    const result = normalizeDelegateArguments({
-      tasks: [{ prompt: "hi", action: "close", sessionId: "s1" }],
-    });
-    expect(result.tasks).toEqual([
-      { prompt: "hi", sessionAction: "close", sessionId: "s1" },
-    ]);
-  });
-
-  for (const action of ["list"] as const) {
-    test(`normalizes legacy per-task session action '${action}' to sessionAction`, () => {
-      const result = normalizeDelegateArguments({
-        tasks: [{ action }],
-      });
-      expect(result.tasks).toEqual([{ sessionAction: action }]);
-    });
-  }
-
   test("does not wrap when a ticket id is present", () => {
     const result = normalizeDelegateArguments({
       ticket: "t1",
@@ -140,6 +70,19 @@ describe("normalizeDelegateArguments", () => {
     });
     expect(result.tasks).toBeUndefined();
     expect(result.ticket).toBe("t1");
+  });
+
+  test("folds a flat top-level sessionAction into the wrapped task", () => {
+    const result = normalizeDelegateArguments({
+      sessionAction: "close",
+      sessionId: "s1",
+    });
+    expect(result.tasks).toEqual([{ sessionAction: "close", sessionId: "s1" }]);
+    expect("sessionAction" in result).toBe(false);
+    expect("sessionId" in result).toBe(false);
+    expect(
+      validateDelegateOperation(result as DelegateArguments),
+    ).toBeUndefined();
   });
 
   test("a valid tasks array wins over flat fields", () => {
@@ -217,6 +160,23 @@ describe("normalizeDelegateArguments", () => {
 });
 
 describe("validateDelegateOperation task-field whitelist", () => {
+  test("rejects the removed top-level action field", () => {
+    const cases = [
+      { action: "poll" },
+      { action: "poll", tasks: [{ prompt: "work" }] },
+      { action: "close", sessionId: "s1" },
+    ];
+
+    for (const params of cases) {
+      const err = validateDelegateOperation(
+        normalizeDelegateArguments(params) as DelegateArguments,
+      );
+      expect(err).toContain("unsupported field 'action'");
+      expect(err).toContain("ticketAction");
+      expect(err).toContain("sessionAction");
+    }
+  });
+
   test("rejects a task-level async flag with a corrective hint", () => {
     const err = validateDelegateOperation({
       tasks: [{ prompt: "x", async: true }],
@@ -394,41 +354,6 @@ describe("validateDelegateOperation task-field whitelist", () => {
     expect(err).toContain("call it separately");
   });
 
-  test("rejects conflicting top-level action and ticketAction", () => {
-    const err = validateDelegateOperation({
-      action: "poll",
-      ticketAction: "wait",
-      ticket: "t1",
-    } as unknown as DelegateArguments);
-    expect(err).toContain("ambiguous");
-    expect(err).toContain("ticketAction");
-  });
-
-  test("rejects conflicting per-task action and sessionAction", () => {
-    const err = validateDelegateOperation({
-      tasks: [{ action: "close", sessionAction: "list", sessionId: "s1" }],
-    } as unknown as DelegateArguments);
-    expect(err).toContain("ambiguous");
-    expect(err).toContain("sessionAction");
-  });
-
-  test("rejects an unknown legacy top-level action with a corrective message", () => {
-    const err = validateDelegateOperation({
-      action: "bogus",
-    } as unknown as DelegateArguments);
-    expect(err).toContain("unknown action 'bogus'");
-    expect(err).toContain("poll/cancel/wait");
-    expect(err).toContain("prompt/close/list");
-  });
-
-  test("rejects an unknown legacy per-task action with a corrective message", () => {
-    const err = validateDelegateOperation({
-      tasks: [{ prompt: "x", action: "bogus" }],
-    } as unknown as DelegateArguments);
-    expect(err).toContain("task 1: unknown action 'bogus'");
-    expect(err).toContain("prompt/close/list");
-  });
-
   test("allows a ticket-only wait call", () => {
     expect(
       validateDelegateOperation({
@@ -481,47 +406,6 @@ describe("validateDelegateOperation task-field whitelist", () => {
         ticket: "t1",
         force: true,
       }),
-    ).toBeUndefined();
-  });
-
-  test("rejects a legacy top-level session action combined with an explicit tasks array", () => {
-    const cases: { action: "close" | "list" | "prompt"; tasks: unknown[] }[] = [
-      {
-        action: "close",
-        tasks: [{ prompt: "continue", sessionId: "s1" }],
-      },
-      { action: "list", tasks: [{ prompt: "x" }] },
-      { action: "prompt", tasks: [{ prompt: "x" }] },
-    ];
-    for (const { action, tasks } of cases) {
-      const err = validateDelegateOperation(
-        normalizeDelegateArguments({ action, tasks }) as DelegateArguments,
-      );
-      expect(err).toContain("legacy top-level action");
-      expect(err).toContain("'" + action + "'");
-      expect(err).toContain("cannot be combined with an explicit tasks array");
-    }
-  });
-
-  test("allows a flat legacy top-level session action with no tasks", () => {
-    expect(
-      validateDelegateOperation(
-        normalizeDelegateArguments({
-          action: "close",
-          sessionId: "s1",
-        }) as DelegateArguments,
-      ),
-    ).toBeUndefined();
-  });
-
-  test("allows a flat legacy top-level ticket action", () => {
-    expect(
-      validateDelegateOperation(
-        normalizeDelegateArguments({
-          action: "poll",
-          ticket: "t1",
-        }) as DelegateArguments,
-      ),
     ).toBeUndefined();
   });
 

@@ -7,6 +7,8 @@ import type { DelegateArguments } from "./types.ts";
 // `Type.Union([Type.Literal…])` keeps the literals but serializes as `anyOf`,
 // which some providers handle poorly. `Type.Unsafe` gives both: the wire
 // format stays `{ type: "string", enum: [...] }` and the type stays narrow.
+// (TypeBox 0.34's `Type.Enum` targets numeric TS enums, not string arrays, so
+// it is not a drop-in replacement here.)
 function StringEnum<const T extends readonly string[]>(
   values: T,
   options?: SchemaOptions,
@@ -112,9 +114,8 @@ export const delegateTaskSchema = Type.Object({
 });
 
 // Single source of truth for registration and generated help. The exported
-// argument types in types.ts project this canonical schema and add deprecated
-// `action` aliases as a type-only compatibility overlay; providers never see
-// those legacy fields in this schema.
+// argument types in types.ts project this canonical schema; providers see
+// only these fields.
 export const delegateArgumentsSchema = Type.Object({
   ticketAction: Type.Optional(
     StringEnum(["poll", "cancel", "wait"], {
@@ -157,8 +158,8 @@ export const delegateArgumentsSchema = Type.Object({
   ),
 });
 
-/** Fields that belong to a task entry. Models sometimes place these at the
- * top level of the arguments; the shim folds them back into a single task. */
+/** Fields that belong to a task entry. Models sometimes place these at the top
+ * level of the arguments; the shim folds them back into a single task. */
 const TASK_FIELD_NAMES = [
   "id",
   "prompt",
@@ -181,52 +182,26 @@ const TASK_FIELD_NAMES = [
  * corrective message instead of being silently ignored (observed in the
  * wild: a task-level `async: true` the caller believed had backgrounded
  * the work while the call in fact ran synchronously). */
-const VALID_TASK_KEYS = new Set<string>([...TASK_FIELD_NAMES, "sessionAction"]);
-
-/** Top-level ticket actions the legacy `action` field may map to. */
-const TICKET_ACTIONS = new Set(["poll", "cancel", "wait"]);
-
-/** Session actions that are valid at the task level. A flat `action` at the
- * top level may also fold into a wrapped task's `sessionAction`. */
-const TASK_ACTIONS = new Set(["prompt", "close", "list"]);
-
-/** Every value the legacy `action` field can carry before it is normalized to
- * `ticketAction` or `sessionAction`. */
-const LEGACY_ACTIONS = new Set([...TICKET_ACTIONS, ...TASK_ACTIONS]);
+const VALID_TASK_KEYS = new Set<string>(TASK_FIELD_NAMES);
 
 /** Validate the three operation modes after compatibility reshaping. */
 export function validateDelegateOperation(
   params: DelegateArguments,
 ): string | undefined {
   const rawParams = params as Record<string, unknown>;
+  if ("action" in rawParams) {
+    return (
+      "unsupported field 'action'; use 'ticketAction' for poll/cancel/wait " +
+      "or 'sessionAction' for prompt/close/list."
+    );
+  }
   const tasks = params.tasks ?? [];
 
-  const hasLegacyAction = typeof rawParams.action === "string";
-  const hasTicketAction = params.ticketAction !== undefined;
-
-  if (hasLegacyAction) {
-    if (!LEGACY_ACTIONS.has(rawParams.action as string)) {
-      return `unknown action '${rawParams.action}'; valid ticket actions are poll/cancel/wait, valid session actions are prompt/close/list.`;
-    }
-    if (hasTicketAction) {
-      return "ambiguous: supply only ticketAction (or only legacy action), not both.";
-    }
-    if (TASK_ACTIONS.has(rawParams.action as string) && tasks.length > 0) {
-      return `legacy top-level action '${rawParams.action}' cannot be combined with an explicit tasks array; move it into the task's sessionAction or remove tasks.`;
-    }
-  }
-
-  const ticketAction: string | undefined =
-    params.ticketAction ??
-    (hasLegacyAction && TICKET_ACTIONS.has(rawParams.action as string)
-      ? (rawParams.action as string)
-      : undefined);
-
+  const ticketAction = params.ticketAction;
   const isTicketControl = ticketAction !== undefined;
 
   if (isTicketControl) {
-    const topLevelTaskIntentFields = [...TASK_FIELD_NAMES, "tasks"] as const;
-    const taskIntentFields = topLevelTaskIntentFields.filter(
+    const taskIntentFields = ([...TASK_FIELD_NAMES, "tasks"] as const).filter(
       (field) => rawParams[field] !== undefined,
     );
     if (taskIntentFields.length) {
@@ -268,9 +243,9 @@ export function validateDelegateOperation(
   // there is no tasks array, so a mixed call silently lets tasks win —
   // a model mistake that should fail loudly.
   if (tasks.length > 0) {
-    const flatTaskFields = [
-      ...new Set([...TASK_FIELD_NAMES, "sessionAction", "action"]),
-    ].filter((field) => rawParams[field] !== undefined);
+    const flatTaskFields = TASK_FIELD_NAMES.filter(
+      (field) => rawParams[field] !== undefined,
+    );
     if (flatTaskFields.length) {
       return `cannot mix top-level task field(s) ${flatTaskFields
         .map((field) => `'${field}'`)
@@ -282,29 +257,11 @@ export function validateDelegateOperation(
 
   for (const [index, task] of tasks.entries()) {
     const rawTask = task as Record<string, unknown>;
-    const hasLegacyTaskAction = typeof rawTask.action === "string";
-    const hasSessionAction = task.sessionAction !== undefined;
+    const sessionAction = task.sessionAction;
 
-    if (hasLegacyTaskAction) {
-      if (!TASK_ACTIONS.has(rawTask.action as string)) {
-        return `task ${index + 1}: unknown action '${rawTask.action}'; valid session actions are prompt/close/list.`;
-      }
-      if (hasSessionAction) {
-        return `task ${index + 1}: ambiguous: supply only sessionAction (or only legacy action), not both.`;
-      }
-    }
-
-    const sessionAction: string | undefined =
-      task.sessionAction ??
-      (hasLegacyTaskAction && TASK_ACTIONS.has(rawTask.action as string)
-        ? (rawTask.action as string)
-        : undefined);
-
-    const unknownKeys = Object.keys(rawTask).filter((key) => {
-      if (VALID_TASK_KEYS.has(key)) return false;
-      if (key === "action" && sessionAction !== undefined) return false;
-      return true;
-    });
+    const unknownKeys = Object.keys(rawTask).filter(
+      (key) => !VALID_TASK_KEYS.has(key),
+    );
     if (unknownKeys.length) {
       const asyncHint = unknownKeys.includes("async")
         ? " 'async' is a top-level flag; move it out of the task entry."
@@ -336,11 +293,7 @@ export function validateDelegateOperation(
         return `task ${index + 1}: sessionAction 'close' requires sessionId.`;
       }
       const extras = Object.keys(rawTask).filter(
-        (key) =>
-          key !== "sessionAction" &&
-          key !== "sessionId" &&
-          key !== "action" &&
-          key !== "id",
+        (key) => key !== "sessionAction" && key !== "sessionId" && key !== "id",
       );
       if (extras.length) {
         return `task ${index + 1}: sessionAction 'close' accepts only sessionAction and sessionId.`;
@@ -348,7 +301,7 @@ export function validateDelegateOperation(
     }
     if (sessionAction === "list") {
       const extras = Object.keys(rawTask).filter(
-        (key) => key !== "sessionAction" && key !== "action" && key !== "id",
+        (key) => key !== "sessionAction" && key !== "id",
       );
       if (extras.length) {
         return `task ${index + 1}: sessionAction 'list' accepts only sessionAction.`;
@@ -378,6 +331,52 @@ function normalizeToolsField(value: string): unknown {
   return trimmed && !/[\s,]/.test(trimmed) ? [trimmed] : value;
 }
 
+/** True when `record` carries a top-level ticket-control intent that makes a
+ * flat task-field wrap illegitimate: an explicit `ticketAction`, or a bare
+ * `ticket` id (which only makes sense with poll/cancel/wait). */
+function hasTicketControlIntent(record: Record<string, unknown>): boolean {
+  return (
+    record.ticketAction === "poll" ||
+    record.ticketAction === "cancel" ||
+    record.ticketAction === "wait" ||
+    record.ticket !== undefined
+  );
+}
+
+/** Fold top-level task fields into a single `tasks` entry. Only fires when
+ * there is no usable tasks array and no ticket-control intent — those calls
+ * are legitimately taskless. `sessionAction` is part of `TASK_FIELD_NAMES`,
+ * so a top-level `sessionAction` rides along into the wrapped task. */
+function wrapFlatTaskFields(record: Record<string, unknown>): void {
+  const hasTasks = Array.isArray(record.tasks) && record.tasks.length > 0;
+  if (hasTasks || hasTicketControlIntent(record)) return;
+  const task: Record<string, unknown> = {};
+  for (const key of TASK_FIELD_NAMES) {
+    if (record[key] !== undefined) {
+      task[key] = record[key];
+      delete record[key];
+    }
+  }
+  if (Object.keys(task).length > 0) record.tasks = [task];
+}
+
+/** Per-entry recovery for one task: stringified (or bare-token) `tools` → a
+ * real array, and `agent: ""` → omitted (ad-hoc). Other malformed input is
+ * left for schema validation to reject loudly. */
+function normalizeTaskEntry(entry: unknown): unknown {
+  if (!entry || typeof entry !== "object") return entry;
+  const e = entry as Record<string, unknown>;
+  const rawTools = e.tools;
+  const fixAgent = e.agent === "";
+  if (typeof rawTools !== "string" && !fixAgent) return entry;
+  const out = { ...e };
+  if (typeof rawTools === "string") {
+    out.tools = normalizeToolsField(rawTools);
+  }
+  if (fixAgent) delete out.agent;
+  return out;
+}
+
 /** Compatibility shim run by pi before schema validation. Recovers the
  * malformed shapes weaker models emit, instead of letting them silently
  * degrade to the help response (an empty `tasks` returns the manual, which
@@ -386,13 +385,9 @@ function normalizeToolsField(value: string): unknown {
  * - task fields (`prompt`, `systemPrompt`, `tools`, ...) placed at the top
  *   level instead of inside a `tasks` entry — wrapped into a single task;
  * - `tools` as a JSON string (or bare token) inside a task entry;
- * - `agent: ""` inside a task entry — treated as omitted (ad-hoc);
- * - legacy `action` folded into `ticketAction` (top level) or `sessionAction`
- *   (per task) for runtime compatibility.
- * Skipped when a ticket action is in play. Conflicts between the legacy
- * `action` field and its canonical replacement are left for
- * `validateDelegateOperation` to report. All other invalid input is left for
- * normal schema validation to reject loudly.
+ * - `agent: ""` inside a task entry — treated as omitted (ad-hoc).
+ * All other invalid input is left for normal schema validation to reject
+ * loudly.
  *
  * Silent by design: these rewrites are lossless re-shaping, so unlike the
  * model-suffix warning in task-resolution (which fires because thinking
@@ -409,83 +404,12 @@ export function normalizeDelegateArguments(args: unknown): DelegateArguments {
     if (parsed) record.tasks = parsed;
   }
 
-  // Legacy top-level `action` (ticket verb) → canonical `ticketAction`.
-  // If both are present, leave the conflict for validateDelegateOperation.
-  if (
-    typeof record.action === "string" &&
-    ["poll", "cancel", "wait"].includes(record.action)
-  ) {
-    if (record.ticketAction === undefined) {
-      record.ticketAction = record.action;
-      delete record.action;
-    }
-  }
+  // Flat task fields at the top level → wrap into a single task.
+  wrapFlatTaskFields(record);
 
-  // Flat task fields at the top level → wrap into a single task. Only fires
-  // when there is no usable tasks array and no ticket action (`ticket`,
-  // poll/cancel/wait) — those calls are legitimately taskless.
-  const hasTasks = Array.isArray(record.tasks) && record.tasks.length > 0;
-  const isTicketAction =
-    record.ticketAction === "poll" ||
-    record.ticketAction === "cancel" ||
-    record.ticketAction === "wait" ||
-    record.action === "poll" ||
-    record.action === "cancel" ||
-    record.action === "wait";
-  if (!hasTasks && !isTicketAction && record.ticket === undefined) {
-    const task: Record<string, unknown> = {};
-    for (const key of TASK_FIELD_NAMES) {
-      if (record[key] !== undefined) {
-        task[key] = record[key];
-        delete record[key];
-      }
-    }
-    // Canonical `sessionAction` at the top level folds into the wrapped task.
-    if (typeof record.sessionAction === "string") {
-      if (task.sessionAction === undefined) {
-        task.sessionAction = record.sessionAction;
-      }
-      delete record.sessionAction;
-    }
-    // Legacy top-level session `action` folds into the wrapped task's
-    // `sessionAction`. A conflict with an explicit `sessionAction` is left
-    // for validateDelegateOperation to report.
-    if (typeof record.action === "string" && TASK_ACTIONS.has(record.action)) {
-      if (task.sessionAction === undefined) {
-        task.sessionAction = record.action;
-      } else {
-        task.action = record.action;
-      }
-      delete record.action;
-    }
-    if (Object.keys(task).length > 0) record.tasks = [task];
-  }
-
-  // Per-entry recovery: stringified (or bare-token) `tools` → real arrays,
-  // `agent: ""` → omitted, and legacy `action` → `sessionAction`.
+  // Per-entry recovery: stringified/bare-token `tools` and `agent: ""`.
   if (Array.isArray(record.tasks)) {
-    record.tasks = record.tasks.map((entry: unknown) => {
-      if (!entry || typeof entry !== "object") return entry;
-      const e = entry as Record<string, unknown>;
-      const rawTools = e.tools;
-      const fixAgent = e.agent === "";
-      const needsActionNorm =
-        typeof e.action === "string" &&
-        TASK_ACTIONS.has(e.action) &&
-        e.sessionAction === undefined;
-      if (typeof rawTools !== "string" && !fixAgent && !needsActionNorm)
-        return entry;
-      const out = { ...e };
-      if (typeof rawTools === "string") {
-        out.tools = normalizeToolsField(rawTools);
-      }
-      if (fixAgent) delete out.agent;
-      if (needsActionNorm) {
-        out.sessionAction = out.action;
-        delete out.action;
-      }
-      return out;
-    });
+    record.tasks = record.tasks.map(normalizeTaskEntry);
   }
 
   return record as DelegateArguments;
