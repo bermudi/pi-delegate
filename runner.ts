@@ -12,6 +12,10 @@ import { snapshotSessionUsage, usageDelta, emptyUsage } from "./usage.ts";
 import { getStallTimeoutMs } from "./config.ts";
 import { fmtDuration } from "./format.ts";
 import { scheduleDeadline } from "./timer.ts";
+import {
+  createQuiescenceBarrier,
+  type CancellationSource,
+} from "./quiescence.ts";
 import type { Usage } from "@earendil-works/pi-ai";
 import type {
   AgentProgressUpdate,
@@ -40,7 +44,7 @@ export function formatDeadlineExceededError(budgetMs: number): string {
  *      `AgentProgressUpdate` / `ToolActivity` shapes,
  *   2. wires the parent abort signal to `session.abort()`,
  *   3. waits for extension-started post-run compaction/continuations to become
- *      quiescent before returning ownership to lifecycle,
+ *      quiescent before returning ownership to lifecycle (`quiescence.ts`),
  *   4. snapshots usage before/after the prompt for token delta accounting, and
  *   5. computes touched files from activity + git diff.
  *
@@ -97,51 +101,26 @@ export async function runAgentSession(
   let prompted = false;
   const activities: ToolActivity[] = [];
   const pendingById = new Map<string, ToolActivity>();
-  let sessionEventGeneration = 0;
-  let wakeSessionEvent: (() => void) | undefined;
 
   // AgentSession.prompt() can return while an agent_settled extension callback
-  // is still running fire-and-forget work through ctx.compact(). Keep a small
-  // internal event seam so the runner can wait without polling throughout a
-  // potentially long remote compaction. The generation closes the race between
-  // checking session state and installing the next waiter.
-  let abortRequestedGeneration = -1;
-  const noteSessionEvent = () => {
-    sessionEventGeneration++;
-    const wake = wakeSessionEvent;
-    wakeSessionEvent = undefined;
-    wake?.();
-  };
-  const waitForSessionEventAfter = async (
-    generation: number,
-  ): Promise<void> => {
-    if (sessionEventGeneration !== generation) return;
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      const probe = setTimeout(() => finish(), 250);
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(probe);
-        if (wakeSessionEvent === finish) wakeSessionEvent = undefined;
-        resolve();
-      };
-      if (sessionEventGeneration !== generation) {
-        finish();
-        return;
-      }
-      // AgentSession normally emits every transition we care about. The slow
-      // probe is a liveness fallback for host versions that clear an internal
-      // busy flag without a corresponding public event.
-      wakeSessionEvent = finish;
-    });
-  };
-  const nextEventLoopTurn = () =>
-    new Promise<void>((resolve) => setImmediate(resolve));
+  // is still running fire-and-forget work through ctx.compact(). The barrier
+  // owns the "is the session really done?" reasoning; see quiescence.ts for
+  // why it cannot be answered deterministically against today's host.
+  const barrier = createQuiescenceBarrier({
+    session,
+    cancellation: () =>
+      signal?.aborted
+        ? "parent-aborted"
+        : deadlineExceeded
+          ? "deadline"
+          : stalled
+            ? "stalled"
+            : undefined,
+    cancel: (source) => requestSessionCancellation(source),
+  });
+  const waitForSessionQuiescence = () => barrier.wait();
 
-  const requestSessionCancellation = (
-    source: "parent-aborted" | "stalled" | "deadline",
-  ): void => {
+  const requestSessionCancellation = (source: CancellationSource): void => {
     const logFailure = (operation: string, error: unknown) => {
       console.error(`[delegate] ${source} subagent ${operation} failed`, error);
     };
@@ -155,106 +134,19 @@ export async function runAgentSession(
     } catch (error) {
       logFailure("branch-summary cancellation", error);
     }
-    noteSessionEvent();
-    // Fire the abort before recording the generation. session.abort() may
-    // synchronously emit events (e.g. a final message_update as the stream
-    // unwinds) that increment the generation. Recording after the call
-    // ensures those abort-caused events are accounted for, so the quiescence
+    barrier.noteEvent();
+    // Fire the abort before recording the cancellation point. session.abort()
+    // may synchronously emit events (e.g. a final message_update as the stream
+    // unwinds); recording after the call attributes those to the abort, so the
     // barrier's re-abort check doesn't loop on the abort's own events.
     void session.abort().catch((error: unknown) => {
       logFailure("agent cancellation", error);
     });
-    // Record the generation after abort is dispatched. If new session events
-    // fire after this point (e.g. a continuation prompt started by an
-    // extension's onComplete callback delayed by async auth), the quiescence
-    // barrier re-aborts to cancel that continuation rather than letting it run
-    // — and potentially mutate files — after the task is considered cancelled.
-    abortRequestedGeneration = sessionEventGeneration;
-  };
-
-  /**
-   * Wait until the session is idle and non-compacting for two unchanged event
-   * loop turns. The quiet turns are significant: AgentSession emits
-   * compaction_end before ctx.compact's onComplete/onError callback runs, and a
-   * successful callback may immediately start a continuation prompt.
-   *
-   * Cancellation re-abort: if the task has been cancelled (parent abort or
-   * stall), any session event after the last cancellation request means new
-   * work started — typically a continuation from an extension's onComplete
-   * callback, possibly delayed by async auth. The barrier re-aborts to cancel
-   * it. This check runs *before* the idle check so a fast continuation that
-   * already completed between samples is still caught: the generation changed
-   * even though the session is idle again, and re-abort resets the tracker to
-   * catch any further continuations.
-   *
-   * Cancelled grace period: when cancelled and idle, a single 50 ms wait is
-   * required before quiet turns can accumulate. Without it, a continuation
-   * delayed by async auth or another extension handler can start after the
-   * runner returns — the two event-loop turns pass in microseconds, far faster
-   * than any realistic async-auth gap. This is a **mitigation, not a
-   * deterministic fix**: a deterministic solution would require the host to
-   * expose pending extension work (e.g. `AgentSession.hasPendingExtensionWork()`)
-   * so the barrier could wait on it explicitly. The grace period adds at most
-   * one 50 ms wait per cancellation/re-abort cycle — re-aborts reset the
-   * `graceWaited` flag, so a sequence of delayed continuations can cause
-   * multiple grace waits.
-   */
-  const waitForSessionQuiescence = async (): Promise<void> => {
-    const cancelledGraceMs = 50;
-    const cancellationRequested = () =>
-      signal?.aborted || stalled || deadlineExceeded;
-    const cancellationSource = (): "parent-aborted" | "stalled" | "deadline" =>
-      signal?.aborted
-        ? "parent-aborted"
-        : deadlineExceeded
-          ? "deadline"
-          : "stalled";
-    let quietTurns = 0;
-    let graceWaited = false;
-    while (quietTurns < 2) {
-      const generation = sessionEventGeneration;
-      await nextEventLoopTurn();
-
-      // Re-abort if new activity started after the last cancellation request.
-      // This runs before the idle check so a fast continuation that completed
-      // between samples (generation changed, session idle again) is still
-      // caught. After re-aborting, restart the loop to recompute isIdle/
-      // isCompacting rather than falling through to the 250 ms event probe.
-      if (
-        cancellationRequested() &&
-        abortRequestedGeneration >= 0 &&
-        sessionEventGeneration !== abortRequestedGeneration
-      ) {
-        requestSessionCancellation(cancellationSource());
-        quietTurns = 0;
-        graceWaited = false;
-        continue;
-      }
-
-      const idle = session.isIdle && !session.isCompacting;
-      if (idle && sessionEventGeneration === generation) {
-        if (cancellationRequested() && !graceWaited) {
-          // Wait once for a grace period before accepting quiet turns. A
-          // continuation delayed by async auth can start after the immediate
-          // microtask batch settles. This is a single setTimeout, not a
-          // busy-spin — the event loop is free to process the continuation's
-          // events during the wait.
-          graceWaited = true;
-          await new Promise<void>((resolve) =>
-            setTimeout(resolve, cancelledGraceMs),
-          );
-          continue;
-        }
-        quietTurns++;
-        continue;
-      }
-
-      quietTurns = 0;
-      graceWaited = false;
-      if (!idle) {
-        await waitForSessionEventAfter(sessionEventGeneration);
-      }
-    }
+    // Any session event after this point means new work started despite the
+    // abort (e.g. a continuation prompt from an extension's onComplete
+    // callback delayed by async auth). The barrier re-aborts it rather than
+    // letting it mutate files after the task is considered cancelled.
+    barrier.noteCancellationRequested();
   };
 
   // Snapshot cumulative usage before the prompt so we can report only the
@@ -527,7 +419,7 @@ export async function runAgentSession(
   // verbatim. Retry and compaction events are handled below; queue/bookkeeping
   // events and thinking changes are intentionally ignored.
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-    noteSessionEvent();
+    barrier.noteEvent();
     switch (event.type) {
       case "tool_execution_start": {
         const now = Date.now();
