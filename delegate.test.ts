@@ -100,8 +100,8 @@ import {
 import {
   _setHostRetryBaseMsForTesting,
   _resetHostDepsCacheForTesting,
-  registerProviderExtensionNotifier,
 } from "./host.ts";
+import { registerProviderExtensionNotifier } from "./provider-extensions.ts";
 import { resolveTasks, validateTasks } from "./task-resolution.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 
