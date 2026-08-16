@@ -32,11 +32,21 @@ import { createScratchWorkspace, ScratchDeadlineError } from "./workspace.ts";
 /** Internal seam for lifecycle-level tests without replacing session ownership. */
 type RunAgentSession = typeof runAgentSession;
 let runAgentSessionForTesting: RunAgentSession = runAgentSession;
+type CreateScratchWorkspace = typeof createScratchWorkspace;
+let createScratchWorkspaceForTesting: CreateScratchWorkspace =
+  createScratchWorkspace;
 
 export function _setRunAgentSessionForTesting(
   override: RunAgentSession | undefined,
 ): void {
   runAgentSessionForTesting = override ?? runAgentSession;
+}
+
+/** @internal Test-only scratch materialization seam. */
+export function _setCreateScratchWorkspaceForTesting(
+  override: CreateScratchWorkspace | undefined,
+): void {
+  createScratchWorkspaceForTesting = override ?? createScratchWorkspace;
 }
 
 /**
@@ -152,6 +162,19 @@ interface RunUpdateOffset {
   tokensOffset?: number;
   toolUsesOffset?: number;
 }
+/** Advance cumulative progress counters without ever moving backwards —
+ *  a live TaskProgress row is monotonic across attempts and retries. */
+function bumpProgressCounters(
+  p: TaskProgress,
+  tokens: number,
+  toolUses: number,
+  durationMs: number,
+): void {
+  p.tokens = Math.max(p.tokens, tokens);
+  p.toolUses = Math.max(p.toolUses, toolUses);
+  if (durationMs > p.durationMs) p.durationMs = durationMs;
+}
+
 /** Mirror a progress update from runAgent into a TaskProgress row.
  *
  * Runner callbacks report attempt-local counters. Offset/merge them so a single
@@ -162,12 +185,12 @@ export function updateProgressFromRun(
   u: AgentProgressUpdate,
   offsets: RunUpdateOffset = {},
 ): void {
-  const cumulativeTokens = (offsets.tokensOffset ?? 0) + u.tokens;
-  const cumulativeTools = (offsets.toolUsesOffset ?? 0) + u.toolUses;
-  p.tokens = Math.max(p.tokens, cumulativeTokens);
-  p.toolUses = Math.max(p.toolUses, cumulativeTools);
-
-  p.durationMs = Math.max(p.durationMs, u.durationMs);
+  bumpProgressCounters(
+    p,
+    (offsets.tokensOffset ?? 0) + u.tokens,
+    (offsets.toolUsesOffset ?? 0) + u.toolUses,
+    u.durationMs,
+  );
   p.lastActivityAt = u.lastActivityAt;
   p.activities = mergeToolActivities(p.activities, u.activities);
   p.failureKind = u.failureKind;
@@ -181,38 +204,65 @@ function updateProgressFromResult(p: TaskProgress, r: TaskResult): void {
   p.failureKind = r.failureKind;
 }
 
-const taskRetryCounts = new WeakMap<TaskResult, number>();
-/** The SQLite task id is part of the logical task, not the transient result
- * object. Scratch wrapping clones results, so keep this alongside retry data. */
-const taskTelemetryIds = new WeakMap<TaskResult, string>();
+/** Outcome of one logical task run: the final result plus how many same-model
+ *  retries it took. Telemetry is recorded by the caller at the outermost
+ *  lifecycle boundary (see recordTaskOutcome). */
+interface TaskOutcome {
+  result: TaskResult;
+  retries: number;
+}
+
+/** Notify the optional status observer without making UI/progress delivery part
+ * of task correctness. In particular, a host callback must not replace a task
+ * result or skip the outer telemetry write. */
+function notifyStatusChange(env: TaskRunEnv): void {
+  if (!env.onStatusChange) return;
+  try {
+    env.onStatusChange();
+  } catch (error) {
+    console.error("[delegate] task status callback threw; continuing", error);
+  }
+}
 
 /** Apply a TaskResult to progress and notify the env (sync fires onUpdate).
  *  Used at every return point in runResolvedTask — mirrors the old fire() pattern
- *  that the duplicated sync/async bodies used after every early-return. */
+ *  that the duplicated sync/async bodies used after every early-return.
+ *  Telemetry is NOT recorded here: the scratch wrapper may still rewrite the
+ *  result (path mapping, cleanup errors), so recording happens exactly once,
+ *  in runResolvedTaskUnlocked, on the final object. */
 function finishTask(
   env: TaskRunEnv,
   p: TaskProgress,
   r: TaskResult,
-  task: ResolvedTask,
   retries = 0,
-): TaskResult {
+): TaskOutcome {
   updateProgressFromResult(p, r);
-  taskRetryCounts.set(r, retries);
+  notifyStatusChange(env);
+  return { result: r, retries };
+}
+
+/** Record the telemetry task row at the outermost lifecycle boundary — once
+ *  per runResolvedTask, on the final (post-scratch-wrap) result. Returns the
+ *  result so call sites stay flat. */
+function recordTaskOutcome(
+  env: TaskRunEnv,
+  p: TaskProgress,
+  task: ResolvedTask,
+  outcome: TaskOutcome,
+): TaskResult {
   if (env.telemetryCallId) {
-    const id = recordTask({
+    recordTask({
       callId: env.telemetryCallId,
       generation: env.telemetryGeneration,
       async: env.async ?? false,
       taskIndex: p.index,
       task,
       progress: p,
-      result: r,
-      retries,
+      result: outcome.result,
+      retries: outcome.retries,
     });
-    if (id) taskTelemetryIds.set(r, id);
   }
-  env.onStatusChange?.();
-  return r;
+  return outcome.result;
 }
 
 /** A failure attributable to the resolved model/provider — not transient for
@@ -586,17 +636,22 @@ async function runResolvedTaskUnlocked(
   taskIndex: number,
 ): Promise<TaskResult> {
   if (task.workspace !== "scratch") {
-    return runResolvedTaskCore(env, task, p, taskIndex);
+    const outcome = await runResolvedTaskCore(env, task, p, taskIndex);
+    return recordTaskOutcome(env, p, task, outcome);
   }
   if (task.sessionId || task.resumeFrom || task.sessionAction) {
-    return finishTask(
+    return recordTaskOutcome(
       env,
       p,
-      failTask(
-        task,
-        "workspace 'scratch' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction.",
-      ),
       task,
+      finishTask(
+        env,
+        p,
+        failTask(
+          task,
+          "workspace 'scratch' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction.",
+        ),
+      ),
     );
   }
 
@@ -607,15 +662,20 @@ async function runResolvedTaskUnlocked(
       : undefined;
   let workspace: Awaited<ReturnType<typeof createScratchWorkspace>>;
   try {
-    workspace = await createScratchWorkspace(task.cwd, env.signal, deadlineAt);
+    workspace = await createScratchWorkspaceForTesting(
+      task.cwd,
+      env.signal,
+      deadlineAt,
+    );
   } catch (error) {
     const setupError = error instanceof Error ? error.message : String(error);
     const deadlineExceeded =
       !env.signal?.aborted && error instanceof ScratchDeadlineError;
-    return finishTask(
+    return recordTaskOutcome(
       env,
       p,
-      {
+      task,
+      finishTask(env, p, {
         ...failTask(
           task,
           env.signal?.aborted
@@ -626,8 +686,7 @@ async function runResolvedTaskUnlocked(
         ),
         failureKind: deadlineExceeded ? "deadline_exceeded" : undefined,
         durationMs: Date.now() - startedAt,
-      },
-      task,
+      }),
     );
   }
 
@@ -635,27 +694,18 @@ async function runResolvedTaskUnlocked(
     ...task,
     cwd: workspace.cwd,
   };
+  let outcome: TaskOutcome | undefined;
   let result: TaskResult | undefined;
   let cleanupError: string | undefined;
   let needsCorrection = false;
-  let telemetryTaskId: string | undefined;
-  let retries = 0;
   try {
-    const preMappingResult = await runResolvedTaskCore(
-      env,
-      executionTask,
-      p,
-      taskIndex,
-      {
-        taskStartedAt: startedAt,
-        deadlineAt,
-      },
-    );
-    result = preMappingResult;
-    // Capture metadata before scratch wrapping creates a new result object.
-    // Both values belong to the logical task and must survive that clone.
-    telemetryTaskId = taskTelemetryIds.get(result);
-    retries = taskRetryCounts.get(result) ?? 0;
+    outcome = await runResolvedTaskCore(env, executionTask, p, taskIndex, {
+      taskStartedAt: startedAt,
+      deadlineAt,
+    });
+    // Keep the pre-mapping result in `result` so the catch below can preserve
+    // its paid-for counters if path mapping throws mid-rewrite.
+    result = outcome.result;
     result = {
       ...result,
       workspace: "scratch",
@@ -687,8 +737,8 @@ async function runResolvedTaskUnlocked(
       workspace: "scratch",
       durationMs: Date.now() - startedAt,
     };
-    // runResolvedTaskCore may already have recorded/notified a successful
-    // result before path mapping failed. Correct those observable outcomes.
+    // runResolvedTaskCore may already have notified a successful result
+    // before path mapping failed. Correct that observable outcome below.
     needsCorrection = true;
   } finally {
     try {
@@ -717,25 +767,15 @@ async function runResolvedTaskUnlocked(
       durationMs: Math.max(result.durationMs, Date.now() - startedAt),
     };
     updateProgressFromResult(p, result);
-    if (env.telemetryCallId) {
-      // runResolvedTaskCore already recorded the pre-cleanup result. Telemetry
-      // rows are upserts, so replace it with the actual returned outcome while
-      // preserving the retry count captured by finishTask.
-      recordTask({
-        id: telemetryTaskId,
-        callId: env.telemetryCallId,
-        generation: env.telemetryGeneration,
-        async: env.async ?? false,
-        taskIndex: p.index,
-        task,
-        progress: p,
-        result,
-        retries,
-      });
-    }
-    env.onStatusChange?.();
+    notifyStatusChange(env);
   }
-  return result;
+  // Single telemetry write for the whole logical task — after scratch
+  // wrapping and cleanup, on the result actually returned, so no correction
+  // upsert is ever needed.
+  return recordTaskOutcome(env, p, task, {
+    result,
+    retries: outcome?.retries ?? 0,
+  });
 }
 
 interface AttemptTiming {
@@ -770,14 +810,13 @@ async function applySessionAction(
   env: TaskRunEnv,
   task: ResolvedTask,
   p: TaskProgress,
-): Promise<TaskResult | undefined> {
+): Promise<TaskOutcome | undefined> {
   if (task.sessionAction === "close") {
     if (!task.sessionId) {
       return finishTask(
         env,
         p,
         failTask(task, "sessionAction='close' requires sessionId."),
-        task,
       );
     }
     // The per-session lock for action-based operations is already held by the
@@ -794,7 +833,6 @@ async function applySessionAction(
           : `Session '${task.sessionId}' not found.`,
         Date.now() - env.delegateStartedAt,
       ),
-      task,
     );
   }
 
@@ -807,7 +845,6 @@ async function applySessionAction(
         `Active sessions:\n${pool.listPooledAgents().join("\n")}`,
         Date.now() - env.delegateStartedAt,
       ),
-      task,
     );
   }
   return undefined;
@@ -871,11 +908,7 @@ function noteAttemptProgress(
   };
 
   // Keep live totals monotonic across attempts.
-  p.tokens = Math.max(p.tokens, mapped.tokens);
-  p.toolUses = Math.max(p.toolUses, mapped.toolUses);
-  if (mapped.durationMs > p.durationMs) {
-    p.durationMs = mapped.durationMs;
-  }
+  bumpProgressCounters(p, mapped.tokens, mapped.toolUses, mapped.durationMs);
   env.onProgress(p, mapped);
 }
 
@@ -1065,17 +1098,31 @@ async function runTaskAttempt(
 function unexpectedAttemptFailure(
   task: ResolvedTask,
   err: unknown,
+  accounting: AttemptAccounting,
+): TaskResult {
+  return {
+    ...failTask(task, err instanceof Error ? err.message : String(err)),
+    tokens: accounting.accumulatedUsage.totalTokens,
+    usage: accounting.accumulatedUsage,
+  };
+}
+
+/** Merge whole-task accounting into a per-attempt result so no counter can
+ *  regress. The single reconcile point for attempt-local values (duration,
+ *  tokens, usage) against cumulative totals — used at every exit from the
+ *  whole-task retry loop. */
+function reconcileResultWithAccounting(
+  result: TaskResult,
   timing: AttemptTiming,
   accounting: AttemptAccounting,
 ): TaskResult {
-  const failure = failTask(
-    task,
-    err instanceof Error ? err.message : String(err),
-  );
   return {
-    ...failure,
-    durationMs: Math.max(failure.durationMs, Date.now() - timing.taskStartedAt),
-    tokens: accounting.accumulatedUsage.totalTokens,
+    ...result,
+    durationMs: Math.max(result.durationMs, Date.now() - timing.taskStartedAt),
+    tokens: Math.max(
+      accounting.cumulativeTokens,
+      accounting.accumulatedUsage.totalTokens,
+    ),
     usage: accounting.accumulatedUsage,
   };
 }
@@ -1086,7 +1133,7 @@ async function runWithWholeTaskRetries(
   task: ResolvedTask,
   p: TaskProgress,
   timing: AttemptTiming,
-): Promise<{ result: TaskResult; retriesExecuted: number }> {
+): Promise<TaskOutcome> {
   const accounting: AttemptAccounting = {
     hasBashExecution: false,
     cumulativeTokens: 0,
@@ -1103,14 +1150,18 @@ async function runWithWholeTaskRetries(
   } catch (err) {
     // First-attempt throw: finish immediately, no retries.
     return {
-      result: unexpectedAttemptFailure(task, err, timing, accounting),
-      retriesExecuted: 0,
+      result: reconcileResultWithAccounting(
+        unexpectedAttemptFailure(task, err, accounting),
+        timing,
+        accounting,
+      ),
+      retries: 0,
     };
   }
 
   const maxRetries = resolvedWholeTaskMaxRetries();
   const baseDelayMs = resolvedWholeTaskBaseDelayMs();
-  let retriesExecuted = 0;
+  let retries = 0;
   for (
     let retry = 0;
     retry < maxRetries &&
@@ -1123,16 +1174,9 @@ async function runWithWholeTaskRetries(
     if (env.signal?.aborted) {
       // Preserve any partial output/session path from the last failed attempt
       // while recording that the retry loop was aborted. The task already
-      // paid for every completed attempt, including the one before sleep.
-      result = {
-        ...result,
-        error: "Aborted",
-        durationMs: Date.now() - timing.taskStartedAt,
-        tokens: accounting.accumulatedUsage.totalTokens,
-        usage: accounting.accumulatedUsage,
-        touchedFiles: result.touchedFiles,
-        sessionFile: result.sessionFile,
-      };
+      // paid for every completed attempt, including the one before sleep;
+      // counters are reconciled by the single return below.
+      result = { ...result, error: "Aborted" };
       break;
     }
 
@@ -1144,30 +1188,19 @@ async function runWithWholeTaskRetries(
     p.status = "running";
     p.error = undefined;
     p.failureKind = undefined;
-    env.onStatusChange?.();
-    retriesExecuted++;
+    notifyStatusChange(env);
+    retries++;
     try {
       result = await runTaskAttempt(env, task, p, timing, accounting);
     } catch (err) {
-      result = unexpectedAttemptFailure(task, err, timing, accounting);
+      result = unexpectedAttemptFailure(task, err, accounting);
       break;
     }
   }
 
   return {
-    result: {
-      ...result,
-      durationMs: Math.max(
-        result.durationMs,
-        Date.now() - timing.taskStartedAt,
-      ),
-      tokens: Math.max(
-        accounting.cumulativeTokens,
-        accounting.accumulatedUsage.totalTokens,
-      ),
-      usage: accounting.accumulatedUsage,
-    },
-    retriesExecuted,
+    result: reconcileResultWithAccounting(result, timing, accounting),
+    retries,
   };
 }
 
@@ -1177,16 +1210,16 @@ async function runResolvedTaskCore(
   p: TaskProgress,
   _taskIndex: number,
   timing?: AttemptTiming,
-): Promise<TaskResult> {
+): Promise<TaskOutcome> {
   try {
     if (env.signal?.aborted) {
-      return finishTask(env, p, failTask(task, "Aborted"), task);
+      return finishTask(env, p, failTask(task, "Aborted"));
     }
 
     // Primary busy validation is in execute() before ticket creation.
     // This catches edge cases where validation missed a conflict.
     const busy = busySessionConflict(env, task);
-    if (busy) return finishTask(env, p, busy, task);
+    if (busy) return finishTask(env, p, busy);
 
     p.status = "running";
     p.model = task.model?.id;
@@ -1200,7 +1233,7 @@ async function runResolvedTaskCore(
       p,
       resolveAttemptTiming(task, timing),
     );
-    return finishTask(env, p, settled.result, task, settled.retriesExecuted);
+    return finishTask(env, p, settled.result, settled.retries);
   } catch (err) {
     // Any acquired session is released by runTaskAttempt's finally before an
     // exception reaches this boundary. This outer catch handles unexpected
@@ -1210,7 +1243,6 @@ async function runResolvedTaskCore(
       env,
       p,
       failTask(task, err instanceof Error ? err.message : String(err)),
-      task,
     );
   }
 }

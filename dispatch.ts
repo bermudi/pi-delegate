@@ -6,7 +6,7 @@ import {
   deliverTicketResults,
   sweepTickets,
   resolveFinalTicketStatus,
-  syncTicketBusyIndex,
+  settleTicket,
   notifyWaiters,
 } from "./tickets.ts";
 import { getConcurrencyLimit, getMaxAsyncTickets } from "./config.ts";
@@ -319,6 +319,16 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
   // Worker must store the TaskResult back into ticket.results, since
   // formatCompletedTicket/handlePoll read from there. Without the write,
   // completed async tasks would be reported as PENDING.
+  //
+  // Worker settlement is complete before these live-runtime observers run.
+  // In particular, result delivery is allowed to fail without re-entering the
+  // worker completion path; the terminal ticket remains available to poll.
+  const finishLiveSettlement = (t: AsyncTicket): void => {
+    syncDelegateStatus();
+    settleAsyncCall(t, callSpan);
+    finishTicketDelivery(pi, t);
+  };
+
   const completion = mapConcurrentByModel(
     resolved,
     (t) => getModelKey(t.model),
@@ -346,21 +356,16 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       // NOT be marked "done" — that would mask incomplete work as
       // complete. resolveFinalTicketStatus returns "failed" for that
       // case and for any case with a failed task.
-      if (ticket.status === "running") {
-        ticket.status = resolveFinalTicketStatus(ticket);
-        ticket.completedAt = Date.now();
-        syncTicketBusyIndex(ticket);
-      } else if (ticket.status === "cancelling") {
-        // Cancellation was requested while tasks were still settling. The
-        // per-task results record what actually happened; the ticket state
-        // reports that the batch was aborted by the caller.
-        ticket.status = "cancelled";
-        ticket.completedAt = Date.now();
-        syncTicketBusyIndex(ticket);
-      }
-      syncDelegateStatus();
-      settleAsyncCall(ticket, callSpan);
-      finishTicketDelivery(pi, ticket);
+      // A "cancelling" ticket that outlived its workers settles as
+      // "cancelled": the per-task results record what actually happened;
+      // the ticket state reports that the batch was aborted by the caller.
+      settleTicket(ticket, {
+        status:
+          ticket.status === "running"
+            ? resolveFinalTicketStatus(ticket)
+            : "cancelled",
+      });
+      finishLiveSettlement(ticket);
     })
     .catch((err) => {
       // Defense-in-depth — should not happen if individual tasks catch properly.
@@ -370,17 +375,11 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         settleAsyncCall(ticket, callSpan);
         return;
       }
-      if (ticket.status === "cancelling") {
-        ticket.status = "cancelled";
-      } else if (ticket.status === "running") {
-        ticket.status = "failed";
-      }
-      ticket.error = err instanceof Error ? err.message : String(err);
-      ticket.completedAt = Date.now();
-      syncTicketBusyIndex(ticket);
-      syncDelegateStatus();
-      settleAsyncCall(ticket, callSpan);
-      finishTicketDelivery(pi, ticket);
+      settleTicket(ticket, {
+        status: ticket.status === "cancelling" ? "cancelled" : "failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
+      finishLiveSettlement(ticket);
     });
   ticket.completion = completion;
 

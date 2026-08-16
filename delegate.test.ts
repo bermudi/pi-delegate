@@ -94,6 +94,7 @@ import {
   notifyWaiters,
   deliverTicketResults,
   resolveFinalTicketStatus,
+  settleTicket,
   formatCompletedTicket,
   resolveCwd,
 } from "./delegate.ts";
@@ -6714,6 +6715,86 @@ describe("async delegate integration", () => {
       parentModelId: "m",
     };
     expect(resolveFinalTicketStatus(ticket)).toBe("done");
+  });
+
+  // ── settleTicket: the single terminal transition ─────────────────────────
+  // Every path that completes a ticket (normal completion, unexpected worker
+  // error, shutdown) routes through this one operation. These tests pin its
+  // contract: status/completion/busy-index ownership and settle-exactly-once.
+  const mkSettleTicket = (sessionId?: string): AsyncTicket => {
+    const ticket: AsyncTicket = {
+      id: `settle-${Math.random().toString(36).slice(2, 8)}`,
+      created: Date.now(),
+      tasks: [],
+      resolved: [
+        { prompt: "t", sessionId, agentName: "scout", warnings: [] },
+      ] as unknown as AsyncTicket["resolved"],
+      status: "running",
+      results: [mkResult()],
+      progress: mkProgress(["done"]),
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    ticketRegistry.set(ticket.id, ticket);
+    return ticket;
+  };
+
+  test("settleTicket: terminal status, completion stamp, and busy-index clear", () => {
+    const ticket = mkSettleTicket("sess-settle-1");
+    expect(isSessionBusy("sess-settle-1")).toBe(ticket.id);
+
+    const before = Date.now();
+    settleTicket(ticket, { status: "failed" });
+
+    expect(ticket.status).toBe("failed");
+    expect(ticket.completedAt).toBeGreaterThanOrEqual(before);
+    expect(isSessionBusy("sess-settle-1")).toBeNull();
+    ticketRegistry.delete(ticket.id);
+  });
+
+  test("settleTicket: records error when provided, leaves existing error untouched when omitted", () => {
+    const a = mkSettleTicket();
+    settleTicket(a, { status: "failed", error: "worker exploded" });
+    expect(a.error).toBe("worker exploded");
+
+    const b = mkSettleTicket();
+    b.error = "attempt error";
+    settleTicket(b, { status: "failed" });
+    expect(b.error).toBe("attempt error");
+    ticketRegistry.delete(a.id);
+    ticketRegistry.delete(b.id);
+  });
+
+  test("settleTicket: idempotent — a second settle is a no-op", () => {
+    const ticket = mkSettleTicket();
+    settleTicket(ticket, { status: "failed", error: "first" });
+    const completedAt = ticket.completedAt;
+
+    const consoleError = mock((..._args: unknown[]) => {});
+    const originalError = console.error;
+    console.error = consoleError as unknown as typeof console.error;
+    try {
+      settleTicket(ticket, { status: "done" });
+    } finally {
+      console.error = originalError;
+    }
+
+    // The first settle wins: no status clobber, no re-stamp, no double delivery.
+    expect(ticket.status).toBe("failed");
+    expect(ticket.error).toBe("first");
+    expect(ticket.completedAt).toBe(completedAt);
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    ticketRegistry.delete(ticket.id);
+  });
+
+  test("settleTicket: a running→cancelled settle clears busy sessions (shutdown path shape)", () => {
+    const ticket = mkSettleTicket("sess-settle-2");
+    ticket.controller.abort(); // shutdown aborts before settling
+    settleTicket(ticket, { status: "cancelled" });
+    expect(ticket.status).toBe("cancelled");
+    expect(ticket.completedAt).toBeGreaterThan(0);
+    expect(isSessionBusy("sess-settle-2")).toBeNull();
+    ticketRegistry.delete(ticket.id);
   });
 
   test("formatCompletedTicket surfaces FAILED status tag for failed ticket", () => {

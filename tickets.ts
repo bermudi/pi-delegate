@@ -115,6 +115,39 @@ export function sweepTickets(): void {
   }
 }
 
+/** Options for `settleTicket`. */
+export interface SettleTicketOptions {
+  status: "done" | "failed" | "cancelled";
+  /** Recorded on the ticket (unexpected worker failure); omitted leaves any
+   *  existing error untouched. */
+  error?: string;
+}
+
+/**
+ * Transition an active ticket to a terminal state. Single owner of the
+ * terminal transition — status, completion timestamp, error, and the
+ * busy-session index — so the normal-completion, unexpected-error, and
+ * shutdown paths cannot drift apart. Result delivery is deliberately outside
+ * this transition: a host `sendMessage()` failure must not undo or re-enter
+ * worker settlement. Settling is idempotent: `completedAt` is the settle
+ * marker, and a second settle attempt is a loud no-op.
+ */
+export function settleTicket(
+  ticket: AsyncTicket,
+  opts: SettleTicketOptions,
+): void {
+  if (ticket.completedAt) {
+    console.error(
+      `[delegate] ticket '${ticket.id}' already settled as '${ticket.status}'; ignoring settle as '${opts.status}'`,
+    );
+    return;
+  }
+  ticket.status = opts.status;
+  if (opts.error !== undefined) ticket.error = opts.error;
+  ticket.completedAt = Date.now();
+  syncTicketBusyIndex(ticket);
+}
+
 /**
  * Finalize an active ticket during host shutdown and resolve any blocking
  * waiters. This intentionally does not send a follow-up: the host is exiting.
@@ -122,17 +155,16 @@ export function sweepTickets(): void {
 export function cancelTicketForShutdown(ticket: AsyncTicket): void {
   if (ticket.status !== "running" && ticket.status !== "cancelling") return;
   ticket.controller.abort();
-  ticket.status = "cancelled";
-  ticket.completedAt = Date.now();
-  syncTicketBusyIndex(ticket);
+  settleTicket(ticket, { status: "cancelled" });
   settleTicketWaiters(ticket);
   if (ticket.callRecord) {
+    const completedAt = ticket.completedAt ?? Date.now();
     const { totalTokens, totalCost } = aggregateTaskResults(ticket.results);
     recordCall(
       {
         ...ticket.callRecord,
         status: "cancelled",
-        wall_ms: ticket.completedAt - (ticket.callStartedAt ?? ticket.created),
+        wall_ms: completedAt - (ticket.callStartedAt ?? ticket.created),
         total_tokens: totalTokens,
         total_cost: totalCost,
       },
@@ -168,9 +200,9 @@ export function isSessionBusy(sessionId: string): string | null {
  * is also "failed".
  *
  * Callers are expected to have already handled "cancelled" / "cancelling"
- * (set by handleCancel) before invoking this; those paths set `ticket.status`
- * directly and skip this function via the `if (ticket.status === "running")`
- * guard in execute().
+ * (set by handleCancel / cancelTicketForShutdown) before invoking this;
+ * dispatchAsync's completion path routes both through `settleTicket`, which
+ * only calls this for a still-"running" ticket.
  */
 export function resolveFinalTicketStatus(
   ticket: AsyncTicket,
@@ -517,21 +549,31 @@ export function deliverTicketResults(
 
   const crossLeaf = isCrossLeafTicket(ticket);
 
-  pi.sendMessage(
-    {
-      customType: "async_delegate_result",
-      content: crossLeaf ? `${CROSS_LEAF_NOTICE}\n\n${text}` : text,
-      display: true,
-      details: {
-        ...formatted.details,
-        ticketId: ticket.id,
-        status: ticket.status,
+  try {
+    pi.sendMessage(
+      {
+        customType: "async_delegate_result",
+        content: crossLeaf ? `${CROSS_LEAF_NOTICE}\n\n${text}` : text,
+        display: true,
+        details: {
+          ...formatted.details,
+          ticketId: ticket.id,
+          status: ticket.status,
+        },
       },
-    },
-    crossLeaf
-      ? { deliverAs: "nextTurn" }
-      : { deliverAs: "steer", triggerTurn: true },
-  );
+      crossLeaf
+        ? { deliverAs: "nextTurn" }
+        : { deliverAs: "steer", triggerTurn: true },
+    );
+  } catch (error) {
+    // Delivery is an observer boundary. The terminal ticket remains pollable
+    // even when the host cannot accept an unsolicited follow-up.
+    console.error(
+      `[delegate] failed to deliver results for ticket '${ticket.id}'; it remains pollable`,
+      error,
+    );
+    return "none";
+  }
   return crossLeaf ? "deferred" : "steer";
 }
 

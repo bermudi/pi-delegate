@@ -71,9 +71,10 @@ export {
   notifyWaiters,
   deliverTicketResults,
   resolveFinalTicketStatus,
+  settleTicket,
   formatCompletedTicket,
 } from "./tickets.ts";
-export type { TicketDelivery } from "./tickets.ts";
+export type { TicketDelivery, SettleTicketOptions } from "./tickets.ts";
 export {
   recordTreeNavigation,
   getCurrentLeafId,
