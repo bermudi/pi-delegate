@@ -9681,7 +9681,7 @@ describe("getHostDeps extension policy and isolation", () => {
 });
 
 // ── shared live-progress row helpers (format.ts) ─────────────────────────
-// Pure helpers deduped across the LLM poll view (tickets.handlePoll) and the
+// Pure helpers deduped across the LLM poll view (ticket-format.ts) and the
 // TUI branches (render-branches). Tested directly so the dedup is verified at
 // the helper level even where the renderers themselves aren't.
 

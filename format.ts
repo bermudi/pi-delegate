@@ -442,7 +442,7 @@ export function formatCompletedTask(
 
 // ── Shared live-progress row helpers ───────────────────────────────────────
 // These dedupe the per-task computations the LLM-facing poll view
-// (tickets.handlePoll) and the TUI branches (render-branches) both need. Each is
+// (ticket-format.ts) and the TUI branches (render-branches) both need. Each is
 // pure over TaskProgress/TaskResult, so it tests without a renderer.
 
 /** The in-flight tool activity (no result yet), or null — the "current thing
@@ -499,7 +499,7 @@ export function waitingLabel(runningCount: number, cap: number): string {
 
 /** Touched-files summary relative to cwd ("src/a.ts, src/b.ts"), or null when
  *  none resolve under cwd. Was byte-for-byte duplicated in formatCompletedTask
- *  and tickets.handlePoll. */
+ *  and ticket-format.ts. */
 export function relativeTouchedSummary(
   files: string[],
   cwd: string,

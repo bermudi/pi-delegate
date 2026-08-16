@@ -74,7 +74,8 @@ consumed by the dispatch/lifecycle path.
 
 **Async ticket** — a fire-and-forget background batch. Spawns, returns a ticket
 id immediately, and delivers results via `sendMessage` when all tasks settle.
-Poll/cancel/wait are top-level `ticketAction` values. Lives in `tickets.ts`.
+Poll/cancel/wait are top-level `ticketAction` values. Bookkeeping lives in
+`tickets.ts`; the poll/cancel listing copy lives in `ticket-format.ts`.
 
 **Leaf affinity** — the session-tree leaf a ticket was spawned on
 (`spawnLeafId`, tracked in `leaf.ts`). `/tree` navigation happens inside the
