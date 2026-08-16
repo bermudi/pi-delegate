@@ -293,7 +293,7 @@ The Codex compaction extension is allowlisted for `openai-codex` subagents becau
 child prompt -> extension starts post-settle compaction -> runner returns -> lifecycle disposes child
 ```
 
-`pi-delegate` now has a post-prompt quiescence barrier in `runner.ts`. It waits for the session to be idle and non-compacting across stable event-loop turns and includes a cancellation grace period. Tests cover compaction callbacks and continuation turns.
+`pi-delegate` now has a post-prompt quiescence barrier in `quiescence.ts`. It waits for the session to be idle and non-compacting across stable event-loop turns, includes a cancellation grace period, re-aborts work that starts after cancellation, and bounds a cancelled unwind so a continuation loop cannot hang the task. Tests cover compaction callbacks and continuation turns.
 
 That barrier reduces the race substantially, but it is not a proof for arbitrary detached extension work:
 

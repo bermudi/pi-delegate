@@ -51,6 +51,21 @@ deps (`host.ts`), session persistence (`sessions.ts`), the SDK
 > "make `acquire(task)` the pool's interface" should re-read this before
 > proceeding.
 
+**Quiescence barrier** — the module (`quiescence.ts`) that decides when a
+subagent `AgentSession` is actually done, so lifecycle may dispose or re-pool
+it. Pi awaits `agent_settled` handlers but not the detached work they start
+(`ctx.compact()` is fire-and-forget), and exposes no pending-extension-work
+primitive, so the barrier waits for **stability** — idle, non-compacting, and
+event-quiet across N consecutive event-loop turns — instead of completion. Its
+seam is three operations (`noteEvent`, `noteCancellationRequested`, `wait`)
+over two observed flags.
+
+**Cancelled unwind** — the barrier's bounded mode. Once cancellation has been
+requested the session should be tearing down, so the wait is capped and expiry
+yields `"abandoned"`; a healthy wait is unbounded and relies on the stall
+watchdog instead. The bound exists because a hung barrier is worse than a
+cancelled task whose session may still be active.
+
 ## Dispatch & tickets
 
 **Resolved task** — a `TaskDef` fully resolved into `{ cwd, systemPrompt, model,
