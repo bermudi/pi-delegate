@@ -232,9 +232,9 @@ describe("getSubagentProviderExtensionSourcesForProvider", () => {
     expect(
       getSubagentProviderExtensionSourcesForProvider("constructor"),
     ).toEqual([]);
-    expect(
-      getSubagentProviderExtensionSourcesForProvider("__proto__"),
-    ).toEqual([]);
+    expect(getSubagentProviderExtensionSourcesForProvider("__proto__")).toEqual(
+      [],
+    );
     expect(
       getSubagentProviderExtensionSourcesForProvider("hasOwnProperty"),
     ).toEqual([]);
@@ -245,10 +245,7 @@ describe("getSubagentProviderExtensionSourcesForProvider", () => {
       providerExtensions: { "  Custom-Provider  ": ["npm:x"] },
     } as DelegateConfig;
     expect(
-      getSubagentProviderExtensionSourcesForProvider(
-        "custom-provider",
-        config,
-      ),
+      getSubagentProviderExtensionSourcesForProvider("custom-provider", config),
     ).toEqual([{ source: "npm:x", required: true }]);
     expect(
       getSubagentProviderExtensionSourcesForProvider(

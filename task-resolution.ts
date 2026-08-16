@@ -288,9 +288,7 @@ export function resolveTasks(
         !agent?.explicitTools
       ) {
         const denied = new Set(agent.deniedTools);
-        effectiveParentTools = parentNativeTools.filter(
-          (t) => !denied.has(t),
-        );
+        effectiveParentTools = parentNativeTools.filter((t) => !denied.has(t));
       }
       tools = resolveToolGroups(
         t.tools ??
@@ -516,7 +514,11 @@ export function resolveTasks(
       pooledSystemPrompt: pooledConfig?.systemPrompt,
       tools,
     });
-    if (isDefaultAgent && !t.systemPrompt?.trim() && !agent?.systemPrompt?.trim()) {
+    if (
+      isDefaultAgent &&
+      !t.systemPrompt?.trim() &&
+      !agent?.systemPrompt?.trim()
+    ) {
       requestedSystemPrompt = systemPrompt;
     }
 

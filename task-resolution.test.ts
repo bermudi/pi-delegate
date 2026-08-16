@@ -660,7 +660,12 @@ describe("resolveTasks: prompt-only built-in overrides preserve privileges", () 
         `---\nname: reviewer\ndescription: My custom reviewer\n---\nCustom reviewer body.\n`,
       );
       const agents = discoverAgents(projectDir);
-      expect(agents.get("scout")?.tools).toEqual(["read", "grep", "find", "ls"]);
+      expect(agents.get("scout")?.tools).toEqual([
+        "read",
+        "grep",
+        "find",
+        "ls",
+      ]);
       expect(agents.get("scout")?.explicitTools).toBe(false);
       expect(agents.get("reviewer")?.workspace).toBe("scratch");
       const [scoutTask] = resolveTasks(
@@ -793,7 +798,15 @@ describe("resolveTasks: explicit Markdown tools/model/thinking", () => {
       ],
     ]);
     const [task] = resolveTasks(
-      [{ agent: "coder", prompt: "go", tools: ["read", "bash"], thinking: "low", model: "openai/gpt-5" }] as any,
+      [
+        {
+          agent: "coder",
+          prompt: "go",
+          tools: ["read", "bash"],
+          thinking: "low",
+          model: "openai/gpt-5",
+        },
+      ] as any,
       makeCtx(parentModel, [overrideModel]),
       agents,
       { thinking: "off", tools: ["read"] },
@@ -840,7 +853,11 @@ describe("resolveTasks: settings precedence", () => {
       JSON.stringify({
         delegate: {
           agentOverrides: {
-            scout: { model: "zai/glm-5-turbo", thinking: "max", tools: ["read", "bash"] },
+            scout: {
+              model: "zai/glm-5-turbo",
+              thinking: "max",
+              tools: ["read", "bash"],
+            },
           },
         },
       }),
@@ -926,9 +943,17 @@ describe("resolveTasks: settings precedence", () => {
       path.join(projectDir, ".pi", "settings.json"),
       JSON.stringify({
         delegate: {
-          agentOverrides: { default: { model: "zai/glm-5-turbo", thinking: "max", tools: ["read"] } },
+          agentOverrides: {
+            default: {
+              model: "zai/glm-5-turbo",
+              thinking: "max",
+              tools: ["read"],
+            },
+          },
           agentOverridesByParentModel: {
-            "openrouter/deepseek-v4-pro": { default: { model: "zai/glm-5-turbo", thinking: "max" } },
+            "openrouter/deepseek-v4-pro": {
+              default: { model: "zai/glm-5-turbo", thinking: "max" },
+            },
           },
         },
       }),
@@ -986,14 +1011,30 @@ describe("resolveTasks: settings precedence", () => {
     writeFileSync(
       path.join(projectDir, ".pi", "settings.json"),
       JSON.stringify({
-        delegate: { agentOverrides: { scout: { model: "zai/glm-5-turbo", thinking: "max", tools: ["read"] } } },
+        delegate: {
+          agentOverrides: {
+            scout: {
+              model: "zai/glm-5-turbo",
+              thinking: "max",
+              tools: ["read"],
+            },
+          },
+        },
       }),
     );
     clearDelegateSettingsCache();
     const agents = new Map(Object.entries(BUILTIN_AGENT_CONFIGS));
     const override = { provider: "openai", id: "gpt-5" } as any;
     const [task] = resolveTasks(
-      [{ agent: "scout", prompt: "go", model: "openai/gpt-5", thinking: "low", tools: ["read", "bash"] }] as any,
+      [
+        {
+          agent: "scout",
+          prompt: "go",
+          model: "openai/gpt-5",
+          thinking: "low",
+          tools: ["read", "bash"],
+        },
+      ] as any,
       {
         cwd: projectDir,
         model: parentModel,
@@ -1013,7 +1054,11 @@ describe("resolveTasks: settings precedence", () => {
 describe("resolveTasks: Claude deny-only overrides", () => {
   const parentModel = { provider: "openrouter", id: "deepseek-v4-pro" } as any;
   function makeRegistry() {
-    return { getAvailable: () => [], find: () => null, hasConfiguredAuth: () => true } as any;
+    return {
+      getAvailable: () => [],
+      find: () => null,
+      hasConfiguredAuth: () => true,
+    } as any;
   }
   beforeEach(() => {
     _resetDelegateConfigForTesting();
@@ -1083,13 +1128,18 @@ describe("resolveTasks: Claude deny-only overrides", () => {
     const tmp = mkdtempSync(path.join(tmpdir(), "delegate-claude-deny-"));
     try {
       const projectDir = path.join(tmp, "project");
-      mkdirSync(path.join(projectDir, ".claude", "agents"), { recursive: true });
+      mkdirSync(path.join(projectDir, ".claude", "agents"), {
+        recursive: true,
+      });
       writeFileSync(
         path.join(projectDir, ".claude", "agents", "default.md"),
         `---\nname: default\ndescription: Default deny\ndisallowedTools: Write, Edit\n---\nBody.\n`,
       );
       const agents = discoverAgents(projectDir);
-      expect(agents.get("default")?.deniedTools?.sort()).toEqual(["edit", "write"]);
+      expect(agents.get("default")?.deniedTools?.sort()).toEqual([
+        "edit",
+        "write",
+      ]);
       expect(agents.get("default")?.explicitTools).toBe(false);
       const [task] = resolveTasks(
         [{ agent: "default", prompt: "go" }] as any,
@@ -1112,13 +1162,20 @@ describe("resolveTasks: Claude deny-only overrides", () => {
     const tmp = mkdtempSync(path.join(tmpdir(), "delegate-claude-scout-"));
     try {
       const projectDir = path.join(tmp, "project");
-      mkdirSync(path.join(projectDir, ".claude", "agents"), { recursive: true });
+      mkdirSync(path.join(projectDir, ".claude", "agents"), {
+        recursive: true,
+      });
       writeFileSync(
         path.join(projectDir, ".claude", "agents", "scout.md"),
         `---\nname: scout\ndescription: Scout\ndisallowedTools: Bash\n---\nBody.\n`,
       );
       const agents = discoverAgents(projectDir);
-      expect(agents.get("scout")?.tools).toEqual(["read", "grep", "find", "ls"]);
+      expect(agents.get("scout")?.tools).toEqual([
+        "read",
+        "grep",
+        "find",
+        "ls",
+      ]);
       expect(agents.get("scout")?.explicitTools).toBe(true);
       const [task] = resolveTasks(
         [{ agent: "scout", prompt: "go" }] as any,
@@ -1130,7 +1187,10 @@ describe("resolveTasks: Claude deny-only overrides", () => {
           getSystemPrompt: () => "p",
         } as any,
         agents,
-        { thinking: "off", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"] },
+        {
+          thinking: "off",
+          tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
+        },
       );
       expect(task.tools).toEqual(["read", "grep", "find", "ls"]);
     } finally {
@@ -1204,7 +1264,9 @@ describe("resolveTasks: pooled-session behavior", () => {
     expect(scoutTask.thinking).toBe("low");
     expect(scoutTask.model).toBe(parentModel);
     const [defaultTask] = resolveTasks(
-      [{ agent: "default", sessionId: "default-pool", prompt: "continue" }] as any,
+      [
+        { agent: "default", sessionId: "default-pool", prompt: "continue" },
+      ] as any,
       makeCtx(parentModel),
       builtins,
       { thinking: "high", tools: ["read"] },
@@ -1252,7 +1314,9 @@ describe("resolveTasks: pooled-session behavior", () => {
       tokens: 0,
     } as any);
     const [task] = resolveTasks(
-      [{ sessionId: "pool-2", prompt: "continue", tools: ["read", "write"] }] as any,
+      [
+        { sessionId: "pool-2", prompt: "continue", tools: ["read", "write"] },
+      ] as any,
       makeCtx(parentModel),
       new Map(),
       { thinking: "off", tools: ["read"] },
@@ -1285,7 +1349,14 @@ describe("resolveTasks: pooled-session behavior", () => {
       tokens: 0,
     } as any);
     const [task] = resolveTasks(
-      [{ agent: "default", sessionId: "pool-default-model", prompt: "continue", model: "anthropic/claude-haiku-4" }] as any,
+      [
+        {
+          agent: "default",
+          sessionId: "pool-default-model",
+          prompt: "continue",
+          model: "anthropic/claude-haiku-4",
+        },
+      ] as any,
       makeCtx(parentModel, [otherModel]),
       new Map(Object.entries(BUILTIN_AGENT_CONFIGS)),
       { thinking: "off", tools: ["read"] },
@@ -1314,7 +1385,9 @@ describe("getSubagentManualMarkdown: deny-only default", () => {
       ],
     ]);
     const manual = getSubagentManualMarkdown(agents);
-    const defaultLine = manual.split("\n").find((l) => l.includes("**default**"))!;
+    const defaultLine = manual
+      .split("\n")
+      .find((l) => l.includes("**default**"))!;
     expect(defaultLine).toContain("parent tools minus `write, edit`");
     expect(defaultLine).not.toContain("Tools: `read, write, edit, bash`");
   });
@@ -1335,7 +1408,9 @@ describe("getSubagentManualMarkdown: deny-only default", () => {
       ],
     ]);
     const manual = getSubagentManualMarkdown(agents);
-    const defaultLine = manual.split("\n").find((l) => l.includes("**default**"))!;
+    const defaultLine = manual
+      .split("\n")
+      .find((l) => l.includes("**default**"))!;
     expect(defaultLine).not.toContain("Tools:");
     expect(defaultLine).not.toContain("parent tools");
   });

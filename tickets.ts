@@ -9,21 +9,21 @@ import type {
 import { ASYNC_TICKET_TTL_MS } from "./constants.ts";
 import {
   fmtDuration,
-  fmtTokens,
   formatCompletedTask,
   formatTaskId,
-  shortenPath,
   trunc,
-  getActivityAge,
-  formatActivityLabel,
-  taskMetaBase,
-  relativeTouchedSummary,
   findTouchedOverlaps,
   formatTouchedOverlapWarning,
 } from "./format.ts";
 import { isCrossLeafTicket } from "./leaf.ts";
-import { renderOutputForPoll } from "./spill.ts";
 import { scheduleDeadline } from "./timer.ts";
+import {
+  emptyTicketPollResult,
+  formatCancelPreview,
+  formatLiveTicketPoll,
+  missingTicketPollResult,
+  rosterTicketPollResult,
+} from "./ticket-format.ts";
 import { aggregateTaskResults, emptyUsage } from "./usage.ts";
 import { recordCall } from "./telemetry.ts";
 import type {
@@ -545,195 +545,23 @@ export function handlePoll(
 
   // Only use top-level ticket param — per-task prompt is NOT a ticket ID
   const ticketId = params.ticket;
-
-  // No ticket specified — list all
   if (!ticketId) {
     const tickets = [...ticketRegistry.values()];
-    if (!tickets.length) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: [
-              "No async tickets.",
-              "",
-              "To spawn a subagent: delegate({ tasks: [{ agent, prompt }] }).",
-              "For the full manual and agent list, call delegate({ tasks: [] }) with no top-level `ticketAction`.",
-            ].join("\n"),
-          },
-        ],
-        details: {
-          tasks: [],
-          results: [],
-          progress: [],
-          parentModel: parentModelId,
-        },
-      };
-    }
-    const lines = tickets.map((t) => {
-      const icon =
-        t.status === "running" || t.status === "cancelling"
-          ? "⏳"
-          : t.status === "done"
-            ? "✓"
-            : "✗";
-      const done = t.progress.filter((p) => p.status === "done").length;
-      const age = fmtDuration(Date.now() - t.created);
-      // Agent roster — compact, deduplicated (a ticket may run the same agent
-      // several times). Helps a human tell tickets apart at a glance.
-      const agentSet = [
-        ...new Set(t.progress.map((p) => p.agent).filter(Boolean)),
-      ];
-      const agents = agentSet.length
-        ? ` · ${agentSet.slice(0, 3).join(", ")}${agentSet.length > 3 ? ` +${agentSet.length - 3}` : ""}`
-        : "";
-      let line = `${icon} ${t.id}${agents} · ${done}/${t.progress.length} tasks · ${t.status} · ${age}`;
-      // Copy-pasteable controls for running/cancelling tickets — a human can grab these
-      // straight out of the TUI without retyping the ticket id.
-      if (t.status === "running" || t.status === "cancelling") {
-        line += `\n     poll:   delegate({ ticketAction: "poll", ticket: "${t.id}" })`;
-        if (t.status === "running") {
-          line += `\n     cancel: delegate({ ticketAction: "cancel", ticket: "${t.id}", force: true })`;
-        }
-      }
-      return line;
-    });
-    return {
-      content: [{ type: "text", text: `Async tickets:\n${lines.join("\n")}` }],
-      details: {
-        tasks: [],
-        results: [],
-        progress: [],
-        parentModel: parentModelId,
-      },
-    };
+    return tickets.length
+      ? rosterTicketPollResult(tickets, parentModelId)
+      : emptyTicketPollResult(parentModelId);
   }
 
-  // Specific ticket
   const ticket = ticketRegistry.get(ticketId);
-  if (!ticket) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Ticket '${ticketId}' not found. It may have expired or never existed.`,
-        },
-      ],
-      details: {
-        tasks: [],
-        results: [],
-        progress: [],
-        parentModel: parentModelId,
-      },
-    };
-  }
+  if (!ticket) return missingTicketPollResult(ticketId, parentModelId);
 
   if (ticket.status === "running" || ticket.status === "cancelling") {
-    const failedCount = ticket.progress.filter(
-      (p) => p.status === "failed",
-    ).length;
-    // Settled = done + failed. Used for the "all finished" guidance check.
-    const settledCount = ticket.progress.filter(
-      (p) => p.status === "done" || p.status === "failed",
-    ).length;
-    const totalCount = ticket.progress.length;
-    const runningCount = ticket.progress.filter(
-      (p) => p.status === "running",
-    ).length;
-    const pendingCount = ticket.progress.filter(
-      (p) => p.status === "pending",
-    ).length;
-    const totalTools = ticket.progress.reduce((sum, p) => sum + p.toolUses, 0);
-    const totalTokens = ticket.progress.reduce((sum, p) => sum + p.tokens, 0);
-    const lines: string[] = [];
-    // Index-aligned sparse array — same shape as ticket.results, so consumers
-    // can correlate results[i] with progress[i] and tasks[i].
-    const completedResults: (TaskResult | undefined)[] = new Array(
-      ticket.progress.length,
-    ).fill(undefined);
-
-    for (let i = 0; i < ticket.progress.length; i++) {
-      const p = ticket.progress[i]!;
-      const r = ticket.results[i];
-
-      if (p.status === "done" && r) {
-        const meta = taskMetaBase(r);
-        if (r.touchedFiles.length > 0) {
-          const t = ticket.resolved[i]!;
-          const touched = relativeTouchedSummary(r.touchedFiles, t.cwd);
-          if (touched) meta.push(`touched (best-effort): ${touched}`);
-        }
-        lines.push(`✓ ${r.agent}${formatTaskId(r.id)} · ${meta.join(" · ")}`);
-        if (r.output && r.output !== "(no output)") {
-          lines.push(renderOutputForPoll(r.output));
-        }
-        completedResults[i] = r;
-      } else if (p.status === "failed" && r) {
-        const meta = taskMetaBase(r);
-        if (r.touchedFiles.length > 0) {
-          const t = ticket.resolved[i]!;
-          const touched = relativeTouchedSummary(r.touchedFiles, t.cwd);
-          if (touched) meta.push(`touched (best-effort): ${touched}`);
-        }
-        const errorText = r.error ?? "unknown error";
-        lines.push(
-          `✗ ${r.agent}${formatTaskId(r.id)} · ${errorText} · ${meta.join(" · ")}`,
-        );
-        if (r.sessionFile)
-          lines.push(`  session: ${shortenPath(r.sessionFile)}`);
-        if (r.output && r.output !== "(no output)")
-          lines.push(renderOutputForPoll(r.output));
-        completedResults[i] = r;
-      } else if (p.status === "running") {
-        const parts: string[] = [formatActivityLabel(p)];
-        if (p.toolUses > 0)
-          parts.push(`${p.toolUses} tool${p.toolUses === 1 ? "" : "s"}`);
-        if (p.tokens > 0) parts.push(`${fmtTokens(p.tokens)} tokens`);
-        const age = getActivityAge(p.lastActivityAt);
-        if (age) parts.push(age);
-        lines.push(`⏳ ${p.agent}${formatTaskId(p.id)} · ${parts.join(" · ")}`);
-      } else {
-        lines.push(`○ ${p.agent}${formatTaskId(p.id)} · waiting…`);
-      }
-    }
-
-    const completedForOverlap = completedResults.filter(
-      (r): r is TaskResult => r !== undefined,
-    );
-    const overlapWarning = formatTouchedOverlapWarning(
-      findTouchedOverlaps(completedForOverlap),
-    );
-
-    const headerStatus =
-      ticket.status === "cancelling" ? "CANCELLING" : "RUNNING";
-    const headerParts: string[] = [
-      `Ticket ${ticket.id}: ${headerStatus}`,
-      `${settledCount}/${totalCount} finalized`,
-    ];
-    if (runningCount > 0) headerParts.push(`${runningCount} active`);
-    if (pendingCount > 0) headerParts.push(`${pendingCount} queued`);
-    if (failedCount > 0) headerParts.push(`${failedCount} failed`);
-    headerParts.push(`${totalTools} tool${totalTools === 1 ? "" : "s"}`);
-    headerParts.push(`${fmtTokens(totalTokens)} tokens`);
-    headerParts.push(`(${fmtDuration(Date.now() - ticket.created)})`);
-    const header = headerParts.join(" · ");
-    const guidance =
-      ticket.status === "cancelling"
-        ? "Cancellation requested. Active subagents are aborting and returning partial results. Wait without timeoutMs for final status; do not repeatedly poll."
-        : settledCount === totalCount
-          ? ""
-          : "If you need the final result in this turn, call wait once with timeoutMs omitted. Otherwise stop calling ticket controls and let the final result auto-deliver after this turn; repeated polling will not speed it up.";
-
+    const snapshot = formatLiveTicketPoll(ticket);
     return {
-      content: [
-        {
-          type: "text",
-          text: `${header}\n${lines.join("\n")}${guidance ? `\n\n${guidance}` : ""}${overlapWarning ? `\n\n${overlapWarning}` : ""}`,
-        },
-      ],
+      content: [{ type: "text", text: snapshot.text }],
       details: {
         tasks: ticket.tasks,
-        results: completedResults.map(
+        results: snapshot.completedResults.map(
           (r, i) => r ?? pendingResultPlaceholder(ticket.resolved[i]),
         ),
         progress: [...ticket.progress],
@@ -742,51 +570,12 @@ export function handlePoll(
         // (friction #2). The LLM-facing content still names the ticket id too.
         ticketId: ticket.id,
         status: ticket.status,
-        overlapWarning: overlapWarning || undefined,
+        overlapWarning: snapshot.overlapWarning || undefined,
       },
     };
   }
 
-  // Done / Failed / Cancelled — full results
   return formatCompletedTicket(ticket);
-}
-
-function buildCancelPreview(ticket: AsyncTicket): string {
-  const finalized = ticket.progress.filter(
-    (p) => p.status === "done" || p.status === "failed",
-  ).length;
-  const running = ticket.progress.filter((p) => p.status === "running").length;
-  const pending = ticket.progress.filter((p) => p.status === "pending").length;
-  const lines: string[] = [
-    `Ticket ${ticket.id}: cancellation preview`,
-    `${finalized}/${ticket.progress.length} finalized · ${running} active · ${pending} queued`,
-  ];
-
-  for (let i = 0; i < ticket.progress.length; i++) {
-    const p = ticket.progress[i]!;
-    if (p.status === "done") {
-      lines.push(`✓ ${p.agent}${formatTaskId(p.id)} · completed`);
-    } else if (p.status === "failed") {
-      lines.push(`✗ ${p.agent}${formatTaskId(p.id)} · ${p.error ?? "failed"}`);
-    } else if (p.status === "running") {
-      const parts: string[] = [formatActivityLabel(p)];
-      if (p.toolUses > 0)
-        parts.push(`${p.toolUses} tool${p.toolUses === 1 ? "" : "s"}`);
-      if (p.tokens > 0) parts.push(`${fmtTokens(p.tokens)} tokens`);
-      const age = getActivityAge(p.lastActivityAt);
-      if (age) parts.push(age);
-      lines.push(`⏳ ${p.agent}${formatTaskId(p.id)} · ${parts.join(" · ")}`);
-    } else {
-      lines.push(`○ ${p.agent}${formatTaskId(p.id)} · waiting…`);
-    }
-  }
-
-  lines.push(
-    "",
-    "WARNING: Cancelling now will abort active subagents. Files already written or shell commands already executed are NOT rolled back.",
-    `To proceed, call delegate({ ticketAction: "cancel", ticket: "${ticket.id}", force: true }).`,
-  );
-  return lines.join("\n");
 }
 
 /** Preview or request cancellation of a running async ticket. */
@@ -826,7 +615,7 @@ export function handleCancel(params: {
   if (!params.force) {
     const details = buildWaitDetails(ticket);
     const text =
-      buildCancelPreview(ticket) +
+      formatCancelPreview(ticket) +
       (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
     return {
       content: [{ type: "text", text }],
