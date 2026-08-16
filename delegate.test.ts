@@ -3213,8 +3213,8 @@ describe("delegate extension integration", () => {
       expect(taskSchema.properties[field]).toBeDefined();
     }
     expect(taskSchema.properties.deadlineMs).toBeDefined();
-    // Legacy aliases remain type/runtime compatible but are intentionally absent
-    // from the provider-visible schema so models see only canonical namespaces.
+    // `action` is not a schema field — the canonical `ticketAction` /
+    // `sessionAction` split is the only surface models see.
     expect(taskSchema.properties.action).toBeUndefined();
     expect((toolDef!.parameters as any).properties.action).toBeUndefined();
     // No required fields at the TypeBox level; runtime validation enforces constraints.

@@ -120,7 +120,7 @@ export function validateTasks(
       ? (agents.get(task.agent) ?? BUILTIN_AGENT_CONFIGS[task.agent])
       : undefined;
     const workspace = task.workspace ?? agent?.workspace ?? "shared";
-    const sessionAction = task.sessionAction ?? task.action;
+    const sessionAction = task.sessionAction;
     if (
       workspace === "scratch" &&
       (task.sessionId || task.resumeFrom || sessionAction !== undefined)

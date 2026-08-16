@@ -5,7 +5,6 @@ export type {
   SessionAction,
   WorkspaceMode,
   TicketAction,
-  DelegateAction,
   DelegateArguments,
   TaskDef,
   AsyncTicket,

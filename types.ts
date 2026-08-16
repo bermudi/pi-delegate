@@ -41,10 +41,8 @@ export interface AgentConfig {
 
 // ── Tool parameter types — derived from the TypeBox schema ────────────────
 // `delegateArgumentsSchema` in schema.ts is the canonical provider-visible
-// shape. The public types add deprecated `action` aliases so existing TypeScript
-// callers remain source-compatible without advertising the overloaded fields to
-// models. The import is type-only, so the schema.ts ↔ types.ts cycle is erased
-// at compile time.
+// shape; these types are its `Static<>` projections. The import is type-only,
+// so the schema.ts ↔ types.ts cycle is erased at compile time.
 
 type CanonicalDelegateArguments = Static<typeof delegateArgumentsSchema>;
 type CanonicalTaskDef = NonNullable<
@@ -60,19 +58,9 @@ export type SessionAction = NonNullable<CanonicalTaskDef["sessionAction"]>;
 /** Filesystem mode: shared source tree or an ephemeral CoW scratch copy. */
 export type WorkspaceMode = NonNullable<CanonicalTaskDef["workspace"]>;
 
-export type TaskDef = CanonicalTaskDef & {
-  /** @deprecated Use `sessionAction` instead. Runtime normalization still accepts this alias. */
-  action?: SessionAction;
-};
+export type TaskDef = CanonicalTaskDef;
 
-export type DelegateArguments = Omit<CanonicalDelegateArguments, "tasks"> & {
-  /** @deprecated Use `ticketAction` instead. Runtime normalization still accepts this alias. */
-  action?: TicketAction;
-  tasks?: TaskDef[];
-};
-
-/** @deprecated Use `TicketAction` instead. */
-export type DelegateAction = TicketAction;
+export type DelegateArguments = CanonicalDelegateArguments;
 
 // ── Async Ticket Types ─────────────────────────────────────────────────────
 
