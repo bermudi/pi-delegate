@@ -318,6 +318,19 @@ describe("resolveTasks tool resolution", () => {
       "Unknown tool(s) ignored: WebSearch. Available: read, write, edit, bash, grep, find, ls",
     ]);
   });
+
+  test("allows web_search only for openai-codex models", () => {
+    const codexModel = { provider: "openai-codex", id: "gpt-5.4" } as any;
+    const resolved = resolveTasks(
+      [{ prompt: "research it", tools: ["read", "web_search"] }] as any,
+      makeCtx(codexModel),
+      new Map(),
+      { thinking: "off", tools: ["read"] } as any,
+    );
+
+    expect(resolved[0].tools).toEqual(["read", "web_search"]);
+    expect(resolved[0].warnings).toEqual([]);
+  });
 });
 
 describe("built-in agent profiles", () => {
