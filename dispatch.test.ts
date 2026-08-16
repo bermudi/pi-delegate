@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -447,7 +447,7 @@ describe("dispatchAsync leaf affinity", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function run(): {
+  function run(sendMessage?: (message: any, options: any) => void): {
     sent: { message: any; options: any }[];
     notified: string[];
     ticketId: string;
@@ -467,8 +467,9 @@ describe("dispatchAsync leaf affinity", () => {
 
     const result = dispatchAsync({
       pi: {
-        sendMessage: (message: any, options: any) =>
-          sent.push({ message, options }),
+        sendMessage:
+          sendMessage ??
+          ((message: any, options: any) => sent.push({ message, options })),
       } as any,
       ctx: { cwd: tmpDir, modelRegistry: {} as any, sessionManager: undefined },
       tasks: [{ prompt: "a" }] as TaskDef[],
@@ -530,5 +531,35 @@ describe("dispatchAsync leaf affinity", () => {
     expect(sent[0]!.options).toEqual({ deliverAs: "nextTurn" });
     expect(notified).toHaveLength(1);
     expect(notified[0]).toContain(ticketId);
+  });
+
+  test("sendMessage failure is logged without changing worker settlement", async () => {
+    const deliveryError = new Error("parent session unavailable");
+    const logged = mock((..._args: unknown[]) => {});
+    const originalError = console.error;
+    console.error = logged as unknown as typeof console.error;
+
+    try {
+      const { ticketId } = run(() => {
+        throw deliveryError;
+      });
+      const ticket = ticketRegistry.get(ticketId);
+      if (!ticket?.completion)
+        throw new Error("async ticket has no completion promise");
+
+      await ticket.completion;
+
+      // The worker settled normally; failed unsolicited delivery leaves the
+      // completed result available to poll rather than re-entering .catch().
+      expect(ticket.status).toBe("done");
+      expect(ticket.completedAt).toBeDefined();
+      expect(ticket.results[0]!.output).toBe("done");
+      expect(logged).toHaveBeenCalledWith(
+        `[delegate] failed to deliver results for ticket '${ticketId}'; it remains pollable`,
+        deliveryError,
+      );
+    } finally {
+      console.error = originalError;
+    }
   });
 });

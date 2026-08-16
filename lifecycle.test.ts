@@ -33,6 +33,7 @@ import {
 } from "./host.ts";
 import {
   _setRunAgentSessionForTesting,
+  _setCreateScratchWorkspaceForTesting,
   _setWholeTaskRetryForTesting,
   isModelAttributableError,
   runResolvedTask,
@@ -44,6 +45,11 @@ import {
   listPooledAgents,
 } from "./pool.ts";
 import { emptyUsage } from "./usage.ts";
+import {
+  _resetTelemetryForTesting,
+  _setTelemetryForTesting,
+  type TaskRecord,
+} from "./telemetry.ts";
 import type {
   ResolvedTask,
   TaskRunEnv,
@@ -2009,6 +2015,326 @@ describe("delegate pool-miss with resumeFrom and sessionId", () => {
     expect(listText).toContain("2 prompts");
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe("task telemetry boundary", () => {
+  // Telemetry rows are recorded exactly once per runResolvedTask, at the
+  // outermost boundary, on the final result — not per attempt and not
+  // provisionally inside the scratch wrapper (which used to force a second
+  // correction write). These tests pin that invariant with an injected
+  // recorder.
+  const mkTask = (overrides: Partial<ResolvedTask> = {}) =>
+    ({
+      prompt: "do work",
+      model: { id: "m", provider: "p", api: "openai-responses" } as never,
+      tools: ["read"],
+      thinking: "default",
+      systemPrompt: "",
+      cwd: process.cwd(),
+      agentName: "inline",
+      warnings: [],
+      ...overrides,
+    }) as never;
+
+  const mkProgressRow = () =>
+    ({
+      index: 0,
+      agent: "inline",
+      task: "do work",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    }) as never;
+
+  const mkEnv = () =>
+    ({
+      signal: undefined,
+      modelRegistry: {} as never,
+      delegateStartedAt: Date.now(),
+      telemetryCallId: "tc-telemetry-once",
+      onProgress: () => {},
+    }) as never;
+
+  test("runResolvedTask records exactly one task row, on the final result", async () => {
+    const taskRows: TaskRecord[] = [];
+    _setTelemetryForTesting({
+      recordCall: () => {},
+      recordTask: (r) => taskRows.push(r),
+    });
+
+    let runCalls = 0;
+    _setRunAgentSessionForTesting(async () => {
+      runCalls++;
+      return {
+        output: "ok",
+        durationMs: 5,
+        tokens: 7,
+        usage: { ...emptyUsage(), totalTokens: 7 },
+        touchedFiles: [],
+        attributedFiles: [],
+      } as never;
+    });
+
+    try {
+      const result = await runResolvedTask(
+        mkEnv(),
+        mkTask(),
+        mkProgressRow(),
+        0,
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(runCalls).toBe(1);
+      expect(taskRows).toHaveLength(1);
+      expect(taskRows[0]!.call_id).toBe("tc-telemetry-once");
+      expect(taskRows[0]!.outcome).toBe("success");
+      expect(taskRows[0]!.tokens).toBe(7);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _resetTelemetryForTesting();
+    }
+  });
+
+  test("a throwing status observer preserves the result and records telemetry", async () => {
+    const taskRows: TaskRecord[] = [];
+    _setTelemetryForTesting({
+      recordCall: () => {},
+      recordTask: (r) => taskRows.push(r),
+    });
+    _setRunAgentSessionForTesting(
+      async () =>
+        ({
+          output: "ok",
+          durationMs: 5,
+          tokens: 7,
+          usage: { ...emptyUsage(), totalTokens: 7 },
+          touchedFiles: [],
+          attributedFiles: [],
+        }) as never,
+    );
+
+    let statusCalls = 0;
+    const originalConsoleError = console.error;
+    console.error = () => {};
+    try {
+      const result = await runResolvedTask(
+        {
+          ...mkEnv(),
+          onStatusChange: () => {
+            statusCalls++;
+            throw new Error("status observer failed");
+          },
+        },
+        mkTask(),
+        mkProgressRow(),
+        0,
+      );
+
+      expect(statusCalls).toBe(1);
+      expect(result.error).toBeUndefined();
+      expect(result.output).toBe("ok");
+      expect(taskRows).toHaveLength(1);
+      expect(taskRows[0]!.outcome).toBe("success");
+    } finally {
+      console.error = originalConsoleError;
+      _setRunAgentSessionForTesting(undefined);
+      _resetTelemetryForTesting();
+    }
+  });
+
+  test("scratch success records its mapped final result once and cleans up", async () => {
+    const taskRows: TaskRecord[] = [];
+    _setTelemetryForTesting({
+      recordCall: () => {},
+      recordTask: (r) => taskRows.push(r),
+    });
+
+    let cleanupCalls = 0;
+    _setCreateScratchWorkspaceForTesting(
+      async () =>
+        ({
+          cwd: "/scratch/project",
+          resolveReportedPath: async (file: string) =>
+            file.replace("/scratch/project", "/source/project"),
+          resolveAttributedPath: async (file: string) =>
+            file.startsWith("/scratch/") ? undefined : `/canonical${file}`,
+          cleanup: async () => {
+            cleanupCalls++;
+          },
+        }) as never,
+    );
+    _setRunAgentSessionForTesting(
+      async () =>
+        ({
+          output: "finished in scratch",
+          durationMs: 5,
+          tokens: 7,
+          usage: { ...emptyUsage(), totalTokens: 7 },
+          touchedFiles: ["/scratch/project/result.txt"],
+          attributedFiles: ["/scratch/project/result.txt", "/host/result.txt"],
+        }) as never,
+    );
+
+    try {
+      const result = await runResolvedTask(
+        mkEnv(),
+        mkTask({ workspace: "scratch" }),
+        mkProgressRow(),
+        0,
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.workspace).toBe("scratch");
+      expect(result.touchedFiles).toEqual(["/source/project/result.txt"]);
+      expect(result.attributedFiles).toEqual(["/canonical/host/result.txt"]);
+      expect(cleanupCalls).toBe(1);
+      expect(taskRows).toHaveLength(1);
+      expect(taskRows[0]!.outcome).toBe("success");
+      expect(taskRows[0]!.retries).toBe(0);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setCreateScratchWorkspaceForTesting(undefined);
+      _resetTelemetryForTesting();
+    }
+  });
+
+  test("scratch correction records one final failed row after cleanup failure and retry", async () => {
+    _setWholeTaskRetryForTesting({ maxRetries: 1, baseDelayMs: 0 });
+    const taskRows: TaskRecord[] = [];
+    _setTelemetryForTesting({
+      recordCall: () => {},
+      recordTask: (r) => taskRows.push(r),
+    });
+
+    let cleanupCalls = 0;
+    _setCreateScratchWorkspaceForTesting(
+      async () =>
+        ({
+          cwd: "/scratch/project",
+          resolveReportedPath: async () => {
+            throw new Error("could not map scratch path");
+          },
+          resolveAttributedPath: async () => undefined,
+          cleanup: async () => {
+            cleanupCalls++;
+            throw new Error("lease remains");
+          },
+        }) as never,
+    );
+    let runCalls = 0;
+    _setRunAgentSessionForTesting(async () => {
+      runCalls++;
+      return runCalls === 1
+        ? ({
+            output: "",
+            error: "connection refused",
+            durationMs: 5,
+            tokens: 3,
+            usage: { ...emptyUsage(), totalTokens: 3 },
+            touchedFiles: [],
+            attributedFiles: [],
+          } as never)
+        : ({
+            output: "will need correction",
+            durationMs: 5,
+            tokens: 4,
+            usage: { ...emptyUsage(), totalTokens: 4 },
+            touchedFiles: ["/scratch/project/result.txt"],
+            attributedFiles: [],
+          } as never);
+    });
+
+    const consoleError = console.error;
+    console.error = () => {};
+    let statusCalls = 0;
+    try {
+      const result = await runResolvedTask(
+        {
+          ...mkEnv(),
+          onStatusChange: () => {
+            statusCalls++;
+            throw new Error("status observer failed");
+          },
+        },
+        mkTask({ workspace: "scratch" }),
+        mkProgressRow(),
+        0,
+      );
+
+      expect(runCalls).toBe(2);
+      expect(result.error).toContain("could not map scratch path");
+      expect(result.error).toContain(
+        "Scratch workspace cleanup failed: lease remains",
+      );
+      expect(cleanupCalls).toBe(1);
+      // Retry start, core completion, and scratch correction all notify; none
+      // may escape this throwing observer or prevent the final telemetry row.
+      expect(statusCalls).toBe(3);
+      expect(taskRows).toHaveLength(1);
+      expect(taskRows[0]!.outcome).toBe("failed");
+      expect(taskRows[0]!.retries).toBe(1);
+      expect(taskRows[0]!.tokens).toBe(7);
+    } finally {
+      console.error = consoleError;
+      _setRunAgentSessionForTesting(undefined);
+      _setCreateScratchWorkspaceForTesting(undefined);
+      _setWholeTaskRetryForTesting(undefined);
+      _resetTelemetryForTesting();
+    }
+  });
+
+  test("a whole-task retry still records one row, carrying the retry count", async () => {
+    _setWholeTaskRetryForTesting({ maxRetries: 1, baseDelayMs: 0 });
+    const taskRows: TaskRecord[] = [];
+    _setTelemetryForTesting({
+      recordCall: () => {},
+      recordTask: (r) => taskRows.push(r),
+    });
+
+    let runCalls = 0;
+    _setRunAgentSessionForTesting(async () => {
+      runCalls++;
+      return runCalls === 1
+        ? ({
+            output: "",
+            error: "connection refused",
+            durationMs: 5,
+            tokens: 3,
+            usage: { ...emptyUsage(), totalTokens: 3 },
+            touchedFiles: [],
+            attributedFiles: [],
+          } as never)
+        : ({
+            output: "ok",
+            durationMs: 5,
+            tokens: 4,
+            usage: { ...emptyUsage(), totalTokens: 4 },
+            touchedFiles: [],
+            attributedFiles: [],
+          } as never);
+    });
+
+    try {
+      const result = await runResolvedTask(
+        mkEnv(),
+        mkTask(),
+        mkProgressRow(),
+        0,
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(runCalls).toBe(2);
+      expect(taskRows).toHaveLength(1);
+      expect(taskRows[0]!.retries).toBe(1);
+      expect(taskRows[0]!.outcome).toBe("success");
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setWholeTaskRetryForTesting(undefined);
+      _resetTelemetryForTesting();
+    }
   });
 });
 
