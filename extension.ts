@@ -18,10 +18,8 @@ import {
 } from "./dispatch.ts";
 import { renderDelegateCall, renderDelegateResult } from "./render-result.ts";
 import { hostCompatError } from "./host-compat.ts";
-import {
-  invalidateHostDepsCache,
-  registerProviderExtensionNotifier,
-} from "./host.ts";
+import { invalidateHostDepsCache } from "./host.ts";
+import { registerProviderExtensionNotifier } from "./provider-extensions.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import { closeAllPooledAgents } from "./pool.ts";
 import {
