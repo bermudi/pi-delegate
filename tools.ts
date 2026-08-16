@@ -29,6 +29,18 @@ TOOL_FACTORIES.grep = createGrepTool;
 TOOL_FACTORIES.find = createFindTool;
 TOOL_FACTORIES.ls = createLsTool;
 
+/** Tools supplied by the allowlisted provider extension rather than Pi core. */
+const PROVIDER_TOOLS: Readonly<Record<string, readonly string[]>> = {
+  "openai-codex": ["web_search"],
+};
+
+export function availableToolNames(modelProvider?: string): string[] {
+  return [
+    ...Object.keys(TOOL_FACTORIES),
+    ...(modelProvider ? (PROVIDER_TOOLS[modelProvider] ?? []) : []),
+  ];
+}
+
 /** Expand tool-group shorthands (`*`, `ro`) into concrete tool lists.
  *  Unknown names pass through unchanged for the caller to validate.
  *  Returns a deduped list. */

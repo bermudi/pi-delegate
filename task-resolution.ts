@@ -6,7 +6,11 @@ import {
   DEFAULT_TOOLS,
   VALID_THINKING,
 } from "./constants.ts";
-import { TOOL_FACTORIES, resolveToolGroups } from "./tools.ts";
+import {
+  TOOL_FACTORIES,
+  availableToolNames,
+  resolveToolGroups,
+} from "./tools.ts";
 import { configFor } from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
 import { BUILTIN_AGENT_CONFIGS, buildSubagentSystemPrompt } from "./agents.ts";
@@ -302,15 +306,6 @@ export function resolveTasks(
           (isPoolHit ? pooledConfig?.tools : undefined) ??
           DEFAULT_TOOLS,
       );
-      const unknownTools = tools.filter(
-        (name) => !Object.hasOwn(TOOL_FACTORIES, name),
-      );
-      if (unknownTools.length) {
-        warnings.push(
-          `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`,
-        );
-      }
-      tools = tools.filter((name) => Object.hasOwn(TOOL_FACTORIES, name));
     }
 
     // System prompt resolution. AgentSession's resource loader owns
@@ -334,14 +329,14 @@ export function resolveTasks(
       parentSystemPrompt,
       tools,
     });
-    const requestedSystemPrompt = t.systemPrompt?.trim()
+    let requestedSystemPrompt = t.systemPrompt?.trim()
       ? t.systemPrompt
       : agent?.systemPrompt?.trim()
         ? agent.systemPrompt
         : isDefaultAgent
           ? resolvedBasePrompt
           : undefined;
-    const systemPrompt = buildSubagentSystemPrompt({
+    let systemPrompt = buildSubagentSystemPrompt({
       taskSystemPrompt: t.systemPrompt,
       agentSystemPrompt: agent?.systemPrompt,
       parentSystemPrompt,
@@ -504,6 +499,27 @@ export function resolveTasks(
         );
       }
     }
+
+    const availableTools = availableToolNames(model?.provider);
+    const availableToolSet = new Set(availableTools);
+    const unknownTools = tools.filter((name) => !availableToolSet.has(name));
+    if (unknownTools.length) {
+      warnings.push(
+        `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${availableTools.join(", ")}`,
+      );
+    }
+    tools = tools.filter((name) => availableToolSet.has(name));
+    systemPrompt = buildSubagentSystemPrompt({
+      taskSystemPrompt: t.systemPrompt,
+      agentSystemPrompt: agent?.systemPrompt,
+      parentSystemPrompt,
+      pooledSystemPrompt: pooledConfig?.systemPrompt,
+      tools,
+    });
+    if (isDefaultAgent && !t.systemPrompt?.trim() && !agent?.systemPrompt?.trim()) {
+      requestedSystemPrompt = systemPrompt;
+    }
+
     return {
       ...t,
       id: t.id,
