@@ -128,4 +128,18 @@ describe("GenerationCache", () => {
     cache.invalidate();
     expect([...cache.values()]).toEqual([]);
   });
+
+  test("a falsy cached value is returned as a valid cache hit", async () => {
+    const cache = new GenerationCache<number>();
+    let builds = 0;
+    const build = async () => {
+      builds += 1;
+      return 0;
+    };
+
+    expect(await cache.resolve("k", true, build)).toBe(0);
+    // A truthiness check would miss the cached 0 and rebuild.
+    expect(await cache.resolve("k", true, build)).toBe(0);
+    expect(builds).toBe(1);
+  });
 });

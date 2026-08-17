@@ -10,29 +10,58 @@ import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 /**
- * Resolve a path through symlinks.
+ * Resolve a path through symlinks, or `undefined` if the path cannot be
+ * canonicalized.
  *
- * Falls back to lexical resolution only for the race where a path that was
- * just discovered on disk disappears before validation — never as a way to
- * accept an unresolvable path as trusted.
+ * A path that cannot be resolved to a real filesystem target is never accepted
+ * as trusted: returning `undefined` lets callers fail closed rather than
+ * falling back to lexical resolution, which a symlink whose target escapes an
+ * install root could launder itself through.
  */
-export function canonicalPath(candidate: string): string {
+export function canonicalPath(candidate: string): string | undefined {
   try {
     return realpathSync(candidate);
   } catch {
-    return resolve(candidate);
+    return undefined;
   }
 }
 
-/** Whether `candidate` is `directory` itself or lies beneath it, after symlink resolution. */
+/** Whether `candidate` is `directory` itself or lies beneath it, after symlink
+ * resolution. Returns `false` when either path cannot be canonicalized. */
 export function isPathWithinDirectory(
+  directory: string | undefined,
+  candidate: string | undefined,
+): boolean {
+  if (directory === undefined || candidate === undefined) return false;
+  const canonicalDirectory = canonicalPath(directory);
+  const canonicalCandidate = canonicalPath(candidate);
+  if (canonicalDirectory === undefined || canonicalCandidate === undefined) {
+    return false;
+  }
+  const relativePath = relative(canonicalDirectory, canonicalCandidate);
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(relativePath))
+  );
+}
+
+/**
+ * Whether `candidate` is `directory` itself or lies beneath it, using lexical
+ * resolution only (no symlink resolution).
+ *
+ * Use this for containment checks on paths that are already trusted or that
+ * need not exist on disk (e.g. classifying load failures by root). For the
+ * subagent trust boundary, use `isPathWithinDirectory` instead — a symlink
+ * whose target escapes an install root must not launder itself through a
+ * lexical check.
+ */
+export function isPathWithinDirectoryLexical(
   directory: string,
   candidate: string,
 ): boolean {
-  const relativePath = relative(
-    canonicalPath(directory),
-    canonicalPath(candidate),
-  );
+  const relativePath = relative(resolve(directory), resolve(candidate));
   return (
     relativePath === "" ||
     (relativePath !== ".." &&

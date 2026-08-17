@@ -65,9 +65,11 @@ export function formatTicketRosterLine(
   now = Date.now(),
 ): string {
   const icon = ticketStatusIcon(ticket.status);
-  const done = ticket.progress.filter((p) => p.status === "done").length;
+  const finalized = ticket.progress.filter(
+    (p) => p.status === "done" || p.status === "failed",
+  ).length;
   const age = fmtDuration(now - ticket.created);
-  return `${icon} ${ticket.id}${formatTicketAgentRoster(ticket.progress)} · ${done}/${ticket.progress.length} tasks · ${ticket.status} · ${age}${formatTicketControlSnippets(ticket)}`;
+  return `${icon} ${ticket.id}${formatTicketAgentRoster(ticket.progress)} · ${finalized}/${ticket.progress.length} finalized · ${ticket.status} · ${age}${formatTicketControlSnippets(ticket)}`;
 }
 
 /** Full roster listing when poll is called without a ticket id. */
