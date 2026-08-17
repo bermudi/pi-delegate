@@ -35,7 +35,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { getSubagentProviderExtensionSourcesForProvider } from "./config.ts";
-import { canonicalPath, isPathWithinDirectory } from "./trusted-paths.ts";
+import { canonicalPath, isPathWithinDirectory, isPathWithinDirectoryLexical } from "./trusted-paths.ts";
 import {
   parseGitOriginIdentity,
   parsePackageSource,
@@ -107,6 +107,7 @@ function findExtensionProjectRoot(cwd: string): string | undefined {
   if (root) return canonicalPath(root);
 
   let directory = canonicalPath(cwd);
+  if (directory === undefined) return undefined;
   for (;;) {
     if (
       existsSync(join(directory, ".pi", "settings.json")) ||
@@ -130,10 +131,13 @@ function gitOutput(cwd: string, args: string[]): string {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
     }).trim();
   } catch {
     // Not every path is a Git worktree, and a missing ref is a normal answer
-    // here. Callers treat "" as "no answer" and fail closed where that matters.
+    // here. A timeout or non-zero exit is also treated as "no answer" so an
+    // unresponsive git never hangs delegation. Callers treat "" as "no
+    // answer" and fail closed where that matters.
     return "";
   }
 }
@@ -444,16 +448,18 @@ export function partitionExtensionLoadFailures(input: {
     extensionPaths.filter(
       (root) =>
         !loadedExtensionPaths.some((extensionPath) =>
-          isPathWithinDirectory(root, extensionPath),
+          isPathWithinDirectoryLexical(root, extensionPath),
         ) ||
         extensionErrors.some((error) =>
-          isPathWithinDirectory(root, error.path),
+          isPathWithinDirectoryLexical(root, error.path),
         ),
     ),
   );
   const fatalErrors = extensionErrors.filter(
     (error) =>
-      !bestEffortRoots.some((root) => isPathWithinDirectory(root, error.path)),
+      !bestEffortRoots.some((root) =>
+        isPathWithinDirectoryLexical(root, error.path),
+      ),
   );
   const fatalRoots = [...failedRoots].filter(
     (root) => !input.bestEffortRoots.has(root),

@@ -98,7 +98,7 @@ describe("ticket roster formatting", () => {
       }),
       1_500,
     );
-    expect(line).toContain("⏳ abc12345 · scout, coder · 1/2 tasks · running");
+    expect(line).toContain("⏳ abc12345 · scout, coder · 1/2 finalized · running");
     expect(line).toContain(fmtDuration(1_500));
     expect(line).toContain('ticketAction: "poll"');
   });

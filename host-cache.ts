@@ -35,7 +35,7 @@ export class GenerationCache<T> {
     if (!cacheable) return build();
 
     const cached = this.entries.get(key);
-    if (cached) return cached;
+    if (cached !== undefined) return cached;
     const pending = this.inflight.get(key);
     if (pending) return pending;
 
