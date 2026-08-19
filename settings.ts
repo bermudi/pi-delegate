@@ -50,9 +50,51 @@ export function readDelegateSettingsFile(
   }
 }
 
+interface LegacyDetectionCacheEntry {
+  signature: string;
+  carriesDelegateBlock: boolean;
+}
+
+const legacyDetectionCache = new Map<string, LegacyDetectionCacheEntry>();
+
+/** A cheap file identity used to invalidate cached misses and parse failures
+ * when a settings file is created or edited. */
+function settingsFileSignature(filePath: string): string {
+  try {
+    const stat = fs.statSync(filePath);
+    return [
+      "present",
+      stat.dev,
+      stat.ino,
+      stat.size,
+      stat.mtimeMs,
+      stat.ctimeMs,
+      stat.mode,
+    ].join(":");
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return "missing";
+    }
+    // An inaccessible or otherwise unstatable file is not a stable miss. Let
+    // the read path report it on each attempt rather than hiding a later fix.
+    return `unstatable:${Date.now()}`;
+  }
+}
+
 function settingsCarryDelegateBlock(filePath: string): boolean {
-  const parsed = readDelegateSettingsFile(filePath);
-  return parsed !== null && isRecord(parsed.delegate);
+  const key = path.resolve(filePath);
+  const signature = settingsFileSignature(key);
+  const cached = legacyDetectionCache.get(key);
+  if (cached?.signature === signature) return cached.carriesDelegateBlock;
+
+  const parsed = readDelegateSettingsFile(key);
+  const carriesDelegateBlock = parsed !== null && isRecord(parsed.delegate);
+  legacyDetectionCache.set(key, { signature, carriesDelegateBlock });
+  return carriesDelegateBlock;
 }
 
 /** Paths of pi settings files (user + nearest project `.pi/settings.json`)
@@ -363,5 +405,6 @@ export function warnLegacyDelegateSettingsMoved(cwd: string): void {
 /** @deprecated Clear the set of cwd's already warned about legacy settings. */
 export function clearDelegateSettingsCache(): void {
   warnedLegacyDirs.clear();
+  legacyDetectionCache.clear();
   legacySettingsCache.clear();
 }
