@@ -24,7 +24,8 @@ import {
 import { validateDelegateOperation } from "./schema.ts";
 import { notifyCrossLeafDelivery, syncDelegateStatus } from "./status.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
-import { clearDelegateSettingsCache } from "./settings.ts";
+import { reloadDelegateConfig } from "./config.ts";
+import { warnLegacyDelegateSettingsMoved } from "./settings.ts";
 import type { CallSpan } from "./telemetry.ts";
 import type {
   AgentConfig,
@@ -147,9 +148,13 @@ export interface DelegateDispatchInput {
 export async function dispatchDelegate(
   input: DelegateDispatchInput,
 ): Promise<DelegateToolResult> {
-  // Settings are user-editable. Clear once at the dispatch boundary so every
-  // task in this batch observes one consistent settings snapshot.
-  clearDelegateSettingsCache();
+  // delegate.json is the single config source (user-edited, user scope).
+  // Reload once at the dispatch boundary so edits become visible between
+  // delegate calls without restarting pi, and surface (once per cwd) any
+  // legacy `delegate` block still sitting in pi's settings.json — those
+  // overrides moved and are otherwise silently ignored.
+  reloadDelegateConfig();
+  warnLegacyDelegateSettingsMoved(input.ctx.cwd);
   const {
     pi,
     params,

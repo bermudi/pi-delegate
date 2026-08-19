@@ -54,10 +54,12 @@ workspace — `scout` stays read-only and `reviewer` stays scratch unless the
 file explicitly sets `tools` or `workspace`. Fresh built-ins inherit the
 parent's exact model object and thinking level; an explicit `model`/`thinking`
 in the Markdown file replaces that inheritance. Task fields always win, and for
-`scout`/`coder`/`reviewer` settings overrides (`settings.json`
-`delegate.agentOverrides` / `delegate.agentOverridesByParentModel`) win over the
-Markdown file, while `default` ignores settings and uses only an explicit
-Markdown `model`/`thinking` when present.
+`scout`/`coder`/`reviewer` overrides in `~/.pi/agent/delegate.json`
+(`agentOverrides` / `agentOverridesByParentModel`) win over the
+Markdown file, while `default` ignores overrides and uses only an explicit
+Markdown `model`/`thinking` when present. `delegate.json` is the single config
+file (user scope, global — there are no project-level delegate overrides), and
+edits apply from the next delegate call.
 
 ### Disposable scratch workspace
 

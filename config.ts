@@ -1,12 +1,162 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   MAX_ASYNC_TICKETS,
   MAX_CONCURRENCY,
   OUTPUT_SPILL_TAIL_CHARS,
   OUTPUT_SPILL_THRESHOLD_CHARS,
+  VALID_THINKING,
 } from "./constants.ts";
+
+export interface AgentOverride {
+  model?: string;
+  thinking?: ThinkingLevel;
+  tools?: string[];
+}
+
+const DELEGATE_CONFIG_SOURCE = "delegate.json";
+
+/** Validate one agentOverrides entry. A malformed entry is dropped whole
+ *  (warn) rather than partially applied — a half-parsed override that
+ *  silently changes only `thinking` is worse than a loud no-op. */
+function normalizeAgentOverride(
+  raw: unknown,
+  agentName: string,
+): AgentOverride | null {
+  if (!isRecord(raw)) {
+    console.warn(
+      `[delegate] ignoring malformed agentOverrides entry for agent '${agentName}' in ${DELEGATE_CONFIG_SOURCE}: expected an object.`,
+    );
+    return null;
+  }
+
+  const result: AgentOverride = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (key === "model") {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        console.warn(
+          `[delegate] ignoring malformed agentOverrides entry for agent '${agentName}' in ${DELEGATE_CONFIG_SOURCE}: model must be a nonempty string.`,
+        );
+        return null;
+      }
+      result.model = value.trim();
+    } else if (key === "thinking") {
+      if (typeof value !== "string" || !VALID_THINKING.has(value)) {
+        console.warn(
+          `[delegate] ignoring malformed agentOverrides entry for agent '${agentName}' in ${DELEGATE_CONFIG_SOURCE}: thinking must be a supported level.`,
+        );
+        return null;
+      }
+      result.thinking = value as ThinkingLevel;
+    } else if (key === "tools") {
+      if (
+        !Array.isArray(value) ||
+        value.some((tool) => typeof tool !== "string")
+      ) {
+        console.warn(
+          `[delegate] ignoring malformed agentOverrides entry for agent '${agentName}' in ${DELEGATE_CONFIG_SOURCE}: tools must be a string array.`,
+        );
+        return null;
+      }
+      result.tools = [...value];
+    } else if (key === "skills") {
+      console.warn(
+        `[delegate] ignoring unsupported skills override for agent '${agentName}' in ${DELEGATE_CONFIG_SOURCE}: per-agent skill filtering is not supported.`,
+      );
+      return null;
+    } else {
+      console.warn(
+        `[delegate] ignoring malformed agentOverrides entry for agent '${agentName}' in ${DELEGATE_CONFIG_SOURCE}: unknown field '${key}'.`,
+      );
+      return null;
+    }
+  }
+  return result;
+}
+
+/** Normalize the `agentOverrides` map (agent name → override). Keys are
+ *  trimmed; collisions after trimming keep the first entry and warn. Returns
+ *  undefined when the block is absent. */
+function normalizeAgentOverrides(
+  raw: unknown,
+): Record<string, AgentOverride> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) {
+    console.warn(
+      `[delegate] ignoring malformed agentOverrides in ${DELEGATE_CONFIG_SOURCE}: expected an object.`,
+    );
+    return undefined;
+  }
+
+  // Null-prototype map so config keys such as `constructor` and `__proto__`
+  // cannot resolve to Object.prototype members during normalization.
+  const out = Object.create(null) as Record<string, AgentOverride>;
+  const seenNames = new Map<string, string>();
+  for (const [agentName, value] of Object.entries(raw)) {
+    const normalizedAgentName = agentName.trim();
+    if (normalizedAgentName.length === 0) {
+      console.warn(
+        `[delegate] ignoring malformed agentOverrides entry in ${DELEGATE_CONFIG_SOURCE}: agent name must be nonempty.`,
+      );
+      continue;
+    }
+    const previousName = seenNames.get(normalizedAgentName);
+    if (previousName !== undefined) {
+      console.warn(
+        `[delegate] ignoring duplicate agentOverrides entry in ${DELEGATE_CONFIG_SOURCE}: agent keys '${previousName}' and '${agentName}' both normalize to '${normalizedAgentName}'.`,
+      );
+      continue;
+    }
+    seenNames.set(normalizedAgentName, agentName);
+    const override = normalizeAgentOverride(value, normalizedAgentName);
+    if (override) out[normalizedAgentName] = override;
+  }
+  return out;
+}
+
+/** Normalize `agentOverridesByParentModel` (`provider/model-id` → agent →
+ *  override). Model keys are trimmed, not lowercased: they must match the
+ *  parent's exact `provider/model-id`. Returns undefined when absent. */
+function normalizeAgentOverridesByParentModel(
+  raw: unknown,
+): Record<string, Record<string, AgentOverride>> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) {
+    console.warn(
+      `[delegate] ignoring malformed agentOverridesByParentModel in ${DELEGATE_CONFIG_SOURCE}: expected an object.`,
+    );
+    return undefined;
+  }
+
+  const out = Object.create(null) as Record<
+    string,
+    Record<string, AgentOverride>
+  >;
+  const seenModels = new Map<string, string>();
+  for (const [parentModel, overrides] of Object.entries(raw)) {
+    const normalizedParentModel = parentModel.trim();
+    if (normalizedParentModel.length === 0) {
+      console.warn(
+        `[delegate] ignoring malformed parent-model override in ${DELEGATE_CONFIG_SOURCE}: model key must be nonempty.`,
+      );
+      continue;
+    }
+    const previousModel = seenModels.get(normalizedParentModel);
+    if (previousModel !== undefined) {
+      console.warn(
+        `[delegate] ignoring duplicate parent-model override in ${DELEGATE_CONFIG_SOURCE}: model keys '${previousModel}' and '${parentModel}' both normalize to '${normalizedParentModel}'.`,
+      );
+      continue;
+    }
+    seenModels.set(normalizedParentModel, parentModel);
+    const inner = normalizeAgentOverrides(overrides);
+    out[normalizedParentModel] =
+      inner ?? (Object.create(null) as Record<string, AgentOverride>);
+  }
+  return out;
+}
 
 export interface TelemetryConfig {
   /** Whether to record delegate calls to the local SQLite store. Default true. */
@@ -61,6 +211,14 @@ export interface DelegateConfig {
     /** Per-agent-type model overrides. Keys are agent names or "default". */
     [agentType: string]: string | null | undefined;
   };
+  /** Per-agent model/thinking/tools overrides (agent name → override), from
+   *  delegate.json. Applies to every non-`default` agent, including the
+   *  built-ins (`scout`/`coder`/`reviewer`) and custom agents. This is the
+   *  modern form; the legacy `agent` map above still feeds custom agents. */
+  agentOverrides?: Record<string, AgentOverride>;
+  /** Parent-model-scoped overrides keyed by the parent's exact
+   *  `provider/model-id`. Win over `agentOverrides` on a key match. */
+  agentOverridesByParentModel?: Record<string, Record<string, AgentOverride>>;
   /** Per-model and per-provider concurrency limits. */
   concurrency: {
     /** Default concurrency limit for unspecified models. */
@@ -99,8 +257,12 @@ export interface DelegateConfig {
   };
 }
 
-const DELEGATE_CONFIG_DIR = path.join(os.homedir(), ".pi", "agent");
-const DELEGATE_CONFIG_PATH = path.join(DELEGATE_CONFIG_DIR, "delegate.json");
+/** Resolved lazily (not at module scope) so the path follows the live
+ *  `os.homedir()` — the test suite swaps homedir via `mock.module`, and an
+ *  eagerly-bound path would keep reading the developer's real config. */
+function delegateConfigPath(): string {
+  return path.join(os.homedir(), ".pi", "agent", "delegate.json");
+}
 
 function normalizeProviderExtensions(
   raw: unknown,
@@ -192,7 +354,7 @@ let stallTimeoutOverrideForTesting: number | undefined;
  *  config presence rather than string identity. */
 export function loadDelegateConfig(): DelegateConfig {
   try {
-    const raw = fs.readFileSync(DELEGATE_CONFIG_PATH, "utf-8");
+    const raw = fs.readFileSync(delegateConfigPath(), "utf-8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       return structuredClone(DEFAULT_DELEGATE_CONFIG);
@@ -208,6 +370,10 @@ export function loadDelegateConfig(): DelegateConfig {
       retry: { ...DEFAULT_DELEGATE_CONFIG.retry, ...(parsed.retry ?? {}) },
       providerExtensions: normalizeProviderExtensions(
         parsed.providerExtensions,
+      ),
+      agentOverrides: normalizeAgentOverrides(parsed.agentOverrides),
+      agentOverridesByParentModel: normalizeAgentOverridesByParentModel(
+        parsed.agentOverridesByParentModel,
       ),
       telemetry: normalizeTelemetryConfig(parsed.telemetry),
       output: { ...DEFAULT_DELEGATE_CONFIG.output, ...(parsed.output ?? {}) },
@@ -273,6 +439,10 @@ export function _setDelegateConfigForTesting(
       ...(config.retry ?? {}),
     },
     providerExtensions: normalizeProviderExtensions(config.providerExtensions),
+    agentOverrides: normalizeAgentOverrides(config.agentOverrides),
+    agentOverridesByParentModel: normalizeAgentOverridesByParentModel(
+      config.agentOverridesByParentModel,
+    ),
     telemetry: normalizeTelemetryConfig(config.telemetry),
     output: {
       ...DEFAULT_DELEGATE_CONFIG.output,
@@ -368,6 +538,33 @@ export function getSubagentProviderExtensionSourcesForProvider(
     source,
     required: false,
   }));
+}
+
+/** Get the effective per-agent overrides from delegate.json
+ *  (agent name → override), or undefined when unconfigured. */
+export function getAgentOverrides(
+  config: DelegateConfig = __delegateConfig,
+): Record<string, AgentOverride> | undefined {
+  return config.agentOverrides;
+}
+
+/** Get the parent-model-scoped overrides (`provider/model-id` → agent →
+ *  override), or undefined when unconfigured. */
+export function getAgentOverridesByParentModel(
+  config: DelegateConfig = __delegateConfig,
+): Record<string, Record<string, AgentOverride>> | undefined {
+  return config.agentOverridesByParentModel;
+}
+
+/** Re-read delegate.json from disk into the config singleton.
+ *
+ *  Called once at the dispatch boundary so user edits to delegate.json become
+ *  visible between delegate calls without restarting pi. Within one dispatch
+ *  the config is a stable snapshot; task resolution captures override values
+ *  into the resolved tasks up front, so a later dispatch's reload cannot
+ *  retroactively change an in-flight batch. */
+export function reloadDelegateConfig(): void {
+  __delegateConfig = loadDelegateConfig();
 }
 
 // ── Config Getters ───────────────────────────────────────────────────────

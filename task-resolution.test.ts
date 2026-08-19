@@ -14,7 +14,6 @@ import {
   _resetDelegateConfigForTesting,
   _setDelegateConfigForTesting,
 } from "./config.ts";
-import { clearDelegateSettingsCache } from "./settings.ts";
 import { DEFAULT_TOOLS } from "./constants.ts";
 import type { AgentConfig, TaskDef } from "./types.ts";
 
@@ -545,12 +544,10 @@ describe("resolveTasks: prompt-only built-in overrides preserve privileges", () 
   beforeEach(() => {
     _resetDelegateConfigForTesting();
     _resetPoolForTesting();
-    clearDelegateSettingsCache();
   });
   afterEach(() => {
     _resetDelegateConfigForTesting();
     _resetPoolForTesting();
-    clearDelegateSettingsCache();
   });
   test("prompt-only scout keeps read-only tools, shared workspace, inherits parent model/thinking", () => {
     const agents = new Map<string, AgentConfig>([
@@ -711,12 +708,10 @@ describe("resolveTasks: explicit Markdown tools/model/thinking", () => {
   beforeEach(() => {
     _resetDelegateConfigForTesting();
     _resetPoolForTesting();
-    clearDelegateSettingsCache();
   });
   afterEach(() => {
     _resetDelegateConfigForTesting();
     _resetPoolForTesting();
-    clearDelegateSettingsCache();
   });
   test("explicit Markdown tools/model/thinking win over parent defaults for scout", () => {
     const agents = new Map<string, AgentConfig>([
@@ -817,9 +812,9 @@ describe("resolveTasks: explicit Markdown tools/model/thinking", () => {
   });
 });
 
-describe("resolveTasks: settings precedence", () => {
+describe("resolveTasks: delegate.json agent override precedence", () => {
   const parentModel = { provider: "openrouter", id: "deepseek-v4-pro" } as any;
-  const settingsModel = { provider: "zai", id: "glm-5-turbo" } as any;
+  const overrideModel = { provider: "zai", id: "glm-5-turbo" } as any;
   const markdownModel = { provider: "anthropic", id: "claude-haiku-4" } as any;
   function makeRegistry(models: any[]) {
     return {
@@ -832,36 +827,31 @@ describe("resolveTasks: settings precedence", () => {
   let tmpRoot: string;
   let projectDir: string;
   beforeEach(() => {
-    tmpRoot = mkdtempSync(path.join(tmpdir(), "delegate-settings-"));
+    tmpRoot = mkdtempSync(path.join(tmpdir(), "delegate-overrides-"));
     projectDir = path.join(tmpRoot, "project");
     mkdirSync(projectDir, { recursive: true });
     _resetDelegateConfigForTesting();
     _resetPoolForTesting();
-    clearDelegateSettingsCache();
+    // The homedir mock keeps discoverAgents() away from the real ~/.agents
+    // and any real user-scope delegate.json during these tests.
     mock.module("node:os", () => ({ ...os, homedir: () => tmpRoot }));
   });
   afterEach(() => {
     mock.module("node:os", () => os);
-    clearDelegateSettingsCache();
+    _resetDelegateConfigForTesting();
     _resetPoolForTesting();
     rmSync(tmpRoot, { recursive: true, force: true });
   });
-  test("settings win over explicit Markdown for scout/coder/reviewer", () => {
-    mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
-    writeFileSync(
-      path.join(projectDir, ".pi", "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverrides: {
-            scout: {
-              model: "zai/glm-5-turbo",
-              thinking: "max",
-              tools: ["read", "bash"],
-            },
-          },
+  test("delegate.json overrides win over explicit Markdown for scout/coder/reviewer", () => {
+    _setDelegateConfigForTesting({
+      agentOverrides: {
+        scout: {
+          model: "zai/glm-5-turbo",
+          thinking: "max",
+          tools: ["read", "bash"],
         },
-      }),
-    );
+      },
+    });
     mkdirSync(path.join(projectDir, ".pi", "agents"), { recursive: true });
     writeFileSync(
       path.join(projectDir, ".pi", "agents", "scout.md"),
@@ -876,34 +866,25 @@ describe("resolveTasks: settings precedence", () => {
       {
         cwd: projectDir,
         model: parentModel,
-        modelRegistry: makeRegistry([settingsModel]),
+        modelRegistry: makeRegistry([overrideModel]),
         sessionManager: undefined,
         getSystemPrompt: () => "parent",
       } as any,
       agents,
       { thinking: "off", tools: DEFAULT_TOOLS },
     );
-    expect(task.model).toBe(settingsModel);
+    expect(task.model).toBe(overrideModel);
     expect(task.thinking).toBe("max");
     expect(task.tools).toEqual(["read", "bash"]);
   });
-  test("parent-model-scoped settings win only for matching parent model", () => {
-    mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
-    const userDir = path.join(tmpRoot, ".pi", "agent");
-    mkdirSync(userDir, { recursive: true });
-    writeFileSync(
-      path.join(userDir, "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverridesByParentModel: {
-            "openai-codex/gpt-5.6-sol": {
-              scout: { model: "zai/glm-5-turbo", thinking: "high" },
-            },
-          },
+  test("parent-model-scoped overrides win only for matching parent model", () => {
+    _setDelegateConfigForTesting({
+      agentOverridesByParentModel: {
+        "openai-codex/gpt-5.6-sol": {
+          scout: { model: "zai/glm-5-turbo", thinking: "high" },
         },
-      }),
-    );
-    clearDelegateSettingsCache();
+      },
+    });
     const agents = new Map(Object.entries(BUILTIN_AGENT_CONFIGS));
     const codexParent = { provider: "openai-codex", id: "gpt-5.6-sol" } as any;
     const otherParent = { provider: "openrouter", id: "other" } as any;
@@ -912,16 +893,15 @@ describe("resolveTasks: settings precedence", () => {
       {
         cwd: projectDir,
         model: codexParent,
-        modelRegistry: makeRegistry([settingsModel]),
+        modelRegistry: makeRegistry([overrideModel]),
         sessionManager: undefined,
         getSystemPrompt: () => "p",
       } as any,
       agents,
       { thinking: "off", tools: DEFAULT_TOOLS },
     );
-    expect(codexTask.model).toBe(settingsModel);
+    expect(codexTask.model).toBe(overrideModel);
     expect(codexTask.thinking).toBe("high");
-    clearDelegateSettingsCache();
     const [otherTask] = resolveTasks(
       [{ agent: "scout", prompt: "go" }] as any,
       {
@@ -937,28 +917,21 @@ describe("resolveTasks: settings precedence", () => {
     expect(otherTask.model).toBe(otherParent);
     expect(otherTask.thinking).toBe("medium");
   });
-  test("default ignores settings and uses explicit Markdown or parent", () => {
-    mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
-    writeFileSync(
-      path.join(projectDir, ".pi", "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverrides: {
-            default: {
-              model: "zai/glm-5-turbo",
-              thinking: "max",
-              tools: ["read"],
-            },
-          },
-          agentOverridesByParentModel: {
-            "openrouter/deepseek-v4-pro": {
-              default: { model: "zai/glm-5-turbo", thinking: "max" },
-            },
-          },
+  test("default ignores delegate.json overrides and uses explicit Markdown or parent", () => {
+    _setDelegateConfigForTesting({
+      agentOverrides: {
+        default: {
+          model: "zai/glm-5-turbo",
+          thinking: "max",
+          tools: ["read"],
         },
-      }),
-    );
-    clearDelegateSettingsCache();
+      },
+      agentOverridesByParentModel: {
+        "openrouter/deepseek-v4-pro": {
+          default: { model: "zai/glm-5-turbo", thinking: "max" },
+        },
+      },
+    });
     mkdirSync(path.join(projectDir, ".pi", "agents"), { recursive: true });
     writeFileSync(
       path.join(projectDir, ".pi", "agents", "default.md"),
@@ -981,7 +954,7 @@ describe("resolveTasks: settings precedence", () => {
     expect(explicitTask.model).toBe(markdownModel);
     expect(explicitTask.thinking).toBe("high");
     expect(explicitTask.tools).toEqual(["read", "bash"]);
-    // prompt-only default should ignore settings and inherit parent
+    // prompt-only default should ignore overrides and inherit parent
     rmSync(path.join(projectDir, ".pi", "agents", "default.md"));
     writeFileSync(
       path.join(projectDir, ".pi", "agents", "default.md"),
@@ -989,7 +962,6 @@ describe("resolveTasks: settings precedence", () => {
     );
     const agents2 = discoverAgents(projectDir);
     expect(agents2.get("default")?.explicitModel).toBe(false);
-    clearDelegateSettingsCache();
     const [inheritedTask] = resolveTasks(
       [{ agent: "default", prompt: "go" }] as any,
       {
@@ -1006,23 +978,16 @@ describe("resolveTasks: settings precedence", () => {
     expect(inheritedTask.thinking).toBe("medium");
     expect(inheritedTask.tools).toEqual(["read", "grep", "find", "ls"]);
   });
-  test("task fields win over settings for scout", () => {
-    mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
-    writeFileSync(
-      path.join(projectDir, ".pi", "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverrides: {
-            scout: {
-              model: "zai/glm-5-turbo",
-              thinking: "max",
-              tools: ["read"],
-            },
-          },
+  test("task fields win over delegate.json overrides for scout", () => {
+    _setDelegateConfigForTesting({
+      agentOverrides: {
+        scout: {
+          model: "zai/glm-5-turbo",
+          thinking: "max",
+          tools: ["read"],
         },
-      }),
-    );
-    clearDelegateSettingsCache();
+      },
+    });
     const agents = new Map(Object.entries(BUILTIN_AGENT_CONFIGS));
     const override = { provider: "openai", id: "gpt-5" } as any;
     const [task] = resolveTasks(
@@ -1038,7 +1003,7 @@ describe("resolveTasks: settings precedence", () => {
       {
         cwd: projectDir,
         model: parentModel,
-        modelRegistry: makeRegistry([override, settingsModel]),
+        modelRegistry: makeRegistry([override, overrideModel]),
         sessionManager: undefined,
         getSystemPrompt: () => "p",
       } as any,
@@ -1063,7 +1028,6 @@ describe("resolveTasks: Claude deny-only overrides", () => {
   beforeEach(() => {
     _resetDelegateConfigForTesting();
     _resetPoolForTesting();
-    clearDelegateSettingsCache();
   });
   afterEach(() => {
     _resetPoolForTesting();
@@ -1222,7 +1186,6 @@ describe("resolveTasks: pooled-session behavior", () => {
   beforeEach(() => {
     _resetDelegateConfigForTesting();
     _resetPoolForTesting();
-    clearDelegateSettingsCache();
   });
   afterEach(() => {
     _resetPoolForTesting();
