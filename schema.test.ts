@@ -185,6 +185,35 @@ describe("validateDelegateOperation task-field whitelist", () => {
     expect(err).toContain("top-level flag");
   });
 
+  test("keeps unsafeSharedWrites at the dispatch level", () => {
+    expect(
+      validateDelegateOperation({
+        unsafeSharedWrites: true,
+        tasks: [{ prompt: "one" }, { prompt: "two" }],
+      }),
+    ).toBeUndefined();
+
+    const misplaced = validateDelegateOperation({
+      tasks: [{ prompt: "x", unsafeSharedWrites: true }],
+    } as unknown as DelegateArguments);
+    expect(misplaced).toContain(
+      "task 1: unknown field(s) 'unsafeSharedWrites'",
+    );
+    expect(misplaced).toContain("top-level flag");
+  });
+
+  test("rejects unsafeSharedWrites on taskless and ticket-control calls", () => {
+    expect(validateDelegateOperation({ unsafeSharedWrites: true })).toContain(
+      "requires at least one task",
+    );
+    expect(
+      validateDelegateOperation({
+        ticketAction: "poll",
+        unsafeSharedWrites: true,
+      }),
+    ).toContain("ticket control cannot include unsafeSharedWrites");
+  });
+
   test("rejects misspelled task fields and lists the valid set", () => {
     const err = validateDelegateOperation({
       tasks: [{ prompt: "x", promtp: "y" }],

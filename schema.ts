@@ -130,6 +130,13 @@ export const delegateArgumentsSchema = Type.Object({
       default: false,
     }),
   ),
+  unsafeSharedWrites: Type.Optional(
+    Type.Boolean({
+      description:
+        "Allow same-tree shared writers in this batch; no isolation or rollback. Dangerous override.",
+      default: false,
+    }),
+  ),
   ticket: Type.Optional(
     Type.String({
       description: "Ticket ID; omit only when polling all tickets.",
@@ -212,6 +219,9 @@ export function validateDelegateOperation(
     if (params.async === true) {
       return "ticket control cannot include async; call it separately.";
     }
+    if (params.unsafeSharedWrites === true) {
+      return "ticket control cannot include unsafeSharedWrites; call it separately.";
+    }
     if (ticketAction !== "poll" && !params.ticket) {
       return `ticketAction '${ticketAction}' requires ticket.`;
     }
@@ -233,6 +243,9 @@ export function validateDelegateOperation(
     return "timeoutMs is valid only with ticketAction 'wait'.";
   }
   if (!tasks.length) {
+    if (params.unsafeSharedWrites === true) {
+      return "unsafeSharedWrites requires at least one task.";
+    }
     return params.async === true
       ? "async dispatch requires at least one task."
       : undefined; // Intentional help request.
@@ -263,13 +276,16 @@ export function validateDelegateOperation(
       (key) => !VALID_TASK_KEYS.has(key),
     );
     if (unknownKeys.length) {
-      const asyncHint = unknownKeys.includes("async")
-        ? " 'async' is a top-level flag; move it out of the task entry."
+      const misplacedTopLevel = unknownKeys.filter(
+        (key) => key === "async" || key === "unsafeSharedWrites",
+      );
+      const topLevelHint = misplacedTopLevel.length
+        ? ` ${misplacedTopLevel.map((key) => `'${key}'`).join(" and ")} ${misplacedTopLevel.length === 1 ? "is a" : "are"} top-level flag${misplacedTopLevel.length === 1 ? "" : "s"}; move ${misplacedTopLevel.length === 1 ? "it" : "them"} out of the task entry.`
         : "";
       return (
         `task ${index + 1}: unknown field(s) ${unknownKeys
           .map((key) => `'${key}'`)
-          .join(", ")}.${asyncHint} ` +
+          .join(", ")}.${topLevelHint} ` +
         `Valid task fields: ${[...VALID_TASK_KEYS].join(", ")}.`
       );
     }
