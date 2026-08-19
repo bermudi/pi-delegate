@@ -865,7 +865,7 @@ export function getConcurrencyLimit(
   const perModel = config.concurrency.models?.[modelKey];
   if (isPositiveInteger(perModel)) return perModel;
   // 2. Per-provider
-  const provider = modelKey.split("/")[0];
+  const provider = modelKey.split("/")[0] ?? modelKey;
   const perProvider = config.concurrency.providers?.[provider];
   if (isPositiveInteger(perProvider)) return perProvider;
   // 3. Default

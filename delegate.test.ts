@@ -1509,6 +1509,8 @@ describe("getConcurrencyLimit", () => {
     };
     expect(getConcurrencyLimit("llamacpp/4b", config)).toBe(2);
     expect(getConcurrencyLimit("llamacpp/7b", config)).toBe(2);
+    // A key with no "/" is its own provider segment
+    expect(getConcurrencyLimit("llamacpp", config)).toBe(2);
     // Other providers still get default
     expect(getConcurrencyLimit("anthropic/claude-sonnet-4", config)).toBe(3);
   });
@@ -2165,6 +2167,7 @@ describe("formatFailedTask", () => {
       tokens: 0,
       touchedFiles: [],
     };
+    let spillPath: string | undefined;
     try {
       // Widen the live global threshold so that without the fix (config
       // dropped), the 18-char output would pass through unspilled.
@@ -2181,25 +2184,18 @@ describe("formatFailedTask", () => {
       // The pointer names a real file containing the FULL output.
       const m = body!.match(/spilled to (.+?) —/);
       expect(m).not.toBeNull();
-      expect(fs.existsSync(m![1]!)).toBe(true);
-      expect(fs.readFileSync(m![1]!, "utf8")).toBe(r.output);
+      spillPath = m![1]!;
+      expect(fs.existsSync(spillPath)).toBe(true);
+      expect(fs.readFileSync(spillPath, "utf8")).toBe(r.output);
     } finally {
       _resetDelegateConfigForTesting();
-      // Clean the spill file dropped in the system tmpdir.
-      const dir = os.tmpdir();
-      let entries: string[];
-      try {
-        entries = fs.readdirSync(dir);
-      } catch {
-        entries = [];
-      }
-      for (const name of entries) {
-        if (name.startsWith("delegate-output-")) {
-          try {
-            fs.rmSync(path.join(dir, name), { force: true });
-          } catch {
-            /* best-effort */
-          }
+      // Clean only this test's spill file — enumerating the tmpdir by prefix
+      // could delete spill files owned by other concurrent processes/tests.
+      if (spillPath !== undefined) {
+        try {
+          fs.rmSync(spillPath, { force: true });
+        } catch {
+          /* best-effort */
         }
       }
     }
@@ -2869,6 +2865,7 @@ describe("malformed delegate.json numeric fields", () => {
 
   afterEach(() => {
     mock.module("node:os", () => os);
+    _resetDelegateConfigForTesting();
     cleanup(tmpDir);
   });
 
@@ -10349,6 +10346,10 @@ describe("public export compatibility", () => {
       settings,
       JSON.stringify({ delegate: { agentOverrides: {} } }),
     );
+    // Pin the user scope to tmpRoot so warnLegacyDelegateSettingsMoved can't
+    // consult the real ~/.pi settings, which would make the warning counts
+    // below machine-dependent.
+    mock.module("node:os", () => ({ ...os, homedir: () => tmpRoot }));
 
     const warnings: string[] = [];
     const originalWarn = console.warn;
@@ -10361,6 +10362,8 @@ describe("public export compatibility", () => {
       warnLegacyDelegateSettingsMoved(projectDir);
     } finally {
       console.warn = originalWarn;
+      clearDelegateSettingsCache();
+      mock.module("node:os", () => os);
     }
     expect(warnings).toHaveLength(2);
     rmSync(tmpRoot, { recursive: true, force: true });

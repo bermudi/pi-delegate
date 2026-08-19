@@ -115,11 +115,16 @@ export function _setGlobalConcurrencyLimitForTesting(limit: number): void {
   reconfigureGlobalConcurrency(limit);
 }
 
-/** Test-only hook: reset the global semaphore to the configured cap. */
+/** Test-only hook: reset the global semaphore to the configured cap.
+ *  Counters and waiters are cleared *before* reconfiguring so the wake loop
+ *  inside reconfigureGlobalConcurrency cannot hand out slots against stale
+ *  bookkeeping (only to have them zeroed) or resolve waiters that the clears
+ *  then abandon. Called when the semaphore should be idle; clearing semantics
+ *  are unchanged — only the ordering is safe now. */
 export function _resetGlobalConcurrencyForTesting(): void {
-  reconfigureGlobalConcurrency(getMaxConcurrent());
   globalConcurrencyRunning = 0;
   globalConcurrencyWaiters.length = 0;
+  reconfigureGlobalConcurrency(getMaxConcurrent());
 }
 
 async function mapConcurrent<T, R>(
