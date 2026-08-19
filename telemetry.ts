@@ -72,10 +72,13 @@ interface TelemetryBackend {
 /** Active telemetry backends keyed by their (generation, config) pair. Call
  *  spans and task rows are bound to the backend that was live when they
  *  started, so a hot-reloaded `enabled`/`dbPath` change cannot split one
- *  logical call across databases. The cache also isolates failures per config:
- *  a bad `dbPath` is marked failed under its own key and does not block a
- *  different path from opening. */
+ *  logical call across databases. A backend is retained only while it is the
+ *  live config or a span is still bound to it. The cache also isolates
+ *  failures per config: a bad `dbPath` is marked failed under its own key and
+ *  does not block a different path from opening. */
 const backendCache = new Map<string, TelemetryBackend | undefined>();
+/** Number of unfinished call spans bound to each backend cache key. */
+const backendBindings = new Map<string, number>();
 const testBackendKey = "test";
 
 /** Monotonic runtime identity. A late worker from a previous runtime may not
@@ -455,6 +458,57 @@ function cacheKey(
   return JSON.stringify([generation, config.enabled, config.dbPath]);
 }
 
+function backendKeyForConfig(
+  generation: number,
+  config: import("./config.ts").TelemetryConfig,
+): string | undefined {
+  if (config.enabled === false) return undefined;
+  return testingRecorder ? testBackendKey : cacheKey(generation, config);
+}
+
+/** Close and forget backends that no active span needs. `currentKey` stays
+ * open for cheap subsequent writes; it is omitted when telemetry is disabled.
+ */
+function evictUnusedBackends(currentKey?: string): void {
+  for (const [key, backend] of backendCache) {
+    if (key === currentKey || (backendBindings.get(key) ?? 0) > 0) continue;
+    try {
+      backend?.close();
+    } catch (error) {
+      console.error("[delegate] telemetry backend close failed", error);
+    }
+    backendCache.delete(key);
+    backendBindings.delete(key);
+  }
+}
+
+function retainBackendBinding(
+  generation: number,
+  config: import("./config.ts").TelemetryConfig,
+): string | undefined {
+  if (telemetryClosed || generation !== telemetryGeneration) return undefined;
+  const key = backendKeyForConfig(generation, config);
+  if (key !== undefined) {
+    backendBindings.set(key, (backendBindings.get(key) ?? 0) + 1);
+  }
+  evictUnusedBackends(key);
+  return key;
+}
+
+function releaseBackendBinding(key: string | undefined): void {
+  if (key !== undefined) {
+    const remaining = (backendBindings.get(key) ?? 1) - 1;
+    if (remaining > 0) backendBindings.set(key, remaining);
+    else backendBindings.delete(key);
+  }
+  const config = getTelemetryConfig();
+  evictUnusedBackends(
+    telemetryClosed
+      ? undefined
+      : backendKeyForConfig(telemetryGeneration, config),
+  );
+}
+
 function disableBackendForKey(
   key: string,
   operation: string,
@@ -485,6 +539,7 @@ function closeAllBackends(): void {
     }
   }
   backendCache.clear();
+  backendBindings.clear();
 }
 
 function openSqliteBackend(
@@ -525,7 +580,9 @@ function getBackendForConfig(
 ): TelemetryBackend | undefined {
   if (telemetryClosed) return undefined;
   if (generation !== telemetryGeneration) return undefined;
-  if (config.enabled === false) return undefined;
+  const key = backendKeyForConfig(generation, config);
+  evictUnusedBackends(key);
+  if (key === undefined) return undefined;
 
   if (testingRecorder) {
     const existing = backendCache.get(testBackendKey);
@@ -540,7 +597,6 @@ function getBackendForConfig(
     return backend;
   }
 
-  const key = cacheKey(generation, config);
   const existing = backendCache.get(key);
   if (existing) return existing;
   if (existing === undefined && backendCache.has(key)) {
@@ -600,11 +656,17 @@ class CallSpanImpl implements CallSpan {
   readonly generation = telemetryGeneration;
   readonly telemetryConfig = getTelemetryConfig();
   private readonly input: CallSpanInput;
+  private readonly backendBinding: string | undefined;
+  private finished = false;
 
   constructor(input: CallSpanInput) {
     this.id = crypto.randomUUID();
     this.startedAt = Date.now();
     this.input = input;
+    this.backendBinding = retainBackendBinding(
+      this.generation,
+      this.telemetryConfig,
+    );
   }
 
   baseRecord(): CallRecord {
@@ -631,14 +693,23 @@ class CallSpanImpl implements CallSpan {
   }
 
   finish(finish: CallSpanFinish): void {
-    const b = getBackendForConfig(this.generation, this.telemetryConfig);
-    if (!b) return;
-    const record = this.baseRecord();
-    record.wall_ms = finish.wallMs;
-    record.status = finish.status;
-    record.total_tokens = finish.totalTokens;
-    record.total_cost = finish.totalCost;
-    b.recordCall(record);
+    if (this.finished) return;
+    this.finished = true;
+    try {
+      const b = getBackendForConfig(this.generation, this.telemetryConfig);
+      if (!b) return;
+      const record = this.baseRecord();
+      record.wall_ms = finish.wallMs;
+      record.status = finish.status;
+      record.total_tokens = finish.totalTokens;
+      record.total_cost = finish.totalCost;
+      b.recordCall(record);
+    } finally {
+      // Once the final call row is written, any task rows for this call have
+      // already been recorded. A superseded database can now release its
+      // SQLite handle (and its WAL sidecars) immediately.
+      releaseBackendBinding(this.backendBinding);
+    }
   }
 }
 
@@ -784,4 +855,10 @@ export function _resetTelemetryForTesting(): void {
   closeAllBackends();
   telemetryGeneration++;
   telemetryClosed = false;
+}
+
+/** @internal Test seam for asserting hot-reload eviction without exposing
+ * SQLite handles themselves. */
+export function _getTelemetryBackendCacheKeysForTesting(): string[] {
+  return [...backendCache.keys()];
 }

@@ -10208,17 +10208,43 @@ describe("touched-file overlap warning", () => {
 });
 
 describe("public export compatibility", () => {
-  test("loadDelegateSettings is a deprecated alias for readDelegateSettingsFile", () => {
-    expect(loadDelegateSettings).toBe(readDelegateSettingsFile);
-    const file = mkdtempSync(path.join(os.tmpdir(), "delegate-compat-"));
-    const settings = path.join(file, "settings.json");
-    writeFileSync(
-      settings,
-      JSON.stringify({ delegate: { agentOverrides: {} } }),
-    );
-    const parsed = loadDelegateSettings(settings);
-    expect(parsed).toHaveProperty("delegate");
-    rmSync(file, { recursive: true, force: true });
+  test("loadDelegateSettings preserves its deprecated cwd-based merged view", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "delegate-compat-"));
+    mock.module("node:os", () => ({ ...os, homedir: () => root }));
+    const project = path.join(root, "project");
+    const cwd = path.join(project, "nested");
+    try {
+      mkdirSync(path.join(root, ".pi", "agent"), { recursive: true });
+      mkdirSync(path.join(project, ".pi"), { recursive: true });
+      mkdirSync(cwd, { recursive: true });
+      writeFileSync(
+        path.join(root, ".pi", "agent", "settings.json"),
+        JSON.stringify({
+          delegate: {
+            agentOverrides: {
+              scout: { model: "user/model", thinking: "low" },
+            },
+          },
+        }),
+      );
+      writeFileSync(
+        path.join(project, ".pi", "settings.json"),
+        JSON.stringify({
+          delegate: {
+            agentOverrides: { scout: { model: "project/model" } },
+          },
+        }),
+      );
+
+      expect(loadDelegateSettings(cwd)?.agentOverrides?.scout).toEqual({
+        model: "project/model",
+        thinking: "low",
+      });
+    } finally {
+      clearDelegateSettingsCache();
+      mock.module("node:os", () => os);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("clearDelegateSettingsCache clears the legacy warning cwd set", () => {

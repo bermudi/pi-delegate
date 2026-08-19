@@ -714,7 +714,11 @@ export function getProviderExtensionSignature(
     config,
   );
   if (sources.length === 0) return "";
-  return JSON.stringify(sources.map((s) => s.source).sort());
+  // Preserve both ordering and provenance. Extension order may affect their
+  // initialization, and a user re-listing a shipped source changes it from
+  // best-effort to required. Treating either change as pool-compatible could
+  // reuse an extension-free session without performing the required checks.
+  return JSON.stringify(sources);
 }
 
 /** A provider-extension source together with how it entered the config. */
