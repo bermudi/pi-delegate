@@ -424,24 +424,20 @@ describe("dispatchSync touched-file overlap warning", () => {
     let capturedConfig: DelegateConfig | undefined;
     let releaseWorker!: () => void;
     const workerStarted = new Promise<void>((resolve) => {
-      const original = _setRunAgentSessionForTesting(
-        async (...args: unknown[]) => {
-          capturedConfig = args[8] as DelegateConfig;
-          resolve();
-          await new Promise<void>((r) => (releaseWorker = r));
-          return {
-            output: "done",
-            durationMs: 1,
-            tokens: 1,
-            usage: emptyUsage(),
-            touchedFiles: [],
-            attributedFiles: [],
-            prompted: true,
-          } as any;
-        },
-      );
-      // Preserve the original for cleanup; the mock just needs to capture.
-      original;
+      _setRunAgentSessionForTesting(async (...args: unknown[]) => {
+        capturedConfig = args[8] as DelegateConfig;
+        resolve();
+        await new Promise<void>((r) => (releaseWorker = r));
+        return {
+          output: "done",
+          durationMs: 1,
+          tokens: 1,
+          usage: emptyUsage(),
+          touchedFiles: [],
+          attributedFiles: [],
+          prompted: true,
+        } as any;
+      });
     });
 
     _setDelegateConfigForTesting({

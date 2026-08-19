@@ -202,10 +202,13 @@ export function checkout(
     });
   }
   if (frozen.providerExtensions !== candidate.providerExtensions) {
+    // JSON.stringify(undefined) returns undefined — the mismatch contract
+    // requires strings on both sides, so an unset side gets an explicit
+    // sentinel instead (mirrors the "<frozen>"/"<requested>" style above).
     mismatches.push({
       field: "providerExtensions",
-      frozen: JSON.stringify(frozen.providerExtensions),
-      requested: JSON.stringify(candidate.providerExtensions),
+      frozen: JSON.stringify(frozen.providerExtensions) ?? "<unset>",
+      requested: JSON.stringify(candidate.providerExtensions) ?? "<unset>",
     });
   }
   if (mismatches.length) return { status: "mismatch", mismatches };
