@@ -627,6 +627,64 @@ describe("telemetry", () => {
   );
 
   test(
+    "Node SQLite backend preserves the live-config backend when a stale span finishes",
+    { timeout: 15_000 },
+    async () => {
+      // Bug: getBackendForConfig evicted with only the pinned (historical) key
+      // as the preserve key. When an in-flight span whose config was superseded
+      // mid-flight finished, it evicted the now-live backend (which had no
+      // binding left after the newer span finished), forcing the next write to
+      // reopen SQLite — and discarding the live backend's failure sentinel so
+      // failed opens retried and logged in a loop.
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-live-"),
+      );
+      const firstDb = path.join(dir, "first.db");
+      const secondDb = path.join(dir, "second.db");
+      try {
+        const result = await runNodeScript(
+          `
+          import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
+          import {
+            _resetTelemetryForTesting,
+            _getTelemetryBackendCacheKeysForTesting,
+            beginCall,
+          } from ${JSON.stringify(telemetryModule)};
+          const [firstDb, secondDb] = [${JSON.stringify(firstDb)}, ${JSON.stringify(secondDb)}];
+          _resetTelemetryForTesting();
+          // span1 starts under config A (firstDb).
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: firstDb } });
+          const span1 = beginCall({ mode: "sync", taskCount: 1 });
+          span1.spawn();
+          // Config switches to B (secondDb) while span1 is still in-flight.
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: secondDb } });
+          // span2 starts and finishes under B — releasing B's binding but
+          // keeping B cached (releaseBackendBinding preserves the live key).
+          const span2 = beginCall({ mode: "sync", taskCount: 1 });
+          span2.spawn();
+          span2.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+          // Now finish the stale span1. Before the fix, getBackendForConfig
+          // evicted B (no binding, not the pinned key A). After the fix, the
+          // live-config key B is preserved alongside the pinned key A.
+          span1.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+          console.log(JSON.stringify(_getTelemetryBackendCacheKeysForTesting()));
+        `,
+          secondDb,
+        );
+        const keys = JSON.parse(result.stdout.trim()) as string[];
+        // The live-config backend (secondDb) must survive span1 finishing.
+        // span1's own backend (firstDb) is evicted by releaseBackendBinding
+        // (no binding, not live). Before the fix, keys was [].
+        expect(keys).toHaveLength(1);
+        expect(keys[0]).toContain(secondDb);
+        expect(keys.some((k) => k.includes(firstDb))).toBe(false);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
     "Node SQLite backend binds an in-flight span to its original database across hot reloads",
     { timeout: 15_000 },
     async () => {

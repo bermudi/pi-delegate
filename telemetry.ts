@@ -466,12 +466,17 @@ function backendKeyForConfig(
   return testingRecorder ? testBackendKey : cacheKey(generation, config);
 }
 
-/** Close and forget backends that no active span needs. `currentKey` stays
- * open for cheap subsequent writes; it is omitted when telemetry is disabled.
+/** Close and forget backends that no active span needs. Any key in
+ * `preserveKeys` stays open for cheap subsequent writes (and keeps its
+ * failure sentinel intact); pass the live-config key so a finishing stale
+ * span cannot evict the backend the next write needs.
  */
-function evictUnusedBackends(currentKey?: string): void {
+function evictUnusedBackends(...preserveKeys: (string | undefined)[]): void {
+  const preserve = new Set(
+    preserveKeys.filter((k): k is string => k !== undefined),
+  );
   for (const [key, backend] of backendCache) {
-    if (key === currentKey || (backendBindings.get(key) ?? 0) > 0) continue;
+    if (preserve.has(key) || (backendBindings.get(key) ?? 0) > 0) continue;
     try {
       backend?.close();
     } catch (error) {
@@ -581,7 +586,15 @@ function getBackendForConfig(
   if (telemetryClosed) return undefined;
   if (generation !== telemetryGeneration) return undefined;
   const key = backendKeyForConfig(generation, config);
-  evictUnusedBackends(key);
+  // Preserve both the pinned (historical) key for this span AND the live-config
+  // key. Without the live key, finishing an in-flight span whose config was
+  // superseded mid-flight would evict the live backend (and discard its failure
+  // sentinel), forcing the next write to reopen SQLite and re-fail in a loop.
+  const liveKey = backendKeyForConfig(
+    telemetryGeneration,
+    getTelemetryConfig(),
+  );
+  evictUnusedBackends(key, liveKey);
   if (key === undefined) return undefined;
 
   if (testingRecorder) {

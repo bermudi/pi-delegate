@@ -2146,6 +2146,64 @@ describe("formatFailedTask", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("partial output honors the dispatch-scoped spill config, not the live global", () => {
+    // Bug: formatFailedTask discarded the dispatch config and rendered partial
+    // output with the live global spill limits. A task pinned to a 10-char
+    // threshold returned the full HEAD-…-TAIL after the live config widened.
+    // The fix threads the config through so the bounds captured at dispatch
+    // are the bounds the parent sees on failure.
+    type ConfigLike = NonNullable<Parameters<typeof formatFailedTask>[2]>;
+    const pinnedConfig = {
+      output: { spillThresholdChars: 10, spillTailChars: 4 },
+    } as ConfigLike;
+    const r: ResultLike = {
+      agent: "scout",
+      output: "HEAD-0123456789-TAIL",
+      error: "524 cloudflare timeout",
+      durationMs: 1000,
+      tokens: 0,
+      touchedFiles: [],
+    };
+    try {
+      // Widen the live global threshold so that without the fix (config
+      // dropped), the 18-char output would pass through unspilled.
+      _setDelegateConfigForTesting({
+        output: { spillThresholdChars: 100_000, spillTailChars: 100_000 },
+      });
+      const lines = formatFailedTask(r, undefined, pinnedConfig);
+      const body = lines.find((l) => l.includes("…"));
+      // Spilled: tail kept, head gone, pointer present.
+      expect(body).toBeDefined();
+      expect(body).toContain("TAIL");
+      expect(body).not.toContain("HEAD");
+      expect(body).toContain("spilled to");
+      // The pointer names a real file containing the FULL output.
+      const m = body!.match(/spilled to (.+?) —/);
+      expect(m).not.toBeNull();
+      expect(fs.existsSync(m![1]!)).toBe(true);
+      expect(fs.readFileSync(m![1]!, "utf8")).toBe(r.output);
+    } finally {
+      _resetDelegateConfigForTesting();
+      // Clean the spill file dropped in the system tmpdir.
+      const dir = os.tmpdir();
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(dir);
+      } catch {
+        entries = [];
+      }
+      for (const name of entries) {
+        if (name.startsWith("delegate-output-")) {
+          try {
+            fs.rmSync(path.join(dir, name), { force: true });
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+    }
+  });
 });
 
 // ── formatCompletedTask ──────────────────────────────────────────────────
