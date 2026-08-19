@@ -13,6 +13,7 @@ import {
   getConcurrencyLimit,
   getMaxAsyncTickets,
   getDelegateConfigSnapshot,
+  getTelemetryConfig,
 } from "./config.ts";
 import type { DelegateConfig } from "./config.ts";
 import { getCurrentLeafId } from "./leaf.ts";
@@ -308,6 +309,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     callStartedAt: callSpan?.startedAt,
     callRecord: callSpan ? { ...callSpan.baseRecord() } : undefined,
     telemetryGeneration: callSpan?.generation,
+    telemetryConfig: callSpan?.telemetryConfig,
     // Capture the dispatch-scoped snapshot so async workers and later poll/wait
     // formatting use the same retry/stall/output/provider settings that were
     // in effect when the ticket was spawned.
@@ -332,6 +334,8 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     delegateStartedAt: ticket.created,
     telemetryCallId: callSpan?.id,
     telemetryGeneration: callSpan?.generation,
+    telemetryConfig:
+      callSpan?.telemetryConfig ?? getTelemetryConfig(dispatchConfig),
     async: true,
     config: dispatchConfig,
     onProgress: (p, u) => {
@@ -465,6 +469,8 @@ export async function dispatchSync(
     delegateStartedAt: startedAt,
     telemetryCallId: callSpan?.id,
     telemetryGeneration: callSpan?.generation,
+    telemetryConfig:
+      callSpan?.telemetryConfig ?? getTelemetryConfig(dispatchConfig),
     async: false,
     config: dispatchConfig,
     onProgress: (p, u) => {

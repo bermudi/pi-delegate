@@ -72,14 +72,12 @@ export function _setWholeTaskRetryForTesting(
 
 function resolvedWholeTaskMaxRetries(env: TaskRunEnv): number {
   return (
-    testWholeTaskMaxRetries ??
-    getWholeTaskMaxRetries(env.config ?? undefined)
+    testWholeTaskMaxRetries ?? getWholeTaskMaxRetries(env.config ?? undefined)
   );
 }
 function resolvedWholeTaskBaseDelayMs(env: TaskRunEnv): number {
   return (
-    testWholeTaskBaseDelayMs ??
-    getWholeTaskBaseDelayMs(env.config ?? undefined)
+    testWholeTaskBaseDelayMs ?? getWholeTaskBaseDelayMs(env.config ?? undefined)
   );
 }
 
@@ -260,6 +258,7 @@ function recordTaskOutcome(
     recordTask({
       callId: env.telemetryCallId,
       generation: env.telemetryGeneration,
+      telemetryConfig: env.telemetryConfig,
       async: env.async ?? false,
       taskIndex: p.index,
       task,
@@ -454,6 +453,7 @@ function checkoutPooledSession(
     cwd: task.cwd,
     thinking: task.thinking,
     tools: task.tools,
+    providerExtensions: task.providerExtensionSources ?? "",
     ...task.reuseIntent,
   });
   if (co.status === "mismatch") {
@@ -950,6 +950,7 @@ async function settlePooledAttempt(
           thinking: task.thinking,
           tools: task.tools,
           cwd: task.cwd,
+          providerExtensions: task.providerExtensionSources ?? "",
         },
         tokens: r.tokens,
       });

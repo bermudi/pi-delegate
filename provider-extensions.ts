@@ -35,7 +35,11 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { getSubagentProviderExtensionSourcesForProvider } from "./config.ts";
-import { canonicalPath, isPathWithinDirectory, isPathWithinDirectoryLexical } from "./trusted-paths.ts";
+import {
+  canonicalPath,
+  isPathWithinDirectory,
+  isPathWithinDirectoryLexical,
+} from "./trusted-paths.ts";
 import {
   parseGitOriginIdentity,
   parsePackageSource,

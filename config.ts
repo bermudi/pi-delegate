@@ -173,6 +173,152 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function isPositiveInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value > 0
+  );
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 0
+  );
+}
+
+/** Validate numeric and nested-object fields before they reach the config
+ *  singleton. Malformed values in `delegate.json` must not replace a valid
+ *  snapshot with a half-parsed object that later produces `NaN` concurrency
+ *  limits and deadlocks the global semaphore. */
+function validateNumericAndNestedFields(
+  raw: Record<string, unknown>,
+): string | null {
+  if ("agent" in raw && raw.agent !== undefined && !isRecord(raw.agent)) {
+    return "agent must be an object";
+  }
+  if (
+    "concurrency" in raw &&
+    raw.concurrency !== undefined &&
+    !isRecord(raw.concurrency)
+  ) {
+    return "concurrency must be an object";
+  }
+  if ("retry" in raw && raw.retry !== undefined && !isRecord(raw.retry)) {
+    return "retry must be an object";
+  }
+  if ("output" in raw && raw.output !== undefined && !isRecord(raw.output)) {
+    return "output must be an object";
+  }
+
+  if ("maxConcurrent" in raw && !isPositiveInteger(raw.maxConcurrent)) {
+    return `maxConcurrent must be a positive integer; got ${JSON.stringify(
+      raw.maxConcurrent,
+    )}`;
+  }
+  if ("maxAsyncTickets" in raw && !isPositiveInteger(raw.maxAsyncTickets)) {
+    return `maxAsyncTickets must be a positive integer; got ${JSON.stringify(
+      raw.maxAsyncTickets,
+    )}`;
+  }
+  if ("stallTimeoutMs" in raw && !isNonNegativeInteger(raw.stallTimeoutMs)) {
+    return `stallTimeoutMs must be a non-negative integer; got ${JSON.stringify(
+      raw.stallTimeoutMs,
+    )}`;
+  }
+
+  const concurrency = raw.concurrency;
+  if (concurrency) {
+    const c = concurrency as Record<string, unknown>;
+    if ("default" in c && !isPositiveInteger(c.default)) {
+      return `concurrency.default must be a positive integer; got ${JSON.stringify(
+        c.default,
+      )}`;
+    }
+    if ("providers" in c) {
+      const providers = c.providers;
+      if (!isRecord(providers)) {
+        return "concurrency.providers must be an object";
+      }
+      for (const [key, value] of Object.entries(providers)) {
+        if (!isPositiveInteger(value)) {
+          return `concurrency.providers.${key} must be a positive integer; got ${JSON.stringify(
+            value,
+          )}`;
+        }
+      }
+    }
+    if ("models" in c) {
+      const models = c.models;
+      if (!isRecord(models)) {
+        return "concurrency.models must be an object";
+      }
+      for (const [key, value] of Object.entries(models)) {
+        if (!isPositiveInteger(value)) {
+          return `concurrency.models.${key} must be a positive integer; got ${JSON.stringify(
+            value,
+          )}`;
+        }
+      }
+    }
+  }
+
+  const retry = raw.retry;
+  if (retry) {
+    const r = retry as Record<string, unknown>;
+    if (
+      "wholeTaskMaxRetries" in r &&
+      !isNonNegativeInteger(r.wholeTaskMaxRetries)
+    ) {
+      return `retry.wholeTaskMaxRetries must be a non-negative integer; got ${JSON.stringify(
+        r.wholeTaskMaxRetries,
+      )}`;
+    }
+    if (
+      "wholeTaskBaseDelayMs" in r &&
+      !isNonNegativeInteger(r.wholeTaskBaseDelayMs)
+    ) {
+      return `retry.wholeTaskBaseDelayMs must be a non-negative integer; got ${JSON.stringify(
+        r.wholeTaskBaseDelayMs,
+      )}`;
+    }
+  }
+
+  const output = raw.output;
+  if (output) {
+    const o = output as Record<string, unknown>;
+    if (
+      "spillThresholdChars" in o &&
+      !isPositiveInteger(o.spillThresholdChars)
+    ) {
+      return `output.spillThresholdChars must be a positive integer; got ${JSON.stringify(
+        o.spillThresholdChars,
+      )}`;
+    }
+    if ("spillTailChars" in o && !isNonNegativeInteger(o.spillTailChars)) {
+      return `output.spillTailChars must be a non-negative integer; got ${JSON.stringify(
+        o.spillTailChars,
+      )}`;
+    }
+  }
+
+  return null;
+}
+
+/** Return a safe positive integer from a possibly malformed config value. */
+function safePositiveInteger(value: unknown, defaultValue: number): number {
+  return isPositiveInteger(value) ? (value as number) : defaultValue;
+}
+
+/** Return a safe non-negative integer from a possibly malformed config value. */
+function safeNonNegativeInteger(value: unknown, defaultValue: number): number {
+  return isNonNegativeInteger(value) ? (value as number) : defaultValue;
+}
+
 /**
  * Validate the user-editable telemetry block at its boundary. An explicitly
  * malformed block disables telemetry rather than silently turning it on with
@@ -361,6 +507,15 @@ function readDelegateConfigFromDisk(): ReadConfigResult {
         error: new Error("top-level value is not an object"),
       };
     }
+    const numericError = validateNumericAndNestedFields(
+      parsed as Record<string, unknown>,
+    );
+    if (numericError) {
+      return {
+        status: "error",
+        error: new Error(numericError),
+      };
+    }
     // Merge with defaults so new fields are always present
     return {
       status: "ok",
@@ -421,7 +576,8 @@ export function loadDelegateConfig(): DelegateConfig {
     );
     return structuredClone(DEFAULT_DELEGATE_CONFIG);
   }
-  if (result.status === "missing") return structuredClone(DEFAULT_DELEGATE_CONFIG);
+  if (result.status === "missing")
+    return structuredClone(DEFAULT_DELEGATE_CONFIG);
   return result.config;
 }
 
@@ -475,6 +631,12 @@ export function _setStallTimeoutForTesting(
 export function _setDelegateConfigForTesting(
   config: Partial<DelegateConfig> = {},
 ): void {
+  const numericError = validateNumericAndNestedFields(
+    config as Record<string, unknown>,
+  );
+  if (numericError) {
+    throw new Error(`[delegate] _setDelegateConfigForTesting: ${numericError}`);
+  }
   __delegateConfig = {
     ...DEFAULT_DELEGATE_CONFIG,
     ...config,
@@ -536,6 +698,23 @@ export function getSubagentProviderExtensionsForProvider(
   return Object.prototype.hasOwnProperty.call(extensions, normalized)
     ? (extensions[normalized] ?? [])
     : [];
+}
+
+/** Stable signature for the provider-scoped extension allowlist that applies
+ *  to a given model provider. Used as a pool compatibility key so a
+ *  `delegate.json` edit that revokes or changes an allowlisted extension does
+ *  not silently reuse a pooled session whose runtime already loaded the old
+ *  extension code. */
+export function getProviderExtensionSignature(
+  provider: string | undefined,
+  config: DelegateConfig = __delegateConfig,
+): string {
+  const sources = getSubagentProviderExtensionSourcesForProvider(
+    provider,
+    config,
+  );
+  if (sources.length === 0) return "";
+  return JSON.stringify(sources.map((s) => s.source).sort());
 }
 
 /** A provider-extension source together with how it entered the config. */
@@ -647,27 +826,33 @@ export function getConcurrencyLimit(
 ): number {
   // 1. Per-model
   const perModel = config.concurrency.models?.[modelKey];
-  if (perModel != null) return perModel;
+  if (isPositiveInteger(perModel)) return perModel;
   // 2. Per-provider
   const provider = modelKey.split("/")[0];
   const perProvider = config.concurrency.providers?.[provider];
-  if (perProvider != null) return perProvider;
+  if (isPositiveInteger(perProvider)) return perProvider;
   // 3. Default
-  return config.concurrency.default;
+  return isPositiveInteger(config.concurrency.default)
+    ? config.concurrency.default
+    : MAX_CONCURRENCY;
 }
 
 /** Get the effective max async tickets limit. */
 export function getMaxAsyncTickets(
   config: DelegateConfig = __delegateConfig,
 ): number {
-  return config.maxAsyncTickets ?? MAX_ASYNC_TICKETS;
+  return isPositiveInteger(config.maxAsyncTickets)
+    ? config.maxAsyncTickets
+    : MAX_ASYNC_TICKETS;
 }
 
 /** Get the hard ceiling on total concurrent agents. */
 export function getMaxConcurrent(
   config: DelegateConfig = __delegateConfig,
 ): number {
-  return config.maxConcurrent ?? MAX_CONCURRENCY;
+  return isPositiveInteger(config.maxConcurrent)
+    ? config.maxConcurrent
+    : MAX_CONCURRENCY;
 }
 
 /** Maximum inactivity before cooperative stall cancellation is requested.
@@ -676,44 +861,45 @@ export function getStallTimeoutMs(
   config: DelegateConfig = __delegateConfig,
 ): number {
   const configured = stallTimeoutOverrideForTesting ?? config.stallTimeoutMs;
-  if (
-    typeof configured === "number" &&
-    Number.isFinite(configured) &&
-    configured >= 0
-  ) {
-    return configured;
-  }
-  return DEFAULT_DELEGATE_CONFIG.stallTimeoutMs!;
+  return isNonNegativeInteger(configured)
+    ? configured
+    : DEFAULT_DELEGATE_CONFIG.stallTimeoutMs!;
 }
 
 /** Get the max whole-task retries after the initial attempt. */
 export function getWholeTaskMaxRetries(
   config: DelegateConfig = __delegateConfig,
 ): number {
-  return config.retry?.wholeTaskMaxRetries ?? 3;
+  return isNonNegativeInteger(config.retry?.wholeTaskMaxRetries)
+    ? config.retry!.wholeTaskMaxRetries
+    : 3;
 }
 
 /** Get the base delay (ms) for whole-task retry exponential backoff. */
 export function getWholeTaskBaseDelayMs(
   config: DelegateConfig = __delegateConfig,
 ): number {
-  return config.retry?.wholeTaskBaseDelayMs ?? 1_000;
+  return isNonNegativeInteger(config.retry?.wholeTaskBaseDelayMs)
+    ? config.retry!.wholeTaskBaseDelayMs
+    : 1_000;
 }
 
 /** Get the output-spill threshold (chars). Over this, final output is spilled. */
 export function getOutputSpillThreshold(
   config: DelegateConfig = __delegateConfig,
 ): number {
-  return (
-    config.output?.spillThresholdChars ?? OUTPUT_SPILL_THRESHOLD_CHARS
-  );
+  return isPositiveInteger(config.output?.spillThresholdChars)
+    ? config.output!.spillThresholdChars
+    : OUTPUT_SPILL_THRESHOLD_CHARS;
 }
 
 /** Get the output-spill tail length (chars) kept in-context when spilled. */
 export function getOutputSpillTail(
   config: DelegateConfig = __delegateConfig,
 ): number {
-  return config.output?.spillTailChars ?? OUTPUT_SPILL_TAIL_CHARS;
+  return isNonNegativeInteger(config.output?.spillTailChars)
+    ? config.output!.spillTailChars
+    : OUTPUT_SPILL_TAIL_CHARS;
 }
 
 /**

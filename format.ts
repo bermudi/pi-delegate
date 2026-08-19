@@ -437,10 +437,14 @@ export function formatCompletedTask(
     const touched = relativeTouchedSummary(result.touchedFiles, task.cwd);
     if (touched) meta.push(`touched (best-effort): ${touched}`);
     parts.push(
-      `[${meta.join(" · ")}]\n\n${renderOutputForLLM(result.output, result.agent, {
-        thresholdChars: getOutputSpillThreshold(config),
-        tailChars: getOutputSpillTail(config),
-      })}`,
+      `[${meta.join(" · ")}]\n\n${renderOutputForLLM(
+        result.output,
+        result.agent,
+        {
+          thresholdChars: getOutputSpillThreshold(config),
+          tailChars: getOutputSpillTail(config),
+        },
+      )}`,
     );
   }
   return parts;

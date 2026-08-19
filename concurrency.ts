@@ -98,9 +98,13 @@ function releaseGlobal(): void {
  *
  *  Newly queued tasks observe the new limit immediately; already-running tasks
  *  keep their slots. If the limit was raised, this wakes as many eligible
- *  queued waiters as the new cap allows. */
+ *  queued waiters as the new cap allows. Malformed limits fall back to 1. */
 export function reconfigureGlobalConcurrency(limit: number): void {
-  globalConcurrencyLimit = Math.max(1, limit);
+  const safe =
+    typeof limit === "number" && Number.isFinite(limit) && limit > 0
+      ? limit
+      : 1;
+  globalConcurrencyLimit = Math.max(1, safe);
   while (wakeNextWaiter()) {
     // Wake up to the new limit.
   }
@@ -125,7 +129,13 @@ async function mapConcurrent<T, R>(
   signal?: AbortSignal,
 ): Promise<R[]> {
   if (items.length === 0) return [];
-  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const safeConcurrency =
+    typeof concurrency === "number" &&
+    Number.isFinite(concurrency) &&
+    concurrency > 0
+      ? concurrency
+      : 1;
+  const limit = Math.max(1, Math.min(safeConcurrency, items.length));
   const results: R[] = new Array(items.length);
   let next = 0;
   const worker = async () => {

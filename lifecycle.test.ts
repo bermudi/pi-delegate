@@ -3007,6 +3007,7 @@ describe("delegate pre-prompt deadline and pool", () => {
           thinking: task.thinking,
           tools: task.tools,
           cwd: task.cwd,
+          providerExtensions: "",
         },
         tokens: 0,
       });
@@ -3100,6 +3101,7 @@ describe("delegate pre-prompt deadline and pool", () => {
           thinking: task.thinking,
           tools: task.tools,
           cwd: task.cwd,
+          providerExtensions: "",
         },
         tokens: 0,
       });
@@ -3185,6 +3187,7 @@ describe("delegate pre-prompt deadline and pool", () => {
           thinking: task.thinking,
           tools: task.tools,
           cwd: task.cwd,
+          providerExtensions: "",
         },
         tokens: 100,
       });
@@ -3283,6 +3286,7 @@ describe("delegate pre-prompt deadline and pool", () => {
           thinking: task.thinking,
           tools: task.tools,
           cwd: task.cwd,
+          providerExtensions: "",
         },
         tokens: 0,
       });
@@ -3363,6 +3367,7 @@ describe("delegate pre-prompt deadline and pool", () => {
           thinking: task.thinking,
           tools: task.tools,
           cwd: task.cwd,
+          providerExtensions: "",
         },
         tokens: 0,
       });

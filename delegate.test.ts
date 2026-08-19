@@ -11,6 +11,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { MAX_CONCURRENCY, MAX_ASYNC_TICKETS } from "./constants.ts";
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   _resetPoolForTesting,
@@ -82,6 +83,7 @@ import {
   reloadDelegateConfig,
   getDelegateConfigSnapshot,
   getConcurrencyLimit,
+  getMaxConcurrent,
   getMaxAsyncTickets,
   getStallTimeoutMs,
   type AgentConfig,
@@ -2667,7 +2669,9 @@ describe("delegate.json agentOverrides", () => {
 
   test("rejects unsupported per-agent skill filtering with a warning", () => {
     writeDelegateConfig({
-      agentOverrides: { scout: { model: "some/model", skills: ["security-review"] } },
+      agentOverrides: {
+        scout: { model: "some/model", skills: ["security-review"] },
+      },
     });
     const warnings: string[] = [];
     const originalWarn = console.warn;
@@ -2756,9 +2760,7 @@ describe("delegate.json agentOverrides", () => {
 
     // The previous valid snapshot must survive a transient malformed file.
     expect(getAgentOverrides()?.coder?.model).toBe("first/model");
-    expect(
-      warnings.some((w) => w.includes("could not reload")),
-    ).toBe(true);
+    expect(warnings.some((w) => w.includes("could not reload"))).toBe(true);
   });
 
   test("reloadDelegateConfig falls back to defaults when the file is deleted", () => {
@@ -2787,6 +2789,78 @@ describe("delegate.json agentOverrides", () => {
   });
 });
 
+describe("malformed delegate.json numeric fields", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+    mock.module("node:os", () => ({ ...os, homedir: () => tmpDir }));
+  });
+
+  afterEach(() => {
+    mock.module("node:os", () => os);
+    cleanup(tmpDir);
+  });
+
+  function writeDelegateConfig(config: unknown) {
+    const dir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "delegate.json"), JSON.stringify(config));
+  }
+
+  test("rejects non-numeric maxConcurrent and keeps the previous valid snapshot", () => {
+    writeDelegateConfig({ maxConcurrent: 4 });
+    reloadDelegateConfig();
+    expect(getMaxConcurrent()).toBe(4);
+
+    writeDelegateConfig({ maxConcurrent: "oops" });
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      reloadDelegateConfig();
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    // The previous valid snapshot must survive a malformed value that would
+    // otherwise become NaN and deadlock the global concurrency semaphore.
+    expect(getMaxConcurrent()).toBe(4);
+    expect(
+      warnings.some(
+        (w) => w.includes("could not reload") || w.includes("maxConcurrent"),
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects malformed nested numeric fields and keeps the previous snapshot", () => {
+    writeDelegateConfig({ concurrency: { default: 4 } });
+    reloadDelegateConfig();
+    expect(getConcurrencyLimit("openai/gpt-5")).toBe(4);
+
+    writeDelegateConfig({
+      concurrency: { default: "oops", providers: { openai: 4 } },
+    });
+    reloadDelegateConfig();
+    expect(getConcurrencyLimit("openai/gpt-5")).toBe(4);
+  });
+
+  test("getters return safe defaults when a malformed value is injected", () => {
+    const malformed = {
+      maxConcurrent: "oops",
+      maxAsyncTickets: -1,
+      stallTimeoutMs: NaN,
+      concurrency: { default: Infinity },
+    } as unknown as DelegateConfig;
+    expect(getMaxConcurrent(malformed)).toBe(MAX_CONCURRENCY);
+    expect(getMaxAsyncTickets(malformed)).toBe(MAX_ASYNC_TICKETS);
+    expect(getStallTimeoutMs(malformed)).toBe(15 * 60 * 1000);
+    expect(getConcurrencyLimit("openai/gpt-5", malformed)).toBe(
+      MAX_CONCURRENCY,
+    );
+  });
+});
+
 describe("legacy pi settings detection", () => {
   let tmpDir: string;
   let projectDir: string;
@@ -2796,6 +2870,7 @@ describe("legacy pi settings detection", () => {
     projectDir = path.join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
     mock.module("node:os", () => ({ ...os, homedir: () => tmpDir }));
+    clearDelegateSettingsCache();
   });
 
   afterEach(() => {
@@ -2871,8 +2946,68 @@ describe("legacy pi settings detection", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("delegate.json");
   });
-});
 
+  test("resolveTasks warns for legacy delegate blocks in every resolved task cwd", () => {
+    const webDir = path.join(tmpDir, "web");
+    const apiDir = path.join(tmpDir, "api");
+    mkdirSync(webDir, { recursive: true });
+    mkdirSync(apiDir, { recursive: true });
+    writeSettings(path.join("web", ".pi", "settings.json"), {
+      delegate: { agentOverrides: {} },
+    });
+    writeSettings(path.join("api", ".pi", "settings.json"), {
+      delegate: { agentOverridesByParentModel: {} },
+    });
+
+    const parentModel = {
+      provider: "openrouter",
+      id: "deepseek-v4-pro",
+    } as any;
+    const registry = {
+      getAvailable: () => [parentModel],
+      find: () => parentModel,
+      hasConfiguredAuth: () => true,
+    } as any;
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      resolveTasks(
+        [
+          { prompt: "web work", cwd: "../web" },
+          { prompt: "api work", cwd: "../api" },
+        ] as any,
+        {
+          cwd: projectDir,
+          model: parentModel,
+          modelRegistry: registry,
+          sessionManager: undefined,
+          getSystemPrompt: () => "parent",
+        } as any,
+        new Map(),
+        { thinking: "off", tools: ["read"] },
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(
+      warnings.filter((w) => w.includes("delegate.json")).length,
+    ).toBeGreaterThanOrEqual(2);
+    // Each distinct task cwd should be reported.
+    expect(
+      new Set(
+        warnings
+          .filter((w) => w.includes("delegate.json"))
+          .map((w) => {
+            const m = w.match(/in (.+?):/);
+            return m ? m[1] : "";
+          }),
+      ).size,
+    ).toBe(2);
+  });
+});
 
 // ── Integration: tool registration ────────────────────────────────────────
 
@@ -5040,6 +5175,49 @@ describe("delegate pool", () => {
       "model",
       "systemPrompt",
     ]);
+  });
+
+  test("checkout rejects providerExtensions changes to prevent revoked extension reuse", () => {
+    const frozenModel = { provider: "openai-codex", id: "pool-ext" } as any;
+    const signatureA = JSON.stringify(["npm:old"].sort());
+    const signatureB = JSON.stringify(["npm:new"].sort());
+    commit("ext-pool", {
+      session: {} as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/ext-pool.jsonl",
+      frozen: {
+        systemPrompt: "",
+        model: frozenModel,
+        thinking: "off" as any,
+        tools: ["read"],
+        cwd: "/tmp",
+        providerExtensions: signatureA,
+      },
+      tokens: 0,
+    });
+
+    const result = checkout("ext-pool", {
+      cwd: "/tmp",
+      thinking: "off" as any,
+      tools: ["read"],
+      model: frozenModel,
+      providerExtensions: signatureB,
+    });
+    expect(result.status).toBe("mismatch");
+    if (result.status !== "mismatch") throw new Error("expected mismatch");
+    expect(result.mismatches.map((m) => m.field)).toContain(
+      "providerExtensions",
+    );
+
+    // The same configured allowlist is allowed to reuse.
+    const hit = checkout("ext-pool", {
+      cwd: "/tmp",
+      thinking: "off" as any,
+      tools: ["read"],
+      model: frozenModel,
+      providerExtensions: signatureA,
+    });
+    expect(hit.status).toBe("hit");
   });
 
   test("closeAllPooledAgents disposes every live session", async () => {
@@ -10034,7 +10212,10 @@ describe("public export compatibility", () => {
     expect(loadDelegateSettings).toBe(readDelegateSettingsFile);
     const file = mkdtempSync(path.join(os.tmpdir(), "delegate-compat-"));
     const settings = path.join(file, "settings.json");
-    writeFileSync(settings, JSON.stringify({ delegate: { agentOverrides: {} } }));
+    writeFileSync(
+      settings,
+      JSON.stringify({ delegate: { agentOverrides: {} } }),
+    );
     const parsed = loadDelegateSettings(settings);
     expect(parsed).toHaveProperty("delegate");
     rmSync(file, { recursive: true, force: true });
@@ -10046,7 +10227,10 @@ describe("public export compatibility", () => {
     mkdirSync(projectDir, { recursive: true });
     const settings = path.join(tmpRoot, ".pi", "settings.json");
     mkdirSync(path.dirname(settings), { recursive: true });
-    writeFileSync(settings, JSON.stringify({ delegate: { agentOverrides: {} } }));
+    writeFileSync(
+      settings,
+      JSON.stringify({ delegate: { agentOverrides: {} } }),
+    );
 
     const warnings: string[] = [];
     const originalWarn = console.warn;

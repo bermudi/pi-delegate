@@ -18,6 +18,10 @@ export interface FrozenConfig {
   thinking: ThinkingLevel;
   tools: string[];
   cwd: string;
+  /** Stable signature of the provider-scoped extension allowlist this session
+   * was built with. A change in `delegate.json` providerExtensions must force
+   * session recreation so the old executable runtime is not silently reused. */
+  providerExtensions?: string;
 }
 
 /** The subset a reuse request supplies for validation. `model` and
@@ -29,12 +33,20 @@ export interface ConfigCandidate {
   tools: string[];
   model?: Model<Api>;
   systemPrompt?: string;
+  /** Provider-scoped extension allowlist signature for the current dispatch. */
+  providerExtensions?: string;
 }
 
 /** One field-level diff from a reuse that conflicts with the frozen config. The
  * pool computes these; the caller formats the error string. */
 export interface ConfigMismatch {
-  field: "cwd" | "thinking" | "tools" | "model" | "systemPrompt";
+  field:
+    | "cwd"
+    | "thinking"
+    | "tools"
+    | "model"
+    | "systemPrompt"
+    | "providerExtensions";
   frozen: string;
   requested: string;
 }
@@ -187,6 +199,13 @@ export function checkout(
       field: "systemPrompt",
       frozen: "<frozen>",
       requested: "<requested>",
+    });
+  }
+  if (frozen.providerExtensions !== candidate.providerExtensions) {
+    mismatches.push({
+      field: "providerExtensions",
+      frozen: JSON.stringify(frozen.providerExtensions),
+      requested: JSON.stringify(candidate.providerExtensions),
     });
   }
   if (mismatches.length) return { status: "mismatch", mismatches };

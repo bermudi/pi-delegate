@@ -21,9 +21,11 @@ import {
   getAgentOverridesByParentModel,
   resolveModelSpec,
   getDelegateConfigSnapshot,
+  getProviderExtensionSignature,
 } from "./config.ts";
 import type { DelegateConfig } from "./config.ts";
 import { resolveCwd } from "./utils.ts";
+import { warnLegacyDelegateSettingsMoved } from "./settings.ts";
 import type {
   AgentConfig,
   DelegateToolCtx,
@@ -242,6 +244,10 @@ export function resolveTasks(
       : undefined;
     const isBuiltinAgent = agent?.builtin === true;
     const cwd = resolveCwd(t.cwd ?? ctx.cwd, ctx.cwd);
+
+    // A task can resolve to a different cwd than the parent; legacy
+    // `delegate` blocks in those project settings must be surfaced too.
+    warnLegacyDelegateSettingsMoved(cwd);
 
     // delegate.json agent overrides for this agent. `default` bypasses them
     // entirely (it mirrors the live parent by contract).
@@ -512,6 +518,11 @@ export function resolveTasks(
       }
     }
 
+    const providerExtensionSources = getProviderExtensionSignature(
+      model?.provider,
+      dispatchConfig,
+    );
+
     const availableTools = availableToolNames(model?.provider);
     const availableToolSet = new Set(availableTools);
     const unknownTools = tools.filter((name) => !availableToolSet.has(name));
@@ -556,6 +567,7 @@ export function resolveTasks(
         model: requestedModel,
         systemPrompt: requestedSystemPrompt,
       },
+      providerExtensionSources,
     };
   });
 }
