@@ -69,13 +69,15 @@ interface TelemetryBackend {
   close(): void;
 }
 
-let backend: TelemetryBackend | undefined;
-let backendGeneration: number | undefined;
-let backendFailed = false;
-/** The telemetry config used to open the current backend. Tracked so a
- *  hot-reloaded `enabled` or `dbPath` change closes the old backend and opens
- *  a new one, rather than continuing to write to a stale SQLite file. */
-let backendConfig: import("./config.ts").TelemetryConfig | undefined;
+/** Active telemetry backends keyed by their (generation, config) pair. Call
+ *  spans and task rows are bound to the backend that was live when they
+ *  started, so a hot-reloaded `enabled`/`dbPath` change cannot split one
+ *  logical call across databases. The cache also isolates failures per config:
+ *  a bad `dbPath` is marked failed under its own key and does not block a
+ *  different path from opening. */
+const backendCache = new Map<string, TelemetryBackend | undefined>();
+const testBackendKey = "test";
+
 /** Monotonic runtime identity. A late worker from a previous runtime may not
  * write into the next runtime's backend after a bounded shutdown drain. */
 let telemetryGeneration = 0;
@@ -446,35 +448,51 @@ class RecorderBackend implements TelemetryBackend {
   close(): void {}
 }
 
-function disableBackend(operation: string, error: unknown): void {
-  if (backendFailed) return;
-  backendFailed = true;
-  const failedBackend = backend;
-  backend = undefined;
+function cacheKey(
+  generation: number,
+  config: import("./config.ts").TelemetryConfig,
+): string {
+  return JSON.stringify([generation, config.enabled, config.dbPath]);
+}
+
+function disableBackendForKey(
+  key: string,
+  operation: string,
+  error: unknown,
+): void {
+  const failedBackend = backendCache.get(key);
+  // Mark this (generation, config) as failed so subsequent writes for the
+  // same span do not reopen a broken backend on every call.
+  backendCache.set(key, undefined);
   try {
     failedBackend?.close();
   } catch (closeError) {
     console.error("[delegate] telemetry backend close failed", closeError);
   }
   console.error(
-    `[delegate] telemetry ${operation} failed; disabling telemetry`,
+    `[delegate] telemetry ${operation} failed; disabling telemetry for this config`,
     error,
   );
 }
 
-function openBackend(
-  config = getTelemetryConfig(),
+function closeAllBackends(): void {
+  for (const entry of backendCache.values()) {
+    if (entry === undefined) continue;
+    try {
+      entry.close();
+    } catch (error) {
+      console.error("[delegate] telemetry backend close failed", error);
+    }
+  }
+  backendCache.clear();
+}
+
+function openSqliteBackend(
+  config: import("./config.ts").TelemetryConfig,
+  onFailure: (operation: string, error: unknown) => void,
 ): TelemetryBackend | undefined {
   if (config.enabled === false || telemetryClosed) return undefined;
-  if (backendFailed) return undefined;
-  if (testingRecorder) {
-    return new RecorderBackend(testingRecorder, disableBackend);
-  }
-
-  if (!DatabaseSyncCtor) {
-    backendFailed = true;
-    return undefined;
-  }
+  if (!DatabaseSyncCtor) return undefined;
 
   const dbPath = config.dbPath ?? defaultDbPath();
   let db: DatabaseSync | undefined;
@@ -489,71 +507,64 @@ function openBackend(
     db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
     db.exec("PRAGMA journal_mode = WAL;");
     initSchema(db);
-    return new SqliteTelemetryBackend(db, disableBackend);
+    return new SqliteTelemetryBackend(db, onFailure);
   } catch (error) {
     try {
       db?.close();
     } catch (closeError) {
       console.error("[delegate] telemetry database close failed", closeError);
     }
-    backendFailed = true;
     console.error("[delegate] telemetry database failed to open", error);
     return undefined;
   }
 }
 
-function telemetryConfigsDiffer(
-  a: import("./config.ts").TelemetryConfig,
-  b: import("./config.ts").TelemetryConfig,
-): boolean {
-  return a.enabled !== b.enabled || a.dbPath !== b.dbPath;
-}
-
-function closeCurrentBackend(): void {
-  const stale = backend;
-  backend = undefined;
-  backendGeneration = undefined;
-  backendConfig = undefined;
-  stale?.close();
-}
-
-function getBackend(generation?: number): TelemetryBackend | undefined {
+function getBackendForConfig(
+  generation: number,
+  config: import("./config.ts").TelemetryConfig,
+): TelemetryBackend | undefined {
   if (telemetryClosed) return undefined;
-  if (generation !== undefined && generation !== telemetryGeneration) {
+  if (generation !== telemetryGeneration) return undefined;
+  if (config.enabled === false) return undefined;
+
+  if (testingRecorder) {
+    const existing = backendCache.get(testBackendKey);
+    if (existing) return existing;
+    if (existing === undefined && backendCache.has(testBackendKey)) {
+      return undefined;
+    }
+    const backend = new RecorderBackend(testingRecorder, (operation, error) =>
+      disableBackendForKey(testBackendKey, operation, error),
+    );
+    backendCache.set(testBackendKey, backend);
+    return backend;
+  }
+
+  const key = cacheKey(generation, config);
+  const existing = backendCache.get(key);
+  if (existing) return existing;
+  if (existing === undefined && backendCache.has(key)) {
+    // This exact (generation, config) pair already failed to open; do not
+    // retry and spam logs every task write.
     return undefined;
   }
 
-  const currentConfig = getTelemetryConfig();
-
-  if (backend) {
-    if (backendGeneration !== telemetryGeneration) {
-      // A previous runtime left its handle open while its bounded shutdown
-      // drain timed out. Dispose that stale handle before opening this one.
-      closeCurrentBackend();
-    } else if (generation !== undefined && backendGeneration !== generation) {
-      return undefined;
-    } else if (
-      backendConfig &&
-      telemetryConfigsDiffer(backendConfig, currentConfig)
-    ) {
-      // Config reload changed `enabled` or `dbPath` while the backend is open.
-      // Close the old handle and, if enabled, open a fresh one under the new
-      // settings. Reset backendFailed so a new path is given a fair attempt.
-      backendFailed = false;
-      closeCurrentBackend();
-    } else {
-      return backend;
-    }
-  }
-
-  if (currentConfig.enabled === false) return undefined;
-
-  backend = openBackend(currentConfig);
-  if (backend) {
-    backendGeneration = telemetryGeneration;
-    backendConfig = currentConfig;
-  }
+  const backend = openSqliteBackend(config, (operation, error) =>
+    disableBackendForKey(key, operation, error),
+  );
+  backendCache.set(key, backend);
   return backend;
+}
+
+/** Legacy unpinned backend lookup: uses the *live* telemetry config. Callers
+ *  that need a stable backend for the lifetime of a span/task should use
+ *  `getBackendForConfig` with the config captured at creation. */
+function getBackend(generation?: number): TelemetryBackend | undefined {
+  if (telemetryClosed) return undefined;
+  return getBackendForConfig(
+    generation ?? telemetryGeneration,
+    getTelemetryConfig(),
+  );
 }
 
 export interface CallSpanInput {
@@ -575,6 +586,8 @@ export interface CallSpan {
   readonly startedAt: number;
   /** Runtime generation captured at call creation; stale calls cannot write. */
   readonly generation: number;
+  /** Telemetry config captured at call creation; binds the span to one backend. */
+  readonly telemetryConfig: import("./config.ts").TelemetryConfig;
   /** Snapshot of the call row as it would be written at spawn. */
   baseRecord(): CallRecord;
   spawn(): void;
@@ -585,6 +598,7 @@ class CallSpanImpl implements CallSpan {
   readonly id: string;
   readonly startedAt: number;
   readonly generation = telemetryGeneration;
+  readonly telemetryConfig = getTelemetryConfig();
   private readonly input: CallSpanInput;
 
   constructor(input: CallSpanInput) {
@@ -611,13 +625,13 @@ class CallSpanImpl implements CallSpan {
   }
 
   spawn(): void {
-    const b = getBackend(this.generation);
+    const b = getBackendForConfig(this.generation, this.telemetryConfig);
     if (!b) return;
     b.recordCall(this.baseRecord());
   }
 
   finish(finish: CallSpanFinish): void {
-    const b = getBackend(this.generation);
+    const b = getBackendForConfig(this.generation, this.telemetryConfig);
     if (!b) return;
     const record = this.baseRecord();
     record.wall_ms = finish.wallMs;
@@ -632,8 +646,14 @@ export function beginCall(input: CallSpanInput): CallSpan {
   return new CallSpanImpl(input);
 }
 
-export function recordCall(record: CallRecord, generation?: number): void {
-  const b = getBackend(generation);
+export function recordCall(
+  record: CallRecord,
+  generation?: number,
+  config?: import("./config.ts").TelemetryConfig,
+): void {
+  const b = config
+    ? getBackendForConfig(generation ?? telemetryGeneration, config)
+    : getBackend(generation);
   if (!b) return;
   b.recordCall(record);
 }
@@ -644,6 +664,9 @@ export interface TaskSpanInput {
   callId: string;
   /** Runtime generation captured by the dispatch that owns this task. */
   generation?: number;
+  /** Telemetry config captured at dispatch; binds the task row to the same
+   *  backend as the call span. */
+  telemetryConfig?: import("./config.ts").TelemetryConfig;
   async: boolean;
   taskIndex: number;
   task: ResolvedTask;
@@ -660,7 +683,12 @@ function outcomeFromResult(result: TaskResult): string {
 }
 
 export function recordTask(input: TaskSpanInput): string | undefined {
-  const b = getBackend(input.generation);
+  const b = input.telemetryConfig
+    ? getBackendForConfig(
+        input.generation ?? telemetryGeneration,
+        input.telemetryConfig,
+      )
+    : getBackend(input.generation);
   if (!b) return undefined;
 
   const { callId, async, taskIndex, task, progress, result, retries } = input;
@@ -706,10 +734,7 @@ export function sealTelemetryWrites(expectedGeneration?: number): boolean {
   }
   telemetryGeneration++;
   telemetryClosed = true;
-  const current = backend;
-  backend = undefined;
-  backendGeneration = undefined;
-  current?.close();
+  closeAllBackends();
   return true;
 }
 
@@ -724,7 +749,7 @@ export function closeTelemetry(expectedGeneration?: number): void {
     return;
   }
   telemetryClosed = true;
-  closeCurrentBackend();
+  closeAllBackends();
 }
 
 /** Current runtime identity for lifecycle owners such as session_shutdown. */
@@ -739,27 +764,24 @@ export function prepareTelemetryForSession(): void {
   // A timed-out old runtime may have left its handle open. Close it before
   // advancing the generation so the old shutdown handler cannot close the new
   // runtime's backend later.
-  closeCurrentBackend();
+  closeAllBackends();
 
   telemetryGeneration++;
-  backendFailed = false;
   telemetryClosed = false;
 }
 
 export function _setTelemetryForTesting(
   recorder: TelemetryRecorder | undefined,
 ): void {
-  closeCurrentBackend();
+  closeAllBackends();
   testingRecorder = recorder;
-  backendFailed = false;
   telemetryGeneration++;
   telemetryClosed = false;
 }
 
 export function _resetTelemetryForTesting(): void {
   testingRecorder = undefined;
-  closeCurrentBackend();
-  backendFailed = false;
+  closeAllBackends();
   telemetryGeneration++;
   telemetryClosed = false;
 }

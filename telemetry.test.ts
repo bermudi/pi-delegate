@@ -584,6 +584,85 @@ describe("telemetry", () => {
     },
   );
 
+  test(
+    "Node SQLite backend binds an in-flight span to its original database across hot reloads",
+    { timeout: 15_000 },
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-bind-"),
+      );
+      const firstDb = path.join(dir, "first.db");
+      const secondDb = path.join(dir, "second.db");
+      try {
+        await runNodeScript(
+          `
+          import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
+          import { _resetTelemetryForTesting, beginCall } from ${JSON.stringify(telemetryModule)};
+          const [firstDb, secondDb] = [${JSON.stringify(firstDb)}, ${JSON.stringify(secondDb)}];
+          _resetTelemetryForTesting();
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: firstDb } });
+          const span1 = beginCall({ mode: "sync", taskCount: 1 });
+          span1.spawn();
+          // Hot reload changes the database path while span1 is still running.
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: secondDb } });
+          span1.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+          // A new span after the reload writes to the new database.
+          const span2 = beginCall({ mode: "sync", taskCount: 1 });
+          span2.spawn();
+          span2.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+        `,
+          firstDb,
+        );
+        const first = await readNodeDatabase(firstDb);
+        const second = await readNodeDatabase(secondDb);
+        // spawn and finish share the same call id, so the table has one row
+        // per call. The key assertion is that span1's final row did not land
+        // in the second database after the hot reload.
+        expect(first.calls).toBe(1);
+        expect(second.calls).toBe(1);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
+    "Node SQLite backend recovers after an initial open failure when dbPath is corrected",
+    { timeout: 15_000 },
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-recover-"),
+      );
+      const badParent = path.join(dir, "notadir");
+      fs.writeFileSync(badParent, "not a directory");
+      const badDb = path.join(badParent, "test.db");
+      const goodDb = path.join(dir, "good.db");
+      try {
+        await runNodeScript(
+          `
+          import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
+          import { _resetTelemetryForTesting, beginCall } from ${JSON.stringify(telemetryModule)};
+          const [badDb, goodDb] = [${JSON.stringify(badDb)}, ${JSON.stringify(goodDb)}];
+          _resetTelemetryForTesting();
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: badDb } });
+          const span1 = beginCall({ mode: "sync", taskCount: 1 });
+          span1.spawn(); // opens nothing; the bad parent cannot be created
+          // Correct the path and start a fresh span.
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: goodDb } });
+          const span2 = beginCall({ mode: "sync", taskCount: 1 });
+          span2.spawn();
+          span2.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+        `,
+          goodDb,
+        );
+        const good = await readNodeDatabase(goodDb);
+        expect(good.calls).toBe(1);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("a recorder write failure disables telemetry after the first attempt", () => {
     let attempts = 0;
     _setTelemetryForTesting({

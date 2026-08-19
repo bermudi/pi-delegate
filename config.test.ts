@@ -318,10 +318,7 @@ describe("agentOverrides normalization (via public seam)", () => {
         "openai-codex/gpt-5.6-sol": { scout: { model: "a/b" } },
       },
     });
-    const overrides = getAgentOverrides() as unknown as Record<
-      string,
-      unknown
-    >;
+    const overrides = getAgentOverrides() as unknown as Record<string, unknown>;
     const byParent = getAgentOverridesByParentModel() as unknown as Record<
       string,
       unknown

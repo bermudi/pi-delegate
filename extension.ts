@@ -23,10 +23,7 @@ import { registerProviderExtensionNotifier } from "./provider-extensions.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import { closeAllPooledAgents } from "./pool.ts";
 import { reconfigureGlobalConcurrency } from "./concurrency.ts";
-import {
-  reloadDelegateConfig,
-  getMaxConcurrent,
-} from "./config.ts";
+import { reloadDelegateConfig, getMaxConcurrent } from "./config.ts";
 import { warnLegacyDelegateSettingsMoved } from "./settings.ts";
 import {
   activeTicketSummary,

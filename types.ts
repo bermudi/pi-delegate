@@ -99,6 +99,9 @@ export interface AsyncTicket {
   callRecord?: CallRecord;
   /** Runtime generation for rejecting shutdown writes from stale tickets. */
   telemetryGeneration?: number;
+  /** Telemetry config captured at dispatch; binds shutdown aggregate rows to the
+   *  same backend the call span wrote to. */
+  telemetryConfig?: import("./config.ts").TelemetryConfig;
   /** Resolves after every async worker has settled, including shutdown aborts. */
   completion?: Promise<void>;
   /** Immutable dispatch-scoped delegate.json snapshot used by async workers and
@@ -141,6 +144,11 @@ export interface ResolvedTask {
   warnings: string[];
   /** Explicit settings that must match a live pooled session on reuse. */
   reuseIntent?: ReuseIntent;
+  /** Stable signature of the provider-scoped extension allowlist for this task's
+   *  model provider. Pool reuse compares this to the frozen session value so a
+   *  revoked or reconfigured extension cannot continue executing in a reused
+   *  session. */
+  providerExtensionSources?: string;
 }
 
 export interface ToolActivity {
@@ -268,6 +276,9 @@ export interface TaskRunEnv {
   telemetryCallId?: string;
   /** Runtime generation for rejecting writes from a stale shutdown worker. */
   telemetryGeneration?: number;
+  /** Telemetry config captured at dispatch; binds task rows to the same backend
+   *  as the call span. */
+  telemetryConfig?: import("./config.ts").TelemetryConfig;
   /** Whether this task is part of an async ticket. */
   async?: boolean;
   /** Immutable dispatch-scoped delegate.json snapshot. Long-lived async workers

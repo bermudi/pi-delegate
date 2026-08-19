@@ -169,6 +169,7 @@ export function cancelTicketForShutdown(ticket: AsyncTicket): void {
         total_cost: totalCost,
       },
       ticket.telemetryGeneration,
+      ticket.telemetryConfig,
     );
   }
 }

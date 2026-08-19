@@ -39,9 +39,9 @@ describe("trusted-paths", () => {
 
   describe("isPathWithinDirectory", () => {
     test("accepts a child path that exists", () => {
-      expect(
-        isPathWithinDirectory(tempRoot, join(tempRoot, "subdir")),
-      ).toBe(true);
+      expect(isPathWithinDirectory(tempRoot, join(tempRoot, "subdir"))).toBe(
+        true,
+      );
     });
 
     test("rejects a nonexistent child path (fail closed)", () => {
@@ -96,10 +96,7 @@ describe("trusted-paths", () => {
 
     test("rejects a parent escape via ..", () => {
       expect(
-        isPathWithinDirectoryLexical(
-          tempRoot,
-          join(tempRoot, "..", "outside"),
-        ),
+        isPathWithinDirectoryLexical(tempRoot, join(tempRoot, "..", "outside")),
       ).toBe(false);
     });
 

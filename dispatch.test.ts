@@ -131,6 +131,7 @@ describe("dispatchSync touched-file overlap warning", () => {
         thinking: "off",
         tools: [],
         cwd: tmpDir,
+        providerExtensions: "",
       },
       tokens: 1,
     });
