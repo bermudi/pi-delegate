@@ -30,6 +30,10 @@ import {
 import { validateDelegateOperation } from "./schema.ts";
 import { notifyCrossLeafDelivery, syncDelegateStatus } from "./status.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
+import {
+  findSharedWriteConflicts,
+  type SharedWriteConflict,
+} from "./shared-write-safety.ts";
 import type { CallSpan } from "./telemetry.ts";
 import type {
   AgentConfig,
@@ -45,6 +49,9 @@ import type {
   TaskResult,
   TaskRunEnv,
 } from "./types.ts";
+
+const UNSAFE_SHARED_WRITES_WARNING =
+  "UNSAFE SHARED WRITES ENABLED: the batch-local safety gate is disabled. Delegate provides no isolation or rollback.";
 
 /** Return the structured result for an invalid top-level operation, or null when
  * the call may proceed to a ticket control/help/dispatch path. */
@@ -150,6 +157,58 @@ export interface DelegateDispatchInput {
   callSpan?: CallSpan;
 }
 
+function taskReference(task: TaskDef, index: number): string {
+  return `Task ${index + 1}${task.id ? `#${task.id}` : ""}`;
+}
+
+function sharedWriteRejection(
+  tasks: TaskDef[],
+  parentModelId: string | undefined,
+  conflicts: SharedWriteConflict[],
+): DelegateToolResult {
+  const scopes = conflicts
+    .map(({ scope, taskIndexes }) => {
+      const refs = taskIndexes
+        .map((index) => taskReference(tasks[index]!, index))
+        .join(", ");
+      return `${refs} share ${scope.kind === "git" ? "Git root" : "directory"} '${scope.root}'.`;
+    })
+    .join(" ");
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          `Rejected before dispatch; no tasks were started. ${scopes} ` +
+          "Each task has write, edit, or bash capability, so concurrent shared execution could silently overwrite work. " +
+          'Run them sequentially in separate calls, use workspace: "scratch" when changes may be discarded, or explicitly set top-level unsafeSharedWrites: true. ' +
+          "The unsafe override provides no isolation or rollback. This check covers only this batch, not separate calls or external processes.",
+      },
+    ],
+    details: { tasks, results: [], progress: [], parentModel: parentModelId },
+  };
+}
+
+function sharedWriteSafetyFailure(
+  tasks: TaskDef[],
+  parentModelId: string | undefined,
+  error: unknown,
+): DelegateToolResult {
+  const detail =
+    error instanceof Error ? error.message : "Unknown workspace error.";
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          `Rejected before dispatch; no tasks were started because shared-write safety could not be verified. ${detail} ` +
+          "Fix the task directory or Git metadata. To bypass this batch-local protection, explicitly set top-level unsafeSharedWrites: true; that provides no isolation or rollback.",
+      },
+    ],
+    details: { tasks, results: [], progress: [], parentModel: parentModelId },
+  };
+}
+
 /** Validate, resolve, and dispatch a non-short-circuit delegate operation. */
 export async function dispatchDelegate(
   input: DelegateDispatchInput,
@@ -191,6 +250,38 @@ export async function dispatchDelegate(
     parentDefaults,
     dispatchConfig,
   );
+
+  if (params.unsafeSharedWrites === true) {
+    const firstTask = resolved[0];
+    if (
+      firstTask &&
+      !firstTask.warnings.includes(UNSAFE_SHARED_WRITES_WARNING)
+    ) {
+      firstTask.warnings.push(UNSAFE_SHARED_WRITES_WARNING);
+    }
+  } else {
+    try {
+      const conflicts = await findSharedWriteConflicts(resolved, signal);
+      if (conflicts.length) {
+        callSpan?.finish({
+          status: "failed",
+          totalTokens: 0,
+          totalCost: 0,
+          wallMs: Date.now() - callSpan.startedAt,
+        });
+        return sharedWriteRejection(tasks, parentModelId, conflicts);
+      }
+    } catch (error) {
+      callSpan?.finish({
+        status: "failed",
+        totalTokens: 0,
+        totalCost: 0,
+        wallMs: Date.now() - callSpan.startedAt,
+      });
+      return sharedWriteSafetyFailure(tasks, parentModelId, error);
+    }
+  }
+
   const progress = initProgress(resolved);
   const fire = makeFireUpdater(
     onUpdate,
@@ -426,6 +517,9 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         text: [
           `Async ticket: ${ticketId}`,
           `${resolved.length} task(s) dispatched · ${runningCount + 1}/${maxAsyncTickets} async slots in use`,
+          ...(resolved[0]?.warnings?.includes(UNSAFE_SHARED_WRITES_WARNING)
+            ? [`WARNING: ${UNSAFE_SHARED_WRITES_WARNING}`]
+            : []),
           "",
           "Work is detached. Stop this turn to let final results auto-deliver.",
           `If this turn must block for the result, call once: delegate({ ticketAction: "wait", ticket: "${ticketId}" }) — omit timeoutMs and do not poll`,

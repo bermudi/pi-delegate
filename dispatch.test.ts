@@ -1,4 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,7 +10,7 @@ import {
 import { _setRunAgentSessionForTesting } from "./lifecycle.ts";
 import { _resetPoolForTesting, commit } from "./pool.ts";
 import { emptyUsage } from "./usage.ts";
-import { dispatchAsync, dispatchSync } from "./dispatch.ts";
+import { dispatchAsync, dispatchDelegate, dispatchSync } from "./dispatch.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import {
   _resetDelegateStatusForTesting,
@@ -53,6 +54,86 @@ interface FakeSession {
     cost: number;
   };
 }
+
+describe("dispatch-time shared-write gate", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(path.join(os.tmpdir(), "delegate-write-gate-"));
+    execFileSync("git", ["init", "--quiet"], { cwd: tmpDir });
+    ticketRegistry.clear();
+    _resetDelegateConfigForTesting();
+  });
+
+  afterEach(() => {
+    ticketRegistry.clear();
+    _resetDelegateConfigForTesting();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test.each([
+    ["sync", false],
+    ["async", true],
+  ] as const)(
+    "rejects same-root writers before %s dispatch creates progress or a ticket",
+    async (_mode, asyncMode) => {
+      const model = { provider: "test", id: "model" } as any;
+      let updates = 0;
+      const finishes: Array<Record<string, unknown>> = [];
+      const result = await dispatchDelegate({
+        pi: {} as any,
+        params: {
+          async: asyncMode,
+          tasks: [
+            { id: "one", prompt: "one", cwd: tmpDir },
+            { id: "two", prompt: "two", cwd: tmpDir },
+          ],
+        },
+        ctx: {
+          cwd: tmpDir,
+          model,
+          modelRegistry: {
+            getAvailable: () => [model],
+            find: () => model,
+            hasConfiguredAuth: () => true,
+          },
+          getSystemPrompt: () => "parent",
+        } as any,
+        agents: new Map(),
+        parentModelId: model.id,
+        parentDefaults: {
+          thinking: "off",
+          tools: ["read", "write", "edit", "bash"],
+        },
+        signal: undefined,
+        onUpdate: (() => {
+          updates += 1;
+        }) as any,
+        callSpan: {
+          startedAt: Date.now(),
+          finish: (record: Record<string, unknown>) => finishes.push(record),
+        } as any,
+      });
+
+      expect(result.content[0]?.text).toContain(
+        "Rejected before dispatch; no tasks were started.",
+      );
+      expect(result.content[0]?.text).toContain("Task 1#one, Task 2#two");
+      expect(result.content[0]?.text).toContain(tmpDir);
+      expect(result.content[0]?.text).toContain("unsafeSharedWrites: true");
+      expect(result.details.results).toEqual([]);
+      expect(result.details.progress).toEqual([]);
+      expect(updates).toBe(0);
+      expect(ticketRegistry.size).toBe(0);
+      expect(finishes).toHaveLength(1);
+      expect(finishes[0]).toMatchObject({
+        status: "failed",
+        totalTokens: 0,
+        totalCost: 0,
+      });
+    },
+  );
+});
 
 function makeFakeSession(
   touchedFiles: string[],

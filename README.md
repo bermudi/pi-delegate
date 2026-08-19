@@ -47,6 +47,19 @@ The other built-ins are:
   default. Set `workspace: "shared"` when a reviewer needs a persistent
   `sessionId`.
 
+### Shared-write safety
+
+Before starting a batch, Delegate resolves each task's real tools and physical
+Git root. If two or more tasks can `write`, `edit`, or run `bash` in the same
+shared tree, the whole batch is rejected before any subagent starts. Run those
+tasks sequentially in separate calls, or use `workspace: "scratch"` when their
+filesystem changes should be discarded.
+
+For deliberately unsafe cases, top-level `unsafeSharedWrites: true` bypasses
+this check. It provides no isolation or rollback, and covers only tasks in that
+one call—not separate calls or external processes. Delegate marks the running
+and final result with a visible warning when the override is active.
+
 A same-named Markdown file can override any built-in (first definition wins
 across `.pi/agents/`, `~/.pi/agent/agents/`, `~/.agents/`, `.claude/agents/`,
 `~/.claude/agents/`). A prompt-only override keeps the built-in's tools and

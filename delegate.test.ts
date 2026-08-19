@@ -3239,6 +3239,9 @@ describe("delegate extension integration", () => {
     );
     expect(schema.properties.tasks.description).toContain("run concurrently");
     expect(schema.properties.tasks.description).toContain("[]=full manual");
+    expect(schema.properties.unsafeSharedWrites.description).toContain(
+      "no isolation or rollback",
+    );
     expect(schema.properties.async.description).toContain("auto-deliver");
     expect(schema.properties.async.description).toContain("Wait");
     expect(schema.properties.ticketAction.description).toContain("Prefer wait");
