@@ -4,6 +4,7 @@ import {
   mapConcurrentByModel,
   _setGlobalConcurrencyLimitForTesting,
   _resetGlobalConcurrencyForTesting,
+  reconfigureGlobalConcurrency,
 } from "./concurrency.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -231,5 +232,94 @@ describe("mapConcurrentByModel", () => {
     expect(results).not.toBe("TIMEOUT");
     expect(started).toEqual(["0", "1"]);
     expect(results).toEqual(["aborted-0", "aborted-1"]);
+  });
+});
+
+describe("reconfigureGlobalConcurrency", () => {
+  beforeEach(() => _resetGlobalConcurrencyForTesting());
+  afterEach(() => _resetGlobalConcurrencyForTesting());
+
+  test("lowering the limit does not interrupt running tasks", async () => {
+    _setGlobalConcurrencyLimitForTesting(2);
+
+    let running = 0;
+    let maxRunning = 0;
+    const release = new Map<number, () => void>();
+
+    const items = Array.from({ length: 3 }, (_, i) =>
+      makeTask(i, "openai", "gpt-4"),
+    );
+    const runPromise = mapConcurrentByModel(
+      items,
+      (t) => getModelKey(t.model as any),
+      () => 10,
+      async (task) => {
+        running++;
+        maxRunning = Math.max(maxRunning, running);
+        let releaseTask!: () => void;
+        const promise = new Promise<void>((r) => (releaseTask = r));
+        release.set(task.id, releaseTask);
+        await promise;
+        running--;
+        return `done-${task.id}`;
+      },
+    );
+
+    // Let two tasks start, then lower the cap.
+    await waitFor(() => running === 2);
+    reconfigureGlobalConcurrency(1);
+    // The already-running task keeps its slot.
+    expect(running).toBe(2);
+    expect(maxRunning).toBe(2);
+
+    // Finish one, then the next queued task can acquire the (now 1) slot.
+    release.get(0)!();
+    await waitFor(() => running === 1);
+    await delay(5);
+    release.get(1)!();
+    await waitFor(() => running === 1);
+    await delay(5);
+    release.get(2)!();
+
+    const results = await runPromise;
+    expect(results).toEqual(["done-0", "done-1", "done-2"]);
+    expect(maxRunning).toBe(2);
+  });
+
+  test("raising the limit wakes queued waiters", async () => {
+    _setGlobalConcurrencyLimitForTesting(1);
+
+    const started: number[] = [];
+    const release = new Map<number, () => void>();
+
+    const items = Array.from({ length: 3 }, (_, i) =>
+      makeTask(i, "openai", "gpt-4"),
+    );
+    const runPromise = mapConcurrentByModel(
+      items,
+      (t) => getModelKey(t.model as any),
+      () => 10,
+      async (task) => {
+        started.push(task.id);
+        let releaseTask!: () => void;
+        const promise = new Promise<void>((r) => (releaseTask = r));
+        release.set(task.id, releaseTask);
+        await promise;
+        return `done-${task.id}`;
+      },
+    );
+
+    await waitFor(() => started.length === 1);
+    await delay(5);
+    expect(started).toEqual([0]);
+
+    // Raise cap to 3: all remaining queued tasks should start.
+    reconfigureGlobalConcurrency(3);
+    await waitFor(() => started.length === 3);
+    expect(started.sort((a, b) => a - b)).toEqual([0, 1, 2]);
+
+    for (const [_, resolve] of release) resolve();
+    const results = await runPromise;
+    expect(results.length).toBe(3);
   });
 });

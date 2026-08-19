@@ -12,6 +12,7 @@ import {
   formatTouchedOverlapWarning,
 } from "./format.ts";
 import { renderOutputForPoll } from "./spill.ts";
+import { getOutputSpillTail } from "./config.ts";
 import type {
   AsyncTicket,
   DelegateDetails,
@@ -111,18 +112,20 @@ function appendTouchedMeta(
 }
 
 function formatSettledPollLines(
+  ticket: AsyncTicket,
   result: TaskResult,
   task: ResolvedTask,
   failed: boolean,
 ): string[] {
   const meta = taskMetaBase(result);
   appendTouchedMeta(meta, result, task);
+  const tailChars = getOutputSpillTail(ticket.config);
   if (!failed) {
     const lines = [
       `✓ ${result.agent}${formatTaskId(result.id)} · ${meta.join(" · ")}`,
     ];
     if (result.output && result.output !== "(no output)") {
-      lines.push(renderOutputForPoll(result.output));
+      lines.push(renderOutputForPoll(result.output, { tailChars }));
     }
     return lines;
   }
@@ -133,7 +136,7 @@ function formatSettledPollLines(
   if (result.sessionFile)
     lines.push(`  session: ${shortenPath(result.sessionFile)}`);
   if (result.output && result.output !== "(no output)") {
-    lines.push(renderOutputForPoll(result.output));
+    lines.push(renderOutputForPoll(result.output, { tailChars }));
   }
   return lines;
 }
@@ -146,13 +149,13 @@ function formatPollTaskLines(
   const r = ticket.results[index];
   if (p.status === "done" && r) {
     return {
-      lines: formatSettledPollLines(r, ticket.resolved[index]!, false),
+      lines: formatSettledPollLines(ticket, r, ticket.resolved[index]!, false),
       result: r,
     };
   }
   if (p.status === "failed" && r) {
     return {
-      lines: formatSettledPollLines(r, ticket.resolved[index]!, true),
+      lines: formatSettledPollLines(ticket, r, ticket.resolved[index]!, true),
       result: r,
     };
   }

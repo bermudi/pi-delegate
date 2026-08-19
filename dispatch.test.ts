@@ -23,6 +23,12 @@ import {
   type CallRecord,
   type TaskRecord,
 } from "./telemetry.ts";
+import {
+  _setDelegateConfigForTesting,
+  _resetDelegateConfigForTesting,
+  getDelegateConfigSnapshot,
+  type DelegateConfig,
+} from "./config.ts";
 import type { ResolvedTask, TaskDef, TaskProgress } from "./types.ts";
 
 interface FakeSession {
@@ -100,6 +106,7 @@ describe("dispatchSync touched-file overlap warning", () => {
     _resetGlobalConcurrencyForTesting();
     _resetPoolForTesting();
     _resetTelemetryForTesting();
+    _resetDelegateConfigForTesting();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -409,6 +416,78 @@ describe("dispatchSync touched-file overlap warning", () => {
     expect(result.details.results[0]!.error).toBeUndefined();
     expect(result.details.results[1]!.error).toBeUndefined();
     expect(result.details.results[1]!.output).toBe("b done");
+  });
+
+  test("async ticket and runner capture a dispatch-scoped config snapshot", async () => {
+    const a = setupTask("s1", "a", []);
+    let capturedConfig: DelegateConfig | undefined;
+    let releaseWorker!: () => void;
+    const workerStarted = new Promise<void>((resolve) => {
+      const original = _setRunAgentSessionForTesting(
+        async (...args: unknown[]) => {
+          capturedConfig = args[8] as DelegateConfig;
+          resolve();
+          await new Promise<void>((r) => (releaseWorker = r));
+          return {
+            output: "done",
+            durationMs: 1,
+            tokens: 1,
+            usage: emptyUsage(),
+            touchedFiles: [],
+            attributedFiles: [],
+            prompted: true,
+          } as any;
+        },
+      );
+      // Preserve the original for cleanup; the mock just needs to capture.
+      original;
+    });
+
+    _setDelegateConfigForTesting({
+      retry: { wholeTaskMaxRetries: 7, wholeTaskBaseDelayMs: 250 },
+      stallTimeoutMs: 12345,
+    });
+    const dispatchConfig = getDelegateConfigSnapshot();
+
+    const callSpan = beginCall({
+      parentModel: "m",
+      mode: "async",
+      taskCount: 1,
+    });
+    const ack = dispatchAsync({
+      pi: { sendMessage: () => {} } as any,
+      ctx: {
+        cwd: tmpDir,
+        modelRegistry: {} as any,
+        sessionManager: undefined,
+      } as any,
+      tasks: [{ prompt: "a" }] as any,
+      resolved: [a.resolved],
+      progress: [a.progress],
+      parentModelId: "m",
+      callSpan,
+      dispatchConfig,
+    });
+
+    const ticket = ticketRegistry.get(ack.details.ticketId!);
+    expect(ticket?.config?.retry?.wholeTaskMaxRetries).toBe(7);
+    expect(ticket?.config?.stallTimeoutMs).toBe(12345);
+
+    await workerStarted;
+
+    // Mutate the global singleton while the worker is still inside runAgentSession.
+    _setDelegateConfigForTesting({
+      retry: { wholeTaskMaxRetries: 1, wholeTaskBaseDelayMs: 0 },
+      stallTimeoutMs: 999,
+    });
+
+    releaseWorker();
+    await ticket?.completion;
+
+    // The runner must have used the snapshot captured at dispatch, not the
+    // new global values.
+    expect(capturedConfig?.retry?.wholeTaskMaxRetries).toBe(7);
+    expect(capturedConfig?.stallTimeoutMs).toBe(12345);
   });
 });
 

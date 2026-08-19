@@ -258,7 +258,7 @@ export function formatCompletedTicket(
       parts.push(`[${pendingLabelFor(i)}]`);
       continue;
     }
-    parts.push(...formatCompletedTask(t, r));
+    parts.push(...formatCompletedTask(t, r, ticket.config));
   }
 
   const completedResults = ticket.results.filter(

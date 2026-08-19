@@ -9,7 +9,12 @@ import {
   settleTicket,
   notifyWaiters,
 } from "./tickets.ts";
-import { getConcurrencyLimit, getMaxAsyncTickets } from "./config.ts";
+import {
+  getConcurrencyLimit,
+  getMaxAsyncTickets,
+  getDelegateConfigSnapshot,
+} from "./config.ts";
+import type { DelegateConfig } from "./config.ts";
 import { getCurrentLeafId } from "./leaf.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
 import { aggregateTaskResults, sumUsage } from "./usage.ts";
@@ -24,8 +29,6 @@ import {
 import { validateDelegateOperation } from "./schema.ts";
 import { notifyCrossLeafDelivery, syncDelegateStatus } from "./status.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
-import { reloadDelegateConfig } from "./config.ts";
-import { warnLegacyDelegateSettingsMoved } from "./settings.ts";
 import type { CallSpan } from "./telemetry.ts";
 import type {
   AgentConfig,
@@ -117,6 +120,7 @@ export interface AsyncDispatchInput {
   progress: TaskProgress[];
   parentModelId: string | undefined;
   callSpan?: CallSpan;
+  dispatchConfig: DelegateConfig;
 }
 
 /** Inputs needed by the sync (blocking) dispatch path. */
@@ -129,6 +133,7 @@ export interface SyncDispatchInput {
   signal: AbortSignal | undefined;
   fire: () => void;
   callSpan?: CallSpan;
+  dispatchConfig: DelegateConfig;
 }
 
 /** Inputs for the normal task-validation, resolution, and dispatch path. */
@@ -148,13 +153,12 @@ export interface DelegateDispatchInput {
 export async function dispatchDelegate(
   input: DelegateDispatchInput,
 ): Promise<DelegateToolResult> {
-  // delegate.json is the single config source (user-edited, user scope).
-  // Reload once at the dispatch boundary so edits become visible between
-  // delegate calls without restarting pi, and surface (once per cwd) any
-  // legacy `delegate` block still sitting in pi's settings.json — those
-  // overrides moved and are otherwise silently ignored.
-  reloadDelegateConfig();
-  warnLegacyDelegateSettingsMoved(input.ctx.cwd);
+  // The extension entry point already reloaded delegate.json and reconfigured
+  // the global concurrency cap. Capture a dispatch-scoped snapshot here so the
+  // retry/stall/output/provider settings stay immutable for every task in this
+  // batch, even if a later dispatch mutates the global singleton while async
+  // work is still in flight.
+  const dispatchConfig = getDelegateConfigSnapshot();
   const {
     pi,
     params,
@@ -179,7 +183,13 @@ export async function dispatchDelegate(
     return validationError;
   }
 
-  const resolved = resolveTasks(tasks, ctx, agents, parentDefaults);
+  const resolved = resolveTasks(
+    tasks,
+    ctx,
+    agents,
+    parentDefaults,
+    dispatchConfig,
+  );
   const progress = initProgress(resolved);
   const fire = makeFireUpdater(
     onUpdate,
@@ -199,6 +209,7 @@ export async function dispatchDelegate(
       progress,
       parentModelId,
       callSpan,
+      dispatchConfig,
     });
   }
 
@@ -211,6 +222,7 @@ export async function dispatchDelegate(
     signal,
     fire,
     callSpan,
+    dispatchConfig,
   });
 }
 
@@ -243,13 +255,23 @@ function settleAsyncCall(
  *  the concurrent run, and returns the ticket acknowledgment immediately.
  *  Results are delivered via `deliverTicketResults` when all tasks settle. */
 export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
-  const { pi, ctx, tasks, resolved, progress, parentModelId, callSpan } = input;
+  const {
+    pi,
+    ctx,
+    tasks,
+    resolved,
+    progress,
+    parentModelId,
+    callSpan,
+    dispatchConfig,
+  } = input;
 
   sweepTickets();
   const runningCount = [...ticketRegistry.values()].filter(
     (t) => t.status === "running" || t.status === "cancelling",
   ).length;
-  if (runningCount >= getMaxAsyncTickets()) {
+  const maxAsyncTickets = getMaxAsyncTickets(dispatchConfig);
+  if (runningCount >= maxAsyncTickets) {
     callSpan?.finish({
       status: "failed",
       totalTokens: 0,
@@ -260,7 +282,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       content: [
         {
           type: "text",
-          text: `Too many async tickets running or cancelling (${runningCount}/${getMaxAsyncTickets()}). Poll existing tickets or cancel one first.`,
+          text: `Too many async tickets running or cancelling (${runningCount}/${maxAsyncTickets}). Poll existing tickets or cancel one first.`,
         },
       ],
       details: { tasks, results: [], progress: [], parentModel: parentModelId },
@@ -286,6 +308,10 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     callStartedAt: callSpan?.startedAt,
     callRecord: callSpan ? { ...callSpan.baseRecord() } : undefined,
     telemetryGeneration: callSpan?.generation,
+    // Capture the dispatch-scoped snapshot so async workers and later poll/wait
+    // formatting use the same retry/stall/output/provider settings that were
+    // in effect when the ticket was spawned.
+    config: dispatchConfig,
   };
   ticketRegistry.set(ticketId, ticket);
   callSpan?.spawn();
@@ -307,6 +333,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     telemetryCallId: callSpan?.id,
     telemetryGeneration: callSpan?.generation,
     async: true,
+    config: dispatchConfig,
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
       notifyWaiters(ticket);
@@ -337,7 +364,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
   const completion = mapConcurrentByModel(
     resolved,
     (t) => getModelKey(t.model),
-    getConcurrencyLimit,
+    (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
     async (t, i) => {
       const result = await runResolvedTask(asyncEnv, t, ticket.progress[i]!, i);
       ticket.results[i] = result;
@@ -394,7 +421,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         type: "text",
         text: [
           `Async ticket: ${ticketId}`,
-          `${resolved.length} task(s) dispatched · ${runningCount + 1}/${getMaxAsyncTickets()} async slots in use`,
+          `${resolved.length} task(s) dispatched · ${runningCount + 1}/${maxAsyncTickets} async slots in use`,
           "",
           "Work is detached. Stop this turn to let final results auto-deliver.",
           `If this turn must block for the result, call once: delegate({ ticketAction: "wait", ticket: "${ticketId}" }) — omit timeoutMs and do not poll`,
@@ -427,6 +454,7 @@ export async function dispatchSync(
     signal,
     fire,
     callSpan,
+    dispatchConfig,
   } = input;
 
   const startedAt = Date.now();
@@ -438,6 +466,7 @@ export async function dispatchSync(
     telemetryCallId: callSpan?.id,
     telemetryGeneration: callSpan?.generation,
     async: false,
+    config: dispatchConfig,
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
       fire();
@@ -448,7 +477,7 @@ export async function dispatchSync(
   const results = await mapConcurrentByModel(
     resolved,
     (t) => getModelKey(t.model),
-    getConcurrencyLimit,
+    (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
     async (t, i) => runResolvedTask(syncEnv, t, progress[i]!, i),
     signal,
   );
@@ -465,7 +494,7 @@ export async function dispatchSync(
   for (let i = 0; i < finalResults.length; i++) {
     const r = finalResults[i]!;
     const t = resolved[i]!;
-    parts.push(...formatCompletedTask(t, r));
+    parts.push(...formatCompletedTask(t, r, dispatchConfig));
   }
 
   const overlapWarning = formatTouchedOverlapWarning(

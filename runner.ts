@@ -72,6 +72,8 @@ export async function runAgentSession(
   gitBaseline: Set<string> | undefined,
   start: number,
   deadlineAt?: number,
+  /** Dispatch-scoped delegate.json snapshot for the stall timeout. */
+  delegateConfig?: import("./config.ts").DelegateConfig,
 ): Promise<{
   output: string;
   error?: string;
@@ -89,7 +91,7 @@ export async function runAgentSession(
   prompted: boolean;
 }> {
   const startTime = start ?? Date.now();
-  const stallTimeoutMs = getStallTimeoutMs();
+  const stallTimeoutMs = getStallTimeoutMs(delegateConfig);
   let toolUses = 0;
   let lastActivityAt: number | undefined = startTime;
   let phase = "starting agent";

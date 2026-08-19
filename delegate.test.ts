@@ -75,9 +75,12 @@ import {
   readDelegateSettingsFile,
   findLegacyDelegateSettings,
   warnLegacyDelegateSettingsMoved,
+  loadDelegateSettings,
+  clearDelegateSettingsCache,
   loadDelegateConfig,
   getAgentOverrides,
   reloadDelegateConfig,
+  getDelegateConfigSnapshot,
   getConcurrencyLimit,
   getMaxAsyncTickets,
   getStallTimeoutMs,
@@ -2733,6 +2736,55 @@ describe("delegate.json agentOverrides", () => {
     reloadDelegateConfig();
     expect(getAgentOverrides()?.coder?.model).toBe("second/model");
   });
+
+  test("reloadDelegateConfig keeps the previous valid config on parse/read errors", () => {
+    writeDelegateConfig({
+      agentOverrides: { coder: { model: "first/model" } },
+    });
+    reloadDelegateConfig();
+    expect(getAgentOverrides()?.coder?.model).toBe("first/model");
+
+    writeDelegateConfig("not json");
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      reloadDelegateConfig();
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    // The previous valid snapshot must survive a transient malformed file.
+    expect(getAgentOverrides()?.coder?.model).toBe("first/model");
+    expect(
+      warnings.some((w) => w.includes("could not reload")),
+    ).toBe(true);
+  });
+
+  test("reloadDelegateConfig falls back to defaults when the file is deleted", () => {
+    writeDelegateConfig({
+      agentOverrides: { coder: { model: "first/model" } },
+    });
+    reloadDelegateConfig();
+    expect(getAgentOverrides()?.coder?.model).toBe("first/model");
+
+    fs.rmSync(path.join(tmpDir, ".pi", "agent", "delegate.json"));
+    reloadDelegateConfig();
+    expect(getAgentOverrides()?.coder).toBeUndefined();
+  });
+
+  test("getDelegateConfigSnapshot returns an immutable dispatch-scoped clone", () => {
+    _setDelegateConfigForTesting({
+      agentOverrides: { coder: { model: "first/model" } },
+    });
+    const snapshot = getDelegateConfigSnapshot();
+    expect(snapshot.agentOverrides?.coder?.model).toBe("first/model");
+    _setDelegateConfigForTesting({
+      agentOverrides: { coder: { model: "second/model" } },
+    });
+    // Mutating the global singleton must not retroactively change the snapshot.
+    expect(snapshot.agentOverrides?.coder?.model).toBe("first/model");
+  });
 });
 
 describe("legacy pi settings detection", () => {
@@ -2791,6 +2843,27 @@ describe("legacy pi settings detection", () => {
     console.warn = (message?: unknown) => warnings.push(String(message));
     try {
       warnLegacyDelegateSettingsMoved(projectDir);
+      warnLegacyDelegateSettingsMoved(projectDir);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("delegate.json");
+  });
+
+  test("warns when a legacy block is added after an earlier no-block call", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      // First call finds nothing — the cwd must not be marked as warned.
+      warnLegacyDelegateSettingsMoved(projectDir);
+      expect(warnings).toHaveLength(0);
+
+      // Legacy block appears later; the next call must still warn.
+      writeSettings(path.join("project", ".pi", "settings.json"), {
+        delegate: { agentOverrides: {} },
+      });
       warnLegacyDelegateSettingsMoved(projectDir);
     } finally {
       console.warn = originalWarn;
@@ -9953,5 +10026,41 @@ describe("touched-file overlap warning", () => {
     const text = result.content[0]!.text;
     expect(text).not.toContain("does not isolate or serialize file access");
     expect(result.details.overlapWarning).toBeUndefined();
+  });
+});
+
+describe("public export compatibility", () => {
+  test("loadDelegateSettings is a deprecated alias for readDelegateSettingsFile", () => {
+    expect(loadDelegateSettings).toBe(readDelegateSettingsFile);
+    const file = mkdtempSync(path.join(os.tmpdir(), "delegate-compat-"));
+    const settings = path.join(file, "settings.json");
+    writeFileSync(settings, JSON.stringify({ delegate: { agentOverrides: {} } }));
+    const parsed = loadDelegateSettings(settings);
+    expect(parsed).toHaveProperty("delegate");
+    rmSync(file, { recursive: true, force: true });
+  });
+
+  test("clearDelegateSettingsCache clears the legacy warning cwd set", () => {
+    const tmpRoot = mkdtempSync(path.join(os.tmpdir(), "delegate-compat-"));
+    const projectDir = path.join(tmpRoot, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const settings = path.join(tmpRoot, ".pi", "settings.json");
+    mkdirSync(path.dirname(settings), { recursive: true });
+    writeFileSync(settings, JSON.stringify({ delegate: { agentOverrides: {} } }));
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      warnLegacyDelegateSettingsMoved(projectDir);
+      expect(warnings).toHaveLength(1);
+      // Without clearing the cache, a second call would stay quiet.
+      clearDelegateSettingsCache();
+      warnLegacyDelegateSettingsMoved(projectDir);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toHaveLength(2);
+    rmSync(tmpRoot, { recursive: true, force: true });
   });
 });
