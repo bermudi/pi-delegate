@@ -70,11 +70,17 @@ export function _setWholeTaskRetryForTesting(
   testWholeTaskBaseDelayMs = opts?.baseDelayMs;
 }
 
-function resolvedWholeTaskMaxRetries(): number {
-  return testWholeTaskMaxRetries ?? getWholeTaskMaxRetries();
+function resolvedWholeTaskMaxRetries(env: TaskRunEnv): number {
+  return (
+    testWholeTaskMaxRetries ??
+    getWholeTaskMaxRetries(env.config ?? undefined)
+  );
 }
-function resolvedWholeTaskBaseDelayMs(): number {
-  return testWholeTaskBaseDelayMs ?? getWholeTaskBaseDelayMs();
+function resolvedWholeTaskBaseDelayMs(env: TaskRunEnv): number {
+  return (
+    testWholeTaskBaseDelayMs ??
+    getWholeTaskBaseDelayMs(env.config ?? undefined)
+  );
 }
 
 /** Build a failed TaskResult. Used for early-failure paths (abort, busy, validation). */
@@ -385,7 +391,7 @@ async function sleepForWholeTaskRetry(
 async function buildDelegateSession(
   task: ResolvedTask,
   sessionManager: SessionManager,
-  modelRegistry: TaskRunEnv["modelRegistry"],
+  env: TaskRunEnv,
 ): Promise<AgentSession> {
   // Resolve host deps for this task's cwd + system prompt. Extension-free
   // resource loaders are cached after the first call; provider-configured or
@@ -396,7 +402,7 @@ async function buildDelegateSession(
   // Pass only the provider needed by this task. This keeps a non-Kilo task
   // from receiving Kilo's provider/auth adapter merely because Kilo is also
   // configured in the parent runtime.
-  const providerConfig = modelRegistry.getRegisteredProviderConfig?.(
+  const providerConfig = env.modelRegistry.getRegisteredProviderConfig?.(
     task.model.provider,
   );
   const providerConfigs = providerConfig
@@ -407,6 +413,10 @@ async function buildDelegateSession(
     systemPrompt: task.systemPrompt,
     providerConfigs,
     modelProvider: task.model.provider,
+    // Freeze the provider-extension allowlist to the dispatch-scoped snapshot
+    // so a later delegate.json edit cannot change which executable code an
+    // already-spawned async worker is allowed to load.
+    delegateConfig: env.config,
   });
 
   const { session } = await createAgentSession({
@@ -529,7 +539,7 @@ async function resumeFromSessionFile(
     };
   }
 
-  const session = await buildDelegateSession(task, resumed, env.modelRegistry);
+  const session = await buildDelegateSession(task, resumed, env);
   return {
     session,
     sessionManager: resumed,
@@ -560,11 +570,7 @@ async function createFreshSession(
     sessionFile = fresh.file;
   }
 
-  const session = await buildDelegateSession(
-    task,
-    sessionManager,
-    env.modelRegistry,
-  );
+  const session = await buildDelegateSession(task, sessionManager, env);
   return {
     session,
     sessionManager,
@@ -1035,6 +1041,7 @@ async function runTaskAttempt(
       gitBaseline,
       timing.taskStartedAt,
       timing.deadlineAt,
+      env.config,
     );
 
     accounting.cumulativeTokens += r.tokens;
@@ -1159,8 +1166,8 @@ async function runWithWholeTaskRetries(
     };
   }
 
-  const maxRetries = resolvedWholeTaskMaxRetries();
-  const baseDelayMs = resolvedWholeTaskBaseDelayMs();
+  const maxRetries = resolvedWholeTaskMaxRetries(env);
+  const baseDelayMs = resolvedWholeTaskBaseDelayMs(env);
   let retries = 0;
   for (
     let retry = 0;

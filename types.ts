@@ -101,6 +101,9 @@ export interface AsyncTicket {
   telemetryGeneration?: number;
   /** Resolves after every async worker has settled, including shutdown aborts. */
   completion?: Promise<void>;
+  /** Immutable dispatch-scoped delegate.json snapshot used by async workers and
+   *  later result formatting. */
+  config?: import("./config.ts").DelegateConfig;
 }
 
 /** Live parent settings captured when a delegate call starts. The built-in
@@ -267,6 +270,10 @@ export interface TaskRunEnv {
   telemetryGeneration?: number;
   /** Whether this task is part of an async ticket. */
   async?: boolean;
+  /** Immutable dispatch-scoped delegate.json snapshot. Long-lived async workers
+   *  use this instead of the live singleton so retry/stall/output/provider
+   *  settings stay stable for the ticket's lifetime. */
+  config?: import("./config.ts").DelegateConfig;
 }
 
 /** Structural subset of Pi's `ExtensionContext` used by delegate's

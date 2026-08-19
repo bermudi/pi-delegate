@@ -917,6 +917,37 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
     expect(otherTask.model).toBe(otherParent);
     expect(otherTask.thinking).toBe("medium");
   });
+
+  test("parent-model-scoped thinking override wins for a custom agent", () => {
+    _setDelegateConfigForTesting({
+      agentOverridesByParentModel: {
+        "openai-codex/gpt-5.6-sol": {
+          "my-agent": { thinking: "high" },
+        },
+      },
+    });
+    mkdirSync(path.join(projectDir, ".pi", "agents"), { recursive: true });
+    writeFileSync(
+      path.join(projectDir, ".pi", "agents", "my-agent.md"),
+      `---\nname: my-agent\ndescription: Mine\nthinking: low\n---\nBody.\n`,
+    );
+    const agents = discoverAgents(projectDir);
+    const codexParent = { provider: "openai-codex", id: "gpt-5.6-sol" } as any;
+    const [task] = resolveTasks(
+      [{ agent: "my-agent", prompt: "go" }] as any,
+      {
+        cwd: projectDir,
+        model: codexParent,
+        modelRegistry: makeRegistry([]),
+        sessionManager: undefined,
+        getSystemPrompt: () => "p",
+      } as any,
+      agents,
+      { thinking: "off", tools: DEFAULT_TOOLS },
+    );
+    expect(task.thinking).toBe("high");
+  });
+
   test("default ignores delegate.json overrides and uses explicit Markdown or parent", () => {
     _setDelegateConfigForTesting({
       agentOverrides: {

@@ -331,8 +331,13 @@ export async function getProviderExtensionPaths(
   provider: string | undefined,
   cwd: string,
   agentDir: string,
+  /** Dispatch-scoped snapshot for the provider-extension allowlist. */
+  config?: import("./config.ts").DelegateConfig,
 ): Promise<ProviderExtensionResolution> {
-  const requested = getSubagentProviderExtensionSourcesForProvider(provider);
+  const requested = getSubagentProviderExtensionSourcesForProvider(
+    provider,
+    config,
+  );
   if (!requested.length) {
     return { paths: [], bestEffortPaths: new Set<string>() };
   }

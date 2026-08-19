@@ -43,6 +43,7 @@ export {
   getAgentOverrides,
   getAgentOverridesByParentModel,
   reloadDelegateConfig,
+  getDelegateConfigSnapshot,
   getOutputSpillThreshold,
   getOutputSpillTail,
 } from "./config.ts";
@@ -148,6 +149,8 @@ export {
   readDelegateSettingsFile,
   findLegacyDelegateSettings,
   warnLegacyDelegateSettingsMoved,
+  loadDelegateSettings,
+  clearDelegateSettingsCache,
 } from "./settings.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";
 export {

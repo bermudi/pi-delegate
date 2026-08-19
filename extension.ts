@@ -22,6 +22,12 @@ import { invalidateHostDepsCache } from "./host.ts";
 import { registerProviderExtensionNotifier } from "./provider-extensions.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import { closeAllPooledAgents } from "./pool.ts";
+import { reconfigureGlobalConcurrency } from "./concurrency.ts";
+import {
+  reloadDelegateConfig,
+  getMaxConcurrent,
+} from "./config.ts";
+import { warnLegacyDelegateSettingsMoved } from "./settings.ts";
 import {
   activeTicketSummary,
   clearDelegateStatusContext,
@@ -123,6 +129,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     prepareArguments: normalizeDelegateArguments,
 
     async execute(_id, params: DelegateArguments, signal, onUpdate, ctx) {
+      // Reload user-edited delegate.json at the start of every execution.
+      // Help, poll, cancel, wait, and invalid calls observe new settings, and
+      // the global concurrency cap is reconfigured so hot-reloaded maxConcurrent
+      // takes effect for subsequent acquisitions. A parse/read error keeps the
+      // previous snapshot and warns instead of falling back to defaults.
+      warnLegacyDelegateSettingsMoved(ctx.cwd);
+      reloadDelegateConfig();
+      reconfigureGlobalConcurrency(getMaxConcurrent());
+
       // Prime the UI notice for best-effort provider extensions that load for
       // subagents (host.ts consumes it where the fact is discovered). Every
       // execute re-primes so a stale ctx never sticks.

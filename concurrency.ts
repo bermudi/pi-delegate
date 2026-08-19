@@ -61,11 +61,7 @@ function acquireGlobal(signal?: AbortSignal): Promise<boolean> {
   });
 }
 
-function releaseGlobal(): void {
-  globalConcurrencyRunning--;
-  // Never hand a slot to a waiter whose signal already aborted. The abort
-  // listener normally removes it synchronously during abort() dispatch; this
-  // drain is defensive for any ordering edge.
+function removeAbortedWaiters(): void {
   while (
     globalConcurrencyWaiters.length > 0 &&
     globalConcurrencyWaiters[0]!.signal?.aborted
@@ -74,22 +70,50 @@ function releaseGlobal(): void {
     w.signal?.removeEventListener("abort", w.onAbort);
     w.resolve(false);
   }
-  if (globalConcurrencyWaiters.length > 0) {
-    globalConcurrencyRunning++;
-    const w = globalConcurrencyWaiters.shift()!;
-    w.signal?.removeEventListener("abort", w.onAbort);
-    w.resolve(true);
+}
+
+/** Wake the next eligible waiter if capacity allows. Returns true if a slot was
+ *  handed out (and `globalConcurrencyRunning` already incremented). */
+function wakeNextWaiter(): boolean {
+  removeAbortedWaiters();
+  if (
+    globalConcurrencyWaiters.length === 0 ||
+    globalConcurrencyRunning >= globalConcurrencyLimit
+  ) {
+    return false;
+  }
+  const w = globalConcurrencyWaiters.shift()!;
+  globalConcurrencyRunning++;
+  w.signal?.removeEventListener("abort", w.onAbort);
+  w.resolve(true);
+  return true;
+}
+
+function releaseGlobal(): void {
+  globalConcurrencyRunning--;
+  wakeNextWaiter();
+}
+
+/** Safely change the global concurrency cap at runtime.
+ *
+ *  Newly queued tasks observe the new limit immediately; already-running tasks
+ *  keep their slots. If the limit was raised, this wakes as many eligible
+ *  queued waiters as the new cap allows. */
+export function reconfigureGlobalConcurrency(limit: number): void {
+  globalConcurrencyLimit = Math.max(1, limit);
+  while (wakeNextWaiter()) {
+    // Wake up to the new limit.
   }
 }
 
 /** Test-only hook: override the global concurrency cap. */
 export function _setGlobalConcurrencyLimitForTesting(limit: number): void {
-  globalConcurrencyLimit = Math.max(1, limit);
+  reconfigureGlobalConcurrency(limit);
 }
 
 /** Test-only hook: reset the global semaphore to the configured cap. */
 export function _resetGlobalConcurrencyForTesting(): void {
-  globalConcurrencyLimit = Math.max(1, getMaxConcurrent());
+  reconfigureGlobalConcurrency(getMaxConcurrent());
   globalConcurrencyRunning = 0;
   globalConcurrencyWaiters.length = 0;
 }

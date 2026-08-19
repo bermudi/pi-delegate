@@ -84,14 +84,26 @@ export function findLegacyDelegateSettings(cwd: string): string[] {
 const warnedLegacyDirs = new Set<string>();
 
 /** Warn (once per cwd) when pi settings files still carry a legacy `delegate`
- *  block. Those overrides are ignored — delegate.json is the only source. */
+ *  block. Those overrides are ignored — delegate.json is the only source.
+ *  Only marks the cwd as warned after at least one legacy block is reported, so
+ *  a block added later is still surfaced. */
 export function warnLegacyDelegateSettingsMoved(cwd: string): void {
   const key = path.resolve(cwd);
   if (warnedLegacyDirs.has(key)) return;
+  const paths = findLegacyDelegateSettings(cwd);
+  if (paths.length === 0) return;
   warnedLegacyDirs.add(key);
-  for (const filePath of findLegacyDelegateSettings(cwd)) {
+  for (const filePath of paths) {
     console.warn(
       `[delegate] ignoring 'delegate' block in ${filePath}: delegate configuration lives in ~/.pi/agent/delegate.json (agentOverrides / agentOverridesByParentModel).`,
     );
   }
 }
+
+/** @deprecated Clear the set of cwd's already warned about legacy settings. */
+export function clearDelegateSettingsCache(): void {
+  warnedLegacyDirs.clear();
+}
+
+/** @deprecated Use `readDelegateSettingsFile` instead. */
+export const loadDelegateSettings = readDelegateSettingsFile;

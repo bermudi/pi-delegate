@@ -343,6 +343,63 @@ let __delegateConfig: DelegateConfig = {
 };
 let stallTimeoutOverrideForTesting: number | undefined;
 
+type ReadConfigResult =
+  | { status: "ok"; config: DelegateConfig }
+  | { status: "missing" }
+  | { status: "error"; error: unknown };
+
+/** Read and normalize delegate.json from disk. Distinguishes a missing file
+ *  (deliberate deletion) from parse/read errors so reload can keep the prior
+ *  valid snapshot instead of silently installing defaults. */
+function readDelegateConfigFromDisk(): ReadConfigResult {
+  try {
+    const raw = fs.readFileSync(delegateConfigPath(), "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {
+        status: "error",
+        error: new Error("top-level value is not an object"),
+      };
+    }
+    // Merge with defaults so new fields are always present
+    return {
+      status: "ok",
+      config: {
+        ...DEFAULT_DELEGATE_CONFIG,
+        ...parsed,
+        agent: { ...DEFAULT_DELEGATE_CONFIG.agent, ...(parsed.agent ?? {}) },
+        concurrency: {
+          ...DEFAULT_DELEGATE_CONFIG.concurrency,
+          ...(parsed.concurrency ?? {}),
+        },
+        retry: { ...DEFAULT_DELEGATE_CONFIG.retry, ...(parsed.retry ?? {}) },
+        providerExtensions: normalizeProviderExtensions(
+          parsed.providerExtensions,
+        ),
+        agentOverrides: normalizeAgentOverrides(parsed.agentOverrides),
+        agentOverridesByParentModel: normalizeAgentOverridesByParentModel(
+          parsed.agentOverridesByParentModel,
+        ),
+        telemetry: normalizeTelemetryConfig(parsed.telemetry),
+        output: {
+          ...DEFAULT_DELEGATE_CONFIG.output,
+          ...(parsed.output ?? {}),
+        },
+      } as DelegateConfig,
+    };
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return { status: "missing" };
+    }
+    return { status: "error", error };
+  }
+}
+
 /** Read delegate config from disk. Returns defaults if file missing or corrupt.
  *
  *  The returned `providerExtensions` is the *user-only* view — exactly what the
@@ -353,34 +410,29 @@ let stallTimeoutOverrideForTesting: number | undefined;
  *  distinguish "the user listed this" from "this is a shipped default" by
  *  config presence rather than string identity. */
 export function loadDelegateConfig(): DelegateConfig {
-  try {
-    const raw = fs.readFileSync(delegateConfigPath(), "utf-8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      return structuredClone(DEFAULT_DELEGATE_CONFIG);
-    // Merge with defaults so new fields are always present
-    return {
-      ...DEFAULT_DELEGATE_CONFIG,
-      ...parsed,
-      agent: { ...DEFAULT_DELEGATE_CONFIG.agent, ...(parsed.agent ?? {}) },
-      concurrency: {
-        ...DEFAULT_DELEGATE_CONFIG.concurrency,
-        ...(parsed.concurrency ?? {}),
-      },
-      retry: { ...DEFAULT_DELEGATE_CONFIG.retry, ...(parsed.retry ?? {}) },
-      providerExtensions: normalizeProviderExtensions(
-        parsed.providerExtensions,
-      ),
-      agentOverrides: normalizeAgentOverrides(parsed.agentOverrides),
-      agentOverridesByParentModel: normalizeAgentOverridesByParentModel(
-        parsed.agentOverridesByParentModel,
-      ),
-      telemetry: normalizeTelemetryConfig(parsed.telemetry),
-      output: { ...DEFAULT_DELEGATE_CONFIG.output, ...(parsed.output ?? {}) },
-    } as DelegateConfig;
-  } catch {
+  const result = readDelegateConfigFromDisk();
+  if (result.status === "error") {
+    console.warn(
+      `[delegate] could not load ${DELEGATE_CONFIG_SOURCE}: ${
+        result.error instanceof Error
+          ? result.error.message
+          : String(result.error)
+      }; using defaults.`,
+    );
     return structuredClone(DEFAULT_DELEGATE_CONFIG);
   }
+  if (result.status === "missing") return structuredClone(DEFAULT_DELEGATE_CONFIG);
+  return result.config;
+}
+
+/** Return an immutable snapshot of the current delegate configuration.
+ *
+ *  Async tickets and long-lived task runners capture this at dispatch time so
+ *  a later `delegate.json` edit cannot retroactively change an in-flight
+ *  batch's retry limits, stall timeout, output-spill bounds, or provider
+ *  extension allowlist. */
+export function getDelegateConfigSnapshot(): DelegateConfig {
+  return structuredClone(__delegateConfig);
 }
 
 /** Initialize module config from disk. Called once at extension load. */
@@ -558,13 +610,26 @@ export function getAgentOverridesByParentModel(
 
 /** Re-read delegate.json from disk into the config singleton.
  *
- *  Called once at the dispatch boundary so user edits to delegate.json become
- *  visible between delegate calls without restarting pi. Within one dispatch
- *  the config is a stable snapshot; task resolution captures override values
- *  into the resolved tasks up front, so a later dispatch's reload cannot
- *  retroactively change an in-flight batch. */
+ *  Called at the start of every tool execution so user edits to delegate.json
+ *  become visible between delegate calls without restarting pi. On parse or
+ *  read errors the existing snapshot is kept and a warning is emitted; a
+ *  deliberately deleted file falls back to defaults. */
 export function reloadDelegateConfig(): void {
-  __delegateConfig = loadDelegateConfig();
+  const result = readDelegateConfigFromDisk();
+  if (result.status === "error") {
+    console.warn(
+      `[delegate] could not reload ${DELEGATE_CONFIG_SOURCE}; keeping current config: ${
+        result.error instanceof Error
+          ? result.error.message
+          : String(result.error)
+      }`,
+    );
+    return;
+  }
+  __delegateConfig =
+    result.status === "missing"
+      ? structuredClone(DEFAULT_DELEGATE_CONFIG)
+      : result.config;
 }
 
 // ── Config Getters ───────────────────────────────────────────────────────
@@ -592,13 +657,17 @@ export function getConcurrencyLimit(
 }
 
 /** Get the effective max async tickets limit. */
-export function getMaxAsyncTickets(): number {
-  return __delegateConfig.maxAsyncTickets ?? MAX_ASYNC_TICKETS;
+export function getMaxAsyncTickets(
+  config: DelegateConfig = __delegateConfig,
+): number {
+  return config.maxAsyncTickets ?? MAX_ASYNC_TICKETS;
 }
 
 /** Get the hard ceiling on total concurrent agents. */
-export function getMaxConcurrent(): number {
-  return __delegateConfig.maxConcurrent ?? MAX_CONCURRENCY;
+export function getMaxConcurrent(
+  config: DelegateConfig = __delegateConfig,
+): number {
+  return config.maxConcurrent ?? MAX_CONCURRENCY;
 }
 
 /** Maximum inactivity before cooperative stall cancellation is requested.
@@ -618,25 +687,33 @@ export function getStallTimeoutMs(
 }
 
 /** Get the max whole-task retries after the initial attempt. */
-export function getWholeTaskMaxRetries(): number {
-  return __delegateConfig.retry?.wholeTaskMaxRetries ?? 3;
+export function getWholeTaskMaxRetries(
+  config: DelegateConfig = __delegateConfig,
+): number {
+  return config.retry?.wholeTaskMaxRetries ?? 3;
 }
 
 /** Get the base delay (ms) for whole-task retry exponential backoff. */
-export function getWholeTaskBaseDelayMs(): number {
-  return __delegateConfig.retry?.wholeTaskBaseDelayMs ?? 1_000;
+export function getWholeTaskBaseDelayMs(
+  config: DelegateConfig = __delegateConfig,
+): number {
+  return config.retry?.wholeTaskBaseDelayMs ?? 1_000;
 }
 
 /** Get the output-spill threshold (chars). Over this, final output is spilled. */
-export function getOutputSpillThreshold(): number {
+export function getOutputSpillThreshold(
+  config: DelegateConfig = __delegateConfig,
+): number {
   return (
-    __delegateConfig.output?.spillThresholdChars ?? OUTPUT_SPILL_THRESHOLD_CHARS
+    config.output?.spillThresholdChars ?? OUTPUT_SPILL_THRESHOLD_CHARS
   );
 }
 
 /** Get the output-spill tail length (chars) kept in-context when spilled. */
-export function getOutputSpillTail(): number {
-  return __delegateConfig.output?.spillTailChars ?? OUTPUT_SPILL_TAIL_CHARS;
+export function getOutputSpillTail(
+  config: DelegateConfig = __delegateConfig,
+): number {
+  return config.output?.spillTailChars ?? OUTPUT_SPILL_TAIL_CHARS;
 }
 
 /**

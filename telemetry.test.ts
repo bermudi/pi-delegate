@@ -439,6 +439,46 @@ describe("telemetry", () => {
     expect(tasks).toHaveLength(0);
   });
 
+  test("disables the open backend when telemetry.enabled becomes false", () => {
+    const { calls, recorder } = makeRecorder();
+    _setDelegateConfigForTesting({ telemetry: { enabled: true } });
+    _setTelemetryForTesting(recorder);
+
+    const span1 = beginCall({ mode: "sync", taskCount: 1 });
+    span1.spawn();
+    span1.finish({
+      status: "success",
+      totalTokens: 1,
+      totalCost: 0,
+      wallMs: 1,
+    });
+    expect(calls).toHaveLength(2);
+
+    // Hot reload disables telemetry.
+    _setDelegateConfigForTesting({ telemetry: { enabled: false } });
+    const span2 = beginCall({ mode: "sync", taskCount: 1 });
+    span2.spawn();
+    span2.finish({
+      status: "success",
+      totalTokens: 1,
+      totalCost: 0,
+      wallMs: 1,
+    });
+    expect(calls).toHaveLength(2);
+
+    // Re-enabling should reopen telemetry for the next call.
+    _setDelegateConfigForTesting({ telemetry: { enabled: true } });
+    const span3 = beginCall({ mode: "sync", taskCount: 1 });
+    span3.spawn();
+    span3.finish({
+      status: "success",
+      totalTokens: 1,
+      totalCost: 0,
+      wallMs: 1,
+    });
+    expect(calls).toHaveLength(4);
+  });
+
   test("includes the installed Pi version on rows", () => {
     const { calls, recorder } = makeRecorder();
     _setTelemetryForTesting(recorder);
@@ -500,6 +540,44 @@ describe("telemetry", () => {
           journalMode: "wal",
           piVersion: piCodingAgent.VERSION,
         });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
+    "Node SQLite backend rotates to a new database path when dbPath changes",
+    { timeout: 15_000 },
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-rotate-"),
+      );
+      const firstDb = path.join(dir, "first.db");
+      const secondDb = path.join(dir, "second.db");
+      try {
+        await runNodeScript(
+          `
+          import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
+          import { _resetTelemetryForTesting, beginCall } from ${JSON.stringify(telemetryModule)};
+          const [firstDb, secondDb] = [${JSON.stringify(firstDb)}, ${JSON.stringify(secondDb)}];
+          _resetTelemetryForTesting();
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: firstDb } });
+          const span1 = beginCall({ mode: "sync", taskCount: 1 });
+          span1.spawn();
+          span1.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+          // Hot reload changes the database path.
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: secondDb } });
+          const span2 = beginCall({ mode: "sync", taskCount: 1 });
+          span2.spawn();
+          span2.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+        `,
+          firstDb,
+        );
+        const first = await readNodeDatabase(firstDb);
+        const second = await readNodeDatabase(secondDb);
+        expect(first.calls).toBe(1);
+        expect(second.calls).toBe(1);
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }

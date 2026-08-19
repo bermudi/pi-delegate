@@ -20,7 +20,9 @@ import {
   getAgentOverrides,
   getAgentOverridesByParentModel,
   resolveModelSpec,
+  getDelegateConfigSnapshot,
 } from "./config.ts";
+import type { DelegateConfig } from "./config.ts";
 import { resolveCwd } from "./utils.ts";
 import type {
   AgentConfig,
@@ -202,6 +204,7 @@ export function resolveTasks(
   ctx: DelegateToolCtx,
   agents: Map<string, AgentConfig>,
   parentDefaults: ParentAgentDefaults,
+  dispatchConfig: DelegateConfig = getDelegateConfigSnapshot(),
 ): ResolvedTask[] {
   // Build parent transcript lazily — only computed once if any task uses with-parent-transcript
   let parentTranscript: string | null = null;
@@ -229,8 +232,8 @@ export function resolveTasks(
   // subagent configuration). The dispatch boundary reloads the config
   // singleton, so this snapshot is one consistent view for every task in
   // the batch.
-  const agentOverrides = getAgentOverrides();
-  const overridesByParentModel = getAgentOverridesByParentModel();
+  const agentOverrides = getAgentOverrides(dispatchConfig);
+  const overridesByParentModel = getAgentOverridesByParentModel(dispatchConfig);
 
   return tasks.map((t, i) => {
     const isDefaultAgent = t.agent === DEFAULT_AGENT_NAME;
@@ -404,6 +407,7 @@ export function resolveTasks(
                 t.model ?? parentModelOverride?.model ?? agentOverride?.model,
               agentType,
               frontmatterModel: agent?.model,
+              config: dispatchConfig,
             });
 
       // A pool hit always runs its frozen model, but an explicitly requested
@@ -489,6 +493,7 @@ export function resolveTasks(
             parentDefaults.thinking ??
             "off")
         : (t.thinking ??
+          parentModelOverride?.thinking ??
           agentOverride?.thinking ??
           agent?.thinking ??
           (isPoolHit ? pooledConfig?.thinking : undefined) ??

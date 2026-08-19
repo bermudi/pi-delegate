@@ -72,6 +72,10 @@ interface TelemetryBackend {
 let backend: TelemetryBackend | undefined;
 let backendGeneration: number | undefined;
 let backendFailed = false;
+/** The telemetry config used to open the current backend. Tracked so a
+ *  hot-reloaded `enabled` or `dbPath` change closes the old backend and opens
+ *  a new one, rather than continuing to write to a stale SQLite file. */
+let backendConfig: import("./config.ts").TelemetryConfig | undefined;
 /** Monotonic runtime identity. A late worker from a previous runtime may not
  * write into the next runtime's backend after a bounded shutdown drain. */
 let telemetryGeneration = 0;
@@ -458,10 +462,11 @@ function disableBackend(operation: string, error: unknown): void {
   );
 }
 
-function openBackend(): TelemetryBackend | undefined {
-  const config = getTelemetryConfig();
-  if (config.enabled === false) return undefined;
-  if (backendFailed || telemetryClosed) return undefined;
+function openBackend(
+  config = getTelemetryConfig(),
+): TelemetryBackend | undefined {
+  if (config.enabled === false || telemetryClosed) return undefined;
+  if (backendFailed) return undefined;
   if (testingRecorder) {
     return new RecorderBackend(testingRecorder, disableBackend);
   }
@@ -497,27 +502,57 @@ function openBackend(): TelemetryBackend | undefined {
   }
 }
 
+function telemetryConfigsDiffer(
+  a: import("./config.ts").TelemetryConfig,
+  b: import("./config.ts").TelemetryConfig,
+): boolean {
+  return a.enabled !== b.enabled || a.dbPath !== b.dbPath;
+}
+
+function closeCurrentBackend(): void {
+  const stale = backend;
+  backend = undefined;
+  backendGeneration = undefined;
+  backendConfig = undefined;
+  stale?.close();
+}
+
 function getBackend(generation?: number): TelemetryBackend | undefined {
   if (telemetryClosed) return undefined;
   if (generation !== undefined && generation !== telemetryGeneration) {
     return undefined;
   }
+
+  const currentConfig = getTelemetryConfig();
+
   if (backend) {
     if (backendGeneration !== telemetryGeneration) {
       // A previous runtime left its handle open while its bounded shutdown
       // drain timed out. Dispose that stale handle before opening this one.
-      const stale = backend;
-      backend = undefined;
-      backendGeneration = undefined;
-      stale.close();
+      closeCurrentBackend();
     } else if (generation !== undefined && backendGeneration !== generation) {
       return undefined;
+    } else if (
+      backendConfig &&
+      telemetryConfigsDiffer(backendConfig, currentConfig)
+    ) {
+      // Config reload changed `enabled` or `dbPath` while the backend is open.
+      // Close the old handle and, if enabled, open a fresh one under the new
+      // settings. Reset backendFailed so a new path is given a fair attempt.
+      backendFailed = false;
+      closeCurrentBackend();
     } else {
       return backend;
     }
   }
-  backend = openBackend();
-  if (backend) backendGeneration = telemetryGeneration;
+
+  if (currentConfig.enabled === false) return undefined;
+
+  backend = openBackend(currentConfig);
+  if (backend) {
+    backendGeneration = telemetryGeneration;
+    backendConfig = currentConfig;
+  }
   return backend;
 }
 
@@ -689,10 +724,7 @@ export function closeTelemetry(expectedGeneration?: number): void {
     return;
   }
   telemetryClosed = true;
-  const current = backend;
-  backend = undefined;
-  backendGeneration = undefined;
-  current?.close();
+  closeCurrentBackend();
 }
 
 /** Current runtime identity for lifecycle owners such as session_shutdown. */
@@ -707,23 +739,17 @@ export function prepareTelemetryForSession(): void {
   // A timed-out old runtime may have left its handle open. Close it before
   // advancing the generation so the old shutdown handler cannot close the new
   // runtime's backend later.
-  const stale = backend;
-  backend = undefined;
-  backendGeneration = undefined;
-  stale?.close();
+  closeCurrentBackend();
 
   telemetryGeneration++;
+  backendFailed = false;
   telemetryClosed = false;
 }
 
 export function _setTelemetryForTesting(
   recorder: TelemetryRecorder | undefined,
 ): void {
-  if (backend) {
-    backend.close();
-    backend = undefined;
-    backendGeneration = undefined;
-  }
+  closeCurrentBackend();
   testingRecorder = recorder;
   backendFailed = false;
   telemetryGeneration++;
@@ -732,11 +758,7 @@ export function _setTelemetryForTesting(
 
 export function _resetTelemetryForTesting(): void {
   testingRecorder = undefined;
-  if (backend) {
-    backend.close();
-    backend = undefined;
-    backendGeneration = undefined;
-  }
+  closeCurrentBackend();
   backendFailed = false;
   telemetryGeneration++;
   telemetryClosed = false;

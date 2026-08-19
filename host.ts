@@ -89,6 +89,8 @@ export interface HostDepsOptions {
    * tasks (no named agent) pass undefined to use the discovered prompt.
    */
   systemPrompt?: string;
+  /** Dispatch-scoped delegate.json snapshot for the provider-extension allowlist. */
+  delegateConfig?: import("./config.ts").DelegateConfig;
 }
 
 const hostDepsCache = new GenerationCache<HostDeps>();
@@ -163,6 +165,7 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
       options.modelProvider,
       options.cwd,
       agentDir,
+      options.delegateConfig,
     );
 
   // Provider configs may contain functions (custom stream/OAuth handlers), so a
@@ -199,7 +202,9 @@ export async function getHostDeps(options: HostDepsOptions): Promise<HostDeps> {
  * allowlist, since editing it changes what a subsequent build would inject.
  */
 function hostDepsCacheKey(options: HostDepsOptions, agentDir: string): string {
-  const providerExtensions = getSubagentProviderExtensionMap();
+  const providerExtensions = getSubagentProviderExtensionMap(
+    options.delegateConfig,
+  );
   return JSON.stringify({
     agentDir,
     cwd: options.cwd,

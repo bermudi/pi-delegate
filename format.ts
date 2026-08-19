@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { renderOutputForLLM } from "./spill.ts";
+import { getOutputSpillThreshold, getOutputSpillTail } from "./config.ts";
 import type {
   ResolvedTask,
   TaskProgress,
@@ -414,6 +415,8 @@ export function formatFailedTask(r: TaskResult, cwd?: string): string[] {
 export function formatCompletedTask(
   task: ResolvedTask,
   result: TaskResult,
+  /** Dispatch-scoped snapshot for output-spill bounds. */
+  config?: import("./config.ts").DelegateConfig,
 ): string[] {
   const parts: string[] = [];
   // `|| task.sessionAction` covers action-only tasks (close/list/...) where prompt is
@@ -434,7 +437,10 @@ export function formatCompletedTask(
     const touched = relativeTouchedSummary(result.touchedFiles, task.cwd);
     if (touched) meta.push(`touched (best-effort): ${touched}`);
     parts.push(
-      `[${meta.join(" · ")}]\n\n${renderOutputForLLM(result.output, result.agent)}`,
+      `[${meta.join(" · ")}]\n\n${renderOutputForLLM(result.output, result.agent, {
+        thresholdChars: getOutputSpillThreshold(config),
+        tailChars: getOutputSpillTail(config),
+      })}`,
     );
   }
   return parts;
