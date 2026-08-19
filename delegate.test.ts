@@ -2836,9 +2836,21 @@ describe("delegate.json agentOverrides", () => {
   test("getDelegateConfigSnapshot returns an immutable dispatch-scoped clone", () => {
     _setDelegateConfigForTesting({
       agentOverrides: { coder: { model: "first/model" } },
+      agentOverridesByParentModel: {
+        "provider/parent": { coder: { thinking: "high" } },
+      },
     });
     const snapshot = getDelegateConfigSnapshot();
     expect(snapshot.agentOverrides?.coder?.model).toBe("first/model");
+    expect(Object.getPrototypeOf(snapshot.agentOverrides)).toBeNull();
+    expect(
+      Object.getPrototypeOf(snapshot.agentOverridesByParentModel),
+    ).toBeNull();
+    expect(
+      Object.getPrototypeOf(
+        snapshot.agentOverridesByParentModel?.["provider/parent"],
+      ),
+    ).toBeNull();
     _setDelegateConfigForTesting({
       agentOverrides: { coder: { model: "second/model" } },
     });
@@ -2965,6 +2977,28 @@ describe("legacy pi settings detection", () => {
       treeFilterMode: "no-tools",
     });
     expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
+  });
+
+  test("caches malformed settings detection until the file changes", () => {
+    const settingsPath = path.join(tmpDir, ".pi", "agent", "settings.json");
+    mkdirSync(path.dirname(settingsPath), { recursive: true });
+    writeFileSync(settingsPath, "{ not json");
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
+      expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(
+      warnings.filter((warning) =>
+        warning.includes("could not read settings file"),
+      ),
+    ).toHaveLength(1);
   });
 
   test("warns once per cwd that the overrides moved to delegate.json", () => {

@@ -581,6 +581,39 @@ export function loadDelegateConfig(): DelegateConfig {
   return result.config;
 }
 
+/** Clone a config while retaining the null-prototype override maps.
+ *
+ * `structuredClone` deliberately preserves data, not object prototypes. That
+ * is normally useful, but these maps are a trust boundary: an inherited
+ * `constructor` or `toString` must not look like a configured agent.
+ */
+function cloneDelegateConfig(config: DelegateConfig): DelegateConfig {
+  const clone = structuredClone(config);
+
+  if (clone.agentOverrides) {
+    clone.agentOverrides = cloneNullPrototypeMap(clone.agentOverrides);
+  }
+  if (clone.agentOverridesByParentModel) {
+    const parentModels = cloneNullPrototypeMap(
+      clone.agentOverridesByParentModel,
+    );
+    for (const [parentModel, overrides] of Object.entries(parentModels)) {
+      parentModels[parentModel] = cloneNullPrototypeMap(overrides);
+    }
+    clone.agentOverridesByParentModel = parentModels;
+  }
+
+  return clone;
+}
+
+function cloneNullPrototypeMap<T>(map: Record<string, T>): Record<string, T> {
+  const clone = Object.create(null) as Record<string, T>;
+  for (const [key, value] of Object.entries(map)) {
+    clone[key] = value;
+  }
+  return clone;
+}
+
 /** Return an immutable snapshot of the current delegate configuration.
  *
  *  Async tickets and long-lived task runners capture this at dispatch time so
@@ -588,7 +621,7 @@ export function loadDelegateConfig(): DelegateConfig {
  *  batch's retry limits, stall timeout, output-spill bounds, or provider
  *  extension allowlist. */
 export function getDelegateConfigSnapshot(): DelegateConfig {
-  return structuredClone(__delegateConfig);
+  return cloneDelegateConfig(__delegateConfig);
 }
 
 /** Initialize module config from disk. Called once at extension load. */

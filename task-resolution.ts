@@ -39,6 +39,13 @@ const PROJECT_CONTEXT_START =
   "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n";
 const PROJECT_CONTEXT_END = "\n</project_context>\n";
 
+function getOwnMapValue<T>(
+  map: Record<string, T> | undefined,
+  key: string,
+): T | undefined {
+  return map && Object.hasOwn(map, key) ? map[key] : undefined;
+}
+
 /**
  * Parent `getSystemPrompt()` is the fully assembled prompt, including the
  * parent's AGENTS.md files. A delegated session resolves resources for its own
@@ -256,10 +263,15 @@ export function resolveTasks(
       : undefined;
     const parentModelOverride =
       t.agent && !isDefaultAgent && parentModelKey
-        ? overridesByParentModel?.[parentModelKey]?.[t.agent]
+        ? getOwnMapValue(
+            getOwnMapValue(overridesByParentModel, parentModelKey),
+            t.agent,
+          )
         : undefined;
     const agentOverride =
-      t.agent && !isDefaultAgent ? agentOverrides?.[t.agent] : undefined;
+      t.agent && !isDefaultAgent
+        ? getOwnMapValue(agentOverrides, t.agent)
+        : undefined;
 
     // Build system prompt. Explicit task prompts and named agent prompts
     // win; ad-hoc subagents inherit the parent's base prompt when Pi exposes
