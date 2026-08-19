@@ -152,6 +152,7 @@ export {
   loadDelegateSettings,
   clearDelegateSettingsCache,
 } from "./settings.ts";
+export type { DelegateSettings } from "./settings.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";
 export {
   decideSpill,

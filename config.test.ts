@@ -7,6 +7,7 @@ import {
   getSubagentProviderExtensionMap,
   getSubagentProviderExtensionsForProvider,
   getSubagentProviderExtensionSourcesForProvider,
+  getProviderExtensionSignature,
   getTelemetryConfig,
   type DelegateConfig,
 } from "./config.ts";
@@ -255,6 +256,34 @@ describe("getSubagentProviderExtensionSourcesForProvider", () => {
         config,
       ),
     ).toEqual([{ source: "npm:x", required: true }]);
+  });
+});
+
+describe("getProviderExtensionSignature", () => {
+  beforeEach(() => _resetDelegateConfigForTesting());
+  afterEach(() => _resetDelegateConfigForTesting());
+
+  test("distinguishes required re-listings from best-effort defaults", () => {
+    const defaultSignature = getProviderExtensionSignature("openai-codex");
+    _setDelegateConfigForTesting({
+      providerExtensions: { "openai-codex": ["npm:@bermudi/pi-codex"] },
+    });
+
+    expect(getProviderExtensionSignature("openai-codex")).not.toBe(
+      defaultSignature,
+    );
+  });
+
+  test("preserves configured extension order", () => {
+    _setDelegateConfigForTesting({
+      providerExtensions: { custom: ["npm:first", "npm:second"] },
+    });
+    const first = getProviderExtensionSignature("custom");
+    _setDelegateConfigForTesting({
+      providerExtensions: { custom: ["npm:second", "npm:first"] },
+    });
+
+    expect(getProviderExtensionSignature("custom")).not.toBe(first);
   });
 });
 

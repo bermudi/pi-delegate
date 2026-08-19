@@ -585,6 +585,48 @@ describe("telemetry", () => {
   );
 
   test(
+    "Node SQLite backend evicts a superseded database after its bound span finishes",
+    { timeout: 15_000 },
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-evict-"),
+      );
+      const firstDb = path.join(dir, "first.db");
+      const secondDb = path.join(dir, "second.db");
+      try {
+        const result = await runNodeScript(
+          `
+          import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
+          import {
+            _resetTelemetryForTesting,
+            _getTelemetryBackendCacheKeysForTesting,
+            beginCall,
+          } from ${JSON.stringify(telemetryModule)};
+          const [firstDb, secondDb] = [${JSON.stringify(firstDb)}, ${JSON.stringify(secondDb)}];
+          _resetTelemetryForTesting();
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: firstDb } });
+          const first = beginCall({ mode: "sync", taskCount: 1 });
+          first.spawn();
+          first.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: secondDb } });
+          const second = beginCall({ mode: "sync", taskCount: 1 });
+          second.spawn();
+          console.log(JSON.stringify(_getTelemetryBackendCacheKeysForTesting()));
+          second.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+        `,
+          secondDb,
+        );
+        const keys = JSON.parse(result.stdout.trim()) as string[];
+        expect(keys).toHaveLength(1);
+        expect(keys[0]).toContain(secondDb);
+        expect(keys[0]).not.toContain(firstDb);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
     "Node SQLite backend binds an in-flight span to its original database across hot reloads",
     { timeout: 15_000 },
     async () => {
