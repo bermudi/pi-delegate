@@ -16,8 +16,11 @@ import { isSessionBusy } from "./tickets.ts";
 import { BUILTIN_AGENT_CONFIGS, buildSubagentSystemPrompt } from "./agents.ts";
 import { buildParentTranscript } from "./parent-context.ts";
 import { findAvailableAlternative, resolveModelRequest } from "./model.ts";
-import { resolveModelSpec } from "./config.ts";
-import { loadDelegateSettings } from "./settings.ts";
+import {
+  getAgentOverrides,
+  getAgentOverridesByParentModel,
+  resolveModelSpec,
+} from "./config.ts";
 import { resolveCwd } from "./utils.ts";
 import type {
   AgentConfig,
@@ -221,6 +224,14 @@ export function resolveTasks(
     ctx.getSystemPrompt?.(),
   );
 
+  // Agent overrides come from delegate.json only (user scope, global —
+  // deliberately no project-level discovery, so repo files never become
+  // subagent configuration). The dispatch boundary reloads the config
+  // singleton, so this snapshot is one consistent view for every task in
+  // the batch.
+  const agentOverrides = getAgentOverrides();
+  const overridesByParentModel = getAgentOverridesByParentModel();
+
   return tasks.map((t, i) => {
     const isDefaultAgent = t.agent === DEFAULT_AGENT_NAME;
     const agent = t.agent
@@ -229,19 +240,17 @@ export function resolveTasks(
     const isBuiltinAgent = agent?.builtin === true;
     const cwd = resolveCwd(t.cwd ?? ctx.cwd, ctx.cwd);
 
-    // Load settings-based overrides for this agent
-    const settings = loadDelegateSettings(cwd);
+    // delegate.json agent overrides for this agent. `default` bypasses them
+    // entirely (it mirrors the live parent by contract).
     const parentModelKey = ctx.model
       ? `${ctx.model.provider}/${ctx.model.id}`
       : undefined;
     const parentModelOverride =
       t.agent && !isDefaultAgent && parentModelKey
-        ? settings?.agentOverridesByParentModel?.[parentModelKey]?.[t.agent]
+        ? overridesByParentModel?.[parentModelKey]?.[t.agent]
         : undefined;
     const agentOverride =
-      t.agent && !isDefaultAgent && settings?.agentOverrides?.[t.agent]
-        ? settings.agentOverrides[t.agent]
-        : undefined;
+      t.agent && !isDefaultAgent ? agentOverrides?.[t.agent] : undefined;
 
     // Build system prompt. Explicit task prompts and named agent prompts
     // win; ad-hoc subagents inherit the parent's base prompt when Pi exposes

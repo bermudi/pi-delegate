@@ -73,8 +73,11 @@ import {
   getHostDeps,
   invalidateHostDepsCache,
   readDelegateSettingsFile,
-  loadDelegateSettings,
-  clearDelegateSettingsCache,
+  findLegacyDelegateSettings,
+  warnLegacyDelegateSettingsMoved,
+  loadDelegateConfig,
+  getAgentOverrides,
+  reloadDelegateConfig,
   getConcurrencyLimit,
   getMaxAsyncTickets,
   getStallTimeoutMs,
@@ -2617,7 +2620,7 @@ describe("readDelegateSettingsFile", () => {
   });
 });
 
-describe("loadDelegateSettings", () => {
+describe("delegate.json agentOverrides", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -2627,171 +2630,85 @@ describe("loadDelegateSettings", () => {
 
   afterEach(() => {
     mock.module("node:os", () => os);
+    _resetDelegateConfigForTesting();
     cleanup(tmpDir);
   });
 
-  test("returns null when no settings files exist", () => {
-    const projectDir = path.join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    expect(loadDelegateSettings(projectDir)).toBeNull();
-  });
+  function writeDelegateConfig(config: unknown) {
+    const dir = path.join(tmpDir, ".pi", "agent");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "delegate.json"), JSON.stringify(config));
+  }
 
-  test("loads user settings from ~/.pi/agent/settings.json", () => {
-    const projectDir = path.join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    const userSettingsDir = path.join(tmpDir, ".pi", "agent");
-    mkdirSync(userSettingsDir, { recursive: true });
-    writeFileSync(
-      path.join(userSettingsDir, "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverrides: { reviewer: { model: "zai/glm-5-turbo" } },
-        },
-      }),
-    );
-    const result = loadDelegateSettings(projectDir);
-    expect(result?.agentOverrides?.reviewer?.model).toBe("zai/glm-5-turbo");
-  });
-
-  test("project settings override user settings", () => {
-    const projectDir = path.join(tmpDir, "project");
-    mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
-    writeFileSync(
-      path.join(projectDir, ".pi", "settings.json"),
-      JSON.stringify({
-        delegate: { agentOverrides: { reviewer: { model: "project/model" } } },
-      }),
-    );
-
-    const userDir = path.join(tmpDir, ".pi", "agent");
-    mkdirSync(userDir, { recursive: true });
-    writeFileSync(
-      path.join(userDir, "settings.json"),
-      JSON.stringify({
-        delegate: { agentOverrides: { reviewer: { model: "user/model" } } },
-      }),
-    );
-
-    const result = loadDelegateSettings(projectDir);
-    expect(result?.agentOverrides?.reviewer?.model).toBe("project/model");
-  });
-
-  test("merges exact parent-model overrides by field with project precedence", () => {
-    const projectDir = path.join(tmpDir, "project");
-    mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
-    writeFileSync(
-      path.join(projectDir, ".pi", "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverridesByParentModel: {
-            "openai-codex/gpt-5.6-sol": {
-              scout: { thinking: "high" },
-            },
-          },
-        },
-      }),
-    );
-
-    const userDir = path.join(tmpDir, ".pi", "agent");
-    mkdirSync(userDir, { recursive: true });
-    writeFileSync(
-      path.join(userDir, "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverridesByParentModel: {
-            "openai-codex/gpt-5.6-sol": {
-              scout: {
-                model: "openai-codex/gpt-5.6-luna",
-                tools: ["read"],
-                thinking: "low",
-              },
-            },
-          },
-        },
-      }),
-    );
-
-    const result = loadDelegateSettings(projectDir);
-    expect(
-      result?.agentOverridesByParentModel?.["openai-codex/gpt-5.6-sol"]?.scout,
-    ).toEqual({
-      model: "openai-codex/gpt-5.6-luna",
-      tools: ["read"],
-      thinking: "high",
+  test("loads agent overrides from delegate.json", () => {
+    writeDelegateConfig({
+      agentOverrides: { reviewer: { model: "zai/glm-5-turbo" } },
+      agentOverridesByParentModel: {
+        "openai-codex/gpt-5.6-sol": { scout: { thinking: "high" } },
+      },
     });
-  });
-
-  test("trims agent and parent-model override keys", () => {
-    const projectDir = path.join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    const userDir = path.join(tmpDir, ".pi", "agent");
-    mkdirSync(userDir, { recursive: true });
-    writeFileSync(
-      path.join(userDir, "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverrides: {
-            " scout ": { thinking: "high" },
-          },
-          agentOverridesByParentModel: {
-            " openai-codex/gpt-5.6-sol ": {
-              " scout ": { model: "openai-codex/gpt-5.6-luna" },
-            },
-          },
-        },
-      }),
-    );
-
-    const result = loadDelegateSettings(projectDir);
-    expect(result?.agentOverrides?.scout).toEqual({ thinking: "high" });
+    const config = loadDelegateConfig();
+    expect(config.agentOverrides?.reviewer?.model).toBe("zai/glm-5-turbo");
     expect(
-      result?.agentOverridesByParentModel?.["openai-codex/gpt-5.6-sol"]?.scout,
-    ).toEqual({ model: "openai-codex/gpt-5.6-luna" });
-    expect(result?.agentOverrides?.[" scout "]).toBeUndefined();
+      config.agentOverridesByParentModel?.["openai-codex/gpt-5.6-sol"]?.scout
+        ?.thinking,
+    ).toBe("high");
   });
 
-  test("warns and keeps the first override when keys collide after trimming", () => {
-    const projectDir = path.join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    const userDir = path.join(tmpDir, ".pi", "agent");
-    mkdirSync(userDir, { recursive: true });
-    writeFileSync(
-      path.join(userDir, "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverrides: {
-            scout: { model: "first/agent-model" },
-            " scout ": { model: "second/agent-model" },
-          },
-          agentOverridesByParentModel: {
-            "openai-codex/gpt-5.6-sol": {
-              scout: { model: "first/parent-model" },
-            },
-            " openai-codex/gpt-5.6-sol ": {
-              scout: { model: "second/parent-model" },
-            },
-          },
-        },
-      }),
-    );
+  test("absent override blocks stay undefined", () => {
+    writeDelegateConfig({ maxConcurrent: 4 });
+    const config = loadDelegateConfig();
+    expect(config.agentOverrides).toBeUndefined();
+    expect(config.agentOverridesByParentModel).toBeUndefined();
+  });
 
+  test("rejects unsupported per-agent skill filtering with a warning", () => {
+    writeDelegateConfig({
+      agentOverrides: { scout: { model: "some/model", skills: ["security-review"] } },
+    });
     const warnings: string[] = [];
     const originalWarn = console.warn;
     console.warn = (message?: unknown) => warnings.push(String(message));
     try {
-      const result = loadDelegateSettings(projectDir);
-      expect(result?.agentOverrides?.scout?.model).toBe("first/agent-model");
+      const config = loadDelegateConfig();
+      expect(config.agentOverrides?.scout).toBeUndefined();
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(
+      warnings.some((warning) => warning.includes("skill filtering")),
+    ).toBe(true);
+  });
+
+  test("warns and keeps the first override when keys collide after trimming", () => {
+    writeDelegateConfig({
+      agentOverrides: {
+        scout: { model: "first/agent-model" },
+        " scout ": { model: "second/agent-model" },
+      },
+      agentOverridesByParentModel: {
+        "openai-codex/gpt-5.6-sol": { scout: { model: "first/parent-model" } },
+        " openai-codex/gpt-5.6-sol ": {
+          scout: { model: "second/parent-model" },
+        },
+      },
+    });
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      const config = loadDelegateConfig();
+      expect(config.agentOverrides?.scout?.model).toBe("first/agent-model");
       expect(
-        result?.agentOverridesByParentModel?.["openai-codex/gpt-5.6-sol"]?.scout
+        config.agentOverridesByParentModel?.["openai-codex/gpt-5.6-sol"]?.scout
           ?.model,
       ).toBe("first/parent-model");
     } finally {
       console.warn = originalWarn;
     }
-
     expect(
       warnings.some((warning) =>
-        warning.includes("duplicate settings override"),
+        warning.includes("duplicate agentOverrides entry"),
       ),
     ).toBe(true);
     expect(
@@ -2801,133 +2718,88 @@ describe("loadDelegateSettings", () => {
     ).toBe(true);
   });
 
-  test("clearing the cache makes changed settings visible", () => {
-    const projectDir = path.join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    const userDir = path.join(tmpDir, ".pi", "agent");
-    mkdirSync(userDir, { recursive: true });
-    const settingsPath = path.join(userDir, "settings.json");
-    writeFileSync(
-      settingsPath,
-      JSON.stringify({
-        delegate: { agentOverrides: { coder: { model: "first/model" } } },
-      }),
-    );
-    expect(loadDelegateSettings(projectDir)?.agentOverrides?.coder?.model).toBe(
-      "first/model",
-    );
+  test("reloadDelegateConfig makes edits visible between dispatches", () => {
+    writeDelegateConfig({
+      agentOverrides: { coder: { model: "first/model" } },
+    });
+    reloadDelegateConfig();
+    expect(getAgentOverrides()?.coder?.model).toBe("first/model");
 
-    writeFileSync(
-      settingsPath,
-      JSON.stringify({
-        delegate: { agentOverrides: { coder: { model: "second/model" } } },
-      }),
-    );
-    expect(loadDelegateSettings(projectDir)?.agentOverrides?.coder?.model).toBe(
-      "first/model",
-    );
-    clearDelegateSettingsCache();
-    expect(loadDelegateSettings(projectDir)?.agentOverrides?.coder?.model).toBe(
-      "second/model",
-    );
+    writeDelegateConfig({
+      agentOverrides: { coder: { model: "second/model" } },
+    });
+    // Without a reload the snapshot is stable within a dispatch.
+    expect(getAgentOverrides()?.coder?.model).toBe("first/model");
+    reloadDelegateConfig();
+    expect(getAgentOverrides()?.coder?.model).toBe("second/model");
+  });
+});
+
+describe("legacy pi settings detection", () => {
+  let tmpDir: string;
+  let projectDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTempDir("delegate-legacy-");
+    projectDir = path.join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    mock.module("node:os", () => ({ ...os, homedir: () => tmpDir }));
   });
 
-  test("parent-model-scoped built-in overrides do not leak to another parent model", () => {
-    const projectDir = path.join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    const userDir = path.join(tmpDir, ".pi", "agent");
-    mkdirSync(userDir, { recursive: true });
-    writeFileSync(
-      path.join(userDir, "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverridesByParentModel: {
-            "openai-codex/gpt-5.6-sol": {
-              scout: {
-                model: "openai-codex/gpt-5.6-luna:high",
-              },
-            },
-          },
-        },
-      }),
-    );
-
-    const selected = {
-      provider: "openai-codex",
-      id: "gpt-5.6-luna",
-    } as any;
-    const registry = {
-      getAvailable: () => [selected],
-      find: (provider: string, id: string) =>
-        provider === selected.provider && id === selected.id ? selected : null,
-      hasConfiguredAuth: () => true,
-    } as any;
-    const codexParent = {
-      provider: "openai-codex",
-      id: "gpt-5.6-sol",
-    } as any;
-    const openrouterParent = {
-      provider: "openrouter",
-      id: "deepseek-v4-pro",
-    } as any;
-    const base = {
-      cwd: projectDir,
-      modelRegistry: registry,
-      sessionManager: undefined,
-      getSystemPrompt: () => "parent",
-    } as any;
-
-    const [codexTask] = resolveTasks(
-      [{ agent: "scout", prompt: "inspect" }] as any,
-      { ...base, model: codexParent },
-      discoverAgents(projectDir),
-      { thinking: "off", tools: DEFAULT_TOOLS },
-    );
-    expect(codexTask?.model).toBe(selected);
-    expect(codexTask?.thinking).toBe("high");
-
-    clearDelegateSettingsCache();
-    const [openrouterTask] = resolveTasks(
-      [{ agent: "scout", prompt: "inspect" }] as any,
-      { ...base, model: openrouterParent },
-      discoverAgents(projectDir),
-      { thinking: "medium", tools: DEFAULT_TOOLS },
-    );
-    expect(openrouterTask?.model).toBe(openrouterParent);
-    expect(openrouterTask?.thinking).toBe("medium");
+  afterEach(() => {
+    mock.module("node:os", () => os);
+    cleanup(tmpDir);
   });
 
-  test("rejects unsupported per-agent skill filtering with a warning", () => {
-    const projectDir = path.join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    const userDir = path.join(tmpDir, ".pi", "agent");
-    mkdirSync(userDir, { recursive: true });
-    writeFileSync(
-      path.join(userDir, "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverrides: {
-            scout: { model: "some/model", skills: ["security-review"] },
-          },
-        },
-      }),
-    );
+  function writeSettings(rel: string, body: unknown) {
+    const file = path.join(tmpDir, rel);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(body));
+  }
 
+  test("detects a delegate block in user and project settings.json", () => {
+    writeSettings(path.join(".pi", "agent", "settings.json"), {
+      delegate: { agentOverrides: { scout: { model: "a/b" } } },
+    });
+    writeSettings(path.join("project", ".pi", "settings.json"), {
+      delegate: { agentOverrides: { coder: { model: "c/d" } } },
+    });
+    const found = findLegacyDelegateSettings(projectDir);
+    expect(found).toHaveLength(2);
+    expect(found[0].endsWith(path.join(".pi", "agent", "settings.json"))).toBe(
+      true,
+    );
+    expect(found[1].endsWith(path.join(".pi", "settings.json"))).toBe(true);
+  });
+
+  test("settings without a delegate block are not flagged", () => {
+    writeSettings(path.join(".pi", "agent", "settings.json"), {
+      defaultProvider: "opencode",
+    });
+    writeSettings(path.join("project", ".pi", "settings.json"), {
+      treeFilterMode: "no-tools",
+    });
+    expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
+  });
+
+  test("warns once per cwd that the overrides moved to delegate.json", () => {
+    writeSettings(path.join(".pi", "agent", "settings.json"), {
+      delegate: { agentOverridesByParentModel: {} },
+    });
     const warnings: string[] = [];
     const originalWarn = console.warn;
     console.warn = (message?: unknown) => warnings.push(String(message));
     try {
-      expect(loadDelegateSettings(projectDir)?.agentOverrides?.scout).toBe(
-        undefined,
-      );
+      warnLegacyDelegateSettingsMoved(projectDir);
+      warnLegacyDelegateSettingsMoved(projectDir);
     } finally {
       console.warn = originalWarn;
     }
-    expect(
-      warnings.some((warning) => warning.includes("skill filtering")),
-    ).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("delegate.json");
   });
 });
+
 
 // ── Integration: tool registration ────────────────────────────────────────
 

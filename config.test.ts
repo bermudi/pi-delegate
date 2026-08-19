@@ -2,6 +2,8 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import {
   _resetDelegateConfigForTesting,
   _setDelegateConfigForTesting,
+  getAgentOverrides,
+  getAgentOverridesByParentModel,
   getSubagentProviderExtensionMap,
   getSubagentProviderExtensionsForProvider,
   getSubagentProviderExtensionSourcesForProvider,
@@ -253,5 +255,82 @@ describe("getSubagentProviderExtensionSourcesForProvider", () => {
         config,
       ),
     ).toEqual([{ source: "npm:x", required: true }]);
+  });
+});
+
+/**
+ * `agentOverrides` / `agentOverridesByParentModel` normalization, driven
+ * through the public `_setDelegateConfigForTesting` seam (which runs input
+ * through the same normalizers `loadDelegateConfig` uses) and read back via
+ * the getters `task-resolution.ts` consumes. File-loading behavior (the
+ * mocked-homedir path) is covered in `delegate.test.ts`.
+ */
+describe("agentOverrides normalization (via public seam)", () => {
+  beforeEach(() => _resetDelegateConfigForTesting());
+  afterEach(() => _resetDelegateConfigForTesting());
+
+  test("absent blocks read back undefined", () => {
+    expect(getAgentOverrides()).toBeUndefined();
+    expect(getAgentOverridesByParentModel()).toBeUndefined();
+  });
+
+  test("valid overrides pass through with trimmed keys", () => {
+    _setDelegateConfigForTesting({
+      agentOverrides: { " scout ": { model: " zai/glm-5-turbo " } },
+    });
+    expect(getAgentOverrides()?.scout?.model).toBe("zai/glm-5-turbo");
+  });
+
+  test("model is trimmed; empty model drops the entry", () => {
+    _setDelegateConfigForTesting({
+      agentOverrides: { scout: { model: "   " } },
+    });
+    expect(getAgentOverrides()?.scout).toBeUndefined();
+  });
+
+  test("unknown fields drop the entry whole (no partial application)", () => {
+    _setDelegateConfigForTesting({
+      agentOverrides: {
+        // @ts-expect-error -- deliberately malformed
+        scout: { model: "a/b", bogus: true },
+      },
+    });
+    expect(getAgentOverrides()?.scout).toBeUndefined();
+  });
+
+  test("parent-model map normalizes inner entries and keys are not lowercased", () => {
+    _setDelegateConfigForTesting({
+      agentOverridesByParentModel: {
+        " openai-codex/GPT-5.6-Sol ": { scout: { thinking: "high" } },
+      },
+    });
+    // Exact `provider/model-id` semantics: case is preserved.
+    expect(
+      getAgentOverridesByParentModel()?.["openai-codex/GPT-5.6-Sol"]?.scout
+        ?.thinking,
+    ).toBe("high");
+  });
+
+  test("override maps are null-prototype (no Object.prototype inheritance)", () => {
+    _setDelegateConfigForTesting({
+      agentOverrides: { scout: { model: "a/b" } },
+      agentOverridesByParentModel: {
+        "openai-codex/gpt-5.6-sol": { scout: { model: "a/b" } },
+      },
+    });
+    const overrides = getAgentOverrides() as unknown as Record<
+      string,
+      unknown
+    >;
+    const byParent = getAgentOverridesByParentModel() as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(Object.getPrototypeOf(overrides)).toBeNull();
+    expect(Object.getPrototypeOf(byParent)).toBeNull();
+    // Prototype members must not masquerade as configured agents.
+    expect(overrides["hasOwnProperty"]).toBeUndefined();
+    expect(overrides["constructor"]).toBeUndefined();
+    expect(byParent["toString"]).toBeUndefined();
   });
 });

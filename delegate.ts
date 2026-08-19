@@ -40,9 +40,13 @@ export {
   getMaxConcurrent,
   getStallTimeoutMs,
   resolveModelSpec,
+  getAgentOverrides,
+  getAgentOverridesByParentModel,
+  reloadDelegateConfig,
   getOutputSpillThreshold,
   getOutputSpillTail,
 } from "./config.ts";
+export type { AgentOverride } from "./config.ts";
 export {
   checkout,
   commit,
@@ -142,10 +146,9 @@ export {
 } from "./model.ts";
 export {
   readDelegateSettingsFile,
-  loadDelegateSettings,
-  clearDelegateSettingsCache,
+  findLegacyDelegateSettings,
+  warnLegacyDelegateSettingsMoved,
 } from "./settings.ts";
-export type { AgentOverride } from "./settings.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";
 export {
   decideSpill,
