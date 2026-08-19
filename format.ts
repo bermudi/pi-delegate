@@ -356,7 +356,13 @@ function isResumableSessionFile(sessionFile: string): boolean {
  * notice instead of a retry hint — so the parent model is told to re-dispatch
  * fresh rather than left to fabricate a path or chase a dead resume.
  */
-export function formatFailedTask(r: TaskResult, cwd?: string): string[] {
+export function formatFailedTask(
+  r: TaskResult,
+  cwd?: string,
+  /** Dispatch-scoped snapshot for output-spill bounds; falls back to live
+   *  config when unset (direct callers, legacy tests). */
+  config?: import("./config.ts").DelegateConfig,
+): string[] {
   const parts: string[] = [];
   const isAbort = r.error === "Aborted";
   // Empty string is falsy but not nullish — `||` covers both undefined and "".
@@ -367,8 +373,16 @@ export function formatFailedTask(r: TaskResult, cwd?: string): string[] {
   parts.push(`[${isAbort ? "ABORTED" : "FAILED"}: ${failParts.join(" · ")}]`);
 
   // Surface partial assistant output even when the task did not complete.
+  // Pass the dispatch-scoped spill bounds so a mid-task config change cannot
+  // widen (or narrow) the partial output the parent sees — the bounds captured
+  // when the task started are the ones the caller committed to.
   if (r.output && r.output !== "(no output)") {
-    parts.push(renderOutputForLLM(r.output, r.agent));
+    parts.push(
+      renderOutputForLLM(r.output, r.agent, {
+        thresholdChars: getOutputSpillThreshold(config),
+        tailChars: getOutputSpillTail(config),
+      }),
+    );
   }
 
   if (r.sessionFile && isResumableSessionFile(r.sessionFile)) {
@@ -428,7 +442,7 @@ export function formatCompletedTask(
     for (const w of task.warnings) parts.push(`[WARNING: ${w}]`);
   }
   if (result.error) {
-    parts.push(...formatFailedTask(result, task.cwd));
+    parts.push(...formatFailedTask(result, task.cwd, config));
   } else {
     const meta = [
       `OK | ${fmtDuration(result.durationMs)} | ${fmtTokens(result.tokens)} tokens`,
