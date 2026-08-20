@@ -133,6 +133,58 @@ describe("dispatch-time shared-write gate", () => {
       });
     },
   );
+
+  test("reports an abort, not a safety failure, when the turn aborts during preflight", async () => {
+    const model = { provider: "test", id: "model" } as any;
+    const finishes: Array<Record<string, unknown>> = [];
+    // Pre-aborted: execFile rejects before git can answer, which is exactly
+    // the mid-preflight cancellation the gate must not misreport.
+    const controller = new AbortController();
+    controller.abort();
+    const result = await dispatchDelegate({
+      pi: {} as any,
+      params: {
+        tasks: [
+          { id: "one", prompt: "one", cwd: tmpDir },
+          { id: "two", prompt: "two", cwd: tmpDir },
+        ],
+      },
+      ctx: {
+        cwd: tmpDir,
+        model,
+        modelRegistry: {
+          getAvailable: () => [model],
+          find: () => model,
+          hasConfiguredAuth: () => true,
+        },
+        getSystemPrompt: () => "parent",
+      } as any,
+      agents: new Map(),
+      parentModelId: model.id,
+      parentDefaults: {
+        thinking: "off",
+        tools: ["read", "write", "edit", "bash"],
+      },
+      signal: controller.signal,
+      onUpdate: (() => {}) as any,
+      callSpan: {
+        startedAt: Date.now(),
+        finish: (record: Record<string, unknown>) => finishes.push(record),
+      } as any,
+    });
+
+    expect(result.content[0]?.text).toBe(
+      "Aborted before dispatch; no tasks were started.",
+    );
+    expect(result.details.results).toEqual([]);
+    expect(ticketRegistry.size).toBe(0);
+    expect(finishes).toHaveLength(1);
+    expect(finishes[0]).toMatchObject({
+      status: "cancelled",
+      totalTokens: 0,
+      totalCost: 0,
+    });
+  });
 });
 
 function makeFakeSession(
