@@ -717,17 +717,21 @@ describe("delegate task lifecycle integration", () => {
 
     const details = (result as any).details as {
       results: Array<{ output?: string; error?: string }>;
+      dispatchWarning?: string;
     };
 
     expect(details.results).toHaveLength(3);
     expect(result.content[0]?.text).toContain("UNSAFE SHARED WRITES ENABLED");
+    expect(details.dispatchWarning).toContain("UNSAFE SHARED WRITES ENABLED");
     expect(
       updates.some((update) =>
-        update.details?.progress?.[0]?.warnings?.some((warning: string) =>
-          warning.includes("UNSAFE SHARED WRITES ENABLED"),
+        update.details?.progress?.some((progress: any) =>
+          progress.warnings?.some((warning: string) =>
+            warning.includes("UNSAFE SHARED WRITES ENABLED"),
+          ),
         ),
       ),
-    ).toBe(true);
+    ).toBe(false);
     for (const r of details.results) {
       expect(r.error).toBeUndefined();
       expect(r.output).toContain("done");
@@ -1030,6 +1034,9 @@ describe("delegate task lifecycle integration", () => {
     const ticketId = (dispatch.details as any).ticketId;
     expect(ticketId).toBeDefined();
     expect(dispatch.content[0]?.text).toContain("UNSAFE SHARED WRITES ENABLED");
+    expect((dispatch.details as any).dispatchWarning).toContain(
+      "UNSAFE SHARED WRITES ENABLED",
+    );
 
     // Poll until settled
     let pollResult: any;
@@ -1059,6 +1066,9 @@ describe("delegate task lifecycle integration", () => {
     expect(text).not.toContain("PENDING");
     expect(text).toContain("Async task done");
     expect(text).toContain("UNSAFE SHARED WRITES ENABLED");
+    expect((pollResult.details as any).dispatchWarning).toContain(
+      "UNSAFE SHARED WRITES ENABLED",
+    );
     expect(finalDetails.results[0]?.output).toContain("Async task done");
     expect(finalDetails.results[0]?.error).toBeUndefined();
     expect(finalDetails.results[0]?.output).toContain("Async task done");

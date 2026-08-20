@@ -49,16 +49,15 @@ The other built-ins are:
 
 ### Shared-write safety
 
-Before starting a batch, Delegate resolves each task's real tools and physical
-Git root. If two or more tasks can `write`, `edit`, or run `bash` in the same
-shared tree, the whole batch is rejected before any subagent starts. Run those
-tasks sequentially in separate calls, or use `workspace: "scratch"` when their
-filesystem changes should be discarded.
+Before starting work, Delegate resolves each task's real tools and physical Git
+root. If a task could mutate a shared tree that overlaps another task in the
+same call or a still-running sync/async dispatch, the new call is rejected
+before any subagent starts. Unknown tool names are treated as mutating. External
+processes are outside this in-process gate.
 
 For deliberately unsafe cases, top-level `unsafeSharedWrites: true` bypasses
-this check. It provides no isolation or rollback, and covers only tasks in that
-one call—not separate calls or external processes. Delegate marks the running
-and final result with a visible warning when the override is active.
+this check. It provides no isolation or rollback. Delegate marks the running
+and final result with a visible batch-level warning when the override is active.
 
 A same-named Markdown file can override any built-in (first definition wins
 across `.pi/agents/`, `~/.pi/agent/agents/`, `~/.agents/`, `.claude/agents/`,

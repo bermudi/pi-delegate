@@ -240,10 +240,15 @@ export function formatLiveTicketPoll(
     findTouchedOverlaps(completedForOverlap),
   );
   const guidance = liveTicketGuidance(ticket);
+  const dispatchWarning = ticket.dispatchWarning
+    ? `WARNING: ${ticket.dispatchWarning}`
+    : "";
   return {
     text: `${formatLiveTicketHeader(ticket, now)}\n${lines.join("\n")}${
       guidance ? `\n\n${guidance}` : ""
-    }${overlapWarning ? `\n\n${overlapWarning}` : ""}`,
+    }${dispatchWarning ? `\n\n${dispatchWarning}` : ""}${
+      overlapWarning ? `\n\n${overlapWarning}` : ""
+    }`,
     completedResults,
     overlapWarning,
   };

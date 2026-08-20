@@ -306,6 +306,21 @@ describe("shared-write safety", () => {
     ).toEqual([]);
   });
 
+  test("fails closed by treating unknown tools as mutating", async () => {
+    initRepository(root);
+    expect(
+      await findSharedWriteConflicts([
+        task(root, ["future_extension_tool"]),
+        task(root, ["write"]),
+      ]),
+    ).toEqual([
+      {
+        scope: { kind: "git", root },
+        taskIndexes: [0, 1],
+      },
+    ]);
+  });
+
   test("does not inspect Git or cwd for a single shared writer", async () => {
     expect(
       await findSharedWriteConflicts([
