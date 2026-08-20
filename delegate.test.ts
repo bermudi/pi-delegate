@@ -5297,9 +5297,15 @@ describe("delegate pool", () => {
     });
     expect(result.status).toBe("mismatch");
     if (result.status !== "mismatch") throw new Error("expected mismatch");
-    expect(result.mismatches.map((m) => m.field)).toContain(
-      "providerExtensions",
-    );
+    expect(
+      result.mismatches.find((m) => m.field === "providerExtensions"),
+    ).toEqual({
+      field: "providerExtensions",
+      frozen: "<redacted>",
+      requested: "<redacted>",
+    });
+    expect(JSON.stringify(result)).not.toContain("npm:old");
+    expect(JSON.stringify(result)).not.toContain("npm:new");
 
     // The same configured allowlist is allowed to reuse.
     const hit = checkout("ext-pool", {

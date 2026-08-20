@@ -263,6 +263,21 @@ describe("getProviderExtensionSignature", () => {
   beforeEach(() => _resetDelegateConfigForTesting());
   afterEach(() => _resetDelegateConfigForTesting());
 
+  test("returns an opaque deterministic digest", () => {
+    const sensitiveSource =
+      "git:https://user:super-secret@example.invalid/provider-extension.git";
+    _setDelegateConfigForTesting({
+      providerExtensions: { custom: [sensitiveSource] },
+    });
+
+    const signature = getProviderExtensionSignature("custom");
+    expect(signature).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(getProviderExtensionSignature("custom")).toBe(signature);
+    expect(signature).not.toContain(sensitiveSource);
+    expect(signature).not.toContain("super-secret");
+    expect(getProviderExtensionSignature("unknown")).toBe("");
+  });
+
   test("distinguishes required re-listings from best-effort defaults", () => {
     const defaultSignature = getProviderExtensionSignature("openai-codex");
     _setDelegateConfigForTesting({

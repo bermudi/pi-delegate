@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -751,7 +752,13 @@ export function getProviderExtensionSignature(
   // initialization, and a user re-listing a shipped source changes it from
   // best-effort to required. Treating either change as pool-compatible could
   // reuse an extension-free session without performing the required checks.
-  return JSON.stringify(sources);
+  // The signature crosses the session-pool boundary. Keep it opaque so a
+  // credential-bearing Git source can never become model-visible through a
+  // later pool mismatch. SHA-256 also keeps collision resistance appropriate
+  // for a key that decides whether already-loaded executable code may be reused.
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(sources), "utf8")
+    .digest("hex")}`;
 }
 
 /** A provider-extension source together with how it entered the config. */

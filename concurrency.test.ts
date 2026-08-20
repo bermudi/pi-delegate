@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
   getModelKey,
+  mapConcurrent,
   mapConcurrentByModel,
   _setGlobalConcurrencyLimitForTesting,
   _resetGlobalConcurrencyForTesting,
@@ -29,6 +30,25 @@ interface Task {
   id: number;
   model: ModelStub;
 }
+
+describe("mapConcurrent", () => {
+  test("bounds workers and preserves result order", async () => {
+    const items = Array.from({ length: 10 }, (_, index) => index);
+    let active = 0;
+    let peak = 0;
+
+    const results = await mapConcurrent(items, 3, async (item) => {
+      active++;
+      peak = Math.max(peak, active);
+      await delay(5);
+      active--;
+      return item * 2;
+    });
+
+    expect(peak).toBe(3);
+    expect(results).toEqual(items.map((item) => item * 2));
+  });
+});
 
 function makeTask(id: number, provider: string, modelId: string): Task {
   return { id, model: { provider, id: modelId } };

@@ -458,7 +458,11 @@ function checkoutPooledSession(
   });
   if (co.status === "mismatch") {
     const detail = co.mismatches
-      .map((m) => `${m.field}: '${m.frozen}' vs '${m.requested}'`)
+      .map((m) =>
+        m.field === "providerExtensions"
+          ? "providerExtensions: changed"
+          : `${m.field}: '${m.frozen}' vs '${m.requested}'`,
+      )
       .join("; ");
     return {
       error: failTask(
