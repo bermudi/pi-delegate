@@ -13,9 +13,21 @@ const GIT_REPOSITORY_REDIRECT_VARIABLES = [
   "GIT_COMMON_DIR",
 ] as const;
 
+export interface ReachRoot {
+  kind: "git" | "directory";
+  path: string;
+}
+
 export interface SharedWriteScope {
   kind: "git" | "directory";
   root: string;
+  /** Full set of canonical roots a shared writer can reach from its cwd: the
+   * primary `root` (Git top-level when known, otherwise the physical cwd) plus,
+   * when an external `core.worktree` places the Git top-level outside the
+   * physical cwd, the physical cwd itself. Overlap detection uses every entry;
+   * `root`/`kind` are the primary values used for display. Undefined on scopes
+   * assembled for a `SharedWriteConflict`, which only carry the witness root. */
+  roots?: ReachRoot[];
 }
 
 export interface SharedWriteConflict {
@@ -101,7 +113,7 @@ export async function resolveSharedWriteScope(
       error instanceof GitScopeError &&
       /not a git repository/i.test(error.stderr)
     ) {
-      return { kind: "directory", root: canonicalCwd };
+      return { kind: "directory", root: canonicalCwd, roots: [{ kind: "directory", path: canonicalCwd }] };
     }
     const detail =
       error instanceof GitScopeError
@@ -121,14 +133,28 @@ export async function resolveSharedWriteScope(
     );
   }
 
+  let canonicalRoot: string;
   try {
-    return { kind: "git", root: await fs.promises.realpath(root) };
+    canonicalRoot = await fs.promises.realpath(root);
   } catch (error) {
     throw new SharedWriteSafetyError(
       `Could not resolve Git root '${root}' for '${canonicalCwd}'.`,
       { cause: error },
     );
   }
+
+  // Git's reported top-level is the repository boundary, but a bash-capable
+  // writer can also reach files beneath its physical cwd. With an external
+  // core.worktree the top-level can live outside the physical cwd (e.g. a bare
+  // repository.git whose worktree is a sibling directory), so discarding the
+  // physical cwd would miss an overlap with another task scoped to a parent of
+  // the Git directory. Track both roots whenever the physical cwd is not within
+  // the Git top-level; the union of reach roots is what overlap detection uses.
+  const roots: ReachRoot[] = [{ kind: "git", path: canonicalRoot }];
+  if (!isPathWithinDirectoryLexical(canonicalRoot, canonicalCwd)) {
+    roots.push({ kind: "directory", path: canonicalCwd });
+  }
+  return { kind: "git", root: canonicalRoot, roots };
 }
 
 function isSharedWriter(task: ResolvedTask): boolean {
@@ -138,20 +164,44 @@ function isSharedWriter(task: ResolvedTask): boolean {
   );
 }
 
-function scopesOverlap(left: SharedWriteScope, right: SharedWriteScope): boolean {
+function reachRoots(scope: SharedWriteScope): ReachRoot[] {
+  return scope.roots ?? [{ kind: scope.kind, path: scope.root }];
+}
+
+function reachRootsOverlap(left: ReachRoot, right: ReachRoot): boolean {
   return (
-    isPathWithinDirectoryLexical(left.root, right.root) ||
-    isPathWithinDirectoryLexical(right.root, left.root)
+    isPathWithinDirectoryLexical(left.path, right.path) ||
+    isPathWithinDirectoryLexical(right.path, left.path)
   );
 }
 
-function shallowerScope(
+/** The shallower of two overlapping reach roots (the one that contains the
+ * other), used as the witness root for a conflict's display scope. When both
+ * paths are equal the left argument wins, preserving task-array order. */
+function shallowerReachRoot(left: ReachRoot, right: ReachRoot): ReachRoot {
+  return isPathWithinDirectoryLexical(left.path, right.path) ? left : right;
+}
+
+/** Find the shallowest witness root among the overlapping reach-root pairs of
+ * two scopes. Returns undefined when the scopes do not overlap. */
+function overlapWitness(
   left: SharedWriteScope,
   right: SharedWriteScope,
-): SharedWriteScope {
-  return isPathWithinDirectoryLexical(left.root, right.root)
-    ? left
-    : right;
+): ReachRoot | undefined {
+  let witness: ReachRoot | undefined;
+  for (const leftRoot of reachRoots(left)) {
+    for (const rightRoot of reachRoots(right)) {
+      if (!reachRootsOverlap(leftRoot, rightRoot)) continue;
+      const candidate = shallowerReachRoot(leftRoot, rightRoot);
+      if (
+        witness === undefined ||
+        isPathWithinDirectoryLexical(candidate.path, witness.path)
+      ) {
+        witness = candidate;
+      }
+    }
+  }
+  return witness;
 }
 
 /** Find overlapping shared-writer scopes while preserving task-array order. */
@@ -192,7 +242,10 @@ export async function findSharedWriteConflicts(
 
   // Build connected components rather than grouping only identical roots.
   // A writer scoped to /work can reach /work/subdir with an ordinary relative
-  // path, including when /work/subdir is itself a nested Git repository.
+  // path, including when /work/subdir is itself a nested Git repository, and a
+  // writer whose external core.worktree places the Git top-level outside its
+  // physical cwd can reach both. Overlap is therefore detected over the full
+  // reach-root set, not just the primary Git top-level.
   const parents = resolved.map((_, index) => index);
   const find = (index: number): number => {
     let root = index;
@@ -211,27 +264,56 @@ export async function findSharedWriteConflicts(
   };
   for (let left = 0; left < resolved.length; left++) {
     for (let right = left + 1; right < resolved.length; right++) {
-      if (scopesOverlap(resolved[left]!.scope, resolved[right]!.scope)) {
+      if (
+        overlapWitness(resolved[left]!.scope, resolved[right]!.scope) !==
+        undefined
+      ) {
         union(left, right);
       }
     }
   }
 
-  const groups = new Map<number, SharedWriteConflict>();
+  // Gather members per component, preserving task-array order.
+  const components = new Map<number, number[]>();
   for (let index = 0; index < resolved.length; index++) {
-    const candidate = resolved[index]!;
     const component = find(index);
-    const group = groups.get(component);
-    if (group) {
-      group.taskIndexes.push(candidate.taskIndex);
-      group.scope = shallowerScope(group.scope, candidate.scope);
-    } else {
-      groups.set(component, {
-        scope: candidate.scope,
-        taskIndexes: [candidate.taskIndex],
-      });
-    }
+    const members = components.get(component);
+    if (members) members.push(index);
+    else components.set(component, [index]);
   }
 
-  return [...groups.values()].filter((group) => group.taskIndexes.length >= 2);
+  // For each multi-member component, derive the display scope from the
+  // shallowest witness root among all intra-component overlapping reach-root
+  // pairs. Recomputing here (rather than tracking witnesses during union) is
+  // robust to the component root changing as unions proceed.
+  const conflicts: SharedWriteConflict[] = [];
+  for (const members of components.values()) {
+    if (members.length < 2) continue;
+    let witness: ReachRoot | undefined;
+    for (let i = 0; i < members.length; i++) {
+      for (let j = i + 1; j < members.length; j++) {
+        const pairWitness = overlapWitness(
+          resolved[members[i]!]!.scope,
+          resolved[members[j]!]!.scope,
+        );
+        if (pairWitness === undefined) continue;
+        if (
+          witness === undefined ||
+          isPathWithinDirectoryLexical(pairWitness.path, witness.path)
+        ) {
+          witness = pairWitness;
+        }
+      }
+    }
+    const taskIndexes = members.map((index) => resolved[index]!.taskIndex);
+    conflicts.push({
+      scope:
+        witness === undefined
+          ? resolved[members[0]!]!.scope
+          : { kind: witness.kind, root: witness.path },
+      taskIndexes,
+    });
+  }
+
+  return conflicts;
 }
