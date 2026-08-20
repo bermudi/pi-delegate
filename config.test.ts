@@ -39,6 +39,24 @@ describe("providerExtensions normalization (via public seam)", () => {
     ]);
   });
 
+  test("preserves a configured own __proto__ provider key", () => {
+    const providerExtensions = JSON.parse(
+      '{"__proto__":["npm:proto-extension"]}',
+    ) as Record<string, readonly string[]>;
+
+    _setDelegateConfigForTesting({ providerExtensions });
+
+    const resolved = getSubagentProviderExtensionMap();
+    expect(Object.hasOwn(resolved, "__proto__")).toBe(true);
+    expect(resolved["__proto__"]).toEqual(["npm:proto-extension"]);
+    expect(getSubagentProviderExtensionsForProvider("__proto__")).toEqual([
+      "npm:proto-extension",
+    ]);
+    expect(getSubagentProviderExtensionSourcesForProvider("__proto__")).toEqual(
+      [{ source: "npm:proto-extension", required: true }],
+    );
+  });
+
   test("empty array is ignored so the default persists (no config-only disable)", () => {
     _setDelegateConfigForTesting({
       providerExtensions: { "openai-codex": [] },
@@ -373,5 +391,17 @@ describe("agentOverrides normalization (via public seam)", () => {
     expect(overrides["hasOwnProperty"]).toBeUndefined();
     expect(overrides["constructor"]).toBeUndefined();
     expect(byParent["toString"]).toBeUndefined();
+  });
+
+  test("preserves a configured own __proto__ agent override", () => {
+    const agentOverrides = JSON.parse(
+      '{"__proto__":{"model":"provider/model"}}',
+    ) as Record<string, { model: string }>;
+
+    _setDelegateConfigForTesting({ agentOverrides });
+
+    const overrides = getAgentOverrides()!;
+    expect(Object.hasOwn(overrides, "__proto__")).toBe(true);
+    expect(overrides["__proto__"]).toEqual({ model: "provider/model" });
   });
 });

@@ -2994,6 +2994,18 @@ describe("legacy pi settings detection", () => {
     expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
   });
 
+  test("migration detection fails open when discovery throws", () => {
+    mock.module("node:os", () => ({
+      ...os,
+      homedir: () => {
+        throw new Error("homedir unavailable");
+      },
+    }));
+
+    expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
+    expect(() => warnLegacyDelegateSettingsMoved(projectDir)).not.toThrow();
+  });
+
   test("caches malformed settings detection until the file changes", () => {
     const settingsPath = path.join(tmpDir, ".pi", "agent", "settings.json");
     mkdirSync(path.dirname(settingsPath), { recursive: true });

@@ -339,11 +339,13 @@ export async function findSharedWriteConflicts(
       }
     }
     const taskIndexes = members.map((index) => resolved[index]!.taskIndex);
+    if (witness === undefined) {
+      throw new SharedWriteSafetyError(
+        "Invariant violation: connected shared-write component has no overlap witness.",
+      );
+    }
     conflicts.push({
-      scope:
-        witness === undefined
-          ? resolved[members[0]!]!.scope
-          : { kind: witness.kind, root: witness.path },
+      scope: { kind: witness.kind, root: witness.path },
       taskIndexes,
     });
   }

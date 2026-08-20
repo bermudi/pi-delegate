@@ -1010,7 +1010,7 @@ describe("delegate task lifecycle integration", () => {
     expect(details.results[0]?.output).toContain("list-me");
   });
 
-  test("async task completes and results are pollable", async () => {
+  test("unsafe async dispatch bypasses overlapping-writer rejection and remains pollable", async () => {
     const stream = installStreamMock("Async task done.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
@@ -1024,7 +1024,7 @@ describe("delegate task lifecycle integration", () => {
       {
         async: true,
         unsafeSharedWrites: true,
-        tasks: [{ prompt: "async work" }],
+        tasks: [{ prompt: "async work A" }, { prompt: "async work B" }],
       },
       undefined,
       undefined,
@@ -1033,6 +1033,8 @@ describe("delegate task lifecycle integration", () => {
 
     const ticketId = (dispatch.details as any).ticketId;
     expect(ticketId).toBeDefined();
+    expect(dispatch.content[0]?.text).not.toContain("Rejected before dispatch");
+    expect((dispatch.details as any).progress).toHaveLength(2);
     expect(dispatch.content[0]?.text).toContain("UNSAFE SHARED WRITES ENABLED");
     expect((dispatch.details as any).dispatchWarning).toContain(
       "UNSAFE SHARED WRITES ENABLED",
@@ -1071,7 +1073,8 @@ describe("delegate task lifecycle integration", () => {
     );
     expect(finalDetails.results[0]?.output).toContain("Async task done");
     expect(finalDetails.results[0]?.error).toBeUndefined();
-    expect(finalDetails.results[0]?.output).toContain("Async task done");
+    expect(finalDetails.results[1]?.output).toContain("Async task done");
+    expect(finalDetails.results[1]?.error).toBeUndefined();
   });
 
   test("unknown agent name produces clear error", async () => {
