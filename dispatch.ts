@@ -272,6 +272,28 @@ export async function dispatchDelegate(
         return sharedWriteRejection(tasks, parentModelId, conflicts);
       }
     } catch (error) {
+      // A parent abort mid-preflight rejects the git rev-parse execFile call;
+      // gitRepositoryRoot wraps every execFile error (abort-shaped ones
+      // included) in GitScopeError, so the error alone cannot distinguish a
+      // cancellation from a verification failure. Check the signal first —
+      // reporting Git-metadata advice for a plain abort would misdirect.
+      if (signal?.aborted) {
+        callSpan?.finish({
+          status: "cancelled",
+          totalTokens: 0,
+          totalCost: 0,
+          wallMs: Date.now() - callSpan.startedAt,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Aborted before dispatch; no tasks were started.",
+            },
+          ],
+          details: { tasks, results: [], progress: [], parentModel: parentModelId },
+        };
+      }
       callSpan?.finish({
         status: "failed",
         totalTokens: 0,

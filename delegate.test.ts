@@ -2802,7 +2802,10 @@ describe("delegate.json agentOverrides", () => {
     reloadDelegateConfig();
     expect(getAgentOverrides()?.coder?.model).toBe("first/model");
 
-    writeDelegateConfig("not json");
+    writeFileSync(
+      path.join(tmpDir, ".pi", "agent", "delegate.json"),
+      "{ not json",
+    );
     const warnings: string[] = [];
     const originalWarn = console.warn;
     console.warn = (message?: unknown) => warnings.push(String(message));
@@ -2815,6 +2818,21 @@ describe("delegate.json agentOverrides", () => {
     // The previous valid snapshot must survive a transient malformed file.
     expect(getAgentOverrides()?.coder?.model).toBe("first/model");
     expect(warnings.some((w) => w.includes("could not reload"))).toBe(true);
+  });
+
+  test("reloadDelegateConfig keeps the previous valid config when the top-level value is not an object", () => {
+    writeDelegateConfig({
+      agentOverrides: { coder: { model: "first/model" } },
+    });
+    reloadDelegateConfig();
+    expect(getAgentOverrides()?.coder?.model).toBe("first/model");
+
+    // JSON.stringify of a bare string is valid JSON — this hits the
+    // non-object rejection, not the parser.
+    writeDelegateConfig("not json");
+    reloadDelegateConfig();
+
+    expect(getAgentOverrides()?.coder?.model).toBe("first/model");
   });
 
   test("reloadDelegateConfig falls back to defaults when the file is deleted", () => {
