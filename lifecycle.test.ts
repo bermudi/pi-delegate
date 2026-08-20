@@ -2954,6 +2954,63 @@ describe("delegate pre-prompt deadline and pool", () => {
     } as unknown as SessionManager;
   }
 
+  test("provider-extension pool mismatch reports only that the field changed", async () => {
+    _resetPoolForTesting();
+    const tmpDir = fs.mkdtempSync("/tmp/delegate-provider-ext-mismatch-");
+    const sessionFile = path.join(tmpDir, "session.jsonl");
+    fs.writeFileSync(sessionFile, "");
+    const frozenSource =
+      "git:https://user:frozen-secret@example.invalid/extension.git";
+    const requestedSource =
+      "git:https://user:requested-secret@example.invalid/extension.git";
+    const task = makeBaseTask({
+      sessionId: "provider-ext-mismatch",
+      cwd: tmpDir,
+      providerExtensionSources: requestedSource,
+    });
+
+    try {
+      commit("provider-ext-mismatch", {
+        session: makeFakeAgentSession(sessionFile),
+        sessionManager: makeFakeSessionManager(sessionFile),
+        sessionFile,
+        frozen: {
+          systemPrompt: task.systemPrompt,
+          model: task.model,
+          thinking: task.thinking,
+          tools: task.tools,
+          cwd: task.cwd,
+          providerExtensions: frozenSource,
+        },
+        tokens: 0,
+      });
+
+      const result = await runResolvedTask(
+        makeTestEnv(),
+        task,
+        {
+          index: 0,
+          agent: "ad-hoc",
+          task: task.prompt,
+          status: "pending",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+        0,
+      );
+
+      expect(result.error).toContain("providerExtensions: changed");
+      expect(result.error).not.toContain("frozen-secret");
+      expect(result.error).not.toContain("requested-secret");
+      expect(result.error).not.toContain("https://");
+    } finally {
+      _resetPoolForTesting();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test("pre-expired deadline during acquisition keeps a pooled session intact and reusable", async () => {
     _resetPoolForTesting();
     const tmpDir = fs.mkdtempSync("/tmp/delegate-pre-prompt-pool-");

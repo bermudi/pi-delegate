@@ -81,7 +81,7 @@ describe("shared-write safety", () => {
     }
   });
 
-  test("ignores ambient Git repository-discovery overrides", async () => {
+  test("ignores ambient Git discovery limits when resolving physical scopes", async () => {
     initRepository(root);
     const left = path.join(root, "left");
     const right = path.join(root, "right");
@@ -105,21 +105,53 @@ describe("shared-write safety", () => {
     }
   });
 
+  test("fails closed when inherited Git variables redirect bash execution", async () => {
+    const left = path.join(root, "left");
+    const right = path.join(root, "right");
+    mkdirSync(left);
+    mkdirSync(right);
+    const previousGitDir = process.env.GIT_DIR;
+    const previousWorkTree = process.env.GIT_WORK_TREE;
+    process.env.GIT_DIR = "/credential-free/test/repository.git";
+    process.env.GIT_WORK_TREE = "/credential-free/test/worktree";
+    try {
+      await expect(
+        findSharedWriteConflicts([
+          task(left, ["write"]),
+          task(right, ["bash"]),
+        ]),
+      ).rejects.toThrow("GIT_DIR, GIT_WORK_TREE");
+    } finally {
+      if (previousGitDir === undefined) {
+        delete process.env.GIT_DIR;
+      } else {
+        process.env.GIT_DIR = previousGitDir;
+      }
+      if (previousWorkTree === undefined) {
+        delete process.env.GIT_WORK_TREE;
+      } else {
+        process.env.GIT_WORK_TREE = previousWorkTree;
+      }
+    }
+  });
+
   test("allows writers in separate Git repositories", async () => {
+    const left = path.join(root, "left");
     const other = path.join(root, "other");
+    mkdirSync(left);
     mkdirSync(other);
-    initRepository(root);
+    initRepository(left);
     initRepository(other);
 
     expect(
       await findSharedWriteConflicts([
-        task(root, ["write"]),
+        task(left, ["write"]),
         task(other, ["bash"]),
       ]),
     ).toEqual([]);
   });
 
-  test("treats a nested repository as an independent scope", async () => {
+  test("rejects an outer repository and a nested repository", async () => {
     const nested = path.join(root, "nested");
     mkdirSync(nested);
     initRepository(root);
@@ -130,7 +162,12 @@ describe("shared-write safety", () => {
         task(root, ["edit"]),
         task(nested, ["edit"]),
       ]),
-    ).toEqual([]);
+    ).toEqual([
+      {
+        scope: { kind: "git", root },
+        taskIndexes: [0, 1],
+      },
+    ]);
   });
 
   test("groups an external Git worktree with its physical directory", async () => {
@@ -180,6 +217,48 @@ describe("shared-write safety", () => {
       await findSharedWriteConflicts([
         task(left, ["write"]),
         task(right, ["write"]),
+      ]),
+    ).toEqual([]);
+  });
+
+  test("rejects nested non-Git directories in either task order", async () => {
+    const nested = path.join(root, "nested");
+    mkdirSync(nested);
+
+    expect(
+      await findSharedWriteConflicts([
+        task(root, ["write"]),
+        task(nested, ["bash"]),
+      ]),
+    ).toEqual([
+      {
+        scope: { kind: "directory", root },
+        taskIndexes: [0, 1],
+      },
+    ]);
+    expect(
+      await findSharedWriteConflicts([
+        task(nested, ["bash"]),
+        task(root, ["write"]),
+      ]),
+    ).toEqual([
+      {
+        scope: { kind: "directory", root },
+        taskIndexes: [0, 1],
+      },
+    ]);
+  });
+
+  test("does not confuse path-prefix siblings with nested directories", async () => {
+    const left = path.join(root, "work");
+    const right = path.join(root, "work-other");
+    mkdirSync(left);
+    mkdirSync(right);
+
+    expect(
+      await findSharedWriteConflicts([
+        task(left, ["write"]),
+        task(right, ["bash"]),
       ]),
     ).toEqual([]);
   });

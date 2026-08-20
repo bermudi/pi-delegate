@@ -127,8 +127,8 @@ export function _resetGlobalConcurrencyForTesting(): void {
   reconfigureGlobalConcurrency(getMaxConcurrent());
 }
 
-async function mapConcurrent<T, R>(
-  items: T[],
+export async function mapConcurrent<T, R>(
+  items: readonly T[],
   concurrency: number,
   fn: (item: T, index: number) => Promise<R>,
   signal?: AbortSignal,

@@ -234,7 +234,7 @@ export function getSubagentManualMarkdown(
     "## Gotchas",
     "",
     "- Dispatch validation is batch-wide and runs before spawning: one invalid task rejects the call without starting its siblings.",
-    "- Multiple shared tasks with `write`, `edit`, or `bash` in one Git root are rejected before dispatch. `unsafeSharedWrites: true` bypasses only this batch-local check, provides no isolation or rollback, and emits a visible warning.",
+    "- Shared tasks with `write`, `edit`, or `bash` in overlapping Git/directory trees are rejected before dispatch. `unsafeSharedWrites: true` bypasses only this batch-local check, provides no isolation or rollback, and emits a visible warning.",
     "- `*` means read/write/edit/bash, not every tool. `grep`, `find`, and `ls` are valid explicit tools and are the `ro` preset.",
     '- `tasks` is an array. The tool recovers common stringified calls for compatibility, but canonical calls use `{ tasks: [{ prompt: "..." }] }`.',
     '- Use `agent: "default"` for the parent\'s live model/thinking/native tools/base prompt. Built-ins are `default`, `scout`, `coder`, and `reviewer`; omitting `agent` creates an ad-hoc task.',

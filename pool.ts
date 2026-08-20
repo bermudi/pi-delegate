@@ -202,13 +202,13 @@ export function checkout(
     });
   }
   if (frozen.providerExtensions !== candidate.providerExtensions) {
-    // JSON.stringify(undefined) returns undefined — the mismatch contract
-    // requires strings on both sides, so an unset side gets an explicit
-    // sentinel instead (mirrors the "<frozen>"/"<requested>" style above).
+    // This field is derived from configured package sources, which may contain
+    // credentials. Never expose either the sources or their digest through the
+    // public checkout result; a digest can still enable dictionary guessing.
     mismatches.push({
       field: "providerExtensions",
-      frozen: JSON.stringify(frozen.providerExtensions) ?? "<unset>",
-      requested: JSON.stringify(candidate.providerExtensions) ?? "<unset>",
+      frozen: "<redacted>",
+      requested: "<redacted>",
     });
   }
   if (mismatches.length) return { status: "mismatch", mismatches };

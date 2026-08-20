@@ -1,9 +1,17 @@
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
+import { mapConcurrent } from "./concurrency.ts";
+import { isPathWithinDirectoryLexical } from "./trusted-paths.ts";
 import type { ResolvedTask } from "./types.ts";
 
 const GIT_TIMEOUT_MS = 5_000;
+export const SHARED_WRITE_PREFLIGHT_CONCURRENCY = 4;
 const MUTATING_TOOLS = new Set(["write", "edit", "bash"]);
+const GIT_REPOSITORY_REDIRECT_VARIABLES = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+] as const;
 
 export interface SharedWriteScope {
   kind: "git" | "directory";
@@ -28,9 +36,10 @@ class GitScopeError extends Error {
 }
 
 function gitRepositoryRoot(cwd: string, signal?: AbortSignal): Promise<string> {
-  // Repository-context variables can redirect discovery away from `cwd` or
-  // stop it before Git reaches the real root. They belong to the parent's
-  // shell invocation, not to this safety decision.
+  // Resolve the physical cwd rather than allowing the parent's Git invocation
+  // context to redirect discovery. findSharedWriteConflicts fails closed when
+  // a bash-capable multi-writer batch inherits repository redirect variables,
+  // so preflight never silently disagrees with task execution.
   const gitEnvironment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
   );
@@ -129,7 +138,23 @@ function isSharedWriter(task: ResolvedTask): boolean {
   );
 }
 
-/** Find same-scope shared writers while preserving task-array order. */
+function scopesOverlap(left: SharedWriteScope, right: SharedWriteScope): boolean {
+  return (
+    isPathWithinDirectoryLexical(left.root, right.root) ||
+    isPathWithinDirectoryLexical(right.root, left.root)
+  );
+}
+
+function shallowerScope(
+  left: SharedWriteScope,
+  right: SharedWriteScope,
+): SharedWriteScope {
+  return isPathWithinDirectoryLexical(left.root, right.root)
+    ? left
+    : right;
+}
+
+/** Find overlapping shared-writer scopes while preserving task-array order. */
 export async function findSharedWriteConflicts(
   tasks: readonly ResolvedTask[],
   signal?: AbortSignal,
@@ -142,35 +167,71 @@ export async function findSharedWriteConflicts(
   // Do not make ordinary single-writer calls depend on Git or cwd inspection.
   if (candidates.length < 2) return [];
 
-  const resolved = await Promise.all(
-    candidates.map(async ({ task, taskIndex }) => ({
+  const inheritedRedirects = GIT_REPOSITORY_REDIRECT_VARIABLES.filter(
+    (name) => process.env[name] !== undefined,
+  );
+  if (
+    inheritedRedirects.length > 0 &&
+    candidates.some(({ task }) => task.tools.includes("bash"))
+  ) {
+    throw new SharedWriteSafetyError(
+      `Could not safely verify a bash-capable shared-write batch while ${inheritedRedirects.join(
+        ", ",
+      )} redirects Git repository context.`,
+    );
+  }
+
+  const resolved = await mapConcurrent(
+    candidates,
+    SHARED_WRITE_PREFLIGHT_CONCURRENCY,
+    async ({ task, taskIndex }) => ({
       taskIndex,
       scope: await resolveSharedWriteScope(task.cwd, signal),
-    })),
+    }),
   );
 
-  const groups = new Map<
-    string,
-    { scope: SharedWriteScope; taskIndexes: number[] }
-  >();
-  for (const candidate of resolved) {
-    // `kind` explains how the path was discovered; it is not part of the
-    // filesystem identity. In particular, an external Git worktree can make
-    // Git report a physical root that another task sees as a plain directory.
-    // Those tasks can still mutate the same files and must share one group.
-    const key = candidate.scope.root;
-    const group = groups.get(key);
+  // Build connected components rather than grouping only identical roots.
+  // A writer scoped to /work can reach /work/subdir with an ordinary relative
+  // path, including when /work/subdir is itself a nested Git repository.
+  const parents = resolved.map((_, index) => index);
+  const find = (index: number): number => {
+    let root = index;
+    while (parents[root] !== root) root = parents[root]!;
+    while (parents[index] !== index) {
+      const next = parents[index]!;
+      parents[index] = root;
+      index = next;
+    }
+    return root;
+  };
+  const union = (left: number, right: number): void => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot;
+  };
+  for (let left = 0; left < resolved.length; left++) {
+    for (let right = left + 1; right < resolved.length; right++) {
+      if (scopesOverlap(resolved[left]!.scope, resolved[right]!.scope)) {
+        union(left, right);
+      }
+    }
+  }
+
+  const groups = new Map<number, SharedWriteConflict>();
+  for (let index = 0; index < resolved.length; index++) {
+    const candidate = resolved[index]!;
+    const component = find(index);
+    const group = groups.get(component);
     if (group) {
       group.taskIndexes.push(candidate.taskIndex);
+      group.scope = shallowerScope(group.scope, candidate.scope);
     } else {
-      groups.set(key, {
+      groups.set(component, {
         scope: candidate.scope,
         taskIndexes: [candidate.taskIndex],
       });
     }
   }
 
-  return [...groups.values()].filter(
-    (group): group is SharedWriteConflict => group.taskIndexes.length >= 2,
-  );
+  return [...groups.values()].filter((group) => group.taskIndexes.length >= 2);
 }
