@@ -56,6 +56,7 @@ interface LegacyDetectionCacheEntry {
 }
 
 const legacyDetectionCache = new Map<string, LegacyDetectionCacheEntry>();
+const warnedLegacyDetectionFailures = new Set<string>();
 
 /** A cheap file identity used to invalidate cached misses and parse failures
  * when a settings file is created or edited. */
@@ -120,8 +121,18 @@ export function findLegacyDelegateSettings(cwd: string): string[] {
       if (parent === dir) break;
       dir = parent;
     }
-  } catch {
-    // Detection is best-effort; it must never block a dispatch.
+  } catch (error) {
+    // Detection is best-effort and must never block a dispatch, but silently
+    // losing the migration signal would make ignored legacy overrides hard to
+    // diagnose. Report each affected cwd once to avoid warning floods when a
+    // dispatch resolves several tasks in the same project.
+    if (!warnedLegacyDetectionFailures.has(cwd)) {
+      warnedLegacyDetectionFailures.add(cwd);
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[delegate] could not check for legacy delegate settings from '${cwd}': ${detail}. Overrides in pi settings.json may be ignored; move them to ~/.pi/agent/delegate.json.`,
+      );
+    }
   }
   return paths;
 }
@@ -405,6 +416,7 @@ export function warnLegacyDelegateSettingsMoved(cwd: string): void {
 /** @deprecated Clear the set of cwd's already warned about legacy settings. */
 export function clearDelegateSettingsCache(): void {
   warnedLegacyDirs.clear();
+  warnedLegacyDetectionFailures.clear();
   legacyDetectionCache.clear();
   legacySettingsCache.clear();
 }

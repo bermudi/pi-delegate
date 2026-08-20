@@ -2994,7 +2994,7 @@ describe("legacy pi settings detection", () => {
     expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
   });
 
-  test("migration detection fails open when discovery throws", () => {
+  test("migration detection reports failures without blocking dispatch", () => {
     mock.module("node:os", () => ({
       ...os,
       homedir: () => {
@@ -3002,8 +3002,19 @@ describe("legacy pi settings detection", () => {
       },
     }));
 
-    expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
-    expect(() => warnLegacyDelegateSettingsMoved(projectDir)).not.toThrow();
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => warnings.push(String(message));
+    try {
+      expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
+      expect(() => warnLegacyDelegateSettingsMoved(projectDir)).not.toThrow();
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("homedir unavailable");
+    expect(warnings[0]).toContain("delegate.json");
   });
 
   test("caches malformed settings detection until the file changes", () => {
