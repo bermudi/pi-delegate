@@ -135,6 +135,62 @@ describe("shared-write safety", () => {
     }
   });
 
+  test("fails closed when GIT_COMMON_DIR alone redirects bash execution", async () => {
+    const left = path.join(root, "left");
+    const right = path.join(root, "right");
+    mkdirSync(left);
+    mkdirSync(right);
+    const previousGitDir = process.env.GIT_DIR;
+    const previousWorkTree = process.env.GIT_WORK_TREE;
+    const previousCommonDir = process.env.GIT_COMMON_DIR;
+    delete process.env.GIT_DIR;
+    delete process.env.GIT_WORK_TREE;
+    process.env.GIT_COMMON_DIR = "/credential-free/test/common.git";
+    try {
+      await expect(
+        findSharedWriteConflicts([
+          task(left, ["write"]),
+          task(right, ["bash"]),
+        ]),
+      ).rejects.toThrow(
+        "while GIT_COMMON_DIR redirects Git repository context",
+      );
+    } finally {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previousGitDir;
+      if (previousWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+      else process.env.GIT_WORK_TREE = previousWorkTree;
+      if (previousCommonDir === undefined) delete process.env.GIT_COMMON_DIR;
+      else process.env.GIT_COMMON_DIR = previousCommonDir;
+    }
+  });
+
+  test("ignores inherited GIT_DIR for write/edit-only scope discovery", async () => {
+    initRepository(root);
+    const left = path.join(root, "left");
+    const right = path.join(root, "right");
+    mkdirSync(left);
+    mkdirSync(right);
+    const previousGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = "/credential-free/test/unrelated.git";
+    try {
+      expect(
+        await findSharedWriteConflicts([
+          task(left, ["write"]),
+          task(right, ["edit"]),
+        ]),
+      ).toEqual([
+        {
+          scope: { kind: "git", root },
+          taskIndexes: [0, 1],
+        },
+      ]);
+    } finally {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previousGitDir;
+    }
+  });
+
   test("allows writers in separate Git repositories", async () => {
     const left = path.join(root, "left");
     const other = path.join(root, "other");
