@@ -32,6 +32,7 @@ import { notifyCrossLeafDelivery, syncDelegateStatus } from "./status.ts";
 import { validateTasks, resolveTasks } from "./task-resolution.ts";
 import {
   findSharedWriteConflicts,
+  isSharedWriter,
   type SharedWriteConflict,
 } from "./shared-write-safety.ts";
 import type { CallSpan } from "./telemetry.ts";
@@ -51,7 +52,34 @@ import type {
 } from "./types.ts";
 
 const UNSAFE_SHARED_WRITES_WARNING =
-  "UNSAFE SHARED WRITES ENABLED: the batch-local safety gate is disabled. Delegate provides no isolation or rollback.";
+  "UNSAFE SHARED WRITES ENABLED: shared-write admission is bypassed. Delegate provides no isolation or rollback.";
+
+interface ActiveSyncDispatch {
+  tasks: TaskDef[];
+  resolved: ResolvedTask[];
+}
+
+const activeSyncDispatches = new Map<symbol, ActiveSyncDispatch>();
+let sharedWriteAdmissionTail: Promise<void> = Promise.resolve();
+
+/** Serialize the preflight snapshot and publication step. The lock is held only
+ * during admission, never while subagents run. This prevents two concurrent
+ * calls from both inspecting an empty active set and then starting together. */
+async function withSharedWriteAdmissionLock<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = sharedWriteAdmissionTail;
+  let release!: () => void;
+  sharedWriteAdmissionTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
 
 /** Return the structured result for an invalid top-level operation, or null when
  * the call may proceed to a ticket control/help/dispatch path. */
@@ -101,6 +129,7 @@ export function makeFireUpdater(
   progress: TaskProgress[],
   resolved: ResolvedTask[],
   parentModelId: string | undefined,
+  dispatchWarning?: string,
 ): () => void {
   return () =>
     onUpdate?.({
@@ -115,6 +144,7 @@ export function makeFireUpdater(
         results: [],
         progress: [...progress],
         parentModel: parentModelId,
+        dispatchWarning,
       },
     });
 }
@@ -129,6 +159,7 @@ export interface AsyncDispatchInput {
   parentModelId: string | undefined;
   callSpan?: CallSpan;
   dispatchConfig: DelegateConfig;
+  dispatchWarning?: string;
 }
 
 /** Inputs needed by the sync (blocking) dispatch path. */
@@ -142,6 +173,7 @@ export interface SyncDispatchInput {
   fire: () => void;
   callSpan?: CallSpan;
   dispatchConfig: DelegateConfig;
+  dispatchWarning?: string;
 }
 
 /** Inputs for the normal task-validation, resolution, and dispatch path. */
@@ -165,11 +197,12 @@ function sharedWriteRejection(
   tasks: TaskDef[],
   parentModelId: string | undefined,
   conflicts: SharedWriteConflict[],
+  references: readonly string[] = tasks.map(taskReference),
 ): DelegateToolResult {
   const scopes = conflicts
     .map(({ scope, taskIndexes }) => {
       const refs = taskIndexes
-        .map((index) => taskReference(tasks[index]!, index))
+        .map((index) => references[index] ?? `Active writer ${index + 1}`)
         .join(", ");
       return `${refs} share ${scope.kind === "git" ? "Git root" : "directory"} '${scope.root}'.`;
     })
@@ -180,9 +213,9 @@ function sharedWriteRejection(
         type: "text",
         text:
           `Rejected before dispatch; no tasks were started. ${scopes} ` +
-          "Each task has write, edit, or bash capability, so concurrent shared execution could silently overwrite work. " +
+          "Each listed task has mutating or unclassified tool capability, so concurrent shared execution could silently overwrite work. " +
           'Run them sequentially in separate calls, use workspace: "scratch" when changes may be discarded, or explicitly set top-level unsafeSharedWrites: true. ' +
-          "The unsafe override provides no isolation or rollback. This check covers only this batch, not separate calls or external processes.",
+          "The unsafe override provides no isolation or rollback. External processes remain outside this check.",
       },
     ],
     details: { tasks, results: [], progress: [], parentModel: parentModelId },
@@ -202,7 +235,7 @@ function sharedWriteSafetyFailure(
         type: "text",
         text:
           `Rejected before dispatch; no tasks were started because shared-write safety could not be verified. ${detail} ` +
-          "Fix the task directory or Git metadata. To bypass this batch-local protection, explicitly set top-level unsafeSharedWrites: true; that provides no isolation or rollback.",
+          "Fix the task directory or Git metadata. To bypass this in-process protection, explicitly set top-level unsafeSharedWrites: true; that provides no isolation or rollback.",
       },
     ],
     details: { tasks, results: [], progress: [], parentModel: parentModelId },
@@ -251,93 +284,167 @@ export async function dispatchDelegate(
     dispatchConfig,
   );
 
-  if (params.unsafeSharedWrites === true) {
-    const firstTask = resolved[0];
-    if (
-      firstTask &&
-      !firstTask.warnings.includes(UNSAFE_SHARED_WRITES_WARNING)
-    ) {
-      firstTask.warnings.push(UNSAFE_SHARED_WRITES_WARNING);
+  const dispatchWarning =
+    params.unsafeSharedWrites === true
+      ? UNSAFE_SHARED_WRITES_WARNING
+      : undefined;
+  const signalWasAbortedBeforeAdmission = signal?.aborted === true;
+  let syncReservation: symbol | undefined;
+  let admissionResult:
+    DelegateToolResult | { progress: TaskProgress[]; fire: () => void };
+
+  try {
+    admissionResult = await withSharedWriteAdmissionLock(async () => {
+      // The call may have been cancelled while queued behind another
+      // preflight. Async dispatch uses its own controller after publication, so
+      // this check must happen before progress, reservations, or ticket
+      // creation rather than relying on the parent signal downstream.
+      if (!signalWasAbortedBeforeAdmission && signal?.aborted) {
+        throw new Error("Delegate call aborted while waiting for admission.");
+      }
+      if (params.unsafeSharedWrites !== true && resolved.some(isSharedWriter)) {
+        const activeResolved: ResolvedTask[] = [];
+        const references = resolved.map((_, index) =>
+          taskReference(tasks[index]!, index),
+        );
+
+        for (const ticket of ticketRegistry.values()) {
+          if (
+            ticket.status !== "running" &&
+            ticket.status !== "cancelling" &&
+            ticket.workersSettled !== false
+          ) {
+            continue;
+          }
+          for (let index = 0; index < ticket.resolved.length; index++) {
+            activeResolved.push(ticket.resolved[index]!);
+            references.push(
+              `async ticket '${ticket.id}' ${taskReference(ticket.tasks[index]!, index).toLowerCase()}`,
+            );
+          }
+        }
+        for (const active of activeSyncDispatches.values()) {
+          for (let index = 0; index < active.resolved.length; index++) {
+            activeResolved.push(active.resolved[index]!);
+            references.push(
+              `active sync ${taskReference(active.tasks[index]!, index).toLowerCase()}`,
+            );
+          }
+        }
+
+        const incomingCount = resolved.length;
+        const conflicts = (
+          await findSharedWriteConflicts(
+            [...resolved, ...activeResolved],
+            signal,
+          )
+        ).filter(({ taskIndexes }) =>
+          taskIndexes.some((index) => index < incomingCount),
+        );
+        if (conflicts.length) {
+          return sharedWriteRejection(
+            tasks,
+            parentModelId,
+            conflicts,
+            references,
+          );
+        }
+      }
+
+      const progress = initProgress(resolved);
+      const fire = makeFireUpdater(
+        onUpdate,
+        tasks,
+        progress,
+        resolved,
+        parentModelId,
+        dispatchWarning,
+      );
+      fire();
+
+      if (params.async) {
+        return dispatchAsync({
+          pi,
+          ctx,
+          tasks,
+          resolved,
+          progress,
+          parentModelId,
+          callSpan,
+          dispatchConfig,
+          dispatchWarning,
+        });
+      }
+
+      syncReservation = Symbol("shared-write-dispatch");
+      activeSyncDispatches.set(syncReservation, { tasks, resolved });
+      return { progress, fire };
+    });
+  } catch (error) {
+    // A parent abort mid-preflight rejects the git rev-parse execFile call;
+    // gitRepositoryRoot wraps every execFile error (abort-shaped ones
+    // included) in GitScopeError, so the error alone cannot distinguish a
+    // cancellation from a verification failure. Check the signal first —
+    // reporting Git-metadata advice for a plain abort would misdirect.
+    if (signal?.aborted) {
+      callSpan?.finish({
+        status: "cancelled",
+        totalTokens: 0,
+        totalCost: 0,
+        wallMs: Date.now() - callSpan.startedAt,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Aborted before dispatch; no tasks were started.",
+          },
+        ],
+        details: {
+          tasks,
+          results: [],
+          progress: [],
+          parentModel: parentModelId,
+        },
+      };
     }
-  } else {
-    try {
-      const conflicts = await findSharedWriteConflicts(resolved, signal);
-      if (conflicts.length) {
-        callSpan?.finish({
-          status: "failed",
-          totalTokens: 0,
-          totalCost: 0,
-          wallMs: Date.now() - callSpan.startedAt,
-        });
-        return sharedWriteRejection(tasks, parentModelId, conflicts);
-      }
-    } catch (error) {
-      // A parent abort mid-preflight rejects the git rev-parse execFile call;
-      // gitRepositoryRoot wraps every execFile error (abort-shaped ones
-      // included) in GitScopeError, so the error alone cannot distinguish a
-      // cancellation from a verification failure. Check the signal first —
-      // reporting Git-metadata advice for a plain abort would misdirect.
-      if (signal?.aborted) {
-        callSpan?.finish({
-          status: "cancelled",
-          totalTokens: 0,
-          totalCost: 0,
-          wallMs: Date.now() - callSpan.startedAt,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Aborted before dispatch; no tasks were started.",
-            },
-          ],
-          details: { tasks, results: [], progress: [], parentModel: parentModelId },
-        };
-      }
+    callSpan?.finish({
+      status: "failed",
+      totalTokens: 0,
+      totalCost: 0,
+      wallMs: Date.now() - callSpan.startedAt,
+    });
+    return sharedWriteSafetyFailure(tasks, parentModelId, error);
+  }
+
+  if ("content" in admissionResult) {
+    if (admissionResult.content[0]?.text.includes("Rejected before dispatch")) {
       callSpan?.finish({
         status: "failed",
         totalTokens: 0,
         totalCost: 0,
         wallMs: Date.now() - callSpan.startedAt,
       });
-      return sharedWriteSafetyFailure(tasks, parentModelId, error);
     }
+    return admissionResult;
   }
 
-  const progress = initProgress(resolved);
-  const fire = makeFireUpdater(
-    onUpdate,
-    tasks,
-    progress,
-    resolved,
-    parentModelId,
-  );
-  fire();
-
-  if (params.async) {
-    return dispatchAsync({
-      pi,
+  try {
+    return await dispatchSync({
       ctx,
       tasks,
       resolved,
-      progress,
+      progress: admissionResult.progress,
       parentModelId,
+      signal,
+      fire: admissionResult.fire,
       callSpan,
       dispatchConfig,
+      dispatchWarning,
     });
+  } finally {
+    if (syncReservation) activeSyncDispatches.delete(syncReservation);
   }
-
-  return dispatchSync({
-    ctx,
-    tasks,
-    resolved,
-    progress,
-    parentModelId,
-    signal,
-    fire,
-    callSpan,
-    dispatchConfig,
-  });
 }
 
 /** Deliver a settled ticket and, when leaf affinity downgraded delivery to a
@@ -378,6 +485,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     parentModelId,
     callSpan,
     dispatchConfig,
+    dispatchWarning,
   } = input;
 
   sweepTickets();
@@ -423,6 +531,8 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     callRecord: callSpan ? { ...callSpan.baseRecord() } : undefined,
     telemetryGeneration: callSpan?.generation,
     telemetryConfig: callSpan?.telemetryConfig,
+    workersSettled: false,
+    dispatchWarning,
     // Capture the dispatch-scoped snapshot so async workers and later poll/wait
     // formatting use the same retry/stall/output/provider settings that were
     // in effect when the ticket was spawned.
@@ -529,6 +639,9 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         error: err instanceof Error ? err.message : String(err),
       });
       finishLiveSettlement(ticket);
+    })
+    .finally(() => {
+      ticket.workersSettled = true;
     });
   ticket.completion = completion;
 
@@ -539,9 +652,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         text: [
           `Async ticket: ${ticketId}`,
           `${resolved.length} task(s) dispatched · ${runningCount + 1}/${maxAsyncTickets} async slots in use`,
-          ...(resolved[0]?.warnings?.includes(UNSAFE_SHARED_WRITES_WARNING)
-            ? [`WARNING: ${UNSAFE_SHARED_WRITES_WARNING}`]
-            : []),
+          ...(dispatchWarning ? [`WARNING: ${dispatchWarning}`] : []),
           "",
           "Work is detached. Stop this turn to let final results auto-deliver.",
           `If this turn must block for the result, call once: delegate({ ticketAction: "wait", ticket: "${ticketId}" }) — omit timeoutMs and do not poll`,
@@ -556,6 +667,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       parentModel: parentModelId,
       ticketId,
       status: ticket.status,
+      dispatchWarning,
     },
   };
 }
@@ -575,6 +687,7 @@ export async function dispatchSync(
     fire,
     callSpan,
     dispatchConfig,
+    dispatchWarning,
   } = input;
 
   const startedAt = Date.now();
@@ -613,6 +726,7 @@ export async function dispatchSync(
   parts.push(
     `${succeeded}/${finalResults.length} tasks completed successfully · ${fmtDuration(elapsedTotal)} wall time\n`,
   );
+  if (dispatchWarning) parts.push(`WARNING: ${dispatchWarning}`);
   for (let i = 0; i < finalResults.length; i++) {
     const r = finalResults[i]!;
     const t = resolved[i]!;
@@ -645,6 +759,7 @@ export async function dispatchSync(
       progress,
       parentModel: parentModelId,
       overlapWarning: overlapWarning || undefined,
+      dispatchWarning,
     },
     // Aggregate subagent spend so Pi folds it into the parent's
     // session/footer totals. Sync dispatch only — async results arrive via a

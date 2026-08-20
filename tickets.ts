@@ -239,6 +239,9 @@ export function formatCompletedTicket(
   parts.push(
     `${statusTag}${succeeded}/${ticket.results.length} ${completionLabel} · ${fmtDuration(elapsedTotal)} wall time\n`,
   );
+  if (ticket.dispatchWarning) {
+    parts.push(`WARNING: ${ticket.dispatchWarning}`);
+  }
 
   const pendingLabelFor = (index: number): string => {
     if (ticket.status !== "cancelled") {
@@ -295,6 +298,7 @@ export function formatCompletedTicket(
       ticketId: ticket.id,
       status: ticket.status,
       overlapWarning: overlapWarning || undefined,
+      dispatchWarning: ticket.dispatchWarning,
     },
   };
 }
@@ -337,7 +341,19 @@ function buildWaitDetails(ticket: AsyncTicket): DelegateDetails {
     ticketId: ticket.id,
     status: ticket.status,
     overlapWarning: overlapWarning || undefined,
+    dispatchWarning: ticket.dispatchWarning,
   };
+}
+
+function appendDispatchWarnings(
+  base: string,
+  details: DelegateDetails,
+): string {
+  const warnings = [
+    details.dispatchWarning ? `WARNING: ${details.dispatchWarning}` : undefined,
+    details.overlapWarning,
+  ].filter((warning): warning is string => warning !== undefined);
+  return warnings.length ? `${base}\n\n${warnings.join("\n\n")}` : base;
 }
 
 function buildWaitRunningUpdate(
@@ -359,9 +375,7 @@ function buildWaitRunningUpdate(
   if (pending > 0) parts.push(`${pending} queued`);
 
   const details = buildWaitDetails(ticket);
-  const text =
-    parts.join(" · ") +
-    (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
+  const text = appendDispatchWarnings(parts.join(" · "), details);
   return {
     content: [{ type: "text", text }],
     details,
@@ -399,8 +413,7 @@ function buildWaitAbortResult(
 ): AgentToolResult<DelegateDetails> {
   const details = buildWaitDetails(ticket);
   const base = `Wait for ticket ${ticket.id} aborted · ticket continues ${ticket.status} in the background`;
-  const text =
-    base + (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
+  const text = appendDispatchWarnings(base, details);
   return {
     content: [{ type: "text", text }],
     details,
@@ -614,6 +627,7 @@ export function handlePoll(
         ticketId: ticket.id,
         status: ticket.status,
         overlapWarning: snapshot.overlapWarning || undefined,
+        dispatchWarning: ticket.dispatchWarning,
       },
     };
   }
@@ -657,9 +671,7 @@ export function handleCancel(params: {
   }
   if (!params.force) {
     const details = buildWaitDetails(ticket);
-    const text =
-      formatCancelPreview(ticket) +
-      (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
+    const text = appendDispatchWarnings(formatCancelPreview(ticket), details);
     return {
       content: [{ type: "text", text }],
       details,
@@ -668,8 +680,7 @@ export function handleCancel(params: {
   requestTicketCancel(ticket);
   const details = buildWaitDetails(ticket);
   const base = `Ticket '${ticketId}' is cancelling; workers are settling. Poll for final status.`;
-  const text =
-    base + (details.overlapWarning ? `\n\n${details.overlapWarning}` : "");
+  const text = appendDispatchWarnings(base, details);
   return {
     content: [{ type: "text", text }],
     details,

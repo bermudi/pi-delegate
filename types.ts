@@ -104,6 +104,11 @@ export interface AsyncTicket {
   telemetryConfig?: import("./config.ts").TelemetryConfig;
   /** Resolves after every async worker has settled, including shutdown aborts. */
   completion?: Promise<void>;
+  /** False from admission until every worker has quiesced. Unlike `status`,
+   * this remains false during shutdown's early terminal transition. */
+  workersSettled?: boolean;
+  /** Batch-level warning attached to this dispatch, not to any one task. */
+  dispatchWarning?: string;
   /** Immutable dispatch-scoped delegate.json snapshot used by async workers and
    *  later result formatting. */
   config?: import("./config.ts").DelegateConfig;
@@ -206,6 +211,8 @@ export interface DelegateDetails {
   /** Global overlap warning derived from result.attributedFiles, surfaced in both
    *  the textual content and the custom TUI. */
   overlapWarning?: string;
+  /** Warning that applies to the whole dispatch rather than an individual task. */
+  dispatchWarning?: string;
 }
 
 export interface TaskResult {

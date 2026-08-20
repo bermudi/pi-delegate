@@ -185,6 +185,78 @@ describe("dispatch-time shared-write gate", () => {
       totalCost: 0,
     });
   });
+
+  test("rejects a writer that overlaps a still-running async ticket", async () => {
+    const model = { provider: "test", id: "model" } as any;
+    ticketRegistry.set("live1234", {
+      id: "live1234",
+      created: Date.now(),
+      tasks: [{ id: "old", prompt: "old", cwd: tmpDir }],
+      resolved: [
+        {
+          id: "old",
+          prompt: "old",
+          model,
+          tools: ["write"],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: tmpDir,
+          workspace: "shared",
+          agentName: "coder",
+          warnings: [],
+        },
+      ],
+      status: "running",
+      results: [undefined],
+      progress: [
+        {
+          id: "old",
+          index: 0,
+          agent: "coder",
+          task: "old",
+          status: "running",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      workersSettled: false,
+    });
+
+    const result = await dispatchDelegate({
+      pi: {} as any,
+      params: {
+        async: true,
+        tasks: [{ id: "new", prompt: "new", cwd: tmpDir }],
+      },
+      ctx: {
+        cwd: tmpDir,
+        model,
+        modelRegistry: {
+          getAvailable: () => [model],
+          find: () => model,
+          hasConfiguredAuth: () => true,
+        },
+        getSystemPrompt: () => "parent",
+      } as any,
+      agents: new Map(),
+      parentModelId: model.id,
+      parentDefaults: {
+        thinking: "off",
+        tools: ["read", "write", "edit", "bash"],
+      },
+      signal: undefined,
+      onUpdate: undefined,
+    });
+
+    expect(result.content[0]?.text).toContain(
+      "Task 1#new, async ticket 'live1234' task 1#old",
+    );
+    expect(result.content[0]?.text).toContain("Rejected before dispatch");
+    expect(ticketRegistry.size).toBe(1);
+  });
 });
 
 function makeFakeSession(

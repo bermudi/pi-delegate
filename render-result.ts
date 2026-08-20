@@ -166,11 +166,14 @@ export function renderDelegateResult(
     ticketStatus,
   };
 
-  // Surface the touched-file overlap warning at the top of the TUI. The same
-  // text already lives in the textual content, but the progress-based renderer
-  // ignores content, so we must render it explicitly from details. Rendering it
-  // before the progress tree places it at the top of the budgeted region, so it
-  // survives truncation from the bottom when many tasks collapse the view.
+  // Surface batch-level warnings at the top of the TUI. The same text already
+  // lives in textual content, but the progress renderer ignores content.
+  if (details?.dispatchWarning) {
+    lines.push(
+      truncLine(theme.fg("warning", `⚠ ${details.dispatchWarning}`), w),
+      "",
+    );
+  }
   if (details?.overlapWarning) {
     lines.push(
       truncLine(theme.fg("warning", `⚠ ${details.overlapWarning}`), w),

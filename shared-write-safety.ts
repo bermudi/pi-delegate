@@ -6,7 +6,16 @@ import type { ResolvedTask } from "./types.ts";
 
 const GIT_TIMEOUT_MS = 5_000;
 export const SHARED_WRITE_PREFLIGHT_CONCURRENCY = 4;
-const MUTATING_TOOLS = new Set(["write", "edit", "bash"]);
+/** Tools whose contract is known not to mutate the shared filesystem. Safety
+ * is deliberately fail-closed: a newly introduced or extension-provided tool
+ * is treated as mutating until it is explicitly classified here. */
+const NON_MUTATING_TOOLS = new Set([
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "web_search",
+]);
 const GIT_REPOSITORY_REDIRECT_VARIABLES = [
   "GIT_DIR",
   "GIT_WORK_TREE",
@@ -86,7 +95,7 @@ function gitRepositoryRoot(cwd: string, signal?: AbortSignal): Promise<string> {
 }
 
 /**
- * Resolve the physical boundary used by the batch-local shared-write gate.
+ * Resolve the physical boundary used by the in-process shared-write gate.
  * Only Git's explicit "not a repository" response permits a plain-directory
  * fallback. Missing Git, timeouts, dubious ownership, and malformed metadata
  * fail closed rather than silently disabling the protection.
@@ -113,7 +122,11 @@ export async function resolveSharedWriteScope(
       error instanceof GitScopeError &&
       /not a git repository/i.test(error.stderr)
     ) {
-      return { kind: "directory", root: canonicalCwd, roots: [{ kind: "directory", path: canonicalCwd }] };
+      return {
+        kind: "directory",
+        root: canonicalCwd,
+        roots: [{ kind: "directory", path: canonicalCwd }],
+      };
     }
     const detail =
       error instanceof GitScopeError
@@ -157,10 +170,10 @@ export async function resolveSharedWriteScope(
   return { kind: "git", root: canonicalRoot, roots };
 }
 
-function isSharedWriter(task: ResolvedTask): boolean {
+export function isSharedWriter(task: ResolvedTask): boolean {
   return (
     task.workspace === "shared" &&
-    task.tools.some((tool) => MUTATING_TOOLS.has(tool))
+    task.tools.some((tool) => !NON_MUTATING_TOOLS.has(tool))
   );
 }
 
@@ -213,8 +226,9 @@ export async function findSharedWriteConflicts(
     .map((task, taskIndex) => ({ task, taskIndex }))
     .filter(({ task }) => isSharedWriter(task));
 
-  // With fewer than two shared writers there cannot be a batch-local conflict.
-  // Do not make ordinary single-writer calls depend on Git or cwd inspection.
+  // With fewer than two shared writers there cannot be a conflict. Callers may
+  // include writers from other live dispatches, so this is not merely a
+  // batch-local optimization.
   if (candidates.length < 2) return [];
 
   const inheritedRedirects = GIT_REPOSITORY_REDIRECT_VARIABLES.filter(
@@ -231,14 +245,33 @@ export async function findSharedWriteConflicts(
     );
   }
 
-  const resolved = await mapConcurrent(
-    candidates,
+  // Scope discovery can take up to GIT_TIMEOUT_MS per unique cwd. Resolve each
+  // cwd once per admission check: repeated tasks in one directory are common,
+  // and without this cache a U-cwd check can take ceil(U / 4) * 5s in the
+  // worst case because mapConcurrent deliberately waits for all workers to
+  // settle before surfacing an error.
+  const candidatesByCwd = new Map<
+    string,
+    Array<{ task: ResolvedTask; taskIndex: number }>
+  >();
+  for (const candidate of candidates) {
+    const matching = candidatesByCwd.get(candidate.task.cwd);
+    if (matching) matching.push(candidate);
+    else candidatesByCwd.set(candidate.task.cwd, [candidate]);
+  }
+  const uniqueCwds = [...candidatesByCwd.keys()];
+  const scopes = await mapConcurrent(
+    uniqueCwds,
     SHARED_WRITE_PREFLIGHT_CONCURRENCY,
-    async ({ task, taskIndex }) => ({
-      taskIndex,
-      scope: await resolveSharedWriteScope(task.cwd, signal),
-    }),
+    (cwd) => resolveSharedWriteScope(cwd, signal),
   );
+  const scopesByCwd = new Map(
+    uniqueCwds.map((cwd, index) => [cwd, scopes[index]!] as const),
+  );
+  const resolved = candidates.map(({ task, taskIndex }) => ({
+    taskIndex,
+    scope: scopesByCwd.get(task.cwd)!,
+  }));
 
   // Build connected components rather than grouping only identical roots.
   // A writer scoped to /work can reach /work/subdir with an ordinary relative
