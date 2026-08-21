@@ -530,8 +530,10 @@ function getBackendForConfig(
   const liveConfig = getTelemetryConfig();
   const liveIdentity = backendIdentity(liveConfig);
 
-  // A hot reload changed the destination. Drop the old span's remaining rows
-  // and release its handle; the next call opens the new destination.
+  // A hot reload changed the destination. Drop every old-identity span's
+  // remaining rows, including concurrent spans, and release the one live
+  // handle; the next call opens the new destination. Telemetry is best-effort,
+  // so retaining/refcounting obsolete backends is deliberately out of scope.
   if (capturedIdentity !== liveIdentity) {
     if (activeBackend && activeBackendIdentity !== liveIdentity) {
       closeTelemetryBackend();

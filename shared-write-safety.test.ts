@@ -251,6 +251,33 @@ describe("shared-write safety", () => {
     ]);
   });
 
+  test("tracks a Git directory when its external worktree escapes its parent", async () => {
+    const outer = path.join(root, "outer");
+    const gitDirectory = path.join(outer, "repository.git");
+    const worktree = path.join(root, "external-worktree");
+    mkdirSync(gitDirectory, { recursive: true });
+    mkdirSync(worktree, { recursive: true });
+    execFileSync("git", ["init", "--bare", "--quiet", gitDirectory]);
+    execFileSync("git", ["config", "core.bare", "false"], {
+      cwd: gitDirectory,
+    });
+    execFileSync("git", ["config", "core.worktree", worktree], {
+      cwd: gitDirectory,
+    });
+
+    expect(
+      await findSharedWriteConflicts([
+        task(outer, ["write"]),
+        task(gitDirectory, ["bash"]),
+      ]),
+    ).toEqual([
+      {
+        scope: { kind: "directory", root: outer },
+        taskIndexes: [0, 1],
+      },
+    ]);
+  });
+
   test("groups the same physical non-Git directory", async () => {
     const conflicts = await findSharedWriteConflicts([
       task(root, ["write"]),

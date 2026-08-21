@@ -110,7 +110,7 @@ export function getSubagentManualMarkdown(
     'delegate({ tasks: [{ agent: "default", prompt: "Investigate the auth module" }] })',
     "```",
     "",
-    'Delegate subagents to execute tasks in parallel. Each subagent gets an independent conversation. A batch with multiple write-capable tasks in one shared tree is rejected before dispatch; run them sequentially, use `workspace: "isolated"` for Git-backed ordered reconciliation, or use disposable scratch workspaces.',
+    'Delegate subagents to execute tasks in parallel. Each subagent gets an independent conversation. A batch with multiple write-capable tasks in one shared tree is rejected before dispatch; run them sequentially, use synchronous one-shot `workspace: "isolated"` for Git-backed ordered reconciliation, or use disposable scratch workspaces.',
     "",
     "The three handles have different lifetimes:",
     "",
