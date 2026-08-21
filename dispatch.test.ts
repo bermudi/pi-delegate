@@ -394,6 +394,67 @@ describe("dispatch-time shared-write gate", () => {
     expect(result.content[0]?.text).toContain("Rejected before dispatch");
     expect(ticketRegistry.size).toBe(1);
   });
+
+  test("rejects a writer that overlaps a still-running sync dispatch", async () => {
+    const model = { provider: "test", id: "model" } as any;
+    let announceStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    let releaseWorker!: () => void;
+    const workerReleased = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    _setRunAgentSessionForTesting(async () => {
+      announceStarted();
+      await workerReleased;
+      return {
+        output: "done",
+        durationMs: 1,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+      };
+    });
+    const invoke = (prompt: string) =>
+      dispatchDelegate({
+        pi: {} as any,
+        params: { tasks: [{ prompt, cwd: tmpDir }] },
+        ctx: {
+          cwd: tmpDir,
+          model,
+          modelRegistry: {
+            getAvailable: () => [model],
+            find: () => model,
+            hasConfiguredAuth: () => true,
+          },
+          getSystemPrompt: () => "parent",
+        } as any,
+        agents: new Map(),
+        parentModelId: model.id,
+        parentDefaults: {
+          thinking: "off",
+          tools: ["read", "write", "edit", "bash"],
+        },
+        signal: undefined,
+        onUpdate: undefined,
+      });
+
+    const active = invoke("active");
+    try {
+      await started;
+      const rejected = await invoke("incoming");
+      expect(rejected.content[0]?.text).toContain(
+        "Rejected before dispatch; no tasks were started.",
+      );
+      expect(rejected.content[0]?.text).toContain("active sync task 1");
+    } finally {
+      releaseWorker();
+      await active;
+      _setRunAgentSessionForTesting(undefined);
+    }
+  });
 });
 
 function makeFakeSession(
