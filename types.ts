@@ -256,16 +256,46 @@ export type TaskIntegrationStatus =
   | "discarded"
   | "apply_failed";
 
-export interface TaskIntegration {
-  status: TaskIntegrationStatus;
+interface TaskIntegrationFiles {
   proposedFiles: string[];
   appliedFiles: string[];
-  conflicts?: Array<{ path: string; reason: string }>;
-  baselineRef?: string;
-  proposalRef?: string;
-  patchPath?: string;
-  worktreePath?: string;
 }
+
+interface TaskIntegrationWithoutRecovery extends TaskIntegrationFiles {
+  conflicts?: never;
+  baselineRef?: never;
+  proposalRef?: never;
+  patchPath?: never;
+  worktreePath?: never;
+}
+
+export type TaskIntegration =
+  | (TaskIntegrationWithoutRecovery & {
+      status: "applied_unverified";
+    })
+  | (TaskIntegrationWithoutRecovery & {
+      status: "no_changes";
+    })
+  | (TaskIntegrationWithoutRecovery & {
+      status: "discarded";
+    })
+  | (TaskIntegrationFiles & {
+      status: "conflict";
+      conflicts: Array<{ path: string; reason: string }>;
+      baselineRef: string;
+      proposalRef: string;
+      patchPath: string;
+      worktreePath: string;
+    })
+  | (TaskIntegrationFiles & {
+      status: "apply_failed";
+      conflicts: Array<{ path: string; reason: string }>;
+      /** Recovery metadata exists when reconciliation reached a proposal. */
+      baselineRef?: string;
+      proposalRef?: string;
+      patchPath?: string;
+      worktreePath?: string;
+    });
 
 /** Single source of truth for a subagent's runtime configuration.
  *  Passed to `createAgentSession` as `model` / `thinkingLevel` / `tools` / `cwd`. */

@@ -132,10 +132,9 @@ export function validateTasks(
     );
   }
 
-  // Scratch sessions are deliberately one-shot. This check uses the
-  // effective workspace, so reviewer gets the same protection even when the
-  // caller omits workspace. Explicit scratch is never silently promoted to
-  // shared.
+  // Scratch and isolated sessions are deliberately one-shot. This check uses
+  // the effective workspace, so named agents get the same protection even
+  // when the caller omits workspace.
   for (const [index, task] of tasks.entries()) {
     const agent = task.agent
       ? (agents.get(task.agent) ?? BUILTIN_AGENT_CONFIGS[task.agent])
@@ -143,13 +142,13 @@ export function validateTasks(
     const workspace = task.workspace ?? agent?.workspace ?? "shared";
     const sessionAction = task.sessionAction;
     if (
-      workspace === "scratch" &&
+      (workspace === "scratch" || workspace === "isolated") &&
       (task.sessionId || task.resumeFrom || sessionAction !== undefined)
     ) {
       const defaultText =
-        task.workspace === undefined && agent?.workspace === "scratch"
-          ? "defaults to workspace `scratch`"
-          : "uses workspace `scratch`";
+        task.workspace === undefined && agent?.workspace === workspace
+          ? `defaults to workspace \`${workspace}\``
+          : `uses workspace \`${workspace}\``;
       const persistentAgent = task.agent ?? "agent";
       return noticeResult(
         `${formatTaskRef(index, task.id)}: Agent \`${persistentAgent}\` ${defaultText}, which is one-shot and cannot use \`sessionId\`, \`resumeFrom\`, or session actions. Set \`workspace: "shared"\` to use a persistent ${persistentAgent}.`,

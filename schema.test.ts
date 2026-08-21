@@ -284,6 +284,29 @@ describe("validateDelegateOperation task-field whitelist", () => {
         ],
       }),
     ).toContain("one-shot");
+    expect(
+      validateDelegateOperation({
+        tasks: [
+          {
+            agent: "coder",
+            prompt: "x",
+            workspace: "isolated",
+            resumeFrom: "/tmp/s.jsonl",
+          },
+        ],
+      }),
+    ).toContain("one-shot");
+    expect(
+      validateDelegateOperation({
+        tasks: [
+          {
+            agent: "coder",
+            workspace: "isolated",
+            sessionAction: "prompt",
+          },
+        ],
+      }),
+    ).toContain("one-shot");
   });
 
   test("rejects non-positive deadlineMs", () => {

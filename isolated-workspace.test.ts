@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +13,15 @@ import type { ResolvedTask, TaskResult } from "./types.ts";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function privateRefs(cwd: string): string[] {
+  const output = git(cwd, [
+    "for-each-ref",
+    "--format=%(refname)",
+    "refs/pi-delegate/batches",
+  ]);
+  return output ? output.split("\n") : [];
 }
 
 function task(cwd: string, prompt: string): ResolvedTask {
@@ -100,6 +110,7 @@ describe("Git-native isolated workspace", () => {
       "applied_unverified",
       "applied_unverified",
     ]);
+    expect(privateRefs(repo)).toEqual([]);
   });
 
   test("keeps a conflicting proposal as a ref, full patch, and worktree", async () => {
@@ -123,6 +134,10 @@ describe("Git-native isolated workspace", () => {
     expect(
       git(repo, ["rev-parse", "--verify", `${conflict.proposalRef}^{commit}`]),
     ).toBeTruthy();
+    expect(privateRefs(repo)).toEqual([
+      conflict.baselineRef,
+      conflict.proposalRef,
+    ]);
   });
 
   test("reconciles additions, deletions, binary data, symlinks, and executable bits", async () => {
@@ -160,6 +175,10 @@ describe("Git-native isolated workspace", () => {
     expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
       "external change\n",
     );
+    expect(privateRefs(repo)).toEqual([
+      result!.integration!.baselineRef!,
+      result!.integration!.proposalRef!,
+    ]);
   });
 
   test("failed workers are discarded without changing the source", async () => {
@@ -173,6 +192,27 @@ describe("Git-native isolated workspace", () => {
     expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
       "baseline\n",
     );
+    expect(privateRefs(repo)).toEqual([]);
+  });
+
+  test("removes private refs when a proposal has no changes", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+
+    const [result] = await batch!.reconcile([success()]);
+
+    expect(result!.integration?.status).toBe("no_changes");
+    expect(privateRefs(repo)).toEqual([]);
+  });
+
+  test("removes an earlier baseline ref when batch preparation fails", async () => {
+    const notARepository = path.join(root, "not-a-repository");
+    fs.mkdirSync(notARepository);
+
+    await expect(
+      prepareIsolatedBatch([task(repo, "one"), task(notARepository, "two")]),
+    ).rejects.toThrow();
+
+    expect(privateRefs(repo)).toEqual([]);
   });
 
   test("terminates a background process before snapshotting", async () => {
@@ -185,11 +225,20 @@ describe("Git-native isolated workspace", () => {
       detached: true,
       stdio: "ignore",
     });
-    child.unref();
-    expect(child.pid).toBeNumber();
+    const exited = once(child, "exit");
+    try {
+      await once(child, "spawn");
+      expect(child.pid).toBeNumber();
 
-    const [result] = await batch!.reconcile([success()]);
-    expect(result!.integration?.status).toBe("applied_unverified");
-    expect(() => process.kill(child.pid!, 0)).toThrow();
+      const [result] = await batch!.reconcile([success()]);
+      await exited;
+      expect(result!.integration?.status).toBe("applied_unverified");
+      expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await exited;
+      }
+    }
   });
 });
