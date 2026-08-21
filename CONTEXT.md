@@ -99,7 +99,10 @@ subagent `.jsonl`.
 
 The SQLite store is in `~/.pi/agent/delegate-usage.db` by default (overridable
 via `delegate.json` `telemetry.dbPath`), uses WAL mode with a 5s busy timeout,
-and is fail-open: any write failure disables the backend for the process.
+and is fail-open: any write failure disables the backend until telemetry config
+changes. One live backend follows the current config. If `dbPath` changes while
+a call is in flight, that call's remaining rows are deliberately dropped rather
+than retaining or reopening the old database.
 `node:sqlite` is not available under Bun, so tests always inject the in-memory
 recorder via `_setTelemetryForTesting`. Example queries:
 
