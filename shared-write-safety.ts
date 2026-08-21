@@ -18,6 +18,14 @@ const GIT_REDIRECTS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as const;
 export interface SharedWriteScope {
   kind: "git" | "directory";
   root: string;
+  /** Additional physical roots reachable from the task cwd. Present only
+   * while resolving admissions; conflict results expose the witness root. */
+  roots?: ReachRoot[];
+}
+
+interface ReachRoot {
+  kind: "git" | "directory";
+  root: string;
 }
 
 export interface SharedWriteConflict {
@@ -71,9 +79,9 @@ function gitRepositoryRoot(cwd: string, signal?: AbortSignal): Promise<string> {
   });
 }
 
-/** Resolve one conservative write boundary. Git repositories use their
- * physical top-level; plain directories use the task cwd. Only Git's explicit
- * "not a repository" response permits directory fallback. */
+/** Resolve a primary write boundary and, for an external core.worktree, the
+ * physical cwd that remains reachable. Plain directories use the task cwd.
+ * Only Git's explicit "not a repository" permits directory fallback. */
 export async function resolveSharedWriteScope(
   cwd: string,
   signal?: AbortSignal,
@@ -95,7 +103,12 @@ export async function resolveSharedWriteScope(
         `Git returned an empty repository root for '${physicalCwd}'.`,
       );
     }
-    return { kind: "git", root: await fs.promises.realpath(root) };
+    const physicalRoot = await fs.promises.realpath(root);
+    const roots: ReachRoot[] = [{ kind: "git", root: physicalRoot }];
+    if (!isPathWithinDirectoryLexical(physicalRoot, physicalCwd)) {
+      roots.push({ kind: "directory", root: physicalCwd });
+    }
+    return { kind: "git", root: physicalRoot, roots };
   } catch (error) {
     if (
       error instanceof GitScopeError &&
@@ -124,18 +137,39 @@ export function isSharedWriter(task: ResolvedTask): boolean {
   );
 }
 
-function overlaps(left: SharedWriteScope, right: SharedWriteScope): boolean {
+function reachRoots(scope: SharedWriteScope): ReachRoot[] {
+  return scope.roots ?? [{ kind: scope.kind, root: scope.root }];
+}
+
+function rootsOverlap(left: ReachRoot, right: ReachRoot): boolean {
   return (
     isPathWithinDirectoryLexical(left.root, right.root) ||
     isPathWithinDirectoryLexical(right.root, left.root)
   );
 }
 
-function shallower(
+function shallower(left: ReachRoot, right: ReachRoot): ReachRoot {
+  return isPathWithinDirectoryLexical(left.root, right.root) ? left : right;
+}
+
+function overlapWitness(
   left: SharedWriteScope,
   right: SharedWriteScope,
-): SharedWriteScope {
-  return isPathWithinDirectoryLexical(left.root, right.root) ? left : right;
+): ReachRoot | undefined {
+  let witness: ReachRoot | undefined;
+  for (const leftRoot of reachRoots(left)) {
+    for (const rightRoot of reachRoots(right)) {
+      if (!rootsOverlap(leftRoot, rightRoot)) continue;
+      const candidate = shallower(leftRoot, rightRoot);
+      if (
+        witness === undefined ||
+        isPathWithinDirectoryLexical(candidate.root, witness.root)
+      ) {
+        witness = candidate;
+      }
+    }
+  }
+  return witness;
 }
 
 /** Find connected overlapping writer scopes while preserving task order.
@@ -189,7 +223,10 @@ export async function findSharedWriteConflicts(
   };
   for (let left = 0; left < resolved.length; left++) {
     for (let right = left + 1; right < resolved.length; right++) {
-      if (overlaps(resolved[left]!.scope, resolved[right]!.scope)) {
+      if (
+        overlapWitness(resolved[left]!.scope, resolved[right]!.scope) !==
+        undefined
+      ) {
         union(left, right);
       }
     }
@@ -206,13 +243,29 @@ export async function findSharedWriteConflicts(
   const conflicts: SharedWriteConflict[] = [];
   for (const members of components.values()) {
     if (members.length < 2) continue;
-    let witness = resolved[members[0]!]!.scope;
-    for (const member of members.slice(1)) {
-      const scope = resolved[member]!.scope;
-      if (overlaps(witness, scope)) witness = shallower(witness, scope);
+    let witness: ReachRoot | undefined;
+    for (let left = 0; left < members.length; left++) {
+      for (let right = left + 1; right < members.length; right++) {
+        const candidate = overlapWitness(
+          resolved[members[left]!]!.scope,
+          resolved[members[right]!]!.scope,
+        );
+        if (
+          candidate &&
+          (witness === undefined ||
+            isPathWithinDirectoryLexical(candidate.root, witness.root))
+        ) {
+          witness = candidate;
+        }
+      }
+    }
+    if (!witness) {
+      throw new SharedWriteSafetyError(
+        "Invariant violation: connected writer scopes have no overlap witness.",
+      );
     }
     conflicts.push({
-      scope: witness,
+      scope: { kind: witness.kind, root: witness.root },
       taskIndexes: members.map((index) => resolved[index]!.taskIndex),
     });
   }

@@ -262,6 +262,14 @@ describe("dispatch-time shared-write gate", () => {
           "integration" in entry ? entry.integration?.status : undefined,
         ),
       ).toEqual(["applied_unverified", "applied_unverified"]);
+      expect(
+        result.details.results.map((entry) =>
+          "touchedFiles" in entry ? entry.touchedFiles : [],
+        ),
+      ).toEqual([
+        [path.join(tmpDir, "0.txt")],
+        [path.join(tmpDir, "1.txt")],
+      ]);
       expect(readFileSync(path.join(tmpDir, "0.txt"), "utf8")).toBe("task 0\n");
       expect(readFileSync(path.join(tmpDir, "1.txt"), "utf8")).toBe("task 1\n");
     } finally {

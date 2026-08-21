@@ -593,4 +593,12 @@ describe("getSubagentManualMarkdown", () => {
       "cannot fold their usage into the parent session total",
     );
   });
+
+  test("documents that isolated workspaces are synchronous and one-shot", () => {
+    const manual = getSubagentManualMarkdown(new Map());
+    expect(manual).toContain('synchronous one-shot `workspace: "isolated"`');
+    expect(delegateTaskSchema.properties.workspace.description).toContain(
+      "isolated=sync one-shot",
+    );
+  });
 });

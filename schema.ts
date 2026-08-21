@@ -108,7 +108,7 @@ export const delegateTaskSchema = Type.Object({
   workspace: Type.Optional(
     StringEnum(["shared", "scratch", "isolated"], {
       description:
-        "shared source; scratch discarded; isolated Git proposal+apply; not security isolation. Reviewer=scratch.",
+        "shared; scratch discarded; isolated=sync one-shot Git apply; not security isolation. Reviewer=scratch.",
     }),
   ),
 });
