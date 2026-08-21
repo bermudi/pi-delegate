@@ -25,7 +25,10 @@ import {
 } from "./config.ts";
 import type { DelegateConfig } from "./config.ts";
 import { resolveCwd } from "./utils.ts";
-import { warnLegacyDelegateSettingsMoved } from "./settings.ts";
+import {
+  loadDelegateSettings,
+  warnLegacyDelegateSettingsMoved,
+} from "./settings.ts";
 import type {
   AgentConfig,
   DelegateToolCtx,
@@ -236,11 +239,9 @@ export function resolveTasks(
     ctx.getSystemPrompt?.(),
   );
 
-  // Agent overrides come from delegate.json only (user scope, global —
-  // deliberately no project-level discovery, so repo files never become
-  // subagent configuration). The dispatch boundary reloads the config
-  // singleton, so this snapshot is one consistent view for every task in
-  // the batch.
+  // Modern overrides come from delegate.json. A one-release bridge below also
+  // reads legacy settings.json model/thinking values; modern values win
+  // field-by-field and legacy tools are never honored.
   const agentOverrides = getAgentOverrides(dispatchConfig);
   const overridesByParentModel = getAgentOverridesByParentModel(dispatchConfig);
 
@@ -254,7 +255,10 @@ export function resolveTasks(
 
     // A task can resolve to a different cwd than the parent; legacy
     // `delegate` blocks in those project settings must be surfaced too.
-    warnLegacyDelegateSettingsMoved(cwd);
+    warnLegacyDelegateSettingsMoved(cwd, (message) =>
+      ctx.ui?.notify(message, "warning"),
+    );
+    const legacySettings = loadDelegateSettings(cwd);
 
     // delegate.json agent overrides for this agent. `default` bypasses them
     // entirely (it mirrors the live parent by contract).
@@ -271,6 +275,20 @@ export function resolveTasks(
     const agentOverride =
       t.agent && !isDefaultAgent
         ? getOwnMapValue(agentOverrides, t.agent)
+        : undefined;
+    const legacyParentModelOverride =
+      t.agent && !isDefaultAgent && parentModelKey
+        ? getOwnMapValue(
+            getOwnMapValue(
+              legacySettings?.agentOverridesByParentModel,
+              parentModelKey,
+            ),
+            t.agent,
+          )
+        : undefined;
+    const legacyAgentOverride =
+      t.agent && !isDefaultAgent
+        ? getOwnMapValue(legacySettings?.agentOverrides, t.agent)
         : undefined;
 
     // Build system prompt. Explicit task prompts and named agent prompts
@@ -419,10 +437,16 @@ export function resolveTasks(
           ? (t.model ??
             parentModelOverride?.model ??
             agentOverride?.model ??
+            legacyParentModelOverride?.model ??
+            legacyAgentOverride?.model ??
             (agent?.explicitModel ? agent.model : undefined))
           : resolveModelSpec({
               taskModel:
-                t.model ?? parentModelOverride?.model ?? agentOverride?.model,
+                t.model ??
+                parentModelOverride?.model ??
+                agentOverride?.model ??
+                legacyParentModelOverride?.model ??
+                legacyAgentOverride?.model,
               agentType,
               frontmatterModel: agent?.model,
               config: dispatchConfig,
@@ -497,6 +521,8 @@ export function resolveTasks(
           ? (t.thinking ??
             parentModelOverride?.thinking ??
             agentOverride?.thinking ??
+            legacyParentModelOverride?.thinking ??
+            legacyAgentOverride?.thinking ??
             (agent?.explicitThinking ? agent.thinking : undefined) ??
             modelSuffix ??
             parentDefaults.thinking ??
@@ -505,6 +531,8 @@ export function resolveTasks(
           : (t.thinking ??
             parentModelOverride?.thinking ??
             agentOverride?.thinking ??
+            legacyParentModelOverride?.thinking ??
+            legacyAgentOverride?.thinking ??
             (agent?.explicitThinking ? agent.thinking : undefined) ??
             (isPoolHit ? pooledConfig?.thinking : undefined) ??
             modelSuffix ??
@@ -513,6 +541,8 @@ export function resolveTasks(
         : (t.thinking ??
           parentModelOverride?.thinking ??
           agentOverride?.thinking ??
+          legacyParentModelOverride?.thinking ??
+          legacyAgentOverride?.thinking ??
           agent?.thinking ??
           (isPoolHit ? pooledConfig?.thinking : undefined) ??
           modelSuffix ??

@@ -71,9 +71,17 @@ in the Markdown file replaces that inheritance. Task fields always win, and for
 `scout`/`coder`/`reviewer` overrides in `~/.pi/agent/delegate.json`
 (`agentOverrides` / `agentOverridesByParentModel`) win over the
 Markdown file, while `default` ignores overrides and uses only an explicit
-Markdown `model`/`thinking` when present. `delegate.json` is the single config
-file (user scope, global — there are no project-level delegate overrides), and
-edits apply from the next delegate call.
+Markdown `model`/`thinking` when present. `delegate.json` is the permanent
+config file (user scope, global), and edits apply from the next delegate call.
+
+For the v0.1.12 migration release only, legacy user and nearest-project
+`settings.json` `delegate.agentOverrides` /
+`delegate.agentOverridesByParentModel` still supply `model` and `thinking`
+when a modern value is absent. Modern `delegate.json` wins field-by-field.
+Legacy `tools` is never honored because a project file must not restore shell
+capability. This bridge is removed in v0.1.13. Project-local replacements are
+`.pi/agents/*.md` profiles or explicit task `model`/`thinking` fields; there
+will be no new project-level delegate config file.
 
 ### Disposable scratch workspace
 

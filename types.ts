@@ -313,6 +313,10 @@ export interface DelegateToolCtx {
     | undefined;
   /** Optional hook Pi exposes for extensions to read the live system prompt. */
   getSystemPrompt?: () => string | undefined;
+  /** Optional TUI notice boundary used for migration warnings. */
+  ui?: {
+    notify(message: string, level?: "info" | "warning" | "error"): void;
+  };
 }
 
 /** Shape returned by the delegate tool's `execute`. Mirrors Pi's

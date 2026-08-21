@@ -3039,21 +3039,28 @@ describe("legacy pi settings detection", () => {
     ).toHaveLength(1);
   });
 
-  test("warns once per cwd that the overrides moved to delegate.json", () => {
+  test("warns once per source/cwd through stderr and the TUI", () => {
     writeSettings(path.join(".pi", "agent", "settings.json"), {
       delegate: { agentOverridesByParentModel: {} },
     });
     const warnings: string[] = [];
+    const notices: string[] = [];
     const originalWarn = console.warn;
     console.warn = (message?: unknown) => warnings.push(String(message));
     try {
-      warnLegacyDelegateSettingsMoved(projectDir);
-      warnLegacyDelegateSettingsMoved(projectDir);
+      warnLegacyDelegateSettingsMoved(projectDir, (message) =>
+        notices.push(message),
+      );
+      warnLegacyDelegateSettingsMoved(projectDir, (message) =>
+        notices.push(message),
+      );
     } finally {
       console.warn = originalWarn;
     }
     expect(warnings).toHaveLength(1);
+    expect(notices).toHaveLength(1);
     expect(warnings[0]).toContain("delegate.json");
+    expect(warnings[0]).toContain("v0.1.13");
   });
 
   test("warns when a legacy block is added after an earlier no-block call", () => {
@@ -3125,17 +3132,12 @@ describe("legacy pi settings detection", () => {
     expect(
       warnings.filter((w) => w.includes("delegate.json")).length,
     ).toBeGreaterThanOrEqual(2);
-    // Each distinct task cwd should be reported.
-    expect(
-      new Set(
-        warnings
-          .filter((w) => w.includes("delegate.json"))
-          .map((w) => {
-            const m = w.match(/in (.+?):/);
-            return m ? m[1] : "";
-          }),
-      ).size,
-    ).toBe(2);
+    expect(warnings.some((w) => w.includes(path.join(webDir, ".pi")))).toBe(
+      true,
+    );
+    expect(warnings.some((w) => w.includes(path.join(apiDir, ".pi")))).toBe(
+      true,
+    );
   });
 });
 
