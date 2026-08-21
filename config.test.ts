@@ -29,6 +29,25 @@ describe("operator shared-write authorization", () => {
   });
 });
 
+describe("optional scalar defaults", () => {
+  beforeEach(() => _resetDelegateConfigForTesting());
+  afterEach(() => _resetDelegateConfigForTesting());
+
+  test("treats explicitly undefined scalar overrides as omitted", () => {
+    const defaults = getDelegateConfigSnapshot();
+    _setDelegateConfigForTesting({
+      maxConcurrent: undefined,
+      maxAsyncTickets: undefined,
+      stallTimeoutMs: undefined,
+    });
+
+    const configured = getDelegateConfigSnapshot();
+    expect(configured.maxConcurrent).toBe(defaults.maxConcurrent);
+    expect(configured.maxAsyncTickets).toBe(defaults.maxAsyncTickets);
+    expect(configured.stallTimeoutMs).toBe(defaults.stallTimeoutMs);
+  });
+});
+
 /**
  * `normalizeProviderExtensions` is the boundary validator for user-edited
  * `delegate.json` input. It's module-private, so these tests drive it through

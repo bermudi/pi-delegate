@@ -291,7 +291,6 @@ export function validateDelegateOperation(
     }
     if (
       (task.workspace === "scratch" || task.workspace === "isolated") &&
-      !task.agent &&
       (task.sessionId || task.resumeFrom || sessionAction !== undefined)
     ) {
       return `task ${index + 1}: workspace '${task.workspace}' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction. Set workspace: "shared" to use a persistent agent.`;

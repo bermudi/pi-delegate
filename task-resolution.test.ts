@@ -501,6 +501,32 @@ describe("built-in agent profiles", () => {
     ).toBeNull();
   });
 
+  test("an agent defaulting to isolated cannot use a persistent session", () => {
+    const agents = new Map(builtins);
+    agents.set("isolated-agent", {
+      name: "isolated-agent",
+      description: "test",
+      prompt: "test",
+      workspace: "isolated",
+    });
+
+    const result = validateTasks(
+      [
+        {
+          agent: "isolated-agent",
+          sessionId: "persistent",
+          prompt: "work",
+        },
+      ],
+      agents,
+      "parent",
+    );
+    expect(result?.content[0]?.text).toContain(
+      "defaults to workspace `isolated`",
+    );
+    expect(result?.content[0]?.text).toContain('Set `workspace: "shared"`');
+  });
+
   test("task model and thinking override built-in suffix and parent defaults", () => {
     const selected = {
       provider: "openai-codex",

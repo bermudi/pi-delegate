@@ -357,7 +357,6 @@ async function reconcileGroup(
         status: "discarded",
         proposedFiles: [],
         appliedFiles: [],
-        baselineRef: group.baselineRef,
       };
       await removeWorktree(group.sourceRoot, worker.workerRoot);
       continue;
@@ -397,9 +396,6 @@ async function reconcileGroup(
           status: "no_changes",
           proposedFiles,
           appliedFiles: [],
-          baselineRef: group.baselineRef,
-          proposalRef: worker.proposalRef,
-          patchPath: worker.patchPath,
         };
         continue;
       }
@@ -427,9 +423,6 @@ async function reconcileGroup(
           status: "applied_unverified",
           proposedFiles,
           appliedFiles: proposedFiles,
-          baselineRef: group.baselineRef,
-          proposalRef: worker.proposalRef,
-          patchPath: worker.patchPath,
         };
         await removeWorktree(group.sourceRoot, candidateRoot);
       } catch (error) {
@@ -451,6 +444,12 @@ async function reconcileGroup(
         };
       }
     } catch (error) {
+      const proposalExists = await privateRefExists(
+        group.sourceRoot,
+        worker.proposalRef,
+      );
+      const patchExists = fs.existsSync(worker.patchPath);
+      const worktreeExists = fs.existsSync(worker.workerRoot);
       result.integration = {
         status: "apply_failed",
         proposedFiles: [],
@@ -462,9 +461,9 @@ async function reconcileGroup(
           },
         ],
         baselineRef: group.baselineRef,
-        proposalRef: worker.proposalRef,
-        patchPath: worker.patchPath,
-        worktreePath: worker.workerRoot,
+        ...(proposalExists ? { proposalRef: worker.proposalRef } : {}),
+        ...(patchExists ? { patchPath: worker.patchPath } : {}),
+        ...(worktreeExists ? { worktreePath: worker.workerRoot } : {}),
       };
     }
   }
@@ -487,15 +486,22 @@ async function reconcileGroup(
   if (currentTree !== baselineTree) {
     for (const [taskIndex] of accepted) {
       const integration = results[taskIndex]!.integration!;
-      integration.status = "apply_failed";
-      integration.appliedFiles = [];
-      integration.conflicts = [
-        {
-          path: "(source tree)",
-          reason:
-            "The source tree changed during isolated execution; no proposal was applied.",
-        },
-      ];
+      const worker = workers.get(taskIndex)!;
+      results[taskIndex]!.integration = {
+        status: "apply_failed",
+        proposedFiles: integration.proposedFiles,
+        appliedFiles: [],
+        conflicts: [
+          {
+            path: "(source tree)",
+            reason:
+              "The source tree changed during isolated execution; no proposal was applied.",
+          },
+        ],
+        baselineRef: group.baselineRef,
+        proposalRef: worker.proposalRef,
+        patchPath: worker.patchPath,
+      };
     }
     await removeWorktree(group.sourceRoot, pristineRoot);
     return;
@@ -549,20 +555,133 @@ async function reconcileGroup(
     }
     for (const [taskIndex] of accepted) {
       const integration = results[taskIndex]!.integration!;
-      integration.status = "apply_failed";
-      integration.appliedFiles = [];
-      integration.conflicts = [
-        {
-          path: "(source tree)",
-          reason: error instanceof Error ? error.message : String(error),
-        },
-      ];
-      integration.worktreePath = pristineRoot;
+      const worker = workers.get(taskIndex)!;
+      results[taskIndex]!.integration = {
+        status: "apply_failed",
+        proposedFiles: integration.proposedFiles,
+        appliedFiles: [],
+        conflicts: [
+          {
+            path: "(source tree)",
+            reason: error instanceof Error ? error.message : String(error),
+          },
+        ],
+        baselineRef: group.baselineRef,
+        proposalRef: worker.proposalRef,
+        patchPath: worker.patchPath,
+        worktreePath: pristineRoot,
+      };
     }
     return;
   }
 
   await removeWorktree(group.sourceRoot, pristineRoot);
+}
+
+async function deletePrivateRefs(
+  sourceRoot: string,
+  refs: readonly string[],
+): Promise<void> {
+  for (const ref of refs) {
+    await git(["update-ref", "-d", ref], { cwd: sourceRoot });
+  }
+}
+
+async function privateRefExists(
+  sourceRoot: string,
+  ref: string,
+): Promise<boolean> {
+  try {
+    await git(["rev-parse", "--verify", `${ref}^{commit}`], {
+      cwd: sourceRoot,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function markGroupReconciliationFailure(
+  group: IsolatedGroup,
+  workers: Map<number, IsolatedWorker>,
+  results: TaskResult[],
+  error: unknown,
+): Promise<void> {
+  const reason = error instanceof Error ? error.message : String(error);
+  const baselineExists = await privateRefExists(
+    group.sourceRoot,
+    group.baselineRef,
+  );
+  const pristineRoot = path.join(group.artifactRoot, "pristine");
+
+  for (const taskIndex of group.taskIndexes) {
+    const result = results[taskIndex]!;
+    const current = result.integration;
+    if (
+      current?.status === "conflict" ||
+      current?.status === "apply_failed" ||
+      current?.status === "no_changes" ||
+      current?.status === "discarded"
+    ) {
+      continue;
+    }
+
+    const worker = workers.get(taskIndex)!;
+    const proposalExists = await privateRefExists(
+      group.sourceRoot,
+      worker.proposalRef,
+    );
+    const patchExists = fs.existsSync(worker.patchPath);
+    const recoveryWorktree = fs.existsSync(worker.workerRoot)
+      ? worker.workerRoot
+      : fs.existsSync(pristineRoot)
+        ? pristineRoot
+        : undefined;
+    result.workspace = "isolated";
+    result.integration = {
+      status: "apply_failed",
+      proposedFiles: current?.proposedFiles ?? [],
+      appliedFiles: [],
+      conflicts: [{ path: "(batch)", reason }],
+      ...(baselineExists ? { baselineRef: group.baselineRef } : {}),
+      ...(proposalExists ? { proposalRef: worker.proposalRef } : {}),
+      ...(patchExists ? { patchPath: worker.patchPath } : {}),
+      ...(recoveryWorktree ? { worktreePath: recoveryWorktree } : {}),
+    };
+  }
+}
+
+async function cleanupCompletedGroupRefs(
+  group: IsolatedGroup,
+  workers: Map<number, IsolatedWorker>,
+  results: readonly TaskResult[],
+): Promise<void> {
+  const disposableProposalRefs: string[] = [];
+  let retainsRecoveryArtifacts = false;
+
+  for (const taskIndex of group.taskIndexes) {
+    const status = results[taskIndex]?.integration?.status;
+    if (status === "conflict" || status === "apply_failed") {
+      retainsRecoveryArtifacts = true;
+    } else if (
+      status === "applied_unverified" ||
+      status === "no_changes" ||
+      status === "discarded"
+    ) {
+      disposableProposalRefs.push(workers.get(taskIndex)!.proposalRef);
+    }
+  }
+
+  const refs = retainsRecoveryArtifacts
+    ? disposableProposalRefs
+    : [...disposableProposalRefs, group.baselineRef];
+  try {
+    await deletePrivateRefs(group.sourceRoot, refs);
+  } catch (error) {
+    // Integration already completed. Ref cleanup must be visible, but must not
+    // turn a successfully applied source change into a reported failure.
+    console.error("[delegate] failed to clean completed isolated refs", error);
+  }
 }
 
 /** Prepare detached worktrees from one synthetic commit per Git root. The
@@ -656,10 +775,30 @@ export async function prepareIsolatedBatch(
       translated[taskIndex] = { ...task, cwd };
     }
   } catch (error) {
-    await Promise.all(
+    const worktreeCleanup = await Promise.allSettled(
       [...workers.values()].map((worker) =>
         removeWorktree(worker.group.sourceRoot, worker.workerRoot),
       ),
+    );
+    for (const failure of worktreeCleanup) {
+      if (failure.status === "rejected") {
+        console.error(
+          "[delegate] failed to remove isolated worktree after preparation error",
+          failure.reason,
+        );
+      }
+    }
+    await Promise.all(
+      [...groupsByRoot.values()].map(async (group) => {
+        try {
+          await deletePrivateRefs(group.sourceRoot, [group.baselineRef]);
+        } catch (cleanupError) {
+          console.error(
+            "[delegate] failed to clean isolated baseline ref after preparation error",
+            cleanupError,
+          );
+        }
+      }),
     );
     throw error;
   }
@@ -668,7 +807,16 @@ export async function prepareIsolatedBatch(
     resolved: translated,
     async reconcile(results: TaskResult[]): Promise<TaskResult[]> {
       for (const group of groupsByRoot.values()) {
-        await reconcileGroup(group, workers, results);
+        try {
+          await reconcileGroup(group, workers, results);
+        } catch (error) {
+          console.error(
+            "[delegate] isolated group reconciliation failed",
+            error,
+          );
+          await markGroupReconciliationFailure(group, workers, results, error);
+        }
+        await cleanupCompletedGroupRefs(group, workers, results);
       }
       return results;
     },

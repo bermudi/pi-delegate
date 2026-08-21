@@ -224,17 +224,29 @@ function validateNumericAndNestedFields(
     return "output must be an object";
   }
 
-  if ("maxConcurrent" in raw && !isPositiveInteger(raw.maxConcurrent)) {
+  if (
+    "maxConcurrent" in raw &&
+    raw.maxConcurrent !== undefined &&
+    !isPositiveInteger(raw.maxConcurrent)
+  ) {
     return `maxConcurrent must be a positive integer; got ${JSON.stringify(
       raw.maxConcurrent,
     )}`;
   }
-  if ("maxAsyncTickets" in raw && !isPositiveInteger(raw.maxAsyncTickets)) {
+  if (
+    "maxAsyncTickets" in raw &&
+    raw.maxAsyncTickets !== undefined &&
+    !isPositiveInteger(raw.maxAsyncTickets)
+  ) {
     return `maxAsyncTickets must be a positive integer; got ${JSON.stringify(
       raw.maxAsyncTickets,
     )}`;
   }
-  if ("stallTimeoutMs" in raw && !isNonNegativeInteger(raw.stallTimeoutMs)) {
+  if (
+    "stallTimeoutMs" in raw &&
+    raw.stallTimeoutMs !== undefined &&
+    !isNonNegativeInteger(raw.stallTimeoutMs)
+  ) {
     return `stallTimeoutMs must be a non-negative integer; got ${JSON.stringify(
       raw.stallTimeoutMs,
     )}`;
@@ -686,6 +698,12 @@ export function _setDelegateConfigForTesting(
   __delegateConfig = {
     ...DEFAULT_DELEGATE_CONFIG,
     ...config,
+    maxConcurrent:
+      config.maxConcurrent ?? DEFAULT_DELEGATE_CONFIG.maxConcurrent,
+    maxAsyncTickets:
+      config.maxAsyncTickets ?? DEFAULT_DELEGATE_CONFIG.maxAsyncTickets,
+    stallTimeoutMs:
+      config.stallTimeoutMs ?? DEFAULT_DELEGATE_CONFIG.stallTimeoutMs,
     agent: {
       ...DEFAULT_DELEGATE_CONFIG.agent,
       ...(config.agent ?? {}),

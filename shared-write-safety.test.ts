@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -36,7 +42,9 @@ describe("shared-write safety", () => {
   let root: string;
 
   beforeEach(() => {
-    root = mkdtempSync(path.join(os.tmpdir(), "delegate-write-safety-"));
+    root = realpathSync(
+      mkdtempSync(path.join(os.tmpdir(), "delegate-write-safety-")),
+    );
   });
 
   afterEach(() => {
