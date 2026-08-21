@@ -42,7 +42,7 @@ export const delegateTaskSchema = Type.Object({
   agent: Type.Optional(
     Type.String({
       description:
-        "Built-ins: default, scout, coder, reviewer. Reviewer defaults to one-shot scratch. Omit for ad-hoc.",
+        "Agent profile name. Built-ins: default, scout, coder, reviewer. Omit for ad-hoc.",
     }),
   ),
   cwd: Type.Optional(
@@ -77,7 +77,7 @@ export const delegateTaskSchema = Type.Object({
   thinking: Type.Optional(
     StringEnum(VALID_THINKING_LEVELS, {
       description:
-        "Thinking: off/minimal/low/medium/high/xhigh/max; default=parent; others=agent/off.",
+        "off/minimal/low/medium/high/xhigh/max. Omit for agents — it overrides delegate.json tiers; default inherits.",
     }),
   ),
   sessionId: Type.Optional(
