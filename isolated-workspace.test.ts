@@ -181,6 +181,23 @@ describe("Git-native isolated workspace", () => {
     ]);
   });
 
+  test("preserves proposed files when candidate worktree creation fails", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    fs.writeFileSync(path.join(one!.cwd, "shared.txt"), "proposal\n");
+    fs.writeFileSync(
+      path.join(path.dirname(one!.cwd), "candidate-0"),
+      "block worktree creation",
+    );
+
+    const [result] = await batch!.reconcile([success()]);
+
+    expect(result!.integration?.status).toBe("apply_failed");
+    expect(result!.integration?.proposedFiles).toEqual(["shared.txt"]);
+    expect(result!.integration?.proposalRef).toBeString();
+    expect(result!.integration?.patchPath).toBeString();
+  });
+
   test("failed workers are discarded without changing the source", async () => {
     const batch = await prepareIsolatedBatch([task(repo, "one")]);
     const [one] = batch!.resolved;
@@ -213,6 +230,7 @@ describe("Git-native isolated workspace", () => {
     ).rejects.toThrow();
 
     expect(privateRefs(repo)).toEqual([]);
+    expect(fs.readdirSync(path.join(root, "artifacts"))).toEqual([]);
   });
 
   test("terminates a background process before snapshotting", async () => {

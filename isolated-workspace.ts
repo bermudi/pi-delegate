@@ -179,14 +179,33 @@ async function addWorktree(
 async function removeWorktree(
   root: string,
   destination: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await git(["worktree", "remove", "--force", destination], { cwd: root });
+    return true;
   } catch (error) {
+    let stillRegistered = true;
+    try {
+      const listed = await git(["worktree", "list", "--porcelain", "-z"], {
+        cwd: root,
+      });
+      stillRegistered = listed.stdout
+        .split("\0")
+        .some(
+          (entry) =>
+            entry.startsWith("worktree ") &&
+            path.resolve(entry.slice("worktree ".length)) ===
+              path.resolve(destination),
+        );
+    } catch {
+      // Fail closed: if registration cannot be checked, preserve the files.
+    }
+    if (!stillRegistered) return true;
     console.error(
       `[delegate] failed to remove isolated worktree '${destination}'`,
       error,
     );
+    return false;
   }
 }
 
@@ -362,6 +381,7 @@ async function reconcileGroup(
       continue;
     }
 
+    let proposedFiles: string[] = [];
     try {
       await stopWorkspaceProcesses(worker.workerRoot);
       const proposalTree = await snapshotTree(
@@ -384,7 +404,7 @@ async function reconcileGroup(
         proposalCommit,
         worker.patchPath,
       );
-      const proposedFiles = await changedFiles(
+      proposedFiles = await changedFiles(
         group.sourceRoot,
         group.baselineCommit,
         proposalCommit,
@@ -452,7 +472,7 @@ async function reconcileGroup(
       const worktreeExists = fs.existsSync(worker.workerRoot);
       result.integration = {
         status: "apply_failed",
-        proposedFiles: [],
+        proposedFiles,
         appliedFiles: [],
         conflicts: [
           {
@@ -696,6 +716,11 @@ export async function prepareIsolatedBatch(
   if (!isolatedIndexes.length) return undefined;
 
   const batchId = crypto.randomUUID();
+  const batchArtifactRoot = path.join(
+    artifactBaseOverrideForTesting ??
+      path.join(os.homedir(), ".pi", "agent", "delegate-isolated"),
+    batchId,
+  );
   const groupsByRoot = new Map<string, IsolatedGroup>();
   const workers = new Map<number, IsolatedWorker>();
   const translated = [...resolved];
@@ -710,9 +735,7 @@ export async function prepareIsolatedBatch(
           await git(["rev-parse", "HEAD"], { cwd: sourceRoot, signal })
         ).stdout.trim();
         const artifactRoot = path.join(
-          artifactBaseOverrideForTesting ??
-            path.join(os.homedir(), ".pi", "agent", "delegate-isolated"),
-          batchId,
+          batchArtifactRoot,
           crypto
             .createHash("sha256")
             .update(sourceRoot)
@@ -757,14 +780,12 @@ export async function prepareIsolatedBatch(
 
       const sourceCwd = await fs.promises.realpath(task.cwd);
       const workerRoot = path.join(group.artifactRoot, `worker-${taskIndex}`);
-      await addWorktree(sourceRoot, workerRoot, group.baselineCommit, signal);
       const cwd = path.join(workerRoot, path.relative(sourceRoot, sourceCwd));
       const proposalRef = privateRef(batchId, `${taskIndex}/proposal`);
       const patchPath = path.join(
         group.artifactRoot,
         `proposal-${taskIndex}.patch`,
       );
-      group.taskIndexes.push(taskIndex);
       workers.set(taskIndex, {
         group,
         workerRoot,
@@ -772,20 +793,19 @@ export async function prepareIsolatedBatch(
         proposalRef,
         patchPath,
       });
+      await addWorktree(sourceRoot, workerRoot, group.baselineCommit, signal);
+      group.taskIndexes.push(taskIndex);
       translated[taskIndex] = { ...task, cwd };
     }
   } catch (error) {
-    const worktreeCleanup = await Promise.allSettled(
-      [...workers.values()].map((worker) =>
-        removeWorktree(worker.group.sourceRoot, worker.workerRoot),
-      ),
-    );
-    for (const failure of worktreeCleanup) {
-      if (failure.status === "rejected") {
-        console.error(
-          "[delegate] failed to remove isolated worktree after preparation error",
-          failure.reason,
-        );
+    let worktreeCleanupFailed = false;
+    for (const worker of workers.values()) {
+      const removed = await removeWorktree(
+        worker.group.sourceRoot,
+        worker.workerRoot,
+      );
+      if (!removed) {
+        worktreeCleanupFailed = true;
       }
     }
     await Promise.all(
@@ -800,6 +820,19 @@ export async function prepareIsolatedBatch(
         }
       }),
     );
+    if (!worktreeCleanupFailed) {
+      try {
+        await fs.promises.rm(batchArtifactRoot, {
+          recursive: true,
+          force: true,
+        });
+      } catch (cleanupError) {
+        console.error(
+          "[delegate] failed to remove isolated artifacts after preparation error",
+          cleanupError,
+        );
+      }
+    }
     throw error;
   }
 
