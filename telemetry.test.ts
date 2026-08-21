@@ -507,6 +507,66 @@ describe("telemetry", () => {
     expect(calls).toHaveLength(4);
   });
 
+  test("drops remaining rows from a span when dbPath changes", () => {
+    const { calls, tasks, recorder } = makeRecorder();
+    _setDelegateConfigForTesting({
+      telemetry: { enabled: true, dbPath: "/tmp/telemetry-a.db" },
+    });
+    _setTelemetryForTesting(recorder);
+
+    const stale = beginCall({ mode: "sync", taskCount: 1 });
+    stale.spawn();
+    expect(calls.map((row) => row.status)).toEqual(["running"]);
+
+    _setDelegateConfigForTesting({
+      telemetry: { enabled: true, dbPath: "/tmp/telemetry-b.db" },
+    });
+    const taskRowId = recordTask({
+      callId: stale.id,
+      generation: stale.generation,
+      telemetryConfig: stale.telemetryConfig,
+      async: false,
+      taskIndex: 0,
+      task: {
+        agentName: "scout",
+        tools: ["read"],
+        thinking: "off",
+        prompt: "work",
+      } as ResolvedTask,
+      progress: { toolUses: 0 } as TaskProgress,
+      result: {
+        agent: "scout",
+        durationMs: 1,
+        tokens: 0,
+        usage: { cost: { total: 0 } },
+      } as TaskResult,
+      retries: 0,
+    });
+    stale.finish({
+      status: "success",
+      totalTokens: 1,
+      totalCost: 0,
+      wallMs: 1,
+    });
+    expect(taskRowId).toBeUndefined();
+    expect(tasks).toHaveLength(0);
+    expect(calls.map((row) => row.status)).toEqual(["running"]);
+
+    const current = beginCall({ mode: "sync", taskCount: 1 });
+    current.spawn();
+    current.finish({
+      status: "success",
+      totalTokens: 1,
+      totalCost: 0,
+      wallMs: 1,
+    });
+    expect(calls.map((row) => row.status)).toEqual([
+      "running",
+      "running",
+      "success",
+    ]);
+  });
+
   test("includes the installed Pi version on rows", () => {
     const { calls, recorder } = makeRecorder();
     _setTelemetryForTesting(recorder);
@@ -613,7 +673,7 @@ describe("telemetry", () => {
   );
 
   test(
-    "Node SQLite backend evicts a superseded database after its bound span finishes",
+    "Node SQLite backend keeps only the current database handle after a path change",
     { timeout: 15_000 },
     async () => {
       const dir = fs.mkdtempSync(
@@ -627,7 +687,7 @@ describe("telemetry", () => {
           import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
           import {
             _resetTelemetryForTesting,
-            _getTelemetryBackendCacheKeysForTesting,
+            _getTelemetryBackendPathsForTesting,
             beginCall,
           } from ${JSON.stringify(telemetryModule)};
           const [firstDb, secondDb] = [${JSON.stringify(firstDb)}, ${JSON.stringify(secondDb)}];
@@ -639,7 +699,7 @@ describe("telemetry", () => {
           _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: secondDb } });
           const second = beginCall({ mode: "sync", taskCount: 1 });
           second.spawn();
-          console.log(JSON.stringify(_getTelemetryBackendCacheKeysForTesting()));
+          console.log(JSON.stringify(_getTelemetryBackendPathsForTesting()));
           second.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
         `,
           secondDb,
@@ -655,65 +715,7 @@ describe("telemetry", () => {
   );
 
   test(
-    "Node SQLite backend preserves the live-config backend when a stale span finishes",
-    { timeout: 15_000 },
-    async () => {
-      // Bug: getBackendForConfig evicted with only the pinned (historical) key
-      // as the preserve key. When an in-flight span whose config was superseded
-      // mid-flight finished, it evicted the now-live backend (which had no
-      // binding left after the newer span finished), forcing the next write to
-      // reopen SQLite — and discarding the live backend's failure sentinel so
-      // failed opens retried and logged in a loop.
-      const dir = fs.mkdtempSync(
-        path.join(os.tmpdir(), "delegate-telemetry-live-"),
-      );
-      const firstDb = path.join(dir, "first.db");
-      const secondDb = path.join(dir, "second.db");
-      try {
-        const result = await runNodeScript(
-          `
-          import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
-          import {
-            _resetTelemetryForTesting,
-            _getTelemetryBackendCacheKeysForTesting,
-            beginCall,
-          } from ${JSON.stringify(telemetryModule)};
-          const [firstDb, secondDb] = [${JSON.stringify(firstDb)}, ${JSON.stringify(secondDb)}];
-          _resetTelemetryForTesting();
-          // span1 starts under config A (firstDb).
-          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: firstDb } });
-          const span1 = beginCall({ mode: "sync", taskCount: 1 });
-          span1.spawn();
-          // Config switches to B (secondDb) while span1 is still in-flight.
-          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: secondDb } });
-          // span2 starts and finishes under B — releasing B's binding but
-          // keeping B cached (releaseBackendBinding preserves the live key).
-          const span2 = beginCall({ mode: "sync", taskCount: 1 });
-          span2.spawn();
-          span2.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
-          // Now finish the stale span1. Before the fix, getBackendForConfig
-          // evicted B (no binding, not the pinned key A). After the fix, the
-          // live-config key B is preserved alongside the pinned key A.
-          span1.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
-          console.log(JSON.stringify(_getTelemetryBackendCacheKeysForTesting()));
-        `,
-          secondDb,
-        );
-        const keys = JSON.parse(result.stdout.trim()) as string[];
-        // The live-config backend (secondDb) must survive span1 finishing.
-        // span1's own backend (firstDb) is evicted by releaseBackendBinding
-        // (no binding, not live). Before the fix, keys was [].
-        expect(keys).toHaveLength(1);
-        expect(keys[0]).toContain(secondDb);
-        expect(keys.some((k) => k.includes(firstDb))).toBe(false);
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
-    },
-  );
-
-  test(
-    "Node SQLite backend binds an in-flight span to its original database across hot reloads",
+    "Node SQLite backend drops a stale span finish after a dbPath hot reload",
     { timeout: 15_000 },
     async () => {
       const dir = fs.mkdtempSync(
@@ -743,61 +745,10 @@ describe("telemetry", () => {
         );
         const first = await readNodeDatabase(firstDb);
         const second = await readNodeDatabase(secondDb);
-        // spawn and finish share the same call id, so the table has one row
-        // per call. The key assertion is that span1's final row did not land
-        // in the second database after the hot reload.
+        // The stale finish is dropped: the first database keeps its spawn row,
+        // while a new call writes normally to the new destination.
         expect(first.calls).toBe(1);
         expect(second.calls).toBe(1);
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
-    },
-  );
-
-  test(
-    "Node SQLite backend retains a superseded binding until every in-flight span finishes",
-    { timeout: 15_000 },
-    async () => {
-      const dir = fs.mkdtempSync(
-        path.join(os.tmpdir(), "delegate-telemetry-multi-bind-"),
-      );
-      const firstDb = path.join(dir, "first.db");
-      const secondDb = path.join(dir, "second.db");
-      try {
-        const result = await runNodeScript(
-          `
-          import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
-          import {
-            _resetTelemetryForTesting,
-            _getTelemetryBackendCacheKeysForTesting,
-            beginCall,
-          } from ${JSON.stringify(telemetryModule)};
-          const [firstDb, secondDb] = [${JSON.stringify(firstDb)}, ${JSON.stringify(secondDb)}];
-          _resetTelemetryForTesting();
-          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: firstDb } });
-          const old1 = beginCall({ mode: "async", taskCount: 1 });
-          const old2 = beginCall({ mode: "async", taskCount: 1 });
-          old1.spawn();
-          old2.spawn();
-
-          // Both old spans remain live while hot reload moves new calls to B.
-          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath: secondDb } });
-          const current = beginCall({ mode: "sync", taskCount: 1 });
-          current.spawn();
-
-          old1.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
-          const keysWhileOld2Lives = _getTelemetryBackendCacheKeysForTesting();
-          old2.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
-          current.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
-          console.log(JSON.stringify(keysWhileOld2Lives));
-        `,
-          secondDb,
-        );
-        const keys = JSON.parse(result.stdout.trim()) as string[];
-        expect(keys.some((key) => key.includes(firstDb))).toBe(true);
-        expect(keys.some((key) => key.includes(secondDb))).toBe(true);
-        expect((await readNodeDatabase(firstDb)).calls).toBe(2);
-        expect((await readNodeDatabase(secondDb)).calls).toBe(1);
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }

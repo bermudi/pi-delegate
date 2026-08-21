@@ -69,17 +69,15 @@ interface TelemetryBackend {
   close(): void;
 }
 
-/** Active telemetry backends keyed by their (generation, config) pair. Call
- *  spans and task rows are bound to the backend that was live when they
- *  started, so a hot-reloaded `enabled`/`dbPath` change cannot split one
- *  logical call across databases. A backend is retained only while it is the
- *  live config or a span is still bound to it. The cache also isolates
- *  failures per config: a bad `dbPath` is marked failed under its own key and
- *  does not block a different path from opening. */
-const backendCache = new Map<string, TelemetryBackend | undefined>();
-/** Number of unfinished call spans bound to each backend cache key. */
-const backendBindings = new Map<string, number>();
-const testBackendKey = "test";
+/** One backend follows the live config. A call captures its config, but if the
+ * path changes before a later row is written that row is deliberately dropped
+ * rather than retaining/reopening a stale database. Telemetry is best-effort;
+ * this small policy avoids a generation-keyed resource manager. */
+let activeBackend: TelemetryBackend | undefined;
+let activeBackendIdentity: string | undefined;
+/** Prevent repeated open/write logs for the current live config. Reset when
+ * the config identity changes. */
+let failedBackendIdentity: string | undefined;
 
 /** Monotonic runtime identity. A late worker from a previous runtime may not
  * write into the next runtime's backend after a bounded shutdown drain. */
@@ -451,100 +449,43 @@ class RecorderBackend implements TelemetryBackend {
   close(): void {}
 }
 
-function cacheKey(
-  generation: number,
-  config: import("./config.ts").TelemetryConfig,
-): string {
-  return JSON.stringify([generation, config.enabled, config.dbPath]);
-}
-
-function backendKeyForConfig(
-  generation: number,
+function backendIdentity(
   config: import("./config.ts").TelemetryConfig,
 ): string | undefined {
   if (config.enabled === false) return undefined;
-  return testingRecorder ? testBackendKey : cacheKey(generation, config);
+  return config.dbPath ?? defaultDbPath();
 }
 
-/** Close and forget backends that no active span needs. Any key in
- * `preserveKeys` stays open for cheap subsequent writes (and keeps its
- * failure sentinel intact); pass the live-config key so a finishing stale
- * span cannot evict the backend the next write needs.
- */
-function evictUnusedBackends(...preserveKeys: (string | undefined)[]): void {
-  const preserve = new Set(
-    preserveKeys.filter((k): k is string => k !== undefined),
-  );
-  for (const [key, backend] of backendCache) {
-    if (preserve.has(key) || (backendBindings.get(key) ?? 0) > 0) continue;
-    try {
-      backend?.close();
-    } catch (error) {
-      console.error("[delegate] telemetry backend close failed", error);
-    }
-    backendCache.delete(key);
-    backendBindings.delete(key);
-  }
-}
-
-function retainBackendBinding(
-  generation: number,
-  config: import("./config.ts").TelemetryConfig,
-): string | undefined {
-  if (telemetryClosed || generation !== telemetryGeneration) return undefined;
-  const key = backendKeyForConfig(generation, config);
-  if (key !== undefined) {
-    backendBindings.set(key, (backendBindings.get(key) ?? 0) + 1);
-  }
-  evictUnusedBackends(key);
-  return key;
-}
-
-function releaseBackendBinding(key: string | undefined): void {
-  if (key !== undefined) {
-    const remaining = (backendBindings.get(key) ?? 1) - 1;
-    if (remaining > 0) backendBindings.set(key, remaining);
-    else backendBindings.delete(key);
-  }
-  const config = getTelemetryConfig();
-  evictUnusedBackends(
-    telemetryClosed
-      ? undefined
-      : backendKeyForConfig(telemetryGeneration, config),
-  );
-}
-
-function disableBackendForKey(
-  key: string,
+function disableActiveBackend(
+  identity: string,
   operation: string,
   error: unknown,
 ): void {
-  const failedBackend = backendCache.get(key);
-  // Mark this (generation, config) as failed so subsequent writes for the
-  // same span do not reopen a broken backend on every call.
-  backendCache.set(key, undefined);
+  if (activeBackendIdentity !== identity) return;
+  const failedBackend = activeBackend;
+  activeBackend = undefined;
+  activeBackendIdentity = undefined;
+  failedBackendIdentity = identity;
   try {
     failedBackend?.close();
   } catch (closeError) {
     console.error("[delegate] telemetry backend close failed", closeError);
   }
   console.error(
-    `[delegate] telemetry ${operation} failed; disabling telemetry for this config`,
+    `[delegate] telemetry ${operation} failed; disabling telemetry until its config changes`,
     error,
   );
 }
 
-function closeAllBackends(): void {
-  for (const entry of backendCache.values()) {
-    if (entry === undefined) continue;
-    try {
-      entry.close();
-    } catch (error) {
-      console.error("[delegate] telemetry backend close failed", error);
-    }
+function closeTelemetryBackend(): void {
+  try {
+    activeBackend?.close();
+  } catch (error) {
+    console.error("[delegate] telemetry backend close failed", error);
   }
-  backendCache.clear();
-  backendBindings.clear();
+  activeBackend = undefined;
+  activeBackendIdentity = undefined;
+  failedBackendIdentity = undefined;
 }
 
 function openSqliteBackend(
@@ -585,44 +526,47 @@ function getBackendForConfig(
 ): TelemetryBackend | undefined {
   if (telemetryClosed) return undefined;
   if (generation !== telemetryGeneration) return undefined;
-  const key = backendKeyForConfig(generation, config);
-  // Preserve both the pinned (historical) key for this span AND the live-config
-  // key. Without the live key, finishing an in-flight span whose config was
-  // superseded mid-flight would evict the live backend (and discard its failure
-  // sentinel), forcing the next write to reopen SQLite and re-fail in a loop.
-  const liveKey = backendKeyForConfig(
-    telemetryGeneration,
-    getTelemetryConfig(),
-  );
-  evictUnusedBackends(key, liveKey);
-  if (key === undefined) return undefined;
+  const capturedIdentity = backendIdentity(config);
+  const liveConfig = getTelemetryConfig();
+  const liveIdentity = backendIdentity(liveConfig);
 
-  if (testingRecorder) {
-    const existing = backendCache.get(testBackendKey);
-    if (existing) return existing;
-    if (existing === undefined && backendCache.has(testBackendKey)) {
-      return undefined;
+  // A hot reload changed the destination. Drop the old span's remaining rows
+  // and release its handle; the next call opens the new destination.
+  if (capturedIdentity !== liveIdentity) {
+    if (activeBackend && activeBackendIdentity !== liveIdentity) {
+      closeTelemetryBackend();
+    } else if (failedBackendIdentity !== liveIdentity) {
+      failedBackendIdentity = undefined;
     }
-    const backend = new RecorderBackend(testingRecorder, (operation, error) =>
-      disableBackendForKey(testBackendKey, operation, error),
-    );
-    backendCache.set(testBackendKey, backend);
-    return backend;
+    return undefined;
   }
-
-  const existing = backendCache.get(key);
-  if (existing) return existing;
-  if (existing === undefined && backendCache.has(key)) {
-    // This exact (generation, config) pair already failed to open; do not
-    // retry and spam logs every task write.
+  if (liveIdentity === undefined) {
+    if (activeBackend || failedBackendIdentity) closeTelemetryBackend();
     return undefined;
   }
 
-  const backend = openSqliteBackend(config, (operation, error) =>
-    disableBackendForKey(key, operation, error),
-  );
-  backendCache.set(key, backend);
-  return backend;
+  if (activeBackend && activeBackendIdentity !== liveIdentity) {
+    closeTelemetryBackend();
+  }
+  if (failedBackendIdentity !== liveIdentity) failedBackendIdentity = undefined;
+  if (failedBackendIdentity === liveIdentity) return undefined;
+  if (activeBackend) return activeBackend;
+
+  activeBackendIdentity = liveIdentity;
+  activeBackend = testingRecorder
+    ? new RecorderBackend(testingRecorder, (operation, error) =>
+        disableActiveBackend(liveIdentity, operation, error),
+      )
+    : openSqliteBackend(liveConfig, (operation, error) =>
+        disableActiveBackend(liveIdentity, operation, error),
+      );
+  if (!activeBackend) {
+    // This includes Bun's intentional no-node:sqlite path. No log is needed
+    // there; real SQLite open failures were already logged at the boundary.
+    activeBackendIdentity = undefined;
+    failedBackendIdentity = liveIdentity;
+  }
+  return activeBackend;
 }
 
 /** Legacy unpinned backend lookup: uses the *live* telemetry config. Callers
@@ -669,17 +613,12 @@ class CallSpanImpl implements CallSpan {
   readonly generation = telemetryGeneration;
   readonly telemetryConfig = getTelemetryConfig();
   private readonly input: CallSpanInput;
-  private readonly backendBinding: string | undefined;
   private finished = false;
 
   constructor(input: CallSpanInput) {
     this.id = crypto.randomUUID();
     this.startedAt = Date.now();
     this.input = input;
-    this.backendBinding = retainBackendBinding(
-      this.generation,
-      this.telemetryConfig,
-    );
   }
 
   baseRecord(): CallRecord {
@@ -708,21 +647,14 @@ class CallSpanImpl implements CallSpan {
   finish(finish: CallSpanFinish): void {
     if (this.finished) return;
     this.finished = true;
-    try {
-      const b = getBackendForConfig(this.generation, this.telemetryConfig);
-      if (!b) return;
-      const record = this.baseRecord();
-      record.wall_ms = finish.wallMs;
-      record.status = finish.status;
-      record.total_tokens = finish.totalTokens;
-      record.total_cost = finish.totalCost;
-      b.recordCall(record);
-    } finally {
-      // Once the final call row is written, any task rows for this call have
-      // already been recorded. A superseded database can now release its
-      // SQLite handle (and its WAL sidecars) immediately.
-      releaseBackendBinding(this.backendBinding);
-    }
+    const b = getBackendForConfig(this.generation, this.telemetryConfig);
+    if (!b) return;
+    const record = this.baseRecord();
+    record.wall_ms = finish.wallMs;
+    record.status = finish.status;
+    record.total_tokens = finish.totalTokens;
+    record.total_cost = finish.totalCost;
+    b.recordCall(record);
   }
 }
 
@@ -818,7 +750,7 @@ export function sealTelemetryWrites(expectedGeneration?: number): boolean {
   }
   telemetryGeneration++;
   telemetryClosed = true;
-  closeAllBackends();
+  closeTelemetryBackend();
   return true;
 }
 
@@ -833,7 +765,7 @@ export function closeTelemetry(expectedGeneration?: number): void {
     return;
   }
   telemetryClosed = true;
-  closeAllBackends();
+  closeTelemetryBackend();
 }
 
 /** Current runtime identity for lifecycle owners such as session_shutdown. */
@@ -848,7 +780,7 @@ export function prepareTelemetryForSession(): void {
   // A timed-out old runtime may have left its handle open. Close it before
   // advancing the generation so the old shutdown handler cannot close the new
   // runtime's backend later.
-  closeAllBackends();
+  closeTelemetryBackend();
 
   telemetryGeneration++;
   telemetryClosed = false;
@@ -857,7 +789,7 @@ export function prepareTelemetryForSession(): void {
 export function _setTelemetryForTesting(
   recorder: TelemetryRecorder | undefined,
 ): void {
-  closeAllBackends();
+  closeTelemetryBackend();
   testingRecorder = recorder;
   telemetryGeneration++;
   telemetryClosed = false;
@@ -865,13 +797,12 @@ export function _setTelemetryForTesting(
 
 export function _resetTelemetryForTesting(): void {
   testingRecorder = undefined;
-  closeAllBackends();
+  closeTelemetryBackend();
   telemetryGeneration++;
   telemetryClosed = false;
 }
 
-/** @internal Test seam for asserting hot-reload eviction without exposing
- * SQLite handles themselves. */
-export function _getTelemetryBackendCacheKeysForTesting(): string[] {
-  return [...backendCache.keys()];
+/** @internal Test seam exposing the single live backend path, never handles. */
+export function _getTelemetryBackendPathsForTesting(): string[] {
+  return activeBackendIdentity === undefined ? [] : [activeBackendIdentity];
 }
