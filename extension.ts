@@ -131,7 +131,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // the global concurrency cap is reconfigured so hot-reloaded maxConcurrent
       // takes effect for subsequent acquisitions. A parse/read error keeps the
       // previous snapshot and warns instead of falling back to defaults.
-      warnLegacyDelegateSettingsMoved(ctx.cwd);
+      warnLegacyDelegateSettingsMoved(ctx.cwd, (message) =>
+        ctx.ui.notify(message, "warning"),
+      );
       reloadDelegateConfig();
       reconfigureGlobalConcurrency(getMaxConcurrent());
 

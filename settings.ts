@@ -5,16 +5,10 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { VALID_THINKING } from "./constants.ts";
 
 /**
- * Legacy pi-settings detection — nothing more.
- *
- * Delegate configuration lives exclusively in `~/.pi/agent/delegate.json`
- * (user scope, global; no project-level discovery). The former
- * `delegate.agentOverrides` / `delegate.agentOverridesByParentModel` blocks in
- * pi's `settings.json` — user-scope and project `.pi/settings.json` — are no
- * longer read as configuration. The dispatch boundary only uses this module's
- * detector to warn that overrides moved. `loadDelegateSettings` remains as an
- * isolated deprecated compatibility reader for external callers; its result
- * must never feed configuration into delegation.
+ * One-release compatibility bridge for delegate overrides formerly stored in
+ * Pi's user/project settings.json. Only model and thinking are bridged; tools
+ * remain operator-controlled because project files must not restore shell
+ * capability. Modern delegate.json values win field-by-field.
  */
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -137,11 +131,9 @@ export function findLegacyDelegateSettings(cwd: string): string[] {
   return paths;
 }
 
-const warnedLegacyDirs = new Set<string>();
+const warnedLegacySources = new Set<string>();
 
-/** Shape returned by the deprecated compatibility loader. Delegate itself no
- * longer consumes these settings; new configuration belongs in delegate.json.
- */
+/** Shape returned by the temporary compatibility loader. */
 export interface DelegateSettings {
   agentOverrides?: Record<string, AgentOverride>;
   agentOverridesByParentModel?: Record<string, Record<string, AgentOverride>>;
@@ -150,7 +142,6 @@ export interface DelegateSettings {
 export interface AgentOverride {
   model?: string;
   thinking?: ThinkingLevel;
-  tools?: string[];
 }
 
 function normalizeOverride(
@@ -184,16 +175,9 @@ function normalizeOverride(
       }
       result.thinking = value as ThinkingLevel;
     } else if (key === "tools") {
-      if (
-        !Array.isArray(value) ||
-        value.some((tool) => typeof tool !== "string")
-      ) {
-        console.warn(
-          `[delegate] ignoring malformed settings override for agent '${agentName}' in ${source}: tools must be a string array.`,
-        );
-        return null;
-      }
-      result.tools = [...value];
+      console.warn(
+        `[delegate] ignoring legacy tools override for agent '${agentName}' in ${source}: the temporary compatibility bridge honors only model and thinking.`,
+      );
     } else {
       console.warn(
         `[delegate] ignoring malformed settings override for agent '${agentName}' in ${source}: unknown field '${key}'.`,
@@ -215,7 +199,7 @@ function normalizeOverrides(
     return {};
   }
 
-  const result: Record<string, AgentOverride> = {};
+  const result = Object.create(null) as Record<string, AgentOverride>;
   const seenNames = new Map<string, string>();
   for (const [agentName, value] of Object.entries(raw)) {
     const normalizedAgentName = agentName.trim();
@@ -250,7 +234,10 @@ function normalizeOverridesByParentModel(
     return {};
   }
 
-  const result: Record<string, Record<string, AgentOverride>> = {};
+  const result = Object.create(null) as Record<
+    string,
+    Record<string, AgentOverride>
+  >;
   const seenModels = new Map<string, string>();
   for (const [parentModel, overrides] of Object.entries(raw)) {
     const normalizedParentModel = parentModel.trim();
@@ -314,7 +301,7 @@ function mergeOverrides(
   user: Record<string, AgentOverride> | undefined,
   project: Record<string, AgentOverride> | undefined,
 ): Record<string, AgentOverride> {
-  const result: Record<string, AgentOverride> = {};
+  const result = Object.create(null) as Record<string, AgentOverride>;
   for (const name of new Set([
     ...Object.keys(user ?? {}),
     ...Object.keys(project ?? {}),
@@ -328,7 +315,10 @@ function mergeParentModelOverrides(
   user: Record<string, Record<string, AgentOverride>> | undefined,
   project: Record<string, Record<string, AgentOverride>> | undefined,
 ): Record<string, Record<string, AgentOverride>> {
-  const result: Record<string, Record<string, AgentOverride>> = {};
+  const result = Object.create(null) as Record<
+    string,
+    Record<string, AgentOverride>
+  >;
   for (const model of new Set([
     ...Object.keys(user ?? {}),
     ...Object.keys(project ?? {}),
@@ -338,19 +328,14 @@ function mergeParentModelOverrides(
   return result;
 }
 
-const legacySettingsCache = new Map<string, DelegateSettings | null>();
-
 /**
- * @deprecated Reads the legacy user/project settings for callers that already
- * depend on this API. It accepts a working directory and returns the merged
- * view (project fields override user fields). Delegate never consumes this
- * result; use delegate.json for actual delegate configuration.
+ * Temporary compatibility reader. It accepts a working directory and returns
+ * the merged view (project fields override user fields). Deliberately rereads
+ * the two small JSON files: this bridge lasts one release, and avoiding a cache
+ * makes file create/edit/delete visible on the very next dispatch.
  */
 export function loadDelegateSettings(cwd: string): DelegateSettings | null {
   const key = path.resolve(cwd);
-  const cached = legacySettingsCache.get(key);
-  if (cached !== undefined) return cached;
-
   const userPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
   let projectPath: string | undefined;
   let dir = key;
@@ -369,7 +354,6 @@ export function loadDelegateSettings(cwd: string): DelegateSettings | null {
   const user = readLegacyDelegateSettings(userPath);
   const project = projectPath ? readLegacyDelegateSettings(projectPath) : null;
   if (!user && !project) {
-    legacySettingsCache.set(key, null);
     return null;
   }
 
@@ -392,31 +376,43 @@ export function loadDelegateSettings(cwd: string): DelegateSettings | null {
         }
       : {}),
   };
-  legacySettingsCache.set(key, result);
   return result;
 }
 
 /** Warn (once per cwd) when pi settings files still carry a legacy `delegate`
- *  block. Those overrides are ignored — delegate.json is the only source.
- *  Only marks the cwd as warned after at least one legacy block is reported, so
- *  a block added later is still surfaced. */
-export function warnLegacyDelegateSettingsMoved(cwd: string): void {
-  const key = path.resolve(cwd);
-  if (warnedLegacyDirs.has(key)) return;
+ * block. The same message goes to stderr and, when available, the TUI. Keys
+ * include both cwd and source so a newly-created project setting is not hidden
+ * by an earlier user-setting warning. */
+export function warnLegacyDelegateSettingsMoved(
+  cwd: string,
+  notify?: (message: string) => void,
+): void {
+  const cwdKey = path.resolve(cwd);
   const paths = findLegacyDelegateSettings(cwd);
   if (paths.length === 0) return;
-  warnedLegacyDirs.add(key);
   for (const filePath of paths) {
-    console.warn(
-      `[delegate] ignoring 'delegate' block in ${filePath}: delegate configuration lives in ~/.pi/agent/delegate.json (agentOverrides / agentOverridesByParentModel).`,
-    );
+    const warningKey = `${cwdKey}\0${filePath}`;
+    if (warnedLegacySources.has(warningKey)) continue;
+    warnedLegacySources.add(warningKey);
+    const message =
+      `[delegate] TEMPORARY legacy compatibility: using model/thinking overrides from ${filePath}. ` +
+      "Move user-global overrides to ~/.pi/agent/delegate.json. Project-local overrides have no future config-file equivalent; use .pi/agents/*.md or explicit task model/thinking fields. " +
+      "Legacy settings compatibility is available for v0.1.12 only and will be removed in v0.1.13. Legacy tools overrides are not honored.";
+    console.warn(message);
+    try {
+      notify?.(message);
+    } catch (error) {
+      console.error(
+        "[delegate] legacy settings TUI notification failed",
+        error,
+      );
+    }
   }
 }
 
 /** @deprecated Clear the set of cwd's already warned about legacy settings. */
 export function clearDelegateSettingsCache(): void {
-  warnedLegacyDirs.clear();
+  warnedLegacySources.clear();
   warnedLegacyDetectionFailures.clear();
   legacyDetectionCache.clear();
-  legacySettingsCache.clear();
 }
