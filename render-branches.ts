@@ -378,6 +378,36 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     if (!isLive && !isCancelledPending && r && "error" in r && r.error) {
       lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
     }
+    if (r && "integration" in r && r.integration) {
+      const integration = r.integration;
+      const tone =
+        integration.status === "applied_unverified" ||
+        integration.status === "no_changes"
+          ? "warning"
+          : "error";
+      lines.push(
+        truncLine(
+          `${ind}${theme.fg(tone, `integration: ${integration.status} · ${integration.appliedFiles.length}/${integration.proposedFiles.length} files applied`)}`,
+          w,
+        ),
+      );
+      if (expanded) {
+        if (integration.patchPath)
+          lines.push(
+            truncLine(
+              `${ind}${theme.fg("muted", `patch: ${integration.patchPath}`)}`,
+              w,
+            ),
+          );
+        if (integration.worktreePath)
+          lines.push(
+            truncLine(
+              `${ind}${theme.fg("muted", `worktree: ${integration.worktreePath}`)}`,
+              w,
+            ),
+          );
+      }
+    }
     // Collapsed: one-line output preview so a human scanning the TUI sees
     // the payoff without expanding every task. Expanded mode renders the
     // full markdown below instead.

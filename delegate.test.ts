@@ -3262,6 +3262,7 @@ describe("delegate extension integration", () => {
     expect(tasksArraySchema.items.properties.workspace.enum).toEqual([
       "shared",
       "scratch",
+      "isolated",
     ]);
     expect(tasksArraySchema.items.properties.workspace.description).toContain(
       "not security isolation",

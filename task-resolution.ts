@@ -307,6 +307,10 @@ export function resolveTasks(
       warnings.push(
         "Scratch workspace: relative file changes run in a disposable CoW copy and are discarded.",
       );
+    } else if (workspace === "isolated") {
+      warnings.push(
+        "Isolated workspace: changes run in a detached Git worktree, then proposals are reconciled in task order. Applied changes remain unverified.",
+      );
     }
 
     // Prompt is required for fresh tasks. ResumeFrom provides context already.

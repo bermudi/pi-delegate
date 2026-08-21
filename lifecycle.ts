@@ -558,7 +558,7 @@ async function createFreshSession(
 ): Promise<AcquireResult> {
   let sessionManager: SessionManager;
   let sessionFile: string | undefined;
-  if (task.workspace === "scratch") {
+  if (task.workspace === "scratch" || task.workspace === "isolated") {
     // A discarded filesystem must not advertise a resumable conversation: a
     // later resume would run against the source cwd and silently lose scratch
     // isolation. Keep scratch transcripts in memory only.
@@ -645,6 +645,24 @@ async function runResolvedTaskUnlocked(
   p: TaskProgress,
   taskIndex: number,
 ): Promise<TaskResult> {
+  if (
+    task.workspace === "isolated" &&
+    (task.sessionId || task.resumeFrom || task.sessionAction)
+  ) {
+    return recordTaskOutcome(
+      env,
+      p,
+      task,
+      finishTask(
+        env,
+        p,
+        failTask(
+          task,
+          "workspace 'isolated' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction.",
+        ),
+      ),
+    );
+  }
   if (task.workspace !== "scratch") {
     const outcome = await runResolvedTaskCore(env, task, p, taskIndex);
     return recordTaskOutcome(env, p, task, outcome);
@@ -1171,7 +1189,11 @@ async function runWithWholeTaskRetries(
     };
   }
 
-  const maxRetries = resolvedWholeTaskMaxRetries(env);
+  // An isolated worker is snapshotted once and reconciled once. Retrying the
+  // whole conversation against a mutated proposal tree would make attribution
+  // ambiguous, so v1 deliberately runs one attempt.
+  const maxRetries =
+    task.workspace === "isolated" ? 0 : resolvedWholeTaskMaxRetries(env);
   const baseDelayMs = resolvedWholeTaskBaseDelayMs(env);
   let retries = 0;
   for (
