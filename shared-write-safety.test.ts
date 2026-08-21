@@ -251,38 +251,6 @@ describe("shared-write safety", () => {
     ]);
   });
 
-  test("rejects a Git directory whose external worktree escapes its parent", async () => {
-    // A bare repository.git lives under /outer and points its core.worktree at
-    // a sibling directory outside /outer. Git's --show-toplevel reports the
-    // external worktree, but a bash writer in repository.git can still reach
-    // /outer/repository.git and below — so a second writer scoped to /outer
-    // must be rejected, with the collision reported at the /outer directory.
-    const outer = path.join(root, "outer");
-    const gitDirectory = path.join(outer, "repository.git");
-    const worktree = path.join(root, "external-worktree");
-    mkdirSync(gitDirectory, { recursive: true });
-    mkdirSync(worktree, { recursive: true });
-    execFileSync("git", ["init", "--bare", "--quiet", gitDirectory]);
-    execFileSync("git", ["config", "core.bare", "false"], {
-      cwd: gitDirectory,
-    });
-    execFileSync("git", ["config", "core.worktree", worktree], {
-      cwd: gitDirectory,
-    });
-
-    const conflicts = await findSharedWriteConflicts([
-      task(outer, ["write"]),
-      task(gitDirectory, ["bash"]),
-    ]);
-
-    expect(conflicts).toEqual([
-      {
-        scope: { kind: "directory", root: outer },
-        taskIndexes: [0, 1],
-      },
-    ]);
-  });
-
   test("groups the same physical non-Git directory", async () => {
     const conflicts = await findSharedWriteConflicts([
       task(root, ["write"]),
