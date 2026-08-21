@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Value } from "@sinclair/typebox/value";
 import {
+  delegateArgumentsSchema,
   delegateTaskSchema,
   normalizeDelegateArguments,
   validateDelegateOperation,
@@ -160,6 +161,15 @@ describe("normalizeDelegateArguments", () => {
 });
 
 describe("validateDelegateOperation task-field whitelist", () => {
+  test("provider schema rejects the removed top-level unsafe bypass", () => {
+    expect(
+      Value.Check(delegateArgumentsSchema, {
+        unsafeSharedWrites: true,
+        tasks: [{ prompt: "x" }],
+      }),
+    ).toBe(false);
+  });
+
   test("rejects the removed top-level action field", () => {
     const cases = [
       { action: "poll" },
@@ -185,33 +195,14 @@ describe("validateDelegateOperation task-field whitelist", () => {
     expect(err).toContain("top-level flag");
   });
 
-  test("keeps unsafeSharedWrites at the dispatch level", () => {
-    expect(
-      validateDelegateOperation({
-        unsafeSharedWrites: true,
-        tasks: [{ prompt: "one" }, { prompt: "two" }],
-      }),
-    ).toBeUndefined();
-
+  test("rejects the removed unsafeSharedWrites task field", () => {
     const misplaced = validateDelegateOperation({
       tasks: [{ prompt: "x", unsafeSharedWrites: true }],
     } as unknown as DelegateArguments);
     expect(misplaced).toContain(
       "task 1: unknown field(s) 'unsafeSharedWrites'",
     );
-    expect(misplaced).toContain("top-level flag");
-  });
-
-  test("rejects unsafeSharedWrites on taskless and ticket-control calls", () => {
-    expect(validateDelegateOperation({ unsafeSharedWrites: true })).toContain(
-      "requires at least one task",
-    );
-    expect(
-      validateDelegateOperation({
-        ticketAction: "poll",
-        unsafeSharedWrites: true,
-      }),
-    ).toContain("ticket control cannot include unsafeSharedWrites");
+    expect(misplaced).not.toContain("top-level flag");
   });
 
   test("rejects misspelled task fields and lists the valid set", () => {

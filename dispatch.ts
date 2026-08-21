@@ -214,8 +214,8 @@ function sharedWriteRejection(
         text:
           `Rejected before dispatch; no tasks were started. ${scopes} ` +
           "Each listed task has mutating or unclassified tool capability, so concurrent shared execution could silently overwrite work. " +
-          'Run them sequentially in separate calls, use workspace: "scratch" when changes may be discarded, or explicitly set top-level unsafeSharedWrites: true. ' +
-          "The unsafe override provides no isolation or rollback. External processes remain outside this check.",
+          'Run them sequentially in separate calls or use workspace: "scratch" when changes may be discarded. ' +
+          "External processes remain outside this check.",
       },
     ],
     details: { tasks, results: [], progress: [], parentModel: parentModelId },
@@ -235,7 +235,7 @@ function sharedWriteSafetyFailure(
         type: "text",
         text:
           `Rejected before dispatch; no tasks were started because shared-write safety could not be verified. ${detail} ` +
-          "Fix the task directory or Git metadata. To bypass this in-process protection, explicitly set top-level unsafeSharedWrites: true; that provides no isolation or rollback.",
+          'Fix the task directory or Git metadata, run tasks sequentially, or use workspace: "scratch" when changes may be discarded.',
       },
     ],
     details: { tasks, results: [], progress: [], parentModel: parentModelId },
@@ -284,10 +284,9 @@ export async function dispatchDelegate(
     dispatchConfig,
   );
 
-  const dispatchWarning =
-    params.unsafeSharedWrites === true
-      ? UNSAFE_SHARED_WRITES_WARNING
-      : undefined;
+  const dispatchWarning = dispatchConfig.allowUnsafeSharedWrites
+    ? UNSAFE_SHARED_WRITES_WARNING
+    : undefined;
   const signalWasAbortedBeforeAdmission = signal?.aborted === true;
   let syncReservation: symbol | undefined;
   let admissionResult:
@@ -302,7 +301,10 @@ export async function dispatchDelegate(
       if (!signalWasAbortedBeforeAdmission && signal?.aborted) {
         throw new Error("Delegate call aborted while waiting for admission.");
       }
-      if (params.unsafeSharedWrites !== true && resolved.some(isSharedWriter)) {
+      if (
+        !dispatchConfig.allowUnsafeSharedWrites &&
+        resolved.some(isSharedWriter)
+      ) {
         const activeResolved: ResolvedTask[] = [];
         const references = resolved.map((_, index) =>
           taskReference(tasks[index]!, index),

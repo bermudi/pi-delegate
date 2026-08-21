@@ -55,9 +55,11 @@ same call or a still-running sync/async dispatch, the new call is rejected
 before any subagent starts. Unknown tool names are treated as mutating. External
 processes are outside this in-process gate.
 
-For deliberately unsafe cases, top-level `unsafeSharedWrites: true` bypasses
-this check. It provides no isolation or rollback. Delegate marks the running
-and final result with a visible batch-level warning when the override is active.
+Operators can deliberately bypass this check by setting
+`"allowUnsafeSharedWrites": true` in `~/.pi/agent/delegate.json`. This setting
+is intentionally absent from the model-facing tool API. It provides no
+isolation or rollback, and Delegate marks running and final results with a
+visible batch-level warning while it is active.
 
 A same-named Markdown file can override any built-in (first definition wins
 across `.pi/agents/`, `~/.pi/agent/agents/`, `~/.agents/`, `.claude/agents/`,
