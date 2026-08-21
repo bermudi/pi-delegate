@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -11,6 +11,7 @@ import { _setRunAgentSessionForTesting } from "./lifecycle.ts";
 import { _resetPoolForTesting, commit } from "./pool.ts";
 import { emptyUsage } from "./usage.ts";
 import { dispatchAsync, dispatchDelegate, dispatchSync } from "./dispatch.ts";
+import { _setIsolatedArtifactRootForTesting } from "./isolated-workspace.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import {
   _resetDelegateStatusForTesting,
@@ -184,6 +185,90 @@ describe("dispatch-time shared-write gate", () => {
     expect(result.content[0]?.text).toContain("no isolation or rollback");
     expect(result.details.results).toHaveLength(2);
     _setRunAgentSessionForTesting(undefined);
+  });
+
+  test("same-root isolated writers run concurrently and reconcile into the source", async () => {
+    writeFileSync(path.join(tmpDir, "base.txt"), "base\n");
+    execFileSync("git", ["add", "."], { cwd: tmpDir });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--quiet",
+        "-m",
+        "initial",
+      ],
+      { cwd: tmpDir },
+    );
+    const model = { provider: "test", id: "model" } as any;
+    let runIndex = 0;
+    _setRunAgentSessionForTesting(async (_session, _prompt, config) => {
+      const index = runIndex++;
+      writeFileSync(path.join(config.cwd, `${index}.txt`), `task ${index}\n`);
+      return {
+        output: "done",
+        durationMs: 1,
+        tokens: 0,
+        toolUses: 0,
+        touchedFiles: [path.join(config.cwd, `${index}.txt`)],
+        attributedFiles: [path.join(config.cwd, `${index}.txt`)],
+        usage: emptyUsage(),
+      };
+    });
+    const artifactRoot = `${tmpDir}-artifacts`;
+    _setIsolatedArtifactRootForTesting(artifactRoot);
+
+    try {
+      const result = await dispatchDelegate({
+        pi: {} as any,
+        params: {
+          tasks: [
+            { prompt: "one", cwd: tmpDir, workspace: "isolated" },
+            { prompt: "two", cwd: tmpDir, workspace: "isolated" },
+          ],
+        },
+        ctx: {
+          cwd: tmpDir,
+          model,
+          modelRegistry: {
+            getAvailable: () => [model],
+            find: () => model,
+            hasConfiguredAuth: () => true,
+          },
+          getSystemPrompt: () => "parent",
+        } as any,
+        agents: new Map(),
+        parentModelId: model.id,
+        parentDefaults: {
+          thinking: "off",
+          tools: ["read", "write", "edit", "bash"],
+        },
+        signal: undefined,
+        onUpdate: undefined,
+      });
+
+      expect(result.content[0]?.text).not.toContain("Rejected before dispatch");
+      expect(result.content[0]?.text).toContain("applied_unverified");
+      expect(result.content[0]?.text).toContain(
+        "Changes were applied but not verified",
+      );
+      expect(result.details.results).toHaveLength(2);
+      expect(
+        result.details.results.map((entry) =>
+          "integration" in entry ? entry.integration?.status : undefined,
+        ),
+      ).toEqual(["applied_unverified", "applied_unverified"]);
+      expect(readFileSync(path.join(tmpDir, "0.txt"), "utf8")).toBe("task 0\n");
+      expect(readFileSync(path.join(tmpDir, "1.txt"), "utf8")).toBe("task 1\n");
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setIsolatedArtifactRootForTesting(undefined);
+      rmSync(artifactRoot, { recursive: true, force: true });
+    }
   });
 
   test("reports an abort, not a safety failure, when the turn aborts during preflight", async () => {

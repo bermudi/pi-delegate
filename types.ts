@@ -245,6 +245,26 @@ export interface TaskResult {
    *  for overlap detection so concurrent tasks in the same repo do not
    *  fabricate false conflicts from shared git snapshots. */
   attributedFiles?: string[];
+  /** Git-native proposal/reconciliation outcome for workspace:"isolated". */
+  integration?: TaskIntegration;
+}
+
+export type TaskIntegrationStatus =
+  | "applied_unverified"
+  | "no_changes"
+  | "conflict"
+  | "discarded"
+  | "apply_failed";
+
+export interface TaskIntegration {
+  status: TaskIntegrationStatus;
+  proposedFiles: string[];
+  appliedFiles: string[];
+  conflicts?: Array<{ path: string; reason: string }>;
+  baselineRef?: string;
+  proposalRef?: string;
+  patchPath?: string;
+  worktreePath?: string;
 }
 
 /** Single source of truth for a subagent's runtime configuration.

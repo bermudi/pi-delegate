@@ -36,6 +36,7 @@ import {
   type SharedWriteConflict,
 } from "./shared-write-safety.ts";
 import type { CallSpan } from "./telemetry.ts";
+import { prepareIsolatedBatch } from "./isolated-workspace.ts";
 import type {
   AgentConfig,
   AsyncTicket,
@@ -193,6 +194,15 @@ function taskReference(task: TaskDef, index: number): string {
   return `Task ${index + 1}${task.id ? `#${task.id}` : ""}`;
 }
 
+/** Isolated workers do not share their worktrees with each other, but their
+ * source root must remain reserved against shared writers until ordered apply
+ * finishes. Represent them as shared only inside the admission index. */
+function asAdmissionWriter(task: ResolvedTask): ResolvedTask {
+  return task.workspace === "isolated"
+    ? { ...task, workspace: "shared" }
+    : task;
+}
+
 function sharedWriteRejection(
   tasks: TaskDef[],
   parentModelId: string | undefined,
@@ -214,7 +224,7 @@ function sharedWriteRejection(
         text:
           `Rejected before dispatch; no tasks were started. ${scopes} ` +
           "Each listed task has mutating or unclassified tool capability, so concurrent shared execution could silently overwrite work. " +
-          'Run them sequentially in separate calls or use workspace: "scratch" when changes may be discarded. ' +
+          'Run them sequentially, use workspace: "isolated" for Git-backed ordered reconciliation, or use workspace: "scratch" when changes may be discarded. ' +
           "External processes remain outside this check.",
       },
     ],
@@ -235,7 +245,7 @@ function sharedWriteSafetyFailure(
         type: "text",
         text:
           `Rejected before dispatch; no tasks were started because shared-write safety could not be verified. ${detail} ` +
-          'Fix the task directory or Git metadata, run tasks sequentially, or use workspace: "scratch" when changes may be discarded.',
+          'Fix the task directory or Git metadata, run tasks sequentially, use workspace: "isolated" for Git-backed ordered reconciliation, or use workspace: "scratch" when changes may be discarded.',
       },
     ],
     details: { tasks, results: [], progress: [], parentModel: parentModelId },
@@ -283,6 +293,28 @@ export async function dispatchDelegate(
     parentDefaults,
     dispatchConfig,
   );
+  if (params.async && resolved.some((task) => task.workspace === "isolated")) {
+    callSpan?.finish({
+      status: "failed",
+      totalTokens: 0,
+      totalCost: 0,
+      wallMs: Date.now() - callSpan.startedAt,
+    });
+    return {
+      content: [
+        {
+          type: "text",
+          text: 'Invalid delegate call: workspace "isolated" is synchronous; remove async.',
+        },
+      ],
+      details: {
+        tasks,
+        results: [],
+        progress: [],
+        parentModel: parentModelId,
+      },
+    };
+  }
 
   const dispatchWarning = dispatchConfig.allowUnsafeSharedWrites
     ? UNSAFE_SHARED_WRITES_WARNING
@@ -303,8 +335,9 @@ export async function dispatchDelegate(
       }
       if (
         !dispatchConfig.allowUnsafeSharedWrites &&
-        resolved.some(isSharedWriter)
+        resolved.some((task) => isSharedWriter(asAdmissionWriter(task)))
       ) {
+        const incomingForSafety = resolved.map(asAdmissionWriter);
         const activeResolved: ResolvedTask[] = [];
         const references = resolved.map((_, index) =>
           taskReference(tasks[index]!, index),
@@ -337,12 +370,20 @@ export async function dispatchDelegate(
         const incomingCount = resolved.length;
         const conflicts = (
           await findSharedWriteConflicts(
-            [...resolved, ...activeResolved],
+            [...incomingForSafety, ...activeResolved],
             signal,
           )
-        ).filter(({ taskIndexes }) =>
-          taskIndexes.some((index) => index < incomingCount),
-        );
+        ).filter(({ taskIndexes }) => {
+          if (!taskIndexes.some((index) => index < incomingCount)) return false;
+          // Multiple isolated tasks in this call intentionally share one
+          // baseline/root. Any shared task or active dispatch in the same
+          // conflict group still rejects the call.
+          return !taskIndexes.every(
+            (index) =>
+              index < incomingCount &&
+              resolved[index]?.workspace === "isolated",
+          );
+        });
         if (conflicts.length) {
           return sharedWriteRejection(
             tasks,
@@ -379,7 +420,10 @@ export async function dispatchDelegate(
       }
 
       syncReservation = Symbol("shared-write-dispatch");
-      activeSyncDispatches.set(syncReservation, { tasks, resolved });
+      activeSyncDispatches.set(syncReservation, {
+        tasks,
+        resolved: resolved.map(asAdmissionWriter),
+      });
       return { progress, fire };
     });
   } catch (error) {
@@ -693,6 +737,34 @@ export async function dispatchSync(
   } = input;
 
   const startedAt = Date.now();
+  let executionResolved = resolved;
+  let isolatedBatch: Awaited<ReturnType<typeof prepareIsolatedBatch>>;
+  try {
+    isolatedBatch = await prepareIsolatedBatch(resolved, signal);
+    if (isolatedBatch) executionResolved = isolatedBatch.resolved;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    callSpan?.finish({
+      status: "failed",
+      totalTokens: 0,
+      totalCost: 0,
+      wallMs: Date.now() - startedAt,
+    });
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Isolated workspace setup failed; no subagents were started. ${detail}`,
+        },
+      ],
+      details: {
+        tasks,
+        results: [],
+        progress: [],
+        parentModel: parentModelId,
+      },
+    };
+  }
   const syncEnv: TaskRunEnv = {
     signal,
     modelRegistry: ctx.modelRegistry,
@@ -711,13 +783,33 @@ export async function dispatchSync(
     onStatusChange: () => fire(),
   };
 
-  const results = await mapConcurrentByModel(
-    resolved,
+  let results = await mapConcurrentByModel(
+    executionResolved,
     (t) => getModelKey(t.model),
     (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
     async (t, i) => runResolvedTask(syncEnv, t, progress[i]!, i),
     signal,
   );
+  if (isolatedBatch) {
+    try {
+      results = await isolatedBatch.reconcile(results);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("[delegate] isolated reconciliation failed", error);
+      for (let index = 0; index < results.length; index++) {
+        if (resolved[index]?.workspace !== "isolated") continue;
+        results[index] = {
+          ...results[index]!,
+          integration: {
+            status: "apply_failed",
+            proposedFiles: [],
+            appliedFiles: [],
+            conflicts: [{ path: "(batch)", reason: detail }],
+          },
+        };
+      }
+    }
+  }
 
   // ── Format for LLM ────────────────────────────────────────────
   const finalResults: TaskResult[] = results;
@@ -740,7 +832,14 @@ export async function dispatchSync(
   );
   if (overlapWarning) parts.push("", overlapWarning);
 
-  const status = finalResults.some((r) => r.error) ? "failed" : "success";
+  const status = finalResults.some(
+    (r) =>
+      r.error ||
+      r.integration?.status === "conflict" ||
+      r.integration?.status === "apply_failed",
+  )
+    ? "failed"
+    : "success";
   const totalTokens = finalResults.reduce((sum, r) => sum + r.tokens, 0);
   const totalCost = finalResults.reduce(
     (sum, r) => sum + r.usage.cost.total,

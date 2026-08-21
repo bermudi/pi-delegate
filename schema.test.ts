@@ -266,6 +266,26 @@ describe("validateDelegateOperation task-field whitelist", () => {
     ).toContain("workspace 'scratch' is one-shot");
   });
 
+  test("rejects async or persistent isolated workspaces", () => {
+    expect(
+      validateDelegateOperation({
+        async: true,
+        tasks: [{ prompt: "x", workspace: "isolated" }],
+      }),
+    ).toContain('workspace "isolated" is synchronous');
+    expect(
+      validateDelegateOperation({
+        tasks: [
+          {
+            prompt: "x",
+            workspace: "isolated",
+            sessionId: "persistent",
+          },
+        ],
+      }),
+    ).toContain("one-shot");
+  });
+
   test("rejects non-positive deadlineMs", () => {
     expect(
       validateDelegateOperation({

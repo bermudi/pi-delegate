@@ -108,6 +108,35 @@ This protects the real project from ordinary relative writes. It is not a
 security sandbox: unrestricted commands and absolute paths can still reach the
 host filesystem.
 
+### Git-native isolated writers
+
+Use `workspace: "isolated"` for synchronous, one-shot coding tasks that should
+run in parallel without sharing a working tree:
+
+```ts
+delegate({
+  tasks: [
+    { prompt: "Implement the parser change", workspace: "isolated" },
+    { prompt: "Update the parser tests", workspace: "isolated" },
+  ],
+});
+```
+
+Delegate snapshots tracked changes, deletions, and non-ignored untracked files
+into a private baseline commit without touching the user's index or branch.
+Each task gets a detached worktree. Successful proposals are captured as
+private refs and full binary patches, then reconciled in task-array order. A
+proposal applies all-or-nothing; conflicts retain the proposal ref, full patch,
+and conflict worktree. Before updating the source, Delegate checks that it
+still matches the baseline.
+
+A clean reconciliation reports `applied_unverified`: textual merging does not
+prove the code builds or tests pass, so the result includes a suggested
+verification call. Isolated mode currently requires Git, rejects async and
+session reuse, disables whole-task retries, and rejects repositories with
+submodules. It is separation, not confinement: absolute-path writes can still
+reach the host.
+
 ### Token accounting
 
 Sync delegate calls report aggregate subagent `Usage` on the tool result, so Pi

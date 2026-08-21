@@ -461,6 +461,28 @@ export function formatCompletedTask(
       )}`,
     );
   }
+  if (result.integration) {
+    const integration = result.integration;
+    parts.push(
+      `[INTEGRATION: ${integration.status} · proposed ${integration.proposedFiles.length} file(s) · applied ${integration.appliedFiles.length} file(s)]`,
+    );
+    if (integration.baselineRef)
+      parts.push(`baseline ref: ${integration.baselineRef}`);
+    if (integration.proposalRef)
+      parts.push(`proposal ref: ${integration.proposalRef}`);
+    if (integration.patchPath)
+      parts.push(`full patch: ${integration.patchPath}`);
+    if (integration.worktreePath)
+      parts.push(`conflict worktree: ${integration.worktreePath}`);
+    for (const conflict of integration.conflicts ?? []) {
+      parts.push(`conflict: ${conflict.path}: ${conflict.reason}`);
+    }
+    if (integration.status === "applied_unverified") {
+      parts.push(
+        'Changes were applied but not verified. Suggested next call: delegate({ tasks: [{ agent: "reviewer", workspace: "scratch", prompt: "Review the applied isolated changes and run the relevant tests." }] })',
+      );
+    }
+  }
   return parts;
 }
 

@@ -106,9 +106,9 @@ export const delegateTaskSchema = Type.Object({
     }),
   ),
   workspace: Type.Optional(
-    StringEnum(["shared", "scratch"], {
+    StringEnum(["shared", "scratch", "isolated"], {
       description:
-        "shared source; scratch disposable copy, one-shot; not security isolation. Reviewer=scratch; others=shared.",
+        "shared source; scratch discarded; isolated Git proposal+apply; not security isolation. Reviewer=scratch.",
     }),
   ),
 });
@@ -241,6 +241,10 @@ export function validateDelegateOperation(
       : undefined; // Intentional help request.
   }
 
+  if (params.async && tasks.some((task) => task.workspace === "isolated")) {
+    return 'workspace "isolated" is synchronous; remove async.';
+  }
+
   // Reject mixed shapes: flat task fields at the top level alongside a
   // nonempty tasks array. The normalize shim only wraps flat fields when
   // there is no tasks array, so a mixed call silently lets tasks win —
@@ -286,11 +290,11 @@ export function validateDelegateOperation(
       return `task ${index + 1}: deadlineMs must be a positive number of milliseconds.`;
     }
     if (
-      task.workspace === "scratch" &&
+      (task.workspace === "scratch" || task.workspace === "isolated") &&
       !task.agent &&
       (task.sessionId || task.resumeFrom || sessionAction !== undefined)
     ) {
-      return `task ${index + 1}: workspace 'scratch' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction. Set workspace: "shared" to use a persistent agent.`;
+      return `task ${index + 1}: workspace '${task.workspace}' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction. Set workspace: "shared" to use a persistent agent.`;
     }
     if (sessionAction === "close") {
       if (!task.sessionId) {
