@@ -703,11 +703,10 @@ describe("delegate task lifecycle integration", () => {
     const result = await toolDef.execute(
       "tc-parallel-1",
       {
-        unsafeSharedWrites: true,
         tasks: [
-          { prompt: "task A" },
-          { prompt: "task B" },
-          { prompt: "task C" },
+          { prompt: "task A", tools: ["read"] },
+          { prompt: "task B", tools: ["read"] },
+          { prompt: "task C", tools: ["read"] },
         ],
       },
       undefined,
@@ -717,12 +716,9 @@ describe("delegate task lifecycle integration", () => {
 
     const details = (result as any).details as {
       results: Array<{ output?: string; error?: string }>;
-      dispatchWarning?: string;
     };
 
     expect(details.results).toHaveLength(3);
-    expect(result.content[0]?.text).toContain("UNSAFE SHARED WRITES ENABLED");
-    expect(details.dispatchWarning).toContain("UNSAFE SHARED WRITES ENABLED");
     expect(
       updates.some((update) =>
         update.details?.progress?.some((progress: any) =>
@@ -1010,7 +1006,7 @@ describe("delegate task lifecycle integration", () => {
     expect(details.results[0]?.output).toContain("list-me");
   });
 
-  test("unsafe async dispatch bypasses overlapping-writer rejection and remains pollable", async () => {
+  test("async read-only tasks avoid overlapping-writer rejection and remain pollable", async () => {
     const stream = installStreamMock("Async task done.");
 
     ts = await createTestSession({ extensions: [EXTENSION] });
@@ -1023,8 +1019,10 @@ describe("delegate task lifecycle integration", () => {
       "tc-async-1",
       {
         async: true,
-        unsafeSharedWrites: true,
-        tasks: [{ prompt: "async work A" }, { prompt: "async work B" }],
+        tasks: [
+          { prompt: "async work A", tools: ["read"] },
+          { prompt: "async work B", tools: ["read"] },
+        ],
       },
       undefined,
       undefined,
@@ -1035,10 +1033,6 @@ describe("delegate task lifecycle integration", () => {
     expect(ticketId).toBeDefined();
     expect(dispatch.content[0]?.text).not.toContain("Rejected before dispatch");
     expect((dispatch.details as any).progress).toHaveLength(2);
-    expect(dispatch.content[0]?.text).toContain("UNSAFE SHARED WRITES ENABLED");
-    expect((dispatch.details as any).dispatchWarning).toContain(
-      "UNSAFE SHARED WRITES ENABLED",
-    );
 
     // Poll until settled
     let pollResult: any;
@@ -1067,10 +1061,6 @@ describe("delegate task lifecycle integration", () => {
     const text = pollResult.content[0]?.text ?? "";
     expect(text).not.toContain("PENDING");
     expect(text).toContain("Async task done");
-    expect(text).toContain("UNSAFE SHARED WRITES ENABLED");
-    expect((pollResult.details as any).dispatchWarning).toContain(
-      "UNSAFE SHARED WRITES ENABLED",
-    );
     expect(finalDetails.results[0]?.output).toContain("Async task done");
     expect(finalDetails.results[0]?.error).toBeUndefined();
     expect(finalDetails.results[1]?.output).toContain("Async task done");
@@ -1887,11 +1877,10 @@ describe("delegate abort behavior", () => {
     const result = await toolDef.execute(
       "tc-abort",
       {
-        unsafeSharedWrites: true,
         tasks: [
-          { prompt: "task A" },
-          { prompt: "task B" },
-          { prompt: "task C" },
+          { prompt: "task A", tools: ["read"] },
+          { prompt: "task B", tools: ["read"] },
+          { prompt: "task C", tools: ["read"] },
         ],
       },
       controller.signal,

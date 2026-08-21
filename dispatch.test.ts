@@ -120,7 +120,9 @@ describe("dispatch-time shared-write gate", () => {
       );
       expect(result.content[0]?.text).toContain("Task 1#one, Task 2#two");
       expect(result.content[0]?.text).toContain(tmpDir);
-      expect(result.content[0]?.text).toContain("unsafeSharedWrites: true");
+      expect(result.content[0]?.text).not.toContain("delegate.json");
+      expect(result.content[0]?.text).not.toContain("allowUnsafeSharedWrites");
+      expect(result.content[0]?.text).toContain('workspace: "scratch"');
       expect(result.details.results).toEqual([]);
       expect(result.details.progress).toEqual([]);
       expect(updates).toBe(0);
@@ -133,6 +135,56 @@ describe("dispatch-time shared-write gate", () => {
       });
     },
   );
+
+  test("an operator config flag authorizes unsafe shared writers with a visible warning", async () => {
+    _setDelegateConfigForTesting({ allowUnsafeSharedWrites: true });
+    const model = { provider: "test", id: "model" } as any;
+    _setRunAgentSessionForTesting(async (env) => ({
+      index: env.index,
+      taskId: env.task.id,
+      agent: env.resolved.agentName,
+      status: "success",
+      output: "done",
+      durationMs: 1,
+      tokens: 0,
+      toolUses: 0,
+      files: [],
+      usage: emptyUsage(),
+    }));
+
+    const result = await dispatchDelegate({
+      pi: {} as any,
+      params: {
+        tasks: [
+          { prompt: "one", cwd: tmpDir },
+          { prompt: "two", cwd: tmpDir },
+        ],
+      },
+      ctx: {
+        cwd: tmpDir,
+        model,
+        modelRegistry: {
+          getAvailable: () => [model],
+          find: () => model,
+          hasConfiguredAuth: () => true,
+        },
+        getSystemPrompt: () => "parent",
+      } as any,
+      agents: new Map(),
+      parentModelId: model.id,
+      parentDefaults: {
+        thinking: "off",
+        tools: ["read", "write", "edit", "bash"],
+      },
+      signal: undefined,
+      onUpdate: undefined,
+    });
+
+    expect(result.content[0]?.text).toContain("UNSAFE SHARED WRITES ENABLED");
+    expect(result.content[0]?.text).toContain("no isolation or rollback");
+    expect(result.details.results).toHaveLength(2);
+    _setRunAgentSessionForTesting(undefined);
+  });
 
   test("reports an abort, not a safety failure, when the turn aborts during preflight", async () => {
     const model = { provider: "test", id: "model" } as any;

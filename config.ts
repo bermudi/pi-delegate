@@ -199,6 +199,14 @@ function isNonNegativeInteger(value: unknown): value is number {
 function validateNumericAndNestedFields(
   raw: Record<string, unknown>,
 ): string | null {
+  if (
+    "allowUnsafeSharedWrites" in raw &&
+    typeof raw.allowUnsafeSharedWrites !== "boolean"
+  ) {
+    return `allowUnsafeSharedWrites must be a boolean; got ${JSON.stringify(
+      raw.allowUnsafeSharedWrites,
+    )}`;
+  }
   if ("agent" in raw && raw.agent !== undefined && !isRecord(raw.agent)) {
     return "agent must be an object";
   }
@@ -381,6 +389,9 @@ export interface DelegateConfig {
   maxAsyncTickets?: number;
   /** Maximum inactivity before cooperative stall cancellation is requested (0 disables). */
   stallTimeoutMs?: number;
+  /** Operator-only escape hatch for overlapping shared writers. Not exposed
+   *  through the model-facing tool schema. Default false. */
+  allowUnsafeSharedWrites?: boolean;
   /** Whole-task transient-error retry settings. */
   retry?: {
     /** Max whole-task retries after the initial attempt (0 = no retry). */
@@ -467,6 +478,7 @@ const DEFAULT_DELEGATE_CONFIG: DelegateConfig = {
   concurrency: { default: MAX_CONCURRENCY },
   maxConcurrent: MAX_CONCURRENCY,
   stallTimeoutMs: 15 * 60 * 1000,
+  allowUnsafeSharedWrites: false,
   retry: {
     wholeTaskMaxRetries: 3,
     wholeTaskBaseDelayMs: 1_000,

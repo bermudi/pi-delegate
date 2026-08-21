@@ -9,8 +9,25 @@ import {
   getSubagentProviderExtensionSourcesForProvider,
   getProviderExtensionSignature,
   getTelemetryConfig,
+  getDelegateConfigSnapshot,
   type DelegateConfig,
 } from "./config.ts";
+
+describe("operator shared-write authorization", () => {
+  beforeEach(() => _resetDelegateConfigForTesting());
+  afterEach(() => _resetDelegateConfigForTesting());
+
+  test("defaults to denied and accepts only a boolean config value", () => {
+    expect(getDelegateConfigSnapshot().allowUnsafeSharedWrites).toBe(false);
+    _setDelegateConfigForTesting({ allowUnsafeSharedWrites: true });
+    expect(getDelegateConfigSnapshot().allowUnsafeSharedWrites).toBe(true);
+    expect(() =>
+      _setDelegateConfigForTesting({
+        allowUnsafeSharedWrites: "true" as unknown as boolean,
+      }),
+    ).toThrow("allowUnsafeSharedWrites must be a boolean");
+  });
+});
 
 /**
  * `normalizeProviderExtensions` is the boundary validator for user-edited

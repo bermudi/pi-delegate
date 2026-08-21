@@ -116,54 +116,50 @@ export const delegateTaskSchema = Type.Object({
 // Single source of truth for registration and generated help. The exported
 // argument types in types.ts project this canonical schema; providers see
 // only these fields.
-export const delegateArgumentsSchema = Type.Object({
-  ticketAction: Type.Optional(
-    StringEnum(["poll", "cancel", "wait"], {
-      description:
-        "Ticket control: poll=snapshot; wait=block until settled; cancel=abort. Prefer wait; never cancel for time.",
-    }),
-  ),
-  async: Type.Optional(
-    Type.Boolean({
-      description:
-        "Detach work, return a ticket; applies to ALL tasks. Results auto-deliver. Wait only if blocked.",
-      default: false,
-    }),
-  ),
-  unsafeSharedWrites: Type.Optional(
-    Type.Boolean({
-      description:
-        "Allow same-tree shared writers in this batch; no isolation or rollback. Dangerous override.",
-      default: false,
-    }),
-  ),
-  ticket: Type.Optional(
-    Type.String({
-      description: "Ticket ID; omit only when polling all tickets.",
-    }),
-  ),
-  force: Type.Optional(
-    Type.Boolean({
-      description:
-        "With cancel: false previews active work; true confirms abort. Completed writes/commands remain.",
-      default: false,
-    }),
-  ),
-  timeoutMs: Type.Optional(
-    Type.Number({
-      minimum: 0,
-      description:
-        "Bounds wait (ms); omit to block until settled. Timeout returns a snapshot; do not poll afterward.",
-    }),
-  ),
-  tasks: Type.Optional(
-    Type.Array(delegateTaskSchema, {
-      minItems: 0,
-      description:
-        "Tasks run concurrently; shared workspaces share files. scratch uses a disposable CoW copy. []=full manual.",
-    }),
-  ),
-});
+export const delegateArgumentsSchema = Type.Object(
+  {
+    ticketAction: Type.Optional(
+      StringEnum(["poll", "cancel", "wait"], {
+        description:
+          "Ticket control: poll=snapshot; wait=block until settled; cancel=abort. Prefer wait; never cancel for time.",
+      }),
+    ),
+    async: Type.Optional(
+      Type.Boolean({
+        description:
+          "Detach work, return a ticket; applies to ALL tasks. Results auto-deliver. Wait only if blocked.",
+        default: false,
+      }),
+    ),
+    ticket: Type.Optional(
+      Type.String({
+        description: "Ticket ID; omit only when polling all tickets.",
+      }),
+    ),
+    force: Type.Optional(
+      Type.Boolean({
+        description:
+          "With cancel: false previews active work; true confirms abort. Completed writes/commands remain.",
+        default: false,
+      }),
+    ),
+    timeoutMs: Type.Optional(
+      Type.Number({
+        minimum: 0,
+        description:
+          "Bounds wait (ms); omit to block until settled. Timeout returns a snapshot; do not poll afterward.",
+      }),
+    ),
+    tasks: Type.Optional(
+      Type.Array(delegateTaskSchema, {
+        minItems: 0,
+        description:
+          "Tasks run concurrently; shared workspaces share files. scratch uses a disposable CoW copy. []=full manual.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
 
 /** Fields that belong to a task entry. Models sometimes place these at the top
  * level of the arguments; the shim folds them back into a single task. */
@@ -219,9 +215,6 @@ export function validateDelegateOperation(
     if (params.async === true) {
       return "ticket control cannot include async; call it separately.";
     }
-    if (params.unsafeSharedWrites === true) {
-      return "ticket control cannot include unsafeSharedWrites; call it separately.";
-    }
     if (ticketAction !== "poll" && !params.ticket) {
       return `ticketAction '${ticketAction}' requires ticket.`;
     }
@@ -243,9 +236,6 @@ export function validateDelegateOperation(
     return "timeoutMs is valid only with ticketAction 'wait'.";
   }
   if (!tasks.length) {
-    if (params.unsafeSharedWrites === true) {
-      return "unsafeSharedWrites requires at least one task.";
-    }
     return params.async === true
       ? "async dispatch requires at least one task."
       : undefined; // Intentional help request.
@@ -276,9 +266,7 @@ export function validateDelegateOperation(
       (key) => !VALID_TASK_KEYS.has(key),
     );
     if (unknownKeys.length) {
-      const misplacedTopLevel = unknownKeys.filter(
-        (key) => key === "async" || key === "unsafeSharedWrites",
-      );
+      const misplacedTopLevel = unknownKeys.filter((key) => key === "async");
       const topLevelHint = misplacedTopLevel.length
         ? ` ${misplacedTopLevel.map((key) => `'${key}'`).join(" and ")} ${misplacedTopLevel.length === 1 ? "is a" : "are"} top-level flag${misplacedTopLevel.length === 1 ? "" : "s"}; move ${misplacedTopLevel.length === 1 ? "it" : "them"} out of the task entry.`
         : "";
