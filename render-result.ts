@@ -1,4 +1,4 @@
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Text } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   fmtDuration,
@@ -52,6 +52,8 @@ interface RenderCtx {
   isPartial: boolean;
   /** Message renderers own their horizontal padding; tool renderers do not. */
   outputPad?: number;
+  /** Width already consumed by an outer shell such as the async result box. */
+  widthInset?: number;
   /** Standalone custom messages do not need the tool-result leading spacer. */
   standalone?: boolean;
 }
@@ -76,8 +78,6 @@ interface AsyncDelegateMessage {
 
 interface AsyncMessageRenderOptions {
   expanded: boolean;
-  /** Added by newer Pi hosts; older compatible hosts omit it. */
-  outputPad?: number;
 }
 
 /** Custom rendering for the tool *call* display — minimal by design; the result
@@ -169,7 +169,8 @@ export function renderDelegateResult(
   } = details;
   const total = progress.length;
   const widthInset =
-    ctx.outputPad === undefined ? 4 : Math.max(0, ctx.outputPad * 2);
+    ctx.widthInset ??
+    (ctx.outputPad === undefined ? 4 : Math.max(0, ctx.outputPad * 2));
   const w = getTermWidth() - widthInset;
   const lines: string[] = ctx.standalone ? [] : [""];
   const helpers = makeRenderHelpers(theme, w, lines);
@@ -240,12 +241,12 @@ export function renderAsyncDelegateMessage(
   message: AsyncDelegateMessage,
   options: AsyncMessageRenderOptions,
   theme: Theme,
-): Text {
+): Box {
   const content =
     typeof message.content === "string"
       ? [{ type: "text", text: message.content }]
       : message.content;
-  return renderDelegateResult(
+  const result = renderDelegateResult(
     { content, details: message.details },
     { isPartial: false, expanded: options.expanded },
     theme,
@@ -255,10 +256,24 @@ export function renderAsyncDelegateMessage(
       invalidate: () => undefined,
       executionStarted: false,
       isPartial: false,
-      // Newer Pi hosts supply configured output padding. Older compatible
-      // hosts omit it, so match their standard one-column message inset.
-      outputPad: options.outputPad ?? 1,
+      // The Box below owns the same one-column padding as Pi's tool shell.
+      outputPad: 0,
+      widthInset: 2,
       standalone: true,
     },
   );
+  const status = message.details?.status;
+  const failed =
+    status === "failed" ||
+    status === "cancelled" ||
+    message.details?.progress.some((task) => task.status === "failed");
+  const pending = status === "running" || status === "cancelling";
+  const background = pending
+    ? "toolPendingBg"
+    : failed
+      ? "toolErrorBg"
+      : "toolSuccessBg";
+  const box = new Box(1, 1, (text) => theme.bg(background, text));
+  box.addChild(result);
+  return box;
 }

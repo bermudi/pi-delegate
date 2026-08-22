@@ -3786,13 +3786,22 @@ describe("delegate renderers", () => {
       timestamp: Date.now(),
     };
 
+    const backgroundCalls: string[] = [];
+    const theme = {
+      ...mockTheme(),
+      bg: (key: string, text: string) => {
+        backgroundCalls.push(key);
+        return text;
+      },
+    };
     const collapsed = renderer!(
       message as never,
       { expanded: false },
-      mockTheme(),
+      theme,
     );
     const collapsedText = collapsed!.render(200).join("\n");
     expect(collapsedText.startsWith(" ")).toBe(true);
+    expect(backgroundCalls).toContain("toolSuccessBg");
     expect(collapsedText).toContain("ticket taste123");
     expect(collapsedText).toContain("2.5s");
     expect(collapsedText).toContain("Ctrl+O expand");
@@ -3806,11 +3815,23 @@ describe("delegate renderers", () => {
     const expanded = renderer!(
       message as never,
       { expanded: true },
-      mockTheme(),
+      theme,
     );
     const expandedText = expanded!.render(200).join("\n");
     expect(expandedText).toContain("Full explanation only when expanded.");
     expect(expandedText).not.toContain("Ctrl+O expand");
+
+    backgroundCalls.length = 0;
+    const failed = renderer!(
+      {
+        ...message,
+        details: { ...details, status: "failed" },
+      } as never,
+      { expanded: false },
+      theme,
+    );
+    failed!.render(200);
+    expect(backgroundCalls).toContain("toolErrorBg");
   });
 
   test("renderResult hides output and tool summary in collapsed final mode", async () => {
