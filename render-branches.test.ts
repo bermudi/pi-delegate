@@ -349,6 +349,107 @@ describe("render-branches compatibility fallback", () => {
       }
     }
   });
+
+  test("keeps live summary fields stable and counts failures as finished", async () => {
+    const { renderPartialBranch } = await import("./render-branches.ts");
+    const progress: TaskProgress[] = [
+      {
+        ...makeTask(0).progress,
+        status: "done",
+        tokens: 10,
+      },
+      {
+        ...makeTask(1).progress,
+        status: "failed",
+        tokens: 20,
+        error: "boom",
+      },
+      {
+        ...makeTask(2).progress,
+        status: "running",
+        tokens: 30,
+      },
+    ];
+    const ctx = {
+      progress,
+      taskResults: [],
+      total: progress.length,
+      w: 120,
+      expanded: false,
+      state: {},
+      theme: {
+        fg: (_: string, text: string) => text,
+        bold: (text: string) => text,
+      } as never,
+      lines: [],
+    };
+
+    renderPartialBranch(ctx, {
+      statJoin: () => "",
+      modelLabel: () => "",
+      compactActivity: () => "thinking…",
+      pushWarnings: () => undefined,
+    });
+
+    expect(ctx.lines[0]).toBe(
+      "1 running · 2/3 finished · 1 failed · 60 tokens · Ctrl+O for detail",
+    );
+  });
+
+  test("uses distinct markers for current work, history, and results", async () => {
+    const { renderPartialBranch } = await import("./render-branches.ts");
+    const fgCalls: Array<[string, string]> = [];
+    const progress: TaskProgress = {
+      ...makeTask(0).progress,
+      status: "running",
+      activities: [
+        {
+          id: "done",
+          name: "read",
+          args: { path: "a.ts" },
+          startTime: Date.now() - 20,
+          endTime: Date.now() - 10,
+          result: { content: [], isError: false },
+        },
+        {
+          id: "live",
+          name: "bash",
+          args: { command: "bun test" },
+          startTime: Date.now() - 10,
+        },
+      ],
+    };
+    const baseCtx = {
+      progress: [progress],
+      taskResults: [],
+      total: 1,
+      w: 120,
+      state: {},
+      theme: {
+        fg: (token: string, text: string) => {
+          fgCalls.push([token, text]);
+          return text;
+        },
+        bold: (text: string) => text,
+      } as never,
+    };
+    const helpers = {
+      statJoin: () => "",
+      modelLabel: () => "",
+      compactActivity: () => "bash bun test",
+      pushWarnings: () => undefined,
+    };
+    const collapsed = { ...baseCtx, expanded: false, lines: [] as string[] };
+    renderPartialBranch(collapsed, helpers);
+    expect(collapsed.lines.join("\n")).toContain("› bash bun test");
+    expect(collapsed.lines.join("\n")).not.toContain("⎿");
+
+    const expanded = { ...baseCtx, expanded: true, lines: [] as string[] };
+    renderPartialBranch(expanded, helpers);
+    expect(expanded.lines.join("\n")).toContain("→ read");
+    expect(expanded.lines.join("\n")).toContain("› $ bun test");
+    expect(fgCalls).toContainEqual(["dim", "→ read a.ts"]);
+  });
 });
 
 describe("render-result overlap warning", () => {
@@ -412,6 +513,47 @@ describe("render-result overlap warning", () => {
       process.stdout.rows = originalRows;
       process.stdout.columns = originalColumns;
     }
+  });
+});
+
+describe("render-result visual hierarchy", () => {
+  test("dims task stats and uses the same final summary shape as live progress", () => {
+    const pair = makeTask(0);
+    const details: DelegateDetails = {
+      tasks: [],
+      results: [pair.result],
+      progress: [pair.progress],
+    };
+    const fgCalls: Array<[string, string]> = [];
+    const theme = {
+      fg: (token: string, text: string) => {
+        fgCalls.push([token, text]);
+        return text;
+      },
+      bold: (text: string) => text,
+    } as never;
+    const fakeText = {
+      text: "",
+      setText(text: string) {
+        this.text = text;
+      },
+    };
+
+    renderDelegateResult(
+      { details } as never,
+      { isPartial: false, expanded: false },
+      theme,
+      {
+        state: {},
+        lastComponent: fakeText as never,
+        invalidate: () => {},
+        executionStarted: false,
+        isPartial: false,
+      },
+    );
+
+    expect(fakeText.text).toContain("1/1 finished · 1 tokens · 10ms");
+    expect(fgCalls).toContainEqual(["dim", " · 10ms · 1 tokens"]);
   });
 });
 

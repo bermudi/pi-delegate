@@ -25,7 +25,7 @@ function makeRenderHelpers(
   lines: string[],
 ): RenderHelpers {
   const statJoin = (parts: string[]) =>
-    parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
+    parts.length ? theme.fg("dim", ` · ${parts.join(" · ")}`) : "";
   const modelLabel = (p: TaskProgress) =>
     p.model ? ` ${theme.fg("accent", p.model)}` : "";
 

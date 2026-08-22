@@ -77,24 +77,26 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
   const { progress, total, w, expanded, state, theme, lines } = ctx;
   const { statJoin, modelLabel, compactActivity, pushWarnings } = h;
 
-  const done = progress.filter(
+  const finished = progress.filter(
     (p) => p.status === "done" || p.status === "failed",
   ).length;
+  const failed = progress.filter((p) => p.status === "failed").length;
   const running = progress.filter((p) => p.status === "running").length;
-  const elapsed = state.startedAt
-    ? ` · ${fmtDuration(Date.now() - state.startedAt)}`
-    : "";
+  const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
 
-  // Richer header: agent counts + wall time. The Ctrl+O affordance is
-  // tool-scoped in Pi, so a single header hint suffices — one per running
-  // task just repeats the same line N times.
+  // Keep the live and final summaries in the same order so the header remains
+  // easy to scan as a partial result resolves into its final form.
   const headerParts: string[] = [];
   if (ctx.ticketStatus === "cancelling") headerParts.push("CANCELLING");
   if (running > 0) headerParts.push(`${running} running`);
-  headerParts.push(`${done}/${total} done`);
+  headerParts.push(`${finished}/${total} finished`);
+  if (failed > 0) headerParts.push(`${failed} failed`);
+  headerParts.push(`${fmtTokens(totalTokens)} tokens`);
+  if (state.startedAt)
+    headerParts.push(fmtDuration(Date.now() - state.startedAt));
   if (!expanded && running > 0)
     headerParts.push(theme.fg("accent", "Ctrl+O for detail"));
-  lines.push(theme.fg("muted", `${headerParts.join(" · ")}${elapsed}`), "");
+  lines.push(theme.fg("muted", headerParts.join(" · ")), "");
 
   for (let i = 0; i < total; i++) {
     const p = progress[i]!;
@@ -119,7 +121,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
               ? theme.fg("error", "✗")
               : theme.fg("success", "✓");
             lines.push(
-              truncLine(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`, w),
+              truncLine(`${ind}${theme.fg("dim", `→ ${call}`)} ${icon}`, w),
             );
           }
         }
@@ -138,7 +140,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
               ? theme.fg("error", "✗")
               : theme.fg("success", "✓");
             lines.push(
-              truncLine(`${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`, w),
+              truncLine(`${ind}${theme.fg("dim", `→ ${call}`)} ${icon}`, w),
             );
           }
         }
@@ -159,7 +161,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
           const glyph = theme.fg("warning", spinnerFrame());
           lines.push(
             truncLine(
-              `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)}${statJoin(runParts)}${issueTag}${theme.fg("muted", ageTag)}`,
+              `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)}${statJoin(runParts)}${issueTag}${theme.fg("dim", ageTag)}`,
               w,
             ),
           );
@@ -174,7 +176,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
                   const elapsed = ` | ${fmtDuration(Date.now() - activity.startTime)}`;
                   lines.push(
                     truncLine(
-                      `${ind}${theme.fg("warning", `> ${call}${elapsed}`)}`,
+                      `${ind}${theme.fg("warning", `› ${call}${elapsed}`)}`,
                       w,
                     ),
                   );
@@ -202,7 +204,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
                     : theme.fg("success", "✓");
                   lines.push(
                     truncLine(
-                      `${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`,
+                      `${ind}${theme.fg("dim", `→ ${call}`)} ${icon}`,
                       w,
                     ),
                   );
@@ -210,7 +212,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
               }
             } else {
               lines.push(
-                truncLine(`${ind}${theme.fg("muted", "  thinking…")}`, w),
+                truncLine(`${ind}${theme.fg("dim", "  thinking…")}`, w),
               );
             }
           } else {
@@ -219,7 +221,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
             // it per task just repeats the same hint for every running agent.
             lines.push(
               truncLine(
-                `${ind}${theme.fg("muted", `⎿  ${compactActivity(p)}`)}`,
+                `${ind}${theme.fg("muted", `› ${compactActivity(p)}`)}`,
                 w,
               ),
             );
@@ -291,11 +293,11 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     );
     lines.push(theme.fg("warning", `⏳ ${ticketParts.join(" · ")}`), "");
   } else {
+    const headerParts = [`${finalized}/${total} finished`];
+    if (failed > 0) headerParts.push(`${failed} failed`);
+    headerParts.push(`${fmtTokens(totalTokens)} tokens`, elapsed);
     lines.push(
-      theme.fg(
-        "muted",
-        `${succeeded}/${total} completed · ${elapsed} wall · ${fmtTokens(totalTokens)} tokens`,
-      ),
+      theme.fg("muted", headerParts.join(" · ")),
       "",
     );
   }
@@ -366,7 +368,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       const status = statusParts.length ? ` · ${statusParts.join(", ")}` : "";
       lines.push(
         truncLine(
-          `${ind}${theme.fg("muted", `${p.activities.length} tool${p.activities.length > 1 ? "s" : ""}: ${nameList}${status}`)}`,
+          `${ind}${theme.fg("dim", `${p.activities.length} tool${p.activities.length > 1 ? "s" : ""}: ${nameList}${status}`)}`,
           w,
         ),
       );
@@ -395,14 +397,14 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
         if (integration.patchPath)
           lines.push(
             truncLine(
-              `${ind}${theme.fg("muted", `patch: ${integration.patchPath}`)}`,
+              `${ind}${theme.fg("dim", `patch: ${integration.patchPath}`)}`,
               w,
             ),
           );
         if (integration.worktreePath)
           lines.push(
             truncLine(
-              `${ind}${theme.fg("muted", `worktree: ${integration.worktreePath}`)}`,
+              `${ind}${theme.fg("dim", `worktree: ${integration.worktreePath}`)}`,
               w,
             ),
           );

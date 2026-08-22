@@ -3699,7 +3699,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const rendered = (text as any).getText();
-    expect(rendered).toContain("0/1 done");
+    expect(rendered).toContain("0/1 finished");
     expect(rendered).toContain("thinking…");
   });
 
@@ -3739,7 +3739,7 @@ describe("delegate renderers", () => {
     );
     const rendered = (text as any).getText();
     expect(rendered).toContain("✓");
-    expect(rendered).toContain("1/1 completed");
+    expect(rendered).toContain("1/1 finished");
   });
 
   test("renderResult hides output and tool summary in collapsed final mode", async () => {
@@ -3895,7 +3895,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const expandedText = (expanded as any).getText();
-    expect(expandedText).toContain("> $ git status |");
+    expect(expandedText).toContain("› $ git status |");
     expect(expandedText).toContain("→ read src/config.ts");
   });
 
@@ -4515,7 +4515,7 @@ describe("delegate renderers", () => {
     expect(rendered).toContain("cancellation pending");
   });
 
-  test("collapsed running shows ⎿ with current tool and Ctrl+O hint", async () => {
+  test("collapsed running shows › with current tool and Ctrl+O hint", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
@@ -4567,7 +4567,7 @@ describe("delegate renderers", () => {
     );
     const rendered = (text as any).getText();
     expect(rendered).toContain("Ctrl+O for detail");
-    expect(rendered).toContain("⎿");
+    expect(rendered).toContain("›");
     // Current in-flight tool shown compactly
     expect(rendered).toContain("$ npm test");
     // Completed tool NOT shown in collapsed mode
@@ -4663,7 +4663,7 @@ describe("delegate renderers", () => {
     );
     const rendered = (text as any).getText();
     // Current in-flight tool with elapsed indicator
-    expect(rendered).toContain("> $ npm test |");
+    expect(rendered).toContain("› $ npm test |");
     // Completed tools also shown in expanded running
     expect(rendered).toContain("→ read a.ts");
     expect(rendered).toContain("✓");
@@ -5130,7 +5130,7 @@ describe("delegate renderers", () => {
           ctx,
         ) as any
       ).getText();
-      expect(rendered).toContain("2/2 completed");
+      expect(rendered).toContain("2/2 finished");
       expect(rendered).toContain(shared);
       expect(rendered).toContain("does not isolate or serialize file access");
       expect(rendered).toContain("does not roll back completed writes");
