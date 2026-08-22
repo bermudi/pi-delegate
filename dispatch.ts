@@ -713,6 +713,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       parentModel: parentModelId,
       ticketId,
       status: ticket.status,
+      elapsedMs: Date.now() - ticket.created,
       dispatchWarning,
     },
   };

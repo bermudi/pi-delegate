@@ -224,9 +224,7 @@ export function formatCompletedTicket(
   const succeeded = ticket.results.filter(
     (r) => r && !("error" in r && r.error),
   ).length;
-  const elapsedTotal = ticket.completedAt
-    ? ticket.completedAt - ticket.created
-    : 0;
+  const elapsedTotal = (ticket.completedAt ?? Date.now()) - ticket.created;
   // Surface the overall ticket status so a failed/cancelled batch is not
   // mistaken for success. "done" tickets keep the original header; others
   // get an explicit status tag up front.
@@ -341,6 +339,7 @@ function buildWaitDetails(ticket: AsyncTicket): DelegateDetails {
     parentModel: ticket.parentModelId,
     ticketId: ticket.id,
     status: ticket.status,
+    elapsedMs: (ticket.completedAt ?? Date.now()) - ticket.created,
     overlapWarning: overlapWarning || undefined,
     dispatchWarning: ticket.dispatchWarning,
   };

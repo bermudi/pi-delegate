@@ -350,6 +350,78 @@ describe("render-branches compatibility fallback", () => {
     }
   });
 
+  test("keeps fully finalized tickets live until their ticket status settles", async () => {
+    const { renderFinalBranch } = await import("./render-branches.ts");
+    const theme = {
+      fg: (_: string, text: string) => text,
+      bold: (text: string) => text,
+    } as never;
+    const progress: TaskProgress = {
+      ...makeTask(0).progress,
+      status: "done",
+    };
+    const helpers = {
+      statJoin: () => "",
+      modelLabel: () => "",
+      compactActivity: () => "thinking…",
+      pushWarnings: () => undefined,
+    };
+
+    for (const ticketStatus of ["running", "cancelling"] as const) {
+      const ctx = {
+        progress: [progress],
+        taskResults: [makeTask(0).result],
+        total: 1,
+        w: 100,
+        expanded: false,
+        state: {},
+        theme,
+        lines: [],
+        ticketId: "ticket-1",
+        ticketStatus,
+        elapsedMs: 10,
+      };
+
+      renderFinalBranch(ctx, helpers);
+
+      expect(ctx.lines[0]).toContain("ticket ticket-1");
+      expect(ctx.lines[0]).toContain("1/1 finished");
+      expect(ctx.lines[0]).not.toStartWith("✓");
+      if (ticketStatus === "cancelling") {
+        expect(ctx.lines[0]).toContain("cancelling");
+      }
+    }
+  });
+
+  test("omits batch duration when no wall-clock source exists", async () => {
+    const { renderFinalBranch } = await import("./render-branches.ts");
+    const pair = makeTask(0);
+    const ctx = {
+      progress: [pair.progress],
+      taskResults: [pair.result],
+      total: 1,
+      w: 100,
+      expanded: false,
+      state: {},
+      theme: {
+        fg: (_: string, text: string) => text,
+        bold: (text: string) => text,
+      } as never,
+      lines: [],
+    };
+
+    renderFinalBranch(ctx, {
+      statJoin: () => "",
+      modelLabel: () => "",
+      compactActivity: () => "thinking…",
+      pushWarnings: () => undefined,
+    });
+
+    expect(ctx.lines[0]).toBe(
+      "✓ 1/1 finished · 1 tokens · Ctrl+O expand",
+    );
+  });
+
   test("keeps live summary fields stable and counts failures as finished", async () => {
     const { renderPartialBranch } = await import("./render-branches.ts");
     const progress: TaskProgress[] = [
@@ -523,6 +595,7 @@ describe("render-result visual hierarchy", () => {
       tasks: [],
       results: [pair.result],
       progress: [pair.progress],
+      elapsedMs: 10,
     };
     const fgCalls: Array<[string, string]> = [];
     const theme = {

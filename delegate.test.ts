@@ -6525,7 +6525,7 @@ describe("async delegate integration", () => {
     const controller = new AbortController();
     const ticket: AsyncTicket = {
       id: "cancel1",
-      created: Date.now(),
+      created: Date.now() - 2500,
       tasks: [],
       resolved: [],
       status: "running",
@@ -6539,6 +6539,7 @@ describe("async delegate integration", () => {
     expect(result.content[0].text).toContain("cancellation preview");
     expect(result.content[0].text).toContain("NOT rolled back");
     expect(result.content[0].text).toContain("force: true");
+    expect(result.details.elapsedMs).toBeGreaterThanOrEqual(2500);
     expect(ticket.status).toBe("running");
     expect(controller.signal.aborted).toBe(false);
   });

@@ -285,18 +285,18 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     ticketStatus === undefined ||
     ticketStatus === "running" ||
     ticketStatus === "cancelling";
-  const elapsed =
-    ctx.elapsedMs !== undefined
-      ? fmtDuration(ctx.elapsedMs)
-      : state.startedAt
-        ? fmtDuration(Date.now() - state.startedAt)
-        : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
+  let elapsed: string | undefined;
+  if (ctx.elapsedMs !== undefined) {
+    elapsed = fmtDuration(ctx.elapsedMs);
+  } else if (state.startedAt !== undefined) {
+    elapsed = fmtDuration(Date.now() - state.startedAt);
+  }
 
   const ticketLabel = ticketId ? `ticket ${ticketId} · ` : "";
   const detailHint = !expanded
     ? ` · ${theme.fg("accent", "Ctrl+O expand")}`
     : "";
-  if (ticketId && ticketIsLive && finalized < total) {
+  if (ticketId && ticketIsLive) {
     // Background ticket — frame it as in-progress, not a finished result.
     const ticketParts = [`${finalized}/${total} finished`];
     if (running > 0) ticketParts.push(`${running} active`);
@@ -317,7 +317,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
   } else {
     const headerParts = [`${finalized}/${total} finished`];
     if (failed > 0) headerParts.push(`${failed} failed`);
-    headerParts.push(`${fmtTokens(totalTokens)} tokens`, elapsed);
+    headerParts.push(`${fmtTokens(totalTokens)} tokens`);
+    if (elapsed) headerParts.push(elapsed);
     const glyph =
       ticketStatus === "cancelled" || ticketStatus === "failed" || failed > 0
         ? theme.fg("error", "✗")
@@ -340,15 +341,18 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     // Unified status glyphs: ✓ done, ✗ failed, ◐ running, ○ pending.
     // Unfinished rows on terminal tickets show as failed so stale progress is
     // never mistaken for work that is still running or queued.
-    const icon = isCancelledPending || isTerminalUnfinished
-      ? theme.fg("error", "✗")
-      : p.status === "done"
-        ? theme.fg("success", "✓")
-        : p.status === "failed"
-          ? theme.fg("error", "✗")
-          : p.status === "running"
-            ? theme.fg("warning", "◐")
-            : theme.fg("muted", "○");
+    let icon: string;
+    if (isCancelledPending || isTerminalUnfinished) {
+      icon = theme.fg("error", "✗");
+    } else if (p.status === "done") {
+      icon = theme.fg("success", "✓");
+    } else if (p.status === "failed") {
+      icon = theme.fg("error", "✗");
+    } else if (p.status === "running") {
+      icon = theme.fg("warning", "◐");
+    } else {
+      icon = theme.fg("muted", "○");
+    }
     const taskId = p.id ? formatTaskId(p.id) : "";
     const taskIdTag = p.id ? theme.fg("accent", taskId) : "";
     const taskIdWidth = p.id ? taskId.length : 0;
@@ -361,8 +365,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     // Live tasks show an activity/waiting hint instead of final stats.
     const liveTail =
       p.status === "pending" && !isCancelledPending
-          ? theme.fg("muted", ` ${waitingLabel(running, getMaxConcurrent())}`)
-          : "";
+        ? theme.fg("muted", ` ${waitingLabel(running, getMaxConcurrent())}`)
+        : "";
     const cancelledTail = isCancelledPending
       ? theme.fg("error", " · CANCELLED")
       : "";

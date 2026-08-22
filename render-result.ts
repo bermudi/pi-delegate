@@ -268,11 +268,13 @@ export function renderAsyncDelegateMessage(
     status === "cancelled" ||
     message.details?.progress.some((task) => task.status === "failed");
   const pending = status === "running" || status === "cancelling";
-  const background = pending
-    ? "toolPendingBg"
-    : failed
-      ? "toolErrorBg"
-      : "toolSuccessBg";
+  let background: "toolPendingBg" | "toolErrorBg" | "toolSuccessBg" =
+    "toolSuccessBg";
+  if (pending) {
+    background = "toolPendingBg";
+  } else if (failed) {
+    background = "toolErrorBg";
+  }
   const box = new Box(1, 1, (text) => theme.bg(background, text));
   box.addChild(result);
   return box;
