@@ -859,6 +859,7 @@ export async function dispatchSync(
       results: finalResults,
       progress,
       parentModel: parentModelId,
+      elapsedMs: elapsedTotal,
       overlapWarning: overlapWarning || undefined,
       dispatchWarning,
     },

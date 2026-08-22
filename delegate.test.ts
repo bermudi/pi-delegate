@@ -3742,6 +3742,77 @@ describe("delegate renderers", () => {
     expect(rendered).toContain("1/1 finished");
   });
 
+  test("auto-delivered async results use the compact result UI", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const runner = ts.session.extensionRunner;
+    if (!runner) throw new Error("No extensionRunner on session");
+    const renderer = runner.getMessageRenderer("async_delegate_result");
+    expect(renderer).toBeDefined();
+
+    const details = {
+      tasks: [{ prompt: "review the UI" }],
+      results: [
+        {
+          agent: "reviewer",
+          output: "Useful answer first.\n\nFull explanation only when expanded.",
+          durationMs: 1200,
+          tokens: 42,
+          touchedFiles: [],
+        },
+      ],
+      progress: [
+        {
+          index: 0,
+          agent: "reviewer",
+          task: "review the UI",
+          status: "done",
+          durationMs: 1200,
+          tokens: 42,
+          toolUses: 1,
+          activities: [],
+        },
+      ],
+      ticketId: "taste123",
+      status: "done",
+      elapsedMs: 2500,
+      crossLeafDelivery: true,
+    };
+    const message = {
+      role: "custom",
+      customType: "async_delegate_result",
+      content: "RAW ASYNC RESULT SHOULD NOT BE DUMPED",
+      display: true,
+      details,
+      timestamp: Date.now(),
+    };
+
+    const collapsed = renderer!(
+      message as never,
+      { expanded: false },
+      mockTheme(),
+    );
+    const collapsedText = collapsed!.render(200).join("\n");
+    expect(collapsedText.startsWith(" ")).toBe(true);
+    expect(collapsedText).toContain("ticket taste123");
+    expect(collapsedText).toContain("2.5s");
+    expect(collapsedText).toContain("Ctrl+O expand");
+    expect(collapsedText).toContain(
+      "Result delivered from another session-tree branch",
+    );
+    expect(collapsedText).toContain("Useful answer first.");
+    expect(collapsedText).not.toContain("RAW ASYNC RESULT");
+    expect(collapsedText).not.toContain("Full explanation only when expanded.");
+
+    const expanded = renderer!(
+      message as never,
+      { expanded: true },
+      mockTheme(),
+    );
+    const expandedText = expanded!.render(200).join("\n");
+    expect(expandedText).toContain("Full explanation only when expanded.");
+    expect(expandedText).not.toContain("Ctrl+O expand");
+  });
+
   test("renderResult hides output and tool summary in collapsed final mode", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
@@ -3882,7 +3953,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const compactText = (compact as any).getText();
-    expect(compactText).toContain("Ctrl+O for detail");
+    expect(compactText).toContain("Ctrl+O expand");
     // Current in-flight tool shown compactly
     expect(compactText).toContain("$ git status");
     expect(compactText).not.toContain("→ read src/config.ts");
@@ -4157,7 +4228,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const compactText = (compact as any).getText();
-    expect(compactText).toContain("Ctrl+O for detail");
+    expect(compactText).toContain("Ctrl+O expand");
     expect(compactText).not.toContain("→ read a.ts");
     expect(compactText).toContain("├─");
 
@@ -4243,7 +4314,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const compactText = (compact as any).getText();
-    expect(compactText).toContain("Ctrl+O for detail");
+    expect(compactText).toContain("Ctrl+O expand");
     expect(compactText).toContain("read 4.ts");
     expect(compactText).not.toContain("1.ts");
 
@@ -4566,7 +4637,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const rendered = (text as any).getText();
-    expect(rendered).toContain("Ctrl+O for detail");
+    expect(rendered).toContain("Ctrl+O expand");
     expect(rendered).toContain("›");
     // Current in-flight tool shown compactly
     expect(rendered).toContain("$ npm test");
@@ -4608,7 +4679,7 @@ describe("delegate renderers", () => {
     );
     const rendered = (text as any).getText();
     expect(rendered).toContain("thinking…");
-    expect(rendered).toContain("Ctrl+O for detail");
+    expect(rendered).toContain("Ctrl+O expand");
   });
 
   test("expanded running shows current tool with elapsed duration", async () => {
@@ -4668,7 +4739,7 @@ describe("delegate renderers", () => {
     expect(rendered).toContain("→ read a.ts");
     expect(rendered).toContain("✓");
     // Ctrl+O hint only in collapsed running
-    expect(rendered).not.toContain("Ctrl+O for detail");
+    expect(rendered).not.toContain("Ctrl+O expand");
   });
 
   test("expanded running shows live output from tool_execution_update", async () => {
@@ -4730,7 +4801,7 @@ describe("delegate renderers", () => {
     // Carriage returns resolved (progress bars show final state)
     expect(rendered).not.toContain("\r");
     // Ctrl+O hint not shown in expanded
-    expect(rendered).not.toContain("Ctrl+O for detail");
+    expect(rendered).not.toContain("Ctrl+O expand");
   });
 
   test("collapsed done hides activities, expanded shows them", async () => {
@@ -4893,9 +4964,10 @@ describe("delegate renderers", () => {
     );
     const rendered = (text as any).getText();
     // Ticket banner frames it as background work, not a finished result.
-    expect(rendered).toContain("⏳");
+    expect(rendered).toContain("◐");
     expect(rendered).toContain("ticket abc12345");
-    expect(rendered).toContain("running in background");
+    expect(rendered).toContain("1 active");
+    expect(rendered).toContain("1 queued");
     expect(rendered).toContain("scout");
     // Running + pending tasks render with their glyphs, never ✗ for still-live work.
     expect(rendered).toContain("◐");
@@ -4957,9 +5029,9 @@ describe("delegate renderers", () => {
           ctx,
         ) as any
       ).getText();
-      expect(rendered).toContain("⏳");
+      expect(rendered).toContain("◐");
       expect(rendered).toContain("ticket poll45678");
-      expect(rendered).toContain("running in background");
+      expect(rendered).toContain("1 active");
       // Live tasks use placeholder { error: "PENDING..." } results for index
       // alignment; the renderer must not surface that placeholder as an error.
       expect(rendered).not.toContain("PENDING");

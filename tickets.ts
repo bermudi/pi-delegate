@@ -297,6 +297,7 @@ export function formatCompletedTicket(
       // the human sees which ticket they polled, even in the rich tree path.
       ticketId: ticket.id,
       status: ticket.status,
+      elapsedMs: elapsedTotal,
       overlapWarning: overlapWarning || undefined,
       dispatchWarning: ticket.dispatchWarning,
     },
@@ -573,6 +574,7 @@ export function deliverTicketResults(
           ...formatted.details,
           ticketId: ticket.id,
           status: ticket.status,
+          crossLeafDelivery: crossLeaf,
         },
       },
       crossLeaf
@@ -626,6 +628,7 @@ export function handlePoll(
         // (friction #2). The LLM-facing content still names the ticket id too.
         ticketId: ticket.id,
         status: ticket.status,
+        elapsedMs: Date.now() - ticket.created,
         overlapWarning: snapshot.overlapWarning || undefined,
         dispatchWarning: ticket.dispatchWarning,
       },

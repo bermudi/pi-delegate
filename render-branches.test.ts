@@ -328,7 +328,7 @@ describe("render-branches compatibility fallback", () => {
           taskResults: [{ error: "PENDING" }],
           total: 1,
           w: 100,
-          expanded: false,
+          expanded: true,
           state: {},
           theme,
           lines: [],
@@ -392,7 +392,7 @@ describe("render-branches compatibility fallback", () => {
     });
 
     expect(ctx.lines[0]).toBe(
-      "1 running · 2/3 finished · 1 failed · 60 tokens · Ctrl+O for detail",
+      "1 running · 2/3 finished · 1 failed · 60 tokens · Ctrl+O expand",
     );
   });
 
@@ -541,7 +541,7 @@ describe("render-result visual hierarchy", () => {
 
     renderDelegateResult(
       { details } as never,
-      { isPartial: false, expanded: false },
+      { isPartial: false, expanded: true },
       theme,
       {
         state: {},

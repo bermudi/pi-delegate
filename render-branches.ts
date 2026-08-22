@@ -59,6 +59,8 @@ export interface BranchCtx {
   ticketId?: string;
   /** Async ticket status, when known, so the renderer can show cancelling/cancelled. */
   ticketStatus?: "running" | "cancelling" | "done" | "failed" | "cancelled";
+  /** Actual batch wall time when no live render state is available. */
+  elapsedMs?: number;
 }
 
 /** Helpers shared across both branches. `pushWarnings` mutates `lines`.
@@ -87,16 +89,24 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
   // Keep the live and final summaries in the same order so the header remains
   // easy to scan as a partial result resolves into its final form.
   const headerParts: string[] = [];
-  if (ctx.ticketStatus === "cancelling") headerParts.push("CANCELLING");
   if (running > 0) headerParts.push(`${running} running`);
   headerParts.push(`${finished}/${total} finished`);
   if (failed > 0) headerParts.push(`${failed} failed`);
   headerParts.push(`${fmtTokens(totalTokens)} tokens`);
   if (state.startedAt)
     headerParts.push(fmtDuration(Date.now() - state.startedAt));
-  if (!expanded && running > 0)
-    headerParts.push(theme.fg("accent", "Ctrl+O for detail"));
-  lines.push(theme.fg("muted", headerParts.join(" · ")), "");
+  const stateLabel =
+    ctx.ticketStatus === "cancelling"
+      ? `${theme.fg("error", "■ cancelling")} · `
+      : "";
+  const detailHint =
+    !expanded && running > 0
+      ? ` · ${theme.fg("accent", "Ctrl+O expand")}`
+      : "";
+  lines.push(
+    `${stateLabel}${theme.fg("muted", headerParts.join(" · "))}${detailHint}`,
+    "",
+  );
 
   for (let i = 0; i < total; i++) {
     const p = progress[i]!;
@@ -110,7 +120,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       case "done":
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
+            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? `${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}` : ""}`,
             w,
           ),
         );
@@ -129,7 +139,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       case "failed":
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`,
+            `${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? modelLabel(p) : ""}${p.error ? theme.fg("error", ` · ${p.error}`) : ""}`,
             w,
           ),
         );
@@ -161,7 +171,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
           const glyph = theme.fg("warning", spinnerFrame());
           lines.push(
             truncLine(
-              `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)}${statJoin(runParts)}${issueTag}${theme.fg("dim", ageTag)}`,
+              `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? `${modelLabel(p)}${statJoin(runParts)}` : ""}${issueTag}${theme.fg("dim", ageTag)}`,
               w,
             ),
           );
@@ -176,7 +186,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
                   const elapsed = ` | ${fmtDuration(Date.now() - activity.startTime)}`;
                   lines.push(
                     truncLine(
-                      `${ind}${theme.fg("warning", `› ${call}${elapsed}`)}`,
+                      `${ind}${theme.fg("warning", "›")} ${call}${theme.fg("dim", elapsed)}`,
                       w,
                     ),
                   );
@@ -221,7 +231,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
             // it per task just repeats the same hint for every running agent.
             lines.push(
               truncLine(
-                `${ind}${theme.fg("muted", `› ${compactActivity(p)}`)}`,
+                `${ind}${theme.fg("warning", "›")} ${compactActivity(p)}`,
                 w,
               ),
             );
@@ -237,7 +247,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
         );
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${modelLabel(p)} ${queuedTag}`,
+            `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? modelLabel(p) : ""}${queuedTag}`,
             w,
           ),
         );
@@ -275,29 +285,45 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     ticketStatus === undefined ||
     ticketStatus === "running" ||
     ticketStatus === "cancelling";
-  const elapsed = state.startedAt
-    ? fmtDuration(Date.now() - state.startedAt)
-    : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
+  const elapsed =
+    ctx.elapsedMs !== undefined
+      ? fmtDuration(ctx.elapsedMs)
+      : state.startedAt
+        ? fmtDuration(Date.now() - state.startedAt)
+        : fmtDuration(progress.reduce((sum, p) => sum + p.durationMs, 0));
 
-  if (ticketId && ticketIsLive) {
+  const ticketLabel = ticketId ? `ticket ${ticketId} · ` : "";
+  const detailHint = !expanded
+    ? ` · ${theme.fg("accent", "Ctrl+O expand")}`
+    : "";
+  if (ticketId && ticketIsLive && finalized < total) {
     // Background ticket — frame it as in-progress, not a finished result.
-    const ticketParts = [
-      `ticket ${ticketId}`,
-      `${finalized}/${total} finalized`,
-    ];
+    const ticketParts = [`${finalized}/${total} finished`];
     if (running > 0) ticketParts.push(`${running} active`);
     if (pending > 0) ticketParts.push(`${pending} queued`);
     if (failed > 0) ticketParts.push(`${failed} failed`);
-    ticketParts.push(
-      ticketStatus === "cancelling" ? "CANCELLING" : "running in background",
+    const glyph =
+      ticketStatus === "cancelling"
+        ? theme.fg("error", "■")
+        : theme.fg("warning", "◐");
+    const stateLabel =
+      ticketStatus === "cancelling"
+        ? ` ${theme.fg("error", "cancelling")}`
+        : "";
+    lines.push(
+      `${glyph}${stateLabel} ${theme.fg("muted", `${ticketLabel}${ticketParts.join(" · ")}`)}${detailHint}`,
+      "",
     );
-    lines.push(theme.fg("warning", `⏳ ${ticketParts.join(" · ")}`), "");
   } else {
     const headerParts = [`${finalized}/${total} finished`];
     if (failed > 0) headerParts.push(`${failed} failed`);
     headerParts.push(`${fmtTokens(totalTokens)} tokens`, elapsed);
+    const glyph =
+      ticketStatus === "cancelled" || ticketStatus === "failed" || failed > 0
+        ? theme.fg("error", "✗")
+        : theme.fg("success", "✓");
     lines.push(
-      theme.fg("muted", headerParts.join(" · ")),
+      `${glyph} ${theme.fg("muted", `${ticketLabel}${headerParts.join(" · ")}`)}${detailHint}`,
       "",
     );
   }
@@ -308,11 +334,13 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const ind = indent(i, total);
     const isCancelledPending =
       ticketStatus === "cancelled" && p.status === "pending";
+    const isTerminalUnfinished =
+      !ticketIsLive && (p.status === "running" || p.status === "pending");
 
     // Unified status glyphs: ✓ done, ✗ failed, ◐ running, ○ pending.
-    // Cancelled-but-not-started tasks show as failed so they are not mistaken
-    // for still-queued work.
-    const icon = isCancelledPending
+    // Unfinished rows on terminal tickets show as failed so stale progress is
+    // never mistaken for work that is still running or queued.
+    const icon = isCancelledPending || isTerminalUnfinished
       ? theme.fg("error", "✗")
       : p.status === "done"
         ? theme.fg("success", "✓")
@@ -325,16 +353,14 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const taskIdTag = p.id ? theme.fg("accent", taskId) : "";
     const taskIdWidth = p.id ? taskId.length : 0;
     const previewBudget = Math.max(1, w - 30 - taskIdWidth);
-    const taskPreview = theme.fg("muted", trunc(p.task, previewBudget));
+    const taskPreview = theme.fg("muted", ` — ${trunc(p.task, previewBudget)}`);
     const isLive =
       ticketIsLive &&
       (p.status === "running" ||
         (p.status === "pending" && !isCancelledPending));
     // Live tasks show an activity/waiting hint instead of final stats.
     const liveTail =
-      p.status === "running"
-        ? theme.fg("muted", ` · ${compactActivity(p)}`)
-        : p.status === "pending" && !isCancelledPending
+      p.status === "pending" && !isCancelledPending
           ? theme.fg("muted", ` ${waitingLabel(running, getMaxConcurrent())}`)
           : "";
     const cancelledTail = isCancelledPending
@@ -342,10 +368,19 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       : "";
     lines.push(
       truncLine(
-        `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${modelLabel(p)}${taskIdTag} ${taskPreview}${isLive ? liveTail : cancelledTail || statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`,
+        `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${taskIdTag}${taskPreview}${expanded ? modelLabel(p) : ""}${isLive ? liveTail : cancelledTail || (expanded ? statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`]) : "")}`,
         w,
       ),
     );
+
+    if (isLive && p.status === "running") {
+      lines.push(
+        truncLine(
+          `${ind}${theme.fg("warning", "›")} ${compactActivity(p)}`,
+          w,
+        ),
+      );
+    }
 
     // Warnings (e.g. unknown tools ignored) — muted line under the task.
     pushWarnings(p, ind);
@@ -419,7 +454,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
           ? previewOutputLine(r.output ?? "", w - ind.length - 3)
           : "";
       if (preview) {
-        lines.push(truncLine(`${ind}${theme.fg("muted", `⎿ ${preview}`)}`, w));
+        lines.push(
+          truncLine(`${ind}${theme.fg("success", "⎿")} ${preview}`, w),
+        );
       }
     }
     // Output: render markdown only in expanded mode.

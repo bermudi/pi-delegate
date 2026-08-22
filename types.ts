@@ -208,6 +208,10 @@ export interface DelegateDetails {
   ticketId?: string;
   /** Terminal/live ticket status when this result comes from an async ticket. */
   status?: AsyncTicket["status"];
+  /** Actual batch wall time for stable rendering outside the live tool context. */
+  elapsedMs?: number;
+  /** Async result arrived on a different session-tree leaf than it was spawned on. */
+  crossLeafDelivery?: boolean;
   /** Global overlap warning derived from result.attributedFiles, surfaced in both
    *  the textual content and the custom TUI. */
   overlapWarning?: string;

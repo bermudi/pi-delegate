@@ -16,7 +16,11 @@ import {
   dispatchDelegate,
   validateDelegateOperationResult,
 } from "./dispatch.ts";
-import { renderDelegateCall, renderDelegateResult } from "./render-result.ts";
+import {
+  renderAsyncDelegateMessage,
+  renderDelegateCall,
+  renderDelegateResult,
+} from "./render-result.ts";
 import { hostCompatError } from "./host-compat.ts";
 import { invalidateHostDepsCache } from "./host.ts";
 import { registerProviderExtensionNotifier } from "./provider-extensions.ts";
@@ -41,7 +45,7 @@ import {
   prepareTelemetryForSession,
   sealTelemetryWrites,
 } from "./telemetry.ts";
-import type { DelegateArguments } from "./types.ts";
+import type { DelegateArguments, DelegateDetails } from "./types.ts";
 
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
 let shutdownDrainTimeoutMs = DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS;
@@ -114,6 +118,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   // its SQLite handle. Permit the new runtime to open a fresh backend; stale
   // workers from the old runtime remain blocked from reopening it.
   prepareTelemetryForSession();
+
+  // Async completion arrives as a custom message after the original tool call
+  // has returned. Give it the same compact/expanded UI as sync results while
+  // leaving the full message intact for model context.
+  pi.registerMessageRenderer<DelegateDetails>(
+    "async_delegate_result",
+    renderAsyncDelegateMessage,
+  );
 
   pi.registerTool({
     name: "delegate",

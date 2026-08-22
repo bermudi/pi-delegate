@@ -27,7 +27,7 @@ function makeRenderHelpers(
   const statJoin = (parts: string[]) =>
     parts.length ? theme.fg("dim", ` · ${parts.join(" · ")}`) : "";
   const modelLabel = (p: TaskProgress) =>
-    p.model ? ` ${theme.fg("accent", p.model)}` : "";
+    p.model ? theme.fg("dim", ` · ${p.model}`) : "";
 
   // Push muted warning lines for a task under its status row. Rendered in
   // both partial and final views so a human watching the TUI sees that tools
@@ -50,6 +50,10 @@ interface RenderCtx {
   invalidate: () => void;
   executionStarted: boolean;
   isPartial: boolean;
+  /** Message renderers own their horizontal padding; tool renderers do not. */
+  outputPad?: number;
+  /** Standalone custom messages do not need the tool-result leading spacer. */
+  standalone?: boolean;
 }
 
 interface RenderResultOptions {
@@ -65,6 +69,17 @@ interface RenderResult {
   details?: DelegateDetails;
 }
 
+interface AsyncDelegateMessage {
+  content: string | Array<{ type: string; text?: string }>;
+  details?: DelegateDetails;
+}
+
+interface AsyncMessageRenderOptions {
+  expanded: boolean;
+  /** Added by newer Pi hosts; older compatible hosts omit it. */
+  outputPad?: number;
+}
+
 /** Custom rendering for the tool *call* display — minimal by design; the result
  *  renderer shows all detail. Only animates a spinner while still running. */
 export function renderDelegateCall(
@@ -75,7 +90,9 @@ export function renderDelegateCall(
   const state = ctx.state;
   const rawTasks = args.tasks;
   const tasks = Array.isArray(rawTasks) ? rawTasks : [];
-  const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  const text =
+    (ctx.lastComponent as Text | undefined) ??
+    new Text("", ctx.outputPad ?? 0, 0);
   if (typeof rawTasks === "string") {
     text.setText(theme.fg("toolTitle", theme.bold("delegate invalid tasks")));
     return text;
@@ -129,7 +146,9 @@ export function renderDelegateResult(
     clearInterval(state.interval);
     state.interval = undefined;
   }
-  const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  const text =
+    (ctx.lastComponent as Text | undefined) ??
+    new Text("", ctx.outputPad ?? 0, 0);
 
   const details = result.details;
   if (!details?.progress?.length) {
@@ -138,7 +157,7 @@ export function renderDelegateResult(
         ?.filter((c) => c.type === "text")
         .map((c) => c.text)
         .join("\n") ?? "";
-    text.setText(content ? `\n${content}` : "");
+    text.setText(content ? `${ctx.standalone ? "" : "\n"}${content}` : "");
     return text;
   }
 
@@ -149,8 +168,10 @@ export function renderDelegateResult(
     status: ticketStatus,
   } = details;
   const total = progress.length;
-  const w = getTermWidth() - 4;
-  const lines: string[] = [""];
+  const widthInset =
+    ctx.outputPad === undefined ? 4 : Math.max(0, ctx.outputPad * 2);
+  const w = getTermWidth() - widthInset;
+  const lines: string[] = ctx.standalone ? [] : [""];
   const helpers = makeRenderHelpers(theme, w, lines);
 
   const branchCtx = {
@@ -164,6 +185,7 @@ export function renderDelegateResult(
     lines,
     ticketId,
     ticketStatus,
+    elapsedMs: details.elapsedMs,
   };
 
   // Surface batch-level warnings at the top of the TUI. The same text already
@@ -177,6 +199,18 @@ export function renderDelegateResult(
   if (details?.overlapWarning) {
     lines.push(
       truncLine(theme.fg("warning", `⚠ ${details.overlapWarning}`), w),
+      "",
+    );
+  }
+  if (details?.crossLeafDelivery) {
+    lines.push(
+      truncLine(
+        theme.fg(
+          "warning",
+          "↳ Result delivered from another session-tree branch",
+        ),
+        w,
+      ),
       "",
     );
   }
@@ -194,4 +228,37 @@ export function renderDelegateResult(
   const budgeted = applyLineBudget(toBudget, options.expanded ?? false);
   text.setText(budgeted.join("\n"));
   return text;
+}
+
+/**
+ * Render an automatically delivered async result with the same compact /
+ * expanded presentation as a synchronous tool result. The full message
+ * content remains untouched in model context; only its TUI presentation is
+ * replaced.
+ */
+export function renderAsyncDelegateMessage(
+  message: AsyncDelegateMessage,
+  options: AsyncMessageRenderOptions,
+  theme: Theme,
+): Text {
+  const content =
+    typeof message.content === "string"
+      ? [{ type: "text", text: message.content }]
+      : message.content;
+  return renderDelegateResult(
+    { content, details: message.details },
+    { isPartial: false, expanded: options.expanded },
+    theme,
+    {
+      state: {},
+      lastComponent: undefined,
+      invalidate: () => undefined,
+      executionStarted: false,
+      isPartial: false,
+      // Newer Pi hosts supply configured output padding. Older compatible
+      // hosts omit it, so match their standard one-column message inset.
+      outputPad: options.outputPad ?? 1,
+      standalone: true,
+    },
+  );
 }
