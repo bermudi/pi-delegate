@@ -2422,6 +2422,65 @@ describe("runAgentSession abort re-check", () => {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  test("prompt rejection outlasts fire-and-forget agent_settled extension work", async () => {
+    let compacting = false;
+    let disposed = false;
+    let extensionFinished = false;
+    let extensionCrashed = false;
+    const fakeCtx = {
+      get hasUI(): boolean {
+        if (disposed) {
+          extensionCrashed = true;
+          throw new Error("extension context was disposed");
+        }
+        return false;
+      },
+    };
+
+    const { session } = fakeSession({
+      isIdle: () => !compacting,
+      isCompacting: () => compacting,
+      prompt: async (emit) => {
+        emit({ type: "agent_settled" });
+        void (async () => {
+          // Match an extension handler that returns after starting ctx.compact.
+          // Its work becomes observable only after prompt() has rejected.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          compacting = true;
+          emit({ type: "compaction_start", reason: "manual" });
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: {},
+            aborted: false,
+            willRetry: false,
+          });
+          compacting = false;
+          await Promise.resolve();
+          void fakeCtx.hasUI;
+          extensionFinished = true;
+        })();
+        throw new Error("provider rejected after agent_settled");
+      },
+    });
+
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+    disposed = true;
+
+    expect(extensionFinished).toBe(true);
+    expect(extensionCrashed).toBe(false);
+    expect(result.error).toBe("provider rejected after agent_settled");
+  });
 });
 
 // ── touched-file tracking (issue #33) ─────────────────────────────────────

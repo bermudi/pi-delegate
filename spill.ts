@@ -198,7 +198,7 @@ export function renderOutputForPoll(
   const tail = tailOf(output, tailChars);
   const completionNote =
     output.length > thresholdChars
-      ? "full output is spilled to a file when the ticket completes"
+      ? "full output will spill to a file if possible when the ticket completes, with full in-result inclusion as the fallback"
       : "full output will be included when the ticket completes";
   return `…${tail}\n[truncated in this poll — ${completionNote}]`;
 }

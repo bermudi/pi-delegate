@@ -2462,6 +2462,86 @@ describe("task telemetry boundary", () => {
     }
   });
 
+  test("scratch outer projection failure retains every original evidence channel as uncertain", async () => {
+    _setCreateScratchWorkspaceForTesting(
+      async () =>
+        ({
+          cwd: "/scratch/project",
+          mapPathToSource: () => {
+            throw new Error("lexical projection unavailable");
+          },
+          resolveReportedPath: async (file: string) => file,
+          resolveAttributedPath: async (file: string) => file,
+          resolveFileAttribution: async () => {
+            throw new Error("structured projection unavailable");
+          },
+          cleanup: async () => {},
+        }) as never,
+    );
+    const originalTouched = [
+      "/scratch/project/touched.txt",
+      "/host/touched.txt",
+    ];
+    const originalAttributed = [
+      "/scratch/project/direct.txt",
+      "/host/direct.txt",
+    ];
+    _setRunAgentSessionForTesting(
+      async () =>
+        ({
+          output: "paid-for output",
+          durationMs: 5,
+          tokens: 9,
+          usage: { ...emptyUsage(), totalTokens: 9 },
+          touchedFiles: originalTouched,
+          attributedFiles: originalAttributed,
+          fileAttributions: [
+            {
+              lexicalPath: "/scratch/project/direct.txt",
+              preExecutionPhysicalPath: "/scratch/project/direct.txt",
+              provenance: "write",
+              uncertain: false,
+            },
+            {
+              lexicalPath: "/host/direct.txt",
+              preExecutionPhysicalPath: "/host/direct.txt",
+              provenance: "edit",
+              uncertain: false,
+            },
+          ],
+        }) as never,
+    );
+    const log = spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const result = await runResolvedTask(
+        mkEnv(),
+        mkTask({ workspace: "scratch" }),
+        mkProgressRow(),
+        0,
+      );
+
+      expect(result.error).toContain(
+        "Scratch evidence projection failed: lexical projection unavailable",
+      );
+      expect(result.output).toBe("paid-for output");
+      expect(result.tokens).toBe(9);
+      expect(result.touchedFiles).toEqual(originalTouched);
+      expect(result.attributedFiles).toEqual(originalAttributed);
+      expect(result.fileAttributions).toHaveLength(2);
+      expect(result.fileAttributions?.every((entry) => entry.uncertain)).toBe(
+        true,
+      );
+      expect(
+        result.fileAttributions?.map((entry) => entry.lexicalPath),
+      ).toEqual(originalAttributed);
+    } finally {
+      log.mockRestore();
+      _setRunAgentSessionForTesting(undefined);
+      _setCreateScratchWorkspaceForTesting(undefined);
+    }
+  });
+
   test("scratch correction records one final failed row after cleanup failure and retry", async () => {
     _setWholeTaskRetryForTesting({ maxRetries: 1, baseDelayMs: 0 });
     const taskRows: TaskRecord[] = [];

@@ -755,6 +755,12 @@ async function reconcileGroup(
         status: "discarded",
         proposedFiles: [],
         appliedFiles: [],
+        cleanupIssue: {
+          status: "deferred",
+          reason:
+            "Worker cleanup is deferred until background AgentSession safety is confirmed; the recovery path may be removed after safe cleanup.",
+          recoveryPath: worker.workerRoot,
+        },
       };
       console.error(
         `[delegate] retaining abandoned isolated worker '${worker.workerRoot}' until its AgentSession is confirmed quiescent; proposal will not be snapshotted or applied`,
@@ -775,37 +781,11 @@ async function reconcileGroup(
                   `[delegate] safely cleaned deferred isolated worker '${worker.workerRoot}'`,
                 );
               } else {
-                result.integration = {
-                  status: "apply_failed",
-                  proposedFiles: [],
-                  appliedFiles: [],
-                  conflicts: [
-                    {
-                      path: "(workspace cleanup)",
-                      reason:
-                        "Deferred isolated worker removal failed; recovery workspace retained.",
-                    },
-                  ],
-                  worktreePath: worker.workerRoot,
-                };
                 console.error(
                   `[delegate] deferred isolated worker cleanup could not remove '${worker.workerRoot}'; retaining it as recovery evidence`,
                 );
               }
             } catch (error) {
-              result.integration = {
-                status: "apply_failed",
-                proposedFiles: [],
-                appliedFiles: [],
-                conflicts: [
-                  {
-                    path: "(workspace cleanup)",
-                    reason:
-                      error instanceof Error ? error.message : String(error),
-                  },
-                ],
-                worktreePath: worker.workerRoot,
-              };
               console.error(
                 `[delegate] deferred isolated worker cleanup failed for '${worker.workerRoot}'; retaining it`,
                 error,
@@ -1071,7 +1051,27 @@ async function reconcileGroup(
     return;
   }
 
-  await requireWorktreeRemoved(group.sourceRoot, pristineRoot);
+  try {
+    await requireWorktreeRemoved(group.sourceRoot, pristineRoot);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    // Source application has already succeeded. Cleanup failure must not
+    // rewrite that durable outcome as apply_failed; publish recovery metadata
+    // separately before the result is delivered.
+    for (const [taskIndex] of accepted) {
+      const integration = results[taskIndex]!.integration;
+      if (integration?.status !== "applied_unverified") continue;
+      integration.cleanupIssue = {
+        status: "failed",
+        reason,
+        recoveryPath: pristineRoot,
+      };
+    }
+    console.error(
+      `[delegate] applied isolated changes, but failed to remove recovery worktree '${pristineRoot}'; applied_unverified remains authoritative`,
+      error,
+    );
+  }
 }
 
 async function deletePrivateRefs(
@@ -1121,11 +1121,12 @@ async function markGroupReconciliationFailure(
       worker.proposalRef,
     );
     const patchExists = fs.existsSync(worker.patchPath);
-    const recoveryWorktree = pathEntryExists(worker.workerRoot)
-      ? worker.workerRoot
-      : pathEntryExists(pristineRoot)
-        ? pristineRoot
-        : undefined;
+    let recoveryWorktree: string | undefined;
+    if (pathEntryExists(worker.workerRoot)) {
+      recoveryWorktree = worker.workerRoot;
+    } else if (pathEntryExists(pristineRoot)) {
+      recoveryWorktree = pristineRoot;
+    }
     result.workspace = "isolated";
     result.integration = {
       status: "apply_failed",

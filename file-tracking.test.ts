@@ -93,6 +93,80 @@ describe("snapshotPhysicalToolTarget", () => {
     }
   });
 
+  test("does not count ordinary path components toward the symlink expansion limit", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "delegate-attribution-"));
+    const deepDirectory = path.join(cwd, ...Array(300).fill("d"));
+    const candidate = path.join(deepDirectory, "target.txt");
+    mkdirSync(deepDirectory, { recursive: true });
+    writeFileSync(candidate, "target");
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const attribution = snapshotPhysicalToolTarget(
+        { name: "edit", args: { path: candidate } },
+        cwd,
+      );
+      expect(attribution?.preExecutionPhysicalPath).toBe(candidate);
+      expect(attribution?.uncertain).toBe(false);
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("marks an existing leaf replaced by a symlink uncertain", () => {
+    if (process.platform === "win32") return;
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "delegate-attribution-"));
+    const candidate = path.join(cwd, "target.txt");
+    const external = path.join(cwd, "external.txt");
+    writeFileSync(candidate, "target");
+    writeFileSync(external, "external");
+    try {
+      const attribution = snapshotPhysicalToolTarget(
+        { name: "write", args: { path: candidate } },
+        cwd,
+      )!;
+      expect(
+        attribution.preExecutionPathSignatures?.some(
+          (signature) => signature.path === candidate,
+        ),
+      ).toBe(true);
+      expect(attribution.uncertain).toBe(false);
+
+      fs.unlinkSync(candidate);
+      fs.symlinkSync(external, candidate);
+
+      expect(revalidateFileAttribution(attribution).uncertain).toBe(true);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps a missing leaf uncertain when it is created as a symlink", () => {
+    if (process.platform === "win32") return;
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "delegate-attribution-"));
+    const candidate = path.join(cwd, "missing.txt");
+    const external = path.join(cwd, "external.txt");
+    writeFileSync(external, "external");
+    try {
+      const attribution = snapshotPhysicalToolTarget(
+        { name: "write", args: { path: candidate } },
+        cwd,
+      )!;
+      expect(attribution.preExecutionPhysicalPath).toBe(candidate);
+      expect(attribution.uncertain).toBe(true);
+
+      fs.symlinkSync(external, candidate);
+
+      expect(revalidateFileAttribution(attribution).uncertain).toBe(true);
+      expect(
+        revalidateFileAttribution(attribution).preExecutionPhysicalPath,
+      ).toBe(candidate);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   test("revalidates every pre-execution symlink-chain identity", () => {
     if (process.platform === "win32") return;
     const cwd = mkdtempSync(path.join(os.tmpdir(), "delegate-attribution-"));

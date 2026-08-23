@@ -164,9 +164,14 @@ function skipCsi(text: string, index: number): number {
  * line and ordinary whitespace structure for markdown/plain-text rendering.
  */
 export function sanitizeTerminalText(text: string): string {
-  return stripAnsi(text)
-    .replace(/\r\n?|\u2028|\u2029/g, "\n")
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]+/g, " ");
+  return (
+    stripAnsi(text)
+      .replace(/\r\n?|\u2028|\u2029/g, "\n")
+      .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]+/g, " ")
+      // Invisible bidi marks, embeddings/overrides, and isolates can reorder
+      // attacker-controlled terminal text without changing its stored spelling.
+      .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+  );
 }
 
 /**

@@ -535,6 +535,22 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
               w,
             ),
           );
+        if (integration.cleanupIssue) {
+          lines.push(
+            truncLine(
+              `${ind}${theme.fg("error", `cleanup ${integration.cleanupIssue.status}: ${sanitizeTerminalLine(integration.cleanupIssue.reason)}`)}`,
+              w,
+            ),
+          );
+          if (integration.cleanupIssue.recoveryPath) {
+            lines.push(
+              truncLine(
+                `${ind}${theme.fg("dim", `cleanup recovery: ${sanitizeTerminalLine(integration.cleanupIssue.recoveryPath)}`)}`,
+                w,
+              ),
+            );
+          }
+        }
       }
     }
     // Collapsed: one-line output preview so a human scanning the TUI sees

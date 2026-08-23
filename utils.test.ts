@@ -31,6 +31,18 @@ describe("terminal text sanitization", () => {
     expect(sanitized).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
   });
 
+  test("terminal sanitizers strip Unicode bidi formatting controls", () => {
+    const bidiControls =
+      "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
+    const input = `left${bidiControls}right\nnext`;
+
+    expect(sanitizeTerminalText(input)).toBe("leftright\nnext");
+    expect(sanitizeTerminalLine(input)).toBe("leftright next");
+    expect(sanitizeTerminalText(input)).not.toMatch(
+      /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/,
+    );
+  });
+
   test("unterminated control strings are handled without repeated rescanning", () => {
     const hostile = "\x1b]".repeat(100_000);
     expect(stripAnsi(hostile)).toBe("");

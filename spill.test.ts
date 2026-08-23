@@ -290,7 +290,8 @@ describe("renderOutputForPoll", () => {
     expect(rendered).toContain("TAILMARKER");
     expect(rendered).not.toContain("HEADMARKER");
     expect(rendered).toContain("truncated");
-    expect(rendered).toContain("spilled to a file when the ticket completes");
+    expect(rendered).toContain("spill to a file if possible");
+    expect(rendered).toContain("full in-result inclusion as the fallback");
     // Critically: no file is written for the poll path.
     expect(rendered).not.toMatch(/^.*spilled to \/.*\.md/);
   });

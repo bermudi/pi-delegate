@@ -182,8 +182,9 @@ export interface FileAttribution {
    * must not resolve this path again against the mutable post-execution tree. */
   preExecutionPhysicalPath?: string;
   /** Identity/signature chain used to obtain the physical snapshot. It covers
-   * resolved ancestors and every followed symlink, but excludes a non-symlink
-   * leaf because edit/write is expected to mutate that leaf. */
+   * every existing resolved component, including the leaf, plus the exact text
+   * of each followed symlink. In-place mutation preserves the leaf identity;
+   * replacement makes attribution uncertain. */
   preExecutionPathSignatures?: FileAttributionPathSignature[];
   /** Which explicit native tool supplied this evidence. */
   provenance: "edit" | "write";
@@ -286,7 +287,8 @@ export interface TaskResult {
    *  bound and dispatch omits top-level nested usage. Per-component cost fields
    *  stay 0 because `getSessionStats()` exposes only aggregate cost. */
   usage: Usage;
-  /** Scratch results are excluded from shared-file conflict detection and never resumable. */
+  /** Scratch is never resumable. Its certain internal writes are excluded from
+   * shared-file conflict detection; external or uncertain evidence is retained. */
   workspace?: WorkspaceMode;
   sessionFile?: string;
   /** All files the subagent is known to have touched, including bash mutations
@@ -314,6 +316,15 @@ export type TaskIntegrationStatus =
 interface TaskIntegrationFiles {
   proposedFiles: string[];
   appliedFiles: string[];
+  /** Cleanup is separate from the integration outcome: a proposal can remain
+   * successfully applied even when a disposable worktree cannot be removed. */
+  cleanupIssue?: {
+    status: "deferred" | "failed";
+    reason: string;
+    /** Stable recovery marker. It may disappear after a deferred cleanup
+     * succeeds, but is retained when cleanup fails. */
+    recoveryPath?: string;
+  };
 }
 
 interface TaskIntegrationWithoutRecovery extends TaskIntegrationFiles {

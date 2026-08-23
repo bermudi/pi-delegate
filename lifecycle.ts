@@ -130,6 +130,66 @@ function failTask(
   };
 }
 
+function scratchSetupFailureResult(
+  task: ResolvedTask,
+  error: unknown,
+  signalAborted: boolean,
+  startedAt: number,
+): TaskResult {
+  let message = error instanceof Error ? error.message : String(error);
+  let failureKind: TaskResult["failureKind"];
+  if (signalAborted) {
+    message = "Aborted";
+    failureKind = "cancelled";
+  } else if (error instanceof ScratchDeadlineError) {
+    message = formatDeadlineExceededError(task.deadlineMs ?? 0);
+    failureKind = "deadline_exceeded";
+  }
+  return {
+    ...failTask(task, message, undefined, failureKind),
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+/** Preserve every core evidence channel when the outer scratch projection
+ * itself fails. Paths cannot be trusted as projected, so structured evidence
+ * is retained verbatim and downgraded to uncertain rather than erased. */
+function scratchProjectionFailureResult(
+  task: ResolvedTask,
+  result: TaskResult | undefined,
+  error: unknown,
+  startedAt: number,
+): TaskResult {
+  const reason = error instanceof Error ? error.message : String(error);
+  const projectionError = `Scratch evidence projection failed: ${reason}`;
+  if (!result) {
+    return {
+      ...failTask(task, projectionError),
+      workspace: "scratch",
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  let combinedError = projectionError;
+  if (result.error) combinedError = `${result.error}\n${projectionError}`;
+  const fallback: TaskResult = {
+    ...result,
+    error: combinedError,
+    workspace: "scratch",
+    sessionFile: undefined,
+    durationMs: Math.max(result.durationMs, Date.now() - startedAt),
+    touchedFiles: [...result.touchedFiles],
+    attributedFiles: result.attributedFiles
+      ? [...result.attributedFiles]
+      : undefined,
+    fileAttributions: result.fileAttributions?.map((entry) => ({
+      ...entry,
+      uncertain: true,
+    })),
+  };
+  return propagateSessionQuarantine(result, fallback);
+}
+
 /** Build a successful TaskResult for session-management actions (close/list).
  *  Pass elapsedMs to record wall time since delegate started (matches the live progress UI). */
 function completeSessionAction(
@@ -869,30 +929,13 @@ async function runResolvedTaskUnlocked(
       deadlineAt,
     );
   } catch (error) {
-    const setupError = error instanceof Error ? error.message : String(error);
-    const deadlineExceeded =
-      !env.signal?.aborted && error instanceof ScratchDeadlineError;
-    return recordTaskOutcome(
-      env,
-      p,
+    const setupFailure = scratchSetupFailureResult(
       task,
-      finishTask(env, p, {
-        ...failTask(
-          task,
-          env.signal?.aborted
-            ? "Aborted"
-            : deadlineExceeded
-              ? formatDeadlineExceededError(task.deadlineMs ?? 0)
-              : setupError,
-        ),
-        failureKind: env.signal?.aborted
-          ? "cancelled"
-          : deadlineExceeded
-            ? "deadline_exceeded"
-            : undefined,
-        durationMs: Date.now() - startedAt,
-      }),
+      error,
+      env.signal?.aborted === true,
+      startedAt,
     );
+    return recordTaskOutcome(env, p, task, finishTask(env, p, setupFailure));
   }
 
   const executionTask: ResolvedTask = {
@@ -1026,23 +1069,7 @@ async function runResolvedTaskUnlocked(
       attributedFiles: [...new Set(projectedAttributedFiles)],
     };
   } catch (error) {
-    const failedProjection = {
-      ...failTask(task, error instanceof Error ? error.message : String(error)),
-      ...(result
-        ? {
-            tokens: result.tokens,
-            usage: result.usage,
-            incomplete: result.incomplete,
-          }
-        : {}),
-      workspace: "scratch" as const,
-      durationMs: Date.now() - startedAt,
-    };
-    // Path projection can throw after core has handed us an abandoned result.
-    // Keep its private quarantine marker so finally defers workspace cleanup.
-    result = result
-      ? propagateSessionQuarantine(result, failedProjection)
-      : failedProjection;
+    result = scratchProjectionFailureResult(task, result, error, startedAt);
     // runResolvedTaskCore may already have notified a successful result
     // before path mapping failed. Correct that observable outcome below.
     needsCorrection = true;
@@ -1221,6 +1248,17 @@ function deadlineExceededResult(
     attributedFiles: prior?.attributedFiles ?? [],
     fileAttributions: prior?.fileAttributions,
   };
+}
+
+function abandonedAcquisitionResult(
+  task: ResolvedTask,
+  timing: AttemptTiming,
+  reason: "parent-aborted" | "deadline",
+): TaskResult {
+  if (reason === "parent-aborted") {
+    return failTask(task, "Aborted", undefined, "cancelled");
+  }
+  return deadlineExceededResult(task, timing);
 }
 
 function noteAttemptProgress(
@@ -1444,10 +1482,11 @@ async function runTaskAttempt(
     // Acquisition itself is not cancellable upstream. Its quarantine remains
     // active until the promise settles and any late session finishes disposal.
     const quarantine = quarantineAbandonedAcquisition(task, acquisition);
-    const result =
-      acquisitionOutcome.reason === "parent-aborted"
-        ? failTask(task, "Aborted", undefined, "cancelled")
-        : deadlineExceededResult(task, timing);
+    const result = abandonedAcquisitionResult(
+      task,
+      timing,
+      acquisitionOutcome.reason,
+    );
     return markSessionQuarantined(result, quarantine);
   }
   const acquired = acquisitionOutcome.value;

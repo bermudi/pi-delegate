@@ -36,8 +36,9 @@ export interface ScratchWorkspace {
   resolveFileAttribution?(
     attribution: FileAttribution,
   ): Promise<FileAttribution | undefined>;
-  /** Project the lexical touched-path half of structured attribution. An
-   * unchanged copied symlink node is suppressed; changed nodes stay lexical. */
+  /** Project the lexical touched-path half of structured attribution. A
+   * certainly attributed copied symlink is suppressed only when both link
+   * identities remain stable while their matching targets are read. */
   resolveAttributedLexicalTouch?(
     attribution: FileAttribution,
   ): Promise<string | undefined>;
@@ -859,14 +860,19 @@ export async function createScratchWorkspace(
     };
   };
   const resolveAttributedLexicalTouch = async (
-    attribution: FileAttribution,
+    original: FileAttribution,
   ): Promise<string | undefined> => {
+    const attribution = revalidateFileAttribution(original);
     const lexical = path.resolve(attribution.lexicalPath);
     if (!isWithin(completedRoot, lexical)) return lexical;
     const source = path.join(
       sourceRoot!,
       path.relative(completedRoot, lexical),
     );
+    // Suppression is an optimization for a copied, unchanged symlink node. An
+    // uncertain attribution cannot prove that the lexical node was harmless.
+    if (attribution.uncertain) return source;
+
     const inspect = async (
       candidate: string,
     ): Promise<fs.Stats | undefined> => {
@@ -884,22 +890,30 @@ export async function createScratchWorkspace(
       inspect(source),
     ]);
     if (scratchStat?.isSymbolicLink() && sourceStat?.isSymbolicLink()) {
-      const read = async (candidate: string): Promise<string | undefined> => {
+      const readStableLink = async (
+        candidate: string,
+        before: fs.Stats,
+      ): Promise<string | undefined> => {
+        let target: string;
         try {
-          return await fs.promises.readlink(candidate);
+          target = await fs.promises.readlink(candidate);
         } catch (error) {
           if (!isExpectedPathRace(error)) {
             logScratchProjectionFailure("readlink", candidate, error);
           }
           return undefined;
         }
+        const after = await inspect(candidate);
+        return after?.isSymbolicLink() && sameFileIdentity(before, after)
+          ? target
+          : undefined;
       };
       const [scratchTarget, sourceTarget] = await Promise.all([
-        read(lexical),
-        read(source),
+        readStableLink(lexical, scratchStat),
+        readStableLink(source, sourceStat),
       ]);
-      // A readlink race is not evidence that the nodes matched. Keep the
-      // lexical source path rather than dropping it or rejecting the result.
+      // A readlink or identity race is not evidence that the nodes matched.
+      // Keep the lexical source path rather than dropping it.
       if (
         scratchTarget !== undefined &&
         sourceTarget !== undefined &&

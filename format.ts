@@ -514,6 +514,16 @@ export function formatCompletedTask(
         `attribution classification issue: ${issue.path}: ${issue.reason}`,
       );
     }
+    if (integration.cleanupIssue) {
+      parts.push(
+        `cleanup ${integration.cleanupIssue.status}: ${integration.cleanupIssue.reason}`,
+      );
+      if (integration.cleanupIssue.recoveryPath) {
+        parts.push(
+          `cleanup recovery path: ${integration.cleanupIssue.recoveryPath}`,
+        );
+      }
+    }
     if (integration.status === "applied_unverified") {
       parts.push(
         'Changes were applied but not verified. Suggested next call: delegate({ tasks: [{ agent: "reviewer", workspace: "scratch", prompt: "Review the applied isolated changes and run the relevant tests." }] })',

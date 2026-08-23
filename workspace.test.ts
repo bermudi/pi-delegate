@@ -2,6 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { snapshotPhysicalToolTarget } from "./file-tracking.ts";
 import { createScratchWorkspace, _testHooks } from "./workspace.ts";
 
 function reflinkCapableTestDir(): string | undefined {
@@ -732,7 +733,7 @@ describe("scratch workspace", () => {
   );
 
   scratchTest(
-    "projects structured attribution without re-resolving snapshots and suppresses unchanged symlinks",
+    "retains leaf races while suppressing only certain unchanged symlinks",
     async () => {
       if (process.platform === "win32") return;
       const parent = testParent();
@@ -747,17 +748,35 @@ describe("scratch workspace", () => {
       try {
         const workspace = await createScratchWorkspace(repo);
         const node = path.join(workspace.cwd, "node.txt");
+        const nodeAttribution = snapshotPhysicalToolTarget(
+          { name: "write", args: { path: node } },
+          workspace.cwd,
+        )!;
         fs.unlinkSync(node);
         fs.symlinkSync(outside, node);
 
-        expect(
-          await workspace.resolveFileAttribution?.({
-            lexicalPath: node,
-            preExecutionPhysicalPath: node,
-            provenance: "write",
-            uncertain: false,
-          }),
-        ).toBeUndefined();
+        const replacedNode =
+          await workspace.resolveFileAttribution?.(nodeAttribution);
+        expect(replacedNode?.lexicalPath).toBe(path.join(repo, "node.txt"));
+        expect(replacedNode?.preExecutionPhysicalPath).toBe(
+          path.join(repo, "node.txt"),
+        );
+        expect(replacedNode?.uncertain).toBe(true);
+
+        const missing = path.join(workspace.cwd, "missing.txt");
+        const missingAttribution = snapshotPhysicalToolTarget(
+          { name: "write", args: { path: missing } },
+          workspace.cwd,
+        )!;
+        fs.symlinkSync(outside, missing);
+        const createdNode =
+          await workspace.resolveFileAttribution?.(missingAttribution);
+        expect(createdNode?.lexicalPath).toBe(path.join(repo, "missing.txt"));
+        expect(createdNode?.preExecutionPhysicalPath).toBe(
+          path.join(repo, "missing.txt"),
+        );
+        expect(createdNode?.uncertain).toBe(true);
+
         expect(
           await workspace.resolveAttributedLexicalTouch?.({
             lexicalPath: path.join(workspace.cwd, "link.txt"),
@@ -766,6 +785,14 @@ describe("scratch workspace", () => {
             uncertain: false,
           }),
         ).toBeUndefined();
+        expect(
+          await workspace.resolveAttributedLexicalTouch?.({
+            lexicalPath: path.join(workspace.cwd, "link.txt"),
+            preExecutionPhysicalPath: path.join(workspace.cwd, "target.txt"),
+            provenance: "edit",
+            uncertain: true,
+          }),
+        ).toBe(path.join(repo, "link.txt"));
         expect(
           await workspace.resolveFileAttribution?.({
             lexicalPath: path.join(workspace.cwd, "uncertain.txt"),
@@ -838,6 +865,55 @@ describe("scratch workspace", () => {
         }
       } finally {
         log.mockRestore();
+        cleanTestDir(parent);
+      }
+    },
+  );
+
+  scratchTest(
+    "retains lexical source evidence when a symlink changes during readlink",
+    async () => {
+      if (process.platform === "win32") return;
+      const parent = testParent();
+      const repo = path.join(parent, "repo");
+      fs.mkdirSync(repo);
+      fs.writeFileSync(path.join(repo, "target.txt"), "target");
+      fs.symlinkSync("target.txt", path.join(repo, "link.txt"));
+      execFileSync("git", ["init", "--quiet"], { cwd: repo });
+      try {
+        const workspace = await createScratchWorkspace(repo);
+        const scratchLink = path.join(workspace.cwd, "link.txt");
+        const sourceLink = path.join(repo, "link.txt");
+        const original = fs.promises.readlink;
+        let replaced = false;
+        const readlink = spyOn(fs.promises, "readlink").mockImplementation(
+          async (candidate, options) => {
+            const target = (await original(
+              candidate,
+              options as never,
+            )) as string;
+            if (!replaced && path.resolve(String(candidate)) === scratchLink) {
+              replaced = true;
+              fs.unlinkSync(scratchLink);
+              fs.writeFileSync(scratchLink, "replacement");
+            }
+            return target;
+          },
+        );
+        try {
+          expect(
+            await workspace.resolveAttributedLexicalTouch?.({
+              lexicalPath: scratchLink,
+              preExecutionPhysicalPath: path.join(workspace.cwd, "target.txt"),
+              provenance: "write",
+              uncertain: false,
+            }),
+          ).toBe(sourceLink);
+        } finally {
+          readlink.mockRestore();
+          await workspace.cleanup();
+        }
+      } finally {
         cleanTestDir(parent);
       }
     },

@@ -898,7 +898,14 @@ export async function runAgentSession(
       promptSettlement,
       cancellationRequested.then(() => ({ status: "cancelled" as const })),
     ]);
-    if (promptOutcome.status === "rejected") throw promptOutcome.error;
+    if (promptOutcome.status === "rejected") {
+      // A rejected prompt can still have fired agent_settled extension work.
+      // Keep ownership until that work is quiescent before routing the prompt
+      // error through the evidence-preserving catch path below. If cancellation
+      // arrived too, this remains the same bounded unwind/quarantine boundary.
+      await waitForSessionQuiescence();
+      throw promptOutcome.error;
+    }
     await waitForSessionQuiescence();
     if (promptOutcome.status === "cancelled" && !promptSettled) {
       // isIdle/quiescence can lie while a provider/tool keeps prompt() pending.

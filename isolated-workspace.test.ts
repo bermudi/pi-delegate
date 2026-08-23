@@ -591,17 +591,27 @@ describe("Git-native isolated workspace", () => {
     expect(privateRefs(repo)).toEqual([]);
   });
 
-  test("surfaces pristine cleanup failure with a retained recovery path", async () => {
+  test("keeps applied_unverified when post-apply cleanup retains a recovery worktree", async () => {
     const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    fs.writeFileSync(path.join(one!.cwd, "shared.txt"), "applied\n");
     _setRemoveWorktreeHookForTesting((destination) =>
       path.basename(destination) === "pristine" ? false : undefined,
     );
 
     const [result] = await batch!.reconcile([success()]);
 
-    expect(result!.integration?.status).toBe("apply_failed");
-    expect(result!.integration?.worktreePath).toEndWith("/pristine");
-    expect(fs.existsSync(result!.integration!.worktreePath!)).toBe(true);
+    expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
+      "applied\n",
+    );
+    expect(result!.integration?.status).toBe("applied_unverified");
+    expect(result!.integration?.cleanupIssue?.status).toBe("failed");
+    expect(result!.integration?.cleanupIssue?.recoveryPath).toEndWith(
+      "/pristine",
+    );
+    expect(
+      fs.existsSync(result!.integration!.cleanupIssue!.recoveryPath!),
+    ).toBe(true);
   });
 
   test("removes an earlier baseline ref when batch preparation fails", async () => {
@@ -629,6 +639,13 @@ describe("Git-native isolated workspace", () => {
     const [result] = await batch!.reconcile([abandoned]);
 
     expect(result!.integration?.status).toBe("discarded");
+    expect(result!.integration?.cleanupIssue).toEqual({
+      status: "deferred",
+      reason:
+        "Worker cleanup is deferred until background AgentSession safety is confirmed; the recovery path may be removed after safe cleanup.",
+      recoveryPath: one!.cwd,
+    });
+    const deliveredIntegration = JSON.stringify(result!.integration);
     expect(result!.error).toContain("quiescence was abandoned");
     expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
       "baseline\n",
@@ -641,6 +658,7 @@ describe("Git-native isolated workspace", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     expect(fs.existsSync(one!.cwd)).toBe(false);
+    expect(JSON.stringify(result!.integration)).toBe(deliveredIntegration);
     expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
       "baseline\n",
     );

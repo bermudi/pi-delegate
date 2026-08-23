@@ -101,16 +101,9 @@ function resolvePhysicalSnapshot(
   let uncertain = false;
   const signatures: FileAttributionPathSignature[] = [];
   const followed = new Set<string>();
-  let followedSymlink = false;
+  let symlinkExpansions = 0;
 
-  for (let traversals = 0; parts.length; traversals++) {
-    if (traversals > 256) {
-      logCanonicalizationFailure(
-        logCandidate,
-        Object.assign(new Error("too many symbolic links"), { code: "ELOOP" }),
-      );
-      return { uncertain: true, signatures };
-    }
+  while (parts.length) {
     const component = parts.shift()!;
     const candidate = path.join(cursor, component);
     let stat: fs.Stats;
@@ -119,9 +112,13 @@ function resolvePhysicalSnapshot(
     } catch (error) {
       const code = errnoOf(error);
       if (code === "ENOENT" || code === "ENOTDIR") {
+        // A missing or unresolved component can be created or replaced before
+        // the tool opens it. Without an identity to guard that transition, the
+        // projected target must remain conservative even on a purely lexical
+        // path with no symlink seen yet.
         return {
           path: path.resolve(candidate, ...parts),
-          uncertain: uncertain || followedSymlink,
+          uncertain: true,
           signatures,
         };
       }
@@ -130,6 +127,16 @@ function resolvePhysicalSnapshot(
     }
 
     if (stat.isSymbolicLink()) {
+      symlinkExpansions++;
+      if (symlinkExpansions > 256) {
+        logCanonicalizationFailure(
+          logCandidate,
+          Object.assign(new Error("too many symbolic links"), {
+            code: "ELOOP",
+          }),
+        );
+        return { uncertain: true, signatures };
+      }
       let target: string;
       try {
         target = fs.readlinkSync(candidate);
@@ -156,7 +163,6 @@ function resolvePhysicalSnapshot(
         return { uncertain: true, signatures };
       }
       followed.add(cycleKey);
-      followedSymlink = true;
       const targetPath = path.isAbsolute(target)
         ? target
         : path.resolve(path.dirname(candidate), target);
@@ -167,9 +173,10 @@ function resolvePhysicalSnapshot(
       continue;
     }
 
-    // The leaf is expected to change. Ancestors are identity guards: replacing
-    // any of them can redirect the physical target after this snapshot.
-    if (parts.length) signatures.push(signatureOf(candidate, stat));
+    // Every existing component is an identity guard, including the leaf. An
+    // in-place edit preserves the leaf identity; replacement or creation does
+    // not, and may redirect the write through a newly installed symlink.
+    signatures.push(signatureOf(candidate, stat));
     cursor = candidate;
   }
 
@@ -179,10 +186,10 @@ function resolvePhysicalSnapshot(
 /**
  * Capture edit/write attribution before tool work begins.
  *
- * realpathSync handles an existing symlink leaf directly. For a target that
- * does not yet exist, walk to a resolvable ancestor and append the missing
- * suffix, preserving write-through attribution through symlinked directories.
- * Dangling symlinks retain their intended target but are marked uncertain.
+ * The target is resolved component by component while recording the identity
+ * of every existing component, including the leaf, and the text of every
+ * followed symlink. Missing or dangling components retain their projected path
+ * but are uncertain because creation can redirect the eventual tool open.
  * Non-ENOENT/ENOTDIR failures are actionable and logged with the lexical
  * candidate and errno; callers retain that uncertain lexical evidence.
  */

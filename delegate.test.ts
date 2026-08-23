@@ -2360,6 +2360,34 @@ describe("formatCompletedTask", () => {
     }
   });
 
+  test("surfaces isolated cleanup failure separately from applied status", () => {
+    const lines = formatCompletedTask(
+      makeTask({ workspace: "isolated" }),
+      makeResult({
+        workspace: "isolated",
+        integration: {
+          status: "applied_unverified",
+          proposedFiles: ["src/a.ts"],
+          appliedFiles: ["src/a.ts"],
+          cleanupIssue: {
+            status: "failed",
+            reason: "could not remove disposable worktree",
+            recoveryPath: "/tmp/delegate-recovery/pristine",
+          },
+        },
+      }),
+    );
+    const text = lines.join("\n");
+
+    expect(text).toContain("[INTEGRATION: applied_unverified");
+    expect(text).toContain(
+      "cleanup failed: could not remove disposable worktree",
+    );
+    expect(text).toContain(
+      "cleanup recovery path: /tmp/delegate-recovery/pristine",
+    );
+  });
+
   test("delegates failure rendering to formatFailedTask", () => {
     const r = makeResult({
       error: "524 cloudflare timeout",
