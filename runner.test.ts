@@ -16,8 +16,12 @@ import * as path from "node:path";
 import { getGitChangedFiles } from "./file-tracking.ts";
 import * as fileTracking from "./file-tracking.ts";
 import * as timer from "./timer.ts";
-import { runAgentSession } from "./runner.ts";
+import {
+  _setRunnerQuiescenceTimingsForTesting,
+  runAgentSession,
+} from "./runner.ts";
 import { _setStallTimeoutForTesting } from "./config.ts";
+import { sessionQuarantineOf } from "./session-quarantine.ts";
 
 /** Minimal fake AgentSession — records whether prompt() was invoked and allows
  *  emitting tool events / mutating messages and stats. */
@@ -131,6 +135,69 @@ describe("runAgentSession abort re-check", () => {
 
     expect(result.error).toBe("Aborted");
     expect(prompted()).toBe(false);
+  });
+
+  test("freezes terminal progress/output after abandonment and resolves safety only after recovery", async () => {
+    let idle = false;
+    let progressUpdates = 0;
+    let resolvePrompt!: () => void;
+    const promptDone = new Promise<void>((resolve) => {
+      resolvePrompt = resolve;
+    });
+    const { session, emit } = fakeSession({
+      prompt: () => promptDone,
+      isIdle: () => idle,
+    });
+    _setRunnerQuiescenceTimingsForTesting({
+      cancelledUnwindBudgetMs: 15,
+      cancelledGraceMs: 1,
+      eventProbeMs: 1,
+    });
+
+    try {
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        () => {
+          progressUpdates++;
+        },
+        new Set<string>(),
+        Date.now(),
+        Date.now() + 5,
+      );
+      const quarantine = sessionQuarantineOf(result);
+      expect(quarantine).toBeDefined();
+      expect(result.incomplete).toBe("quiescence_abandoned");
+      const terminalProgressUpdates = progressUpdates;
+      emit({
+        type: "message_update",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "late unsafe output" }],
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(progressUpdates).toBe(terminalProgressUpdates);
+      expect(result.output).not.toContain("late unsafe output");
+      let safe = false;
+      void quarantine!.safe.then(() => {
+        safe = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(safe).toBe(false);
+
+      idle = true;
+      resolvePrompt();
+      emit({ type: "agent_settled" });
+      await quarantine!.safe;
+      expect(safe).toBe(true);
+    } finally {
+      _setRunnerQuiescenceTimingsForTesting(undefined);
+      idle = true;
+      resolvePrompt();
+    }
   });
 
   test("cancellation queued before prompt start never invokes prompt", async () => {

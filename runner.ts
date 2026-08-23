@@ -15,13 +15,25 @@ import { scheduleDeadline } from "./timer.ts";
 import {
   createQuiescenceBarrier,
   type CancellationSource,
+  type QuiescenceBarrier,
 } from "./quiescence.ts";
+import { markSessionQuarantined } from "./session-quarantine.ts";
 import type { Usage } from "@earendil-works/pi-ai";
 import type {
   AgentProgressUpdate,
   TaskFailureKind,
   ToolActivity,
 } from "./types.ts";
+
+let quiescenceTimingsForTesting:
+  Partial<import("./quiescence.ts").QuiescenceTimings> | undefined;
+
+/** @internal Test-only timings for forcing the bounded abandonment path. */
+export function _setRunnerQuiescenceTimingsForTesting(
+  timings: Partial<import("./quiescence.ts").QuiescenceTimings> | undefined,
+): void {
+  quiescenceTimingsForTesting = timings;
+}
 
 /** Human-facing error for an expired `deadlineMs` budget.
  *
@@ -98,6 +110,9 @@ export async function runAgentSession(
    *  deadline (session never used) from a mid-prompt deadline (session was
    *  prompted and may have partial state mutations). */
   prompted: boolean;
+  /** Quiescence was abandoned. All returned accounting and evidence are lower
+   * bounds captured before quarantined background work became safe. */
+  incomplete?: "quiescence_abandoned";
 }> {
   const startTime = start ?? Date.now();
   const stallTimeoutMs = getStallTimeoutMs(delegateConfig);
@@ -111,6 +126,44 @@ export async function runAgentSession(
   let clearDeadline: (() => void) | undefined;
   let prompted = false;
   let cancellationDispatched = false;
+  let promptSettlement:
+    | Promise<
+        | { status: "not_started" | "fulfilled" }
+        | { status: "rejected"; error: unknown }
+      >
+    | undefined;
+  let recoveryBarrier: QuiescenceBarrier | undefined;
+  let abandonmentSafety: Promise<void> | undefined;
+  let unsubscribeFull: (() => void) | undefined;
+  let unsubscribeRecovery: (() => void) | undefined;
+  const safeLog = (message: string, error?: unknown): void => {
+    try {
+      console.error(message, error);
+    } catch {
+      // Recovery and listener cleanup must never create an unhandled failure.
+    }
+  };
+  const removeFullListener = (): void => {
+    const remove = unsubscribeFull;
+    unsubscribeFull = undefined;
+    try {
+      remove?.();
+    } catch (error) {
+      safeLog("[delegate] full AgentSession listener cleanup failed", error);
+    }
+  };
+  const removeRecoveryListener = (): void => {
+    const remove = unsubscribeRecovery;
+    unsubscribeRecovery = undefined;
+    try {
+      remove?.();
+    } catch (error) {
+      safeLog(
+        "[delegate] recovery AgentSession listener cleanup failed",
+        error,
+      );
+    }
+  };
   const activities: ToolActivity[] = [];
   const pendingById = new Map<string, ToolActivity>();
   let notifyCancellationRequested!: () => void;
@@ -124,6 +177,7 @@ export async function runAgentSession(
   // why it cannot be answered deterministically against today's host.
   const barrier = createQuiescenceBarrier({
     session,
+    timings: quiescenceTimingsForTesting,
     cancellation: () =>
       signal?.aborted
         ? "parent-aborted"
@@ -139,17 +193,26 @@ export async function runAgentSession(
   // but cancellation has an explicit terminal path instead of repeatedly
   // waiting on work that the host cannot prove has stopped.
   let sessionAbandoned = false;
+  let startAbandonedRecovery!: (source: CancellationSource) => Promise<void>;
   const waitForSessionQuiescence = async () => {
     if (sessionAbandoned) return "abandoned" as const;
     const outcome = await barrier.wait();
-    if (outcome === "abandoned") sessionAbandoned = true;
+    if (outcome === "abandoned") {
+      sessionAbandoned = true;
+      const source = signal?.aborted
+        ? "parent-aborted"
+        : deadlineExceeded
+          ? "deadline"
+          : "stalled";
+      abandonmentSafety ??= startAbandonedRecovery(source);
+    }
     return outcome;
   };
 
   const requestSessionCancellation = (source: CancellationSource): void => {
     cancellationDispatched = true;
     const logFailure = (operation: string, error: unknown) => {
-      console.error(`[delegate] ${source} subagent ${operation} failed`, error);
+      safeLog(`[delegate] ${source} subagent ${operation} failed`, error);
     };
     try {
       session.abortCompaction();
@@ -166,9 +229,15 @@ export async function runAgentSession(
     // may synchronously emit events (e.g. a final message_update as the stream
     // unwinds); recording after the call attributes those to the abort, so the
     // barrier's re-abort check doesn't loop on the abort's own events.
-    void session.abort().catch((error: unknown) => {
+    try {
+      void session.abort().catch((error: unknown) => {
+        logFailure("agent cancellation", error);
+      });
+    } catch (error) {
+      // Some host fakes/versions can throw before returning the abort promise.
+      // Continue recording cancellation so the quarantine path still engages.
       logFailure("agent cancellation", error);
-    });
+    }
     // Any session event after this point means new work started despite the
     // abort (e.g. a continuation prompt from an extension's onComplete
     // callback delayed by async auth). The barrier re-aborts it rather than
@@ -177,6 +246,86 @@ export async function runAgentSession(
     // Wake the prompt race only after every cooperative cancellation request
     // has been dispatched and the barrier knows its cancellation generation.
     notifyCancellationRequested();
+  };
+
+  startAbandonedRecovery = (source) => {
+    safeLog(
+      `[delegate] QUARANTINING ${source} AgentSession after quiescence abandonment; it will not be reused, disposed, or have its workspace cleaned until background termination confirms safety`,
+    );
+
+    try {
+      recoveryBarrier = createQuiescenceBarrier({
+        session,
+        cancellation: () => source,
+        // Recovery is deliberately unbounded. If the host never proves safety,
+        // the quarantine and its workspace live forever rather than racing work.
+        timings: { cancelledUnwindBudgetMs: Number.POSITIVE_INFINITY },
+        // A permanent quarantine is an intentional leak, not a reason to keep a
+        // headless Node process alive forever on its liveness probe.
+        unrefTimers: true,
+        cancel: (nextSource) => {
+          requestSessionCancellation(nextSource);
+          recoveryBarrier?.noteCancellationRequested();
+        },
+        onAbandon: () => {
+          // Infinity above makes this unreachable; keep fail-closed semantics if
+          // timing arithmetic ever changes.
+        },
+      });
+
+      // Freeze user-visible output/progress at the terminal result boundary.
+      // Recovery needs only event generation; retaining the full listener
+      // would mutate returned evidence and emit stale terminal progress.
+      unsubscribeRecovery = session.subscribe(() =>
+        recoveryBarrier?.noteEvent(),
+      );
+      removeFullListener();
+
+      requestSessionCancellation(source);
+      recoveryBarrier.noteCancellationRequested();
+    } catch (error) {
+      removeFullListener();
+      removeRecoveryListener();
+      safeLog(
+        `[delegate] quarantined ${source} AgentSession recovery setup failed; retaining session and workspace indefinitely`,
+        error,
+      );
+      return new Promise<void>(() => {});
+    }
+
+    const recovery = (async () => {
+      // Keep actively re-aborting while an ignored prompt/provider call winds
+      // down. A first quiet observation is not enough if prompt() itself is
+      // unresolved; after it settles, require a fresh quiet window.
+      await Promise.all([
+        promptSettlement ?? Promise.resolve({ status: "not_started" as const }),
+        recoveryBarrier!.wait(),
+      ]);
+      await recoveryBarrier!.wait();
+      safeLog(
+        `[delegate] quarantined ${source} AgentSession is now quiescent; deferred disposal and workspace cleanup may proceed`,
+      );
+      removeRecoveryListener();
+    })().catch((error) => {
+      safeLog(
+        `[delegate] quarantined ${source} AgentSession background termination failed; retaining session and workspace indefinitely`,
+        error,
+      );
+      // Never resolve safety after an observer failure: leaking is safer than
+      // allowing disposal or filesystem teardown to race unknown live work.
+      return new Promise<void>(() => {});
+    });
+    return recovery;
+  };
+
+  const finishResult = <T extends object>(
+    result: T,
+  ): T & { incomplete?: "quiescence_abandoned" } => {
+    if (!abandonmentSafety) return result;
+    return markSessionQuarantined(
+      { ...result, incomplete: "quiescence_abandoned" as const },
+      { safe: abandonmentSafety },
+    );
   };
 
   // Snapshot cumulative usage before the prompt so we can report only the
@@ -448,8 +597,9 @@ export async function runAgentSession(
   // result, isError) — AgentSession forwards the underlying agent events
   // verbatim. Retry and compaction events are handled below; queue/bookkeeping
   // events and thinking changes are intentionally ignored.
-  const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+  unsubscribeFull = session.subscribe((event: AgentSessionEvent) => {
     barrier.noteEvent();
+    recoveryBarrier?.noteEvent();
     switch (event.type) {
       case "tool_execution_start": {
         const now = Date.now();
@@ -610,14 +760,12 @@ export async function runAgentSession(
     // runner never prompts it. Use the same bounded cancelled unwind as every
     // other cancellation path before returning ownership.
     await waitForSessionQuiescence();
-    // The early return skips the try/finally below, so clean up the
-    // subscription and abort listener here — otherwise they leak on every
-    // already-aborted call, which is especially harmful for pooled sessions
-    // whose subscription would outlive the task.
+    // The early return skips the try/finally below. The abandonment path has
+    // already replaced the full listener with its minimal recovery listener.
     if (signal && abortHandler)
       signal.removeEventListener("abort", abortHandler);
-    unsubscribe();
-    return {
+    removeFullListener();
+    return finishResult({
       output: "",
       error: "Aborted",
       durationMs: Date.now() - startTime,
@@ -626,7 +774,7 @@ export async function runAgentSession(
       touchedFiles: [],
       attributedFiles: [],
       prompted: false,
-    };
+    });
   }
 
   // If the deadline is already in the past, request cooperative cancellation
@@ -648,9 +796,9 @@ export async function runAgentSession(
     clearDeadlineWatchdog();
     if (signal && abortHandler)
       signal.removeEventListener("abort", abortHandler);
-    unsubscribe();
+    removeFullListener();
     if (signal?.aborted) {
-      return {
+      return finishResult({
         output: "",
         error: "Aborted",
         durationMs: Date.now() - startTime,
@@ -659,9 +807,9 @@ export async function runAgentSession(
         touchedFiles: [],
         attributedFiles: [],
         prompted: false,
-      };
+      });
     }
-    return {
+    return finishResult({
       output: "(no output)",
       error: deadlineError(),
       durationMs: Date.now() - startTime,
@@ -669,9 +817,9 @@ export async function runAgentSession(
       usage: emptyUsage(),
       touchedFiles: [],
       attributedFiles: [],
-      failureKind: "deadline_exceeded",
+      failureKind: "deadline_exceeded" as const,
       prompted: false,
-    };
+    });
   }
 
   try {
@@ -689,7 +837,7 @@ export async function runAgentSession(
     // that callback starts a newly cancelled prompt. Rejections are converted
     // to data so a late rejection after abandonment cannot become an unhandled
     // promise rejection.
-    const promptSettlement = Promise.resolve().then(async () => {
+    promptSettlement = Promise.resolve().then(async () => {
       if (cancellationDispatched) return { status: "not_started" as const };
       prompted = true;
       try {
@@ -757,7 +905,7 @@ export async function runAgentSession(
           ? stallError()
           : state.errorMessage;
 
-    return {
+    return finishResult({
       output: output || "(no output)",
       error: errorMessage,
       durationMs: Date.now() - startTime,
@@ -773,7 +921,7 @@ export async function runAgentSession(
             ? "stalled"
             : undefined,
       prompted,
-    };
+    });
   } catch (err) {
     // Preserve partial-work evidence: whatever assistant output, token spend,
     // and touched files accumulated before the failure/abort. The touched-file
@@ -829,7 +977,7 @@ export async function runAgentSession(
           : err instanceof Error
             ? err.message
             : String(err);
-    return {
+    return finishResult({
       output: partialOutput || "(no output)",
       error: msg,
       durationMs: Date.now() - startTime,
@@ -845,12 +993,12 @@ export async function runAgentSession(
             ? "stalled"
             : undefined,
       prompted,
-    };
+    });
   } finally {
     clearStallWatchdog();
     clearDeadlineWatchdog();
     if (signal && abortHandler)
       signal.removeEventListener("abort", abortHandler);
-    unsubscribe();
+    removeFullListener();
   }
 }

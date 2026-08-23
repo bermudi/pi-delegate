@@ -37,6 +37,8 @@ import {
 } from "./shared-write-safety.ts";
 import type { CallSpan } from "./telemetry.ts";
 import { prepareIsolatedBatch } from "./isolated-workspace.ts";
+import { sanitizeTerminalLine } from "./utils.ts";
+import { quarantinedTasks } from "./session-quarantine.ts";
 import type {
   AgentConfig,
   AsyncTicket,
@@ -110,7 +112,7 @@ export function initProgress(resolved: ResolvedTask[]): TaskProgress[] {
     id: t.id,
     index: i,
     agent: t.agentName,
-    task: trunc(t.prompt || t.sessionAction || "", 50),
+    task: trunc(sanitizeTerminalLine(t.prompt || t.sessionAction || ""), 50),
     status: "pending" as const,
     durationMs: 0,
     tokens: 0,
@@ -365,6 +367,12 @@ export async function dispatchDelegate(
               `active sync ${taskReference(active.tasks[index]!, index).toLowerCase()}`,
             );
           }
+        }
+        for (const quarantined of quarantinedTasks()) {
+          activeResolved.push(asAdmissionWriter(quarantined));
+          references.push(
+            `quarantined ${quarantined.agentName}${quarantined.id ? ` task #${quarantined.id}` : " task"}`,
+          );
         }
 
         const incomingCount = resolved.length;
@@ -874,6 +882,11 @@ export async function dispatchSync(
     // Aggregate subagent spend so Pi folds it into the parent's
     // session/footer totals. Sync dispatch only — async results arrive via a
     // follow-up message that has no usage slot (see DelegateToolResult).
-    usage: sumUsage(finalResults.map((r) => r.usage)),
+    // A quarantined task can continue spending after this terminal snapshot.
+    // Omitting top-level usage avoids presenting a lower bound as final nested
+    // accounting to Pi; per-task results retain the observed lower bound.
+    ...(finalResults.some((r) => r.incomplete)
+      ? {}
+      : { usage: sumUsage(finalResults.map((r) => r.usage)) }),
   };
 }

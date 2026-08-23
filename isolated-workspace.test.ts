@@ -9,6 +9,7 @@ import {
   prepareIsolatedBatch,
 } from "./isolated-workspace.ts";
 import { emptyUsage } from "./usage.ts";
+import { markSessionQuarantined } from "./session-quarantine.ts";
 import type { ResolvedTask, TaskResult } from "./types.ts";
 
 function git(cwd: string, args: string[]): string {
@@ -382,6 +383,36 @@ describe("Git-native isolated workspace", () => {
 
     expect(privateRefs(repo)).toEqual([]);
     expect(fs.readdirSync(path.join(root, "artifacts"))).toEqual([]);
+  });
+
+  test("does not reconcile or tear down an abandoned worker before safety", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    fs.writeFileSync(path.join(one!.cwd, "shared.txt"), "must never apply\n");
+    let confirmSafe!: () => void;
+    const safe = new Promise<void>((resolve) => {
+      confirmSafe = resolve;
+    });
+    const abandoned = markSessionQuarantined(success(), { safe });
+
+    const [result] = await batch!.reconcile([abandoned]);
+
+    expect(result!.integration?.status).toBe("discarded");
+    expect(result!.error).toContain("quiescence was abandoned");
+    expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
+      "baseline\n",
+    );
+    expect(fs.existsSync(one!.cwd)).toBe(true);
+    expect(privateRefs(repo)).toEqual([]);
+
+    confirmSafe();
+    for (let attempt = 0; attempt < 100 && fs.existsSync(one!.cwd); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(fs.existsSync(one!.cwd)).toBe(false);
+    expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
+      "baseline\n",
+    );
   });
 
   test("terminates a background process before snapshotting", async () => {

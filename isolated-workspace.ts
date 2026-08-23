@@ -3,9 +3,15 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { mapConcurrent } from "./concurrency.ts";
+import {
+  observeQuarantineSafety,
+  sessionQuarantineOf,
+} from "./session-quarantine.ts";
 import type { ResolvedTask, TaskIntegration, TaskResult } from "./types.ts";
 
 const GIT_TIMEOUT_MS = 5 * 60 * 1000;
+const PATH_CLASSIFICATION_CONCURRENCY = 16;
 const PROCESS_GRACE_MS = 500;
 let artifactBaseOverrideForTesting: string | undefined;
 
@@ -199,8 +205,13 @@ async function changedWorkerPaths(
         .filter(Boolean)
         .map((relative) => path.resolve(workerRoot, relative)),
     );
-  } catch {
-    // Reporting is conservative when Git evidence cannot be reconstructed.
+  } catch (error) {
+    // Reporting is conservative when Git evidence cannot be reconstructed, but
+    // the missing evidence must be visible and attributable to its worker.
+    console.error(
+      `[delegate] failed to collect isolated Git change evidence for worker '${workerRoot}'`,
+      error,
+    );
     return undefined;
   }
 }
@@ -227,12 +238,26 @@ async function classifyReportedFiles(
   // write-through followed by replacement can preserve both the source-mapped
   // node and its external physical target. An unchanged final symlink appeared
   // only because edit/write attribution is part of touchedFiles, so avoid
-  // inventing Git evidence for that node.
+  // inventing Git evidence for that node. Bound filesystem classification: a
+  // model can report an arbitrarily large path list and Promise.all would issue
+  // every lstat/realpath at once.
   const attributedSet = new Set(attributedCandidates);
-  const touched = (
-    await Promise.all(
-      result.touchedFiles.map(async (candidate) => {
-        const absolute = path.resolve(worker.cwd, candidate);
+  const candidates = [
+    ...result.touchedFiles.map((candidate) => ({
+      kind: "touched" as const,
+      candidate,
+    })),
+    ...attributedCandidates.map((candidate) => ({
+      kind: "attributed" as const,
+      candidate,
+    })),
+  ];
+  const classified = await mapConcurrent(
+    candidates,
+    PATH_CLASSIFICATION_CONCURRENCY,
+    async (entry) => {
+      if (entry.kind === "touched") {
+        const absolute = path.resolve(worker.cwd, entry.candidate);
         const finalStat = await fs.promises.lstat(absolute).catch(() => null);
         if (
           attributedSet.has(absolute) &&
@@ -240,30 +265,52 @@ async function classifyReportedFiles(
           gitChanged !== undefined &&
           !gitChanged.has(absolute)
         ) {
-          return undefined;
+          return { kind: "touched" as const, path: undefined };
         }
         const resolved = await physicalReportedPath(absolute, false);
-        return mapReportedPathToSource(
-          group,
-          physicalWorkerRoot,
-          resolved.path,
-        );
-      }),
-    )
-  ).filter((candidate): candidate is string => candidate !== undefined);
-  const attributed = await Promise.all(
-    attributedCandidates.map(async (candidate) => {
-      const resolved = await physicalReportedPath(candidate, true);
+        return {
+          kind: "touched" as const,
+          path: mapReportedPathToSource(
+            group,
+            physicalWorkerRoot,
+            resolved.path,
+          ),
+        };
+      }
+
+      const resolved = await physicalReportedPath(entry.candidate, true);
       return {
-        ...resolved,
-        reportedPath: mapReportedPathToSource(
-          group,
-          physicalWorkerRoot,
-          resolved.path,
-        ),
+        kind: "attributed" as const,
+        value: {
+          ...resolved,
+          reportedPath: mapReportedPathToSource(
+            group,
+            physicalWorkerRoot,
+            resolved.path,
+          ),
+        },
       };
-    }),
+    },
   );
+  const touched = classified
+    .filter(
+      (
+        entry,
+      ): entry is Extract<(typeof classified)[number], { kind: "touched" }> =>
+        entry.kind === "touched",
+    )
+    .map((entry) => entry.path)
+    .filter((candidate): candidate is string => candidate !== undefined);
+  const attributed = classified
+    .filter(
+      (
+        entry,
+      ): entry is Extract<
+        (typeof classified)[number],
+        { kind: "attributed" }
+      > => entry.kind === "attributed",
+    )
+    .map((entry) => entry.value);
   const escapedOrUncertain = attributed.filter(
     (candidate) =>
       candidate.uncertain || !isWithin(physicalWorkerRoot, candidate.path),
@@ -540,6 +587,50 @@ async function reconcileGroup(
     const worker = workers.get(taskIndex)!;
     const result = results[taskIndex]!;
     result.workspace = "isolated";
+
+    const quarantine = sessionQuarantineOf(result);
+    if (quarantine) {
+      result.error ??=
+        "AgentSession quiescence was abandoned; the isolated proposal was not applied.";
+      result.integration = {
+        status: "discarded",
+        proposedFiles: [],
+        appliedFiles: [],
+      };
+      console.error(
+        `[delegate] retaining abandoned isolated worker '${worker.workerRoot}' until its AgentSession is confirmed quiescent; proposal will not be snapshotted or applied`,
+      );
+      observeQuarantineSafety(
+        quarantine,
+        "deferred isolated worker cleanup",
+        async () => {
+          try {
+            await stopWorkspaceProcesses(worker.workerRoot);
+            const removed = await removeWorktree(
+              group.sourceRoot,
+              worker.workerRoot,
+            );
+            if (removed) {
+              console.error(
+                `[delegate] safely cleaned deferred isolated worker '${worker.workerRoot}'`,
+              );
+            }
+          } catch (error) {
+            console.error(
+              `[delegate] deferred isolated worker cleanup failed for '${worker.workerRoot}'; retaining it`,
+              error,
+            );
+          }
+        },
+        (error) => {
+          console.error(
+            `[delegate] isolated AgentSession safety monitor failed; retaining worker '${worker.workerRoot}' indefinitely`,
+            error,
+          );
+        },
+      );
+      continue;
+    }
 
     let proposedFiles: string[] = [];
     try {

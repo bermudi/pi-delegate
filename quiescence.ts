@@ -47,9 +47,11 @@
  * Once cancellation has been requested the session is supposed to be tearing
  * down, so the wait is bounded by `cancelledUnwindBudgetMs`. Without a bound,
  * an extension that keeps launching continuations keeps resetting progress and
- * the barrier never returns — hanging the delegate task forever, which is
- * strictly worse than reporting a cancelled task whose session may still be
- * active. On expiry the barrier logs and returns `"abandoned"`.
+ * the barrier never returns — hanging the delegate task forever. On expiry the
+ * barrier logs and returns `"abandoned"`. Runner then transfers a private
+ * quarantine marker and an unbounded background termination promise to
+ * lifecycle; lifecycle must detach the session and defer disposal/workspace
+ * cleanup until that promise confirms quiescence.
  */
 
 /** Why the runner asked the session to stop. */
@@ -91,8 +93,8 @@ export const DEFAULT_QUIESCENCE_TIMINGS: QuiescenceTimings = {
 /**
  * `"quiescent"` — the session went idle and stayed quiet; ownership may be
  * returned to the caller. `"abandoned"` — the cancelled-unwind budget expired
- * while work was still starting; the caller regains ownership of a session
- * that may still be active.
+ * while work was still starting; the caller must quarantine the session because
+ * it may still be active.
  */
 export type QuiescenceOutcome = "quiescent" | "abandoned";
 
@@ -104,6 +106,9 @@ export type QuiescenceBarrierOptions = {
   cancel: (source: CancellationSource) => void;
   timings?: Partial<QuiescenceTimings>;
   now?: () => number;
+  /** Do not let liveness probes keep Node alive. Used only by the unbounded
+   * quarantine recovery monitor; foreground barriers retain ordinary timers. */
+  unrefTimers?: boolean;
   /** Overridable for tests; defaults to a `console.error` trace. */
   onAbandon?: (info: {
     source: CancellationSource;
@@ -161,7 +166,12 @@ export function createQuiescenceBarrier(
   };
 
   const sleep = (ms: number) =>
-    new Promise<void>((resolve) => setTimeout(resolve, ms));
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      if (options.unrefTimers && typeof timer.unref === "function") {
+        timer.unref();
+      }
+    });
   const nextEventLoopTurn = () =>
     new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -178,6 +188,9 @@ export function createQuiescenceBarrier(
         resolve();
       };
       const probe = setTimeout(finish, probeMs);
+      if (options.unrefTimers && typeof probe.unref === "function") {
+        probe.unref();
+      }
       if (generation !== sampled) {
         finish();
         return;

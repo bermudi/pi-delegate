@@ -54,6 +54,7 @@ type Harness = {
 function harness(
   options: {
     timings?: Partial<QuiescenceTimings>;
+    unrefTimers?: boolean;
     /** Called on every re-abort, before the cancel is recorded. */
     onCancel?: (h: Harness) => void;
   } = {},
@@ -85,6 +86,7 @@ function harness(
       h.barrier.noteCancellationRequested();
     },
     timings: options.timings,
+    unrefTimers: options.unrefTimers,
     onAbandon: ({ source, waitedMs }) => abandoned.push({ source, waitedMs }),
   });
   fake.attach(h.barrier);
@@ -271,6 +273,46 @@ describe("createQuiescenceBarrier", () => {
     h.barrier.noteCancellationRequested();
 
     expect(await h.barrier.wait()).toBe("abandoned");
+  });
+
+  test("unrefs quarantine recovery probes", async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    let unrefs = 0;
+    const timers = new Set<object>();
+    globalThis.setTimeout = ((callback: () => void) => {
+      const handle = {
+        callback,
+        unref: () => {
+          unrefs++;
+          return handle;
+        },
+      };
+      timers.add(handle);
+      return handle as never;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((handle: object) => {
+      timers.delete(handle);
+    }) as typeof clearTimeout;
+
+    try {
+      const h = harness({
+        unrefTimers: true,
+        timings: { eventProbeMs: 10_000 },
+      });
+      h.state.busy = true;
+      const done = h.barrier.wait();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unrefs).toBeGreaterThan(0);
+
+      h.state.busy = false;
+      h.emit();
+      expect(await done).toBe("quiescent");
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
   });
 
   test("does not bound a healthy wait", async () => {

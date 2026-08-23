@@ -10,7 +10,12 @@ import {
 import { _setRunAgentSessionForTesting } from "./lifecycle.ts";
 import { _resetPoolForTesting, commit } from "./pool.ts";
 import { emptyUsage } from "./usage.ts";
-import { dispatchAsync, dispatchDelegate, dispatchSync } from "./dispatch.ts";
+import {
+  dispatchAsync,
+  dispatchDelegate,
+  dispatchSync,
+  initProgress,
+} from "./dispatch.ts";
 import { _setIsolatedArtifactRootForTesting } from "./isolated-workspace.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import {
@@ -31,7 +36,32 @@ import {
   getDelegateConfigSnapshot,
   type DelegateConfig,
 } from "./config.ts";
+import {
+  _resetQuarantineRegistryForTesting,
+  markSessionQuarantined,
+  quarantinedTasks,
+  reserveSessionQuarantine,
+} from "./session-quarantine.ts";
 import type { ResolvedTask, TaskDef, TaskProgress } from "./types.ts";
+
+describe("progress preview sanitization", () => {
+  test("flattens prompt newlines and removes ANSI and terminal controls before storage", () => {
+    const prompt =
+      "first \x1b[31mred\x1b[0m\r\nforged\x00\x07 row \x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\";
+    const [progress] = initProgress([
+      {
+        prompt,
+        agentName: "scout",
+        warnings: [],
+      } as ResolvedTask,
+    ]);
+
+    expect(progress?.task).toBe("first red forged row link");
+    expect(progress?.task).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+    expect(progress?.task).not.toContain("\n");
+    expect(progress?.task).not.toContain("\x1b");
+  });
+});
 
 interface FakeSession {
   touchedFiles: string[];
@@ -60,6 +90,7 @@ describe("dispatch-time shared-write gate", () => {
   let tmpDir: string;
 
   beforeEach(() => {
+    _resetQuarantineRegistryForTesting();
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "delegate-write-gate-"));
     execFileSync("git", ["init", "--quiet"], { cwd: tmpDir });
     ticketRegistry.clear();
@@ -67,10 +98,118 @@ describe("dispatch-time shared-write gate", () => {
   });
 
   afterEach(() => {
+    _resetQuarantineRegistryForTesting();
     ticketRegistry.clear();
     _resetDelegateConfigForTesting();
     rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  test("rejects an overlapping writer while an abandoned writer is quarantined, then releases it after safe", async () => {
+    let confirmSafe!: () => void;
+    const safe = new Promise<void>((resolve) => {
+      confirmSafe = resolve;
+    });
+    reserveSessionQuarantine(
+      {
+        prompt: "abandoned writer",
+        cwd: tmpDir,
+        workspace: "shared",
+        tools: ["write"],
+        agentName: "coder",
+      } as ResolvedTask,
+      { safe },
+    );
+
+    const model = { provider: "test", id: "model" } as any;
+    const result = await dispatchDelegate({
+      pi: {} as any,
+      params: { tasks: [{ prompt: "new writer", cwd: tmpDir }] },
+      ctx: {
+        cwd: tmpDir,
+        model,
+        modelRegistry: {
+          getAvailable: () => [model],
+          find: () => model,
+          hasConfiguredAuth: () => true,
+        },
+        getSystemPrompt: () => "parent",
+      } as any,
+      agents: new Map(),
+      parentModelId: model.id,
+      parentDefaults: {
+        thinking: "off",
+        tools: ["read", "write", "edit", "bash"],
+      },
+      signal: undefined,
+      onUpdate: undefined,
+    });
+
+    expect(result.content[0]?.text).toContain(
+      "Rejected before dispatch; no tasks were started.",
+    );
+    expect(result.content[0]?.text).toContain("quarantined coder task");
+    expect(quarantinedTasks()).toHaveLength(1);
+
+    confirmSafe();
+    await safe;
+    await Promise.resolve();
+    expect(quarantinedTasks()).toHaveLength(0);
+  });
+
+  test.each([
+    ["sync", false],
+    ["async", true],
+  ] as const)(
+    "rejects quarantined sessionId reuse before %s dispatch",
+    async (_mode, asyncMode) => {
+      reserveSessionQuarantine(
+        {
+          prompt: "abandoned session",
+          sessionId: "unsafe-session",
+          cwd: tmpDir,
+          workspace: "shared",
+          tools: ["read"],
+          agentName: "scout",
+        } as ResolvedTask,
+        { safe: new Promise<void>(() => {}) },
+      );
+      const model = { provider: "test", id: "model" } as any;
+      const result = await dispatchDelegate({
+        pi: {} as any,
+        params: {
+          async: asyncMode,
+          tasks: [
+            {
+              prompt: "reuse",
+              sessionId: "unsafe-session",
+              cwd: tmpDir,
+            },
+          ],
+        },
+        ctx: {
+          cwd: tmpDir,
+          model,
+          modelRegistry: {
+            getAvailable: () => [model],
+            find: () => model,
+            hasConfiguredAuth: () => true,
+          },
+          getSystemPrompt: () => "parent",
+        } as any,
+        agents: new Map(),
+        parentModelId: model.id,
+        parentDefaults: { thinking: "off", tools: ["read"] },
+        signal: undefined,
+        onUpdate: undefined,
+      });
+
+      expect(result.content[0]?.text).toContain(
+        "SessionId(s) quarantined after quiescence abandonment",
+      );
+      expect(result.details.progress).toEqual([]);
+      expect(ticketRegistry.size).toBe(0);
+    },
+  );
 
   test.each([
     ["sync", false],
@@ -492,6 +631,7 @@ describe("dispatchSync touched-file overlap warning", () => {
 
   beforeEach(() => {
     _resetPoolForTesting();
+    _resetQuarantineRegistryForTesting();
     _setGlobalConcurrencyLimitForTesting(10);
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "delegate-dispatch-"));
     _setRunAgentSessionForTesting(
@@ -512,6 +652,7 @@ describe("dispatchSync touched-file overlap warning", () => {
     _setRunAgentSessionForTesting(undefined);
     _resetGlobalConcurrencyForTesting();
     _resetPoolForTesting();
+    _resetQuarantineRegistryForTesting();
     _resetTelemetryForTesting();
     _resetDelegateConfigForTesting();
     rmSync(tmpDir, { recursive: true, force: true });
@@ -568,6 +709,51 @@ describe("dispatchSync touched-file overlap warning", () => {
       } as TaskProgress,
     };
   }
+
+  test("omits top-level usage when abandoned accounting is incomplete", async () => {
+    const task = setupTask("abandoned-usage", "coder", []);
+    let confirmSafe!: () => void;
+    const safe = new Promise<void>((resolve) => {
+      confirmSafe = resolve;
+    });
+    _setRunAgentSessionForTesting(async () =>
+      markSessionQuarantined(
+        {
+          output: "partial",
+          error: "Stalled",
+          failureKind: "stalled",
+          incomplete: "quiescence_abandoned",
+          durationMs: 1,
+          tokens: 1,
+          usage: { ...emptyUsage(), totalTokens: 1 },
+          touchedFiles: [],
+          attributedFiles: [],
+          prompted: true,
+        },
+        { safe },
+      ),
+    );
+
+    const result = await dispatchSync({
+      ctx: { cwd: tmpDir, modelRegistry: {} as any },
+      tasks: [{ prompt: "work" }],
+      resolved: [task.resolved],
+      progress: [task.progress],
+      parentModelId: "m",
+      signal: undefined,
+      fire: () => {},
+    });
+
+    expect(result.details.results[0]?.incomplete).toBe("quiescence_abandoned");
+    expect("usage" in result).toBe(false);
+    expect(result.content[0]?.text).toContain(
+      "token usage, and cost are lower bounds",
+    );
+
+    confirmSafe();
+    await safe;
+    await Promise.resolve();
+  });
 
   test("emits overlap warning when two tasks touch the same path", async () => {
     const shared = path.join(tmpDir, "shared.txt");

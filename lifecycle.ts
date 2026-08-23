@@ -28,6 +28,14 @@ import { addUsage, emptyUsage } from "./usage.ts";
 import { scheduleDeadline } from "./timer.ts";
 import { recordTask } from "./telemetry.ts";
 import { createScratchWorkspace, ScratchDeadlineError } from "./workspace.ts";
+import {
+  isSessionIdQuarantined,
+  observeQuarantineSafety,
+  propagateSessionQuarantine,
+  reserveSessionQuarantine,
+  sessionQuarantineOf,
+  type SessionQuarantine,
+} from "./session-quarantine.ts";
 
 /** Internal seam for lifecycle-level tests without replacing session ownership. */
 type RunAgentSession = typeof runAgentSession;
@@ -125,14 +133,57 @@ function completeSessionAction(
  * Pool hits and successfully committed sessions remain pool-owned. */
 function disposeOwnedSession(acquired: AcquiredSession): void {
   if (!acquired.lifecycleOwnsSession) return;
+  disposeSession(acquired.session, "uncommitted subagent");
+}
+
+function disposeSession(session: AgentSession, description: string): void {
   try {
-    acquired.session.dispose();
+    session.dispose();
   } catch (error) {
     // Cleanup must not replace the task's primary result, but it must emit a
     // signal: extension-bearing sessions can retain callbacks/resources when a
     // provider's dispose implementation misbehaves.
-    console.error("[delegate] uncommitted subagent disposal failed", error);
+    console.error(`[delegate] ${description} disposal failed`, error);
   }
+}
+
+/** Detach an abandoned session from every owner immediately, then dispose it
+ * only after runner's background termination monitor proves quiescence. */
+function quarantineAcquiredSession(
+  task: ResolvedTask,
+  acquired: AcquiredSession,
+  quarantine: SessionQuarantine,
+): void {
+  if (!acquired.lifecycleOwnsSession && task.sessionId) {
+    const detached = pool._quarantinePooledAgentWithoutDisposal(
+      task.sessionId,
+      acquired.session,
+    );
+    if (!detached) {
+      console.error(
+        `[delegate] CRITICAL: could not detach abandoned pooled AgentSession '${task.sessionId}'; refusing immediate disposal`,
+      );
+    }
+  }
+
+  // Publish the admission reservation before this task can return and its
+  // active dispatch reservation is released.
+  reserveSessionQuarantine(task, quarantine);
+  console.error(
+    `[delegate] AgentSession${task.sessionId ? ` '${task.sessionId}'` : ""} quarantined; deferred disposal is waiting for background quiescence confirmation`,
+  );
+  observeQuarantineSafety(
+    quarantine,
+    "quarantined AgentSession disposal",
+    () => disposeSession(acquired.session, "quarantined subagent"),
+    (error) => {
+      // A rejected safety proof is not permission to clean anything.
+      console.error(
+        "[delegate] quarantined AgentSession safety monitor failed; retaining the session indefinitely",
+        error,
+      );
+    },
+  );
 }
 
 /** Merge per-attempt activities into a live history list while preserving
@@ -206,6 +257,7 @@ function updateProgressFromResult(p: TaskProgress, r: TaskResult): void {
   p.tokens = r.tokens;
   p.error = r.error;
   p.failureKind = r.failureKind;
+  p.incomplete = r.incomplete;
 }
 
 /** Outcome of one logical task run: the final result plus how many same-model
@@ -346,6 +398,7 @@ function canRetryWholeTask(
   // restrictive for retry safety — touched-file accounting and observed activity
   // are the direct side-effect signals.
   return (
+    !sessionQuarantineOf(result) &&
     result.failureKind !== "stalled" &&
     result.failureKind !== "model_error" &&
     result.failureKind !== "deadline_exceeded" &&
@@ -641,9 +694,27 @@ export async function runResolvedTask(
   taskIndex: number,
 ): Promise<TaskResult> {
   if (task.sessionId) {
-    return pool.withSessionLock(task.sessionId, () =>
-      runResolvedTaskUnlocked(env, task, p, taskIndex),
-    );
+    return pool.withSessionLock(task.sessionId, async () => {
+      // Validation may have run while an earlier synchronous use of this key
+      // was still active. Recheck after acquiring the per-session lock so an
+      // abandonment published by that use cannot be bypassed by a queued call.
+      if (isSessionIdQuarantined(task.sessionId!)) {
+        return recordTaskOutcome(
+          env,
+          p,
+          task,
+          finishTask(
+            env,
+            p,
+            failTask(
+              task,
+              `SessionId '${task.sessionId}' is quarantined after quiescence abandonment. Wait for background safety confirmation before reusing it.`,
+            ),
+          ),
+        );
+      }
+      return runResolvedTaskUnlocked(env, task, p, taskIndex);
+    });
   }
   return runResolvedTaskUnlocked(env, task, p, taskIndex);
 }
@@ -763,26 +834,62 @@ async function runResolvedTaskUnlocked(
       ).filter((file): file is string => file !== undefined),
     };
   } catch (error) {
-    result = {
+    const failedProjection = {
       ...failTask(task, error instanceof Error ? error.message : String(error)),
       ...(result
         ? {
             tokens: result.tokens,
             usage: result.usage,
+            incomplete: result.incomplete,
           }
         : {}),
-      workspace: "scratch",
+      workspace: "scratch" as const,
       durationMs: Date.now() - startedAt,
     };
+    // Path projection can throw after core has handed us an abandoned result.
+    // Keep its private quarantine marker so finally defers workspace cleanup.
+    result = result
+      ? propagateSessionQuarantine(result, failedProjection)
+      : failedProjection;
     // runResolvedTaskCore may already have notified a successful result
     // before path mapping failed. Correct that observable outcome below.
     needsCorrection = true;
   } finally {
-    try {
-      await workspace.cleanup();
-    } catch (error) {
-      cleanupError = `Scratch workspace cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
-      console.error("[delegate] scratch workspace cleanup failed", error);
+    const quarantine = sessionQuarantineOf(result);
+    if (quarantine) {
+      console.error(
+        `[delegate] retaining abandoned scratch workspace '${workspace.scratchRoot}' until its AgentSession is confirmed quiescent`,
+      );
+      observeQuarantineSafety(
+        quarantine,
+        "deferred scratch workspace cleanup",
+        async () => {
+          try {
+            await workspace.cleanup();
+            console.error(
+              `[delegate] safely cleaned deferred scratch workspace '${workspace.scratchRoot}'`,
+            );
+          } catch (error) {
+            console.error(
+              `[delegate] deferred scratch workspace cleanup failed for '${workspace.scratchRoot}'; retaining it`,
+              error,
+            );
+          }
+        },
+        (error) => {
+          console.error(
+            `[delegate] scratch AgentSession safety monitor failed; retaining workspace '${workspace.scratchRoot}' indefinitely`,
+            error,
+          );
+        },
+      );
+    } else {
+      try {
+        await workspace.cleanup();
+      } catch (error) {
+        cleanupError = `Scratch workspace cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+        console.error("[delegate] scratch workspace cleanup failed", error);
+      }
     }
   }
 
@@ -1098,17 +1205,20 @@ async function runTaskAttempt(
     // Acquisition itself is not cancellable upstream. Consume its eventual
     // outcome and dispose any late lifecycle-owned session; otherwise a late
     // rejection would be unhandled or a late session would leak resources.
-    void acquisition.then(
-      (late) => {
+    void acquisition
+      .then((late) => {
         if (!("error" in late)) disposeOwnedSession(late);
-      },
-      (error) => {
-        console.error(
-          "[delegate] abandoned subagent acquisition later failed",
-          error,
-        );
-      },
-    );
+      })
+      .catch((error) => {
+        try {
+          console.error(
+            "[delegate] abandoned subagent acquisition cleanup failed",
+            error,
+          );
+        } catch {
+          // A late cleanup observer must never become an unhandled rejection.
+        }
+      });
     return acquisitionOutcome.reason === "parent-aborted"
       ? failTask(task, "Aborted")
       : deadlineExceededResult(task, timing);
@@ -1156,18 +1266,30 @@ async function runTaskAttempt(
       r = { ...r, error: "Aborted" };
     }
 
-    const sessionFile = resolveResumableSessionFile(
-      acquired.sessionFile,
-      acquired.sessionManager,
-      r.error,
-    );
+    const quarantine = sessionQuarantineOf(r);
+    // Persisting or advertising a resumable transcript while its session is
+    // still mutating would create another owner of unsafe state.
+    const sessionFile = quarantine
+      ? undefined
+      : resolveResumableSessionFile(
+          acquired.sessionFile,
+          acquired.sessionManager,
+          r.error,
+        );
 
-    sessionReleased = await settlePooledAttempt(
-      task,
-      acquired,
-      r,
-      sessionReleased,
-    );
+    if (quarantine) {
+      quarantineAcquiredSession(task, acquired, quarantine);
+      // Neither lifecycle nor pool owns it now. The deferred safety callback is
+      // the sole owner and finally below must not dispose it early.
+      sessionReleased = true;
+    } else {
+      sessionReleased = await settlePooledAttempt(
+        task,
+        acquired,
+        r,
+        sessionReleased,
+      );
+    }
 
     accounting.accumulatedUsage = addUsage(
       accounting.accumulatedUsage,
@@ -1175,7 +1297,7 @@ async function runTaskAttempt(
     );
     accounting.cumulativeToolUses += attemptToolUsesObserved;
 
-    return {
+    return propagateSessionQuarantine(r, {
       id: task.id,
       agent: task.agentName,
       output: r.output,
@@ -1191,13 +1313,14 @@ async function runTaskAttempt(
         (r.error && isModelAttributableError(r.error)
           ? "model_error"
           : undefined),
+      incomplete: r.incomplete,
       durationMs: r.durationMs,
       tokens: r.tokens,
       usage: r.usage,
       sessionFile,
       touchedFiles: r.touchedFiles,
       attributedFiles: r.attributedFiles ?? [],
-    };
+    });
   } finally {
     // This runs for ordinary success, normal provider failure, whole-task
     // retry attempts, abort races, stalls, and unexpected throws. Pool hits

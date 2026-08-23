@@ -47,6 +47,11 @@ import {
 } from "./pool.ts";
 import { emptyUsage } from "./usage.ts";
 import {
+  _resetQuarantineRegistryForTesting,
+  markSessionQuarantined,
+  sessionQuarantineOf,
+} from "./session-quarantine.ts";
+import {
   _resetTelemetryForTesting,
   _setTelemetryForTesting,
   type TaskRecord,
@@ -3855,6 +3860,253 @@ describe("lifecycle-level deadline and abort races", () => {
       if (timer) clearTimeout(timer);
       _setRunAgentSessionForTesting(undefined);
       _setWholeTaskRetryForTesting(undefined);
+    }
+  });
+});
+
+describe("quiescence-abandoned session ownership", () => {
+  afterEach(() => {
+    _resetQuarantineRegistryForTesting();
+  });
+
+  function progress(task: ResolvedTask): TaskProgress {
+    return {
+      index: 0,
+      agent: task.agentName,
+      task: task.prompt,
+      status: "pending",
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    };
+  }
+
+  function deferred(): {
+    promise: Promise<void>;
+    resolve: () => void;
+  } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  function abandonedRun(safe: Promise<void>) {
+    return markSessionQuarantined(
+      {
+        output: "partial",
+        error: "Stalled: cancellation could not prove quiescence",
+        failureKind: "stalled" as const,
+        incomplete: "quiescence_abandoned" as const,
+        durationMs: 1,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+        prompted: true,
+      },
+      { safe },
+    );
+  }
+
+  test("fresh shared ownership defers disposal until safety confirmation", async () => {
+    const safety = deferred();
+    let disposed = 0;
+    const session = { dispose: () => disposed++ } as unknown as AgentSession;
+    _setAcquireAgentSessionForTesting(async () => ({
+      session,
+      sessionManager: undefined,
+      sessionFile: undefined,
+      lifecycleOwnsSession: true,
+    }));
+    _setRunAgentSessionForTesting(async () => abandonedRun(safety.promise));
+    const task = makeBaseTask({ workspace: "shared" });
+
+    try {
+      const result = await runResolvedTask(
+        makeTestEnv(),
+        task,
+        progress(task),
+        0,
+      );
+      expect(sessionQuarantineOf(result)?.safe).toBe(safety.promise);
+      expect(disposed).toBe(0);
+      safety.resolve();
+      await safety.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(disposed).toBe(1);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setAcquireAgentSessionForTesting(undefined);
+    }
+  });
+
+  test("pool hit is detached immediately but not disposed before safety", async () => {
+    _resetPoolForTesting();
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "delegate-quarantine-pool-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    fs.writeFileSync(sessionFile, "");
+    const safety = deferred();
+    let disposed = 0;
+    const session = { dispose: () => disposed++ } as unknown as AgentSession;
+    const manager = {
+      getSessionFile: () => sessionFile,
+    } as unknown as SessionManager;
+    const task = makeBaseTask({
+      workspace: "shared",
+      cwd: root,
+      sessionId: "quarantined-hit",
+    });
+    commit("quarantined-hit", {
+      session,
+      sessionManager: manager,
+      sessionFile,
+      frozen: {
+        systemPrompt: task.systemPrompt,
+        model: task.model,
+        thinking: task.thinking,
+        tools: task.tools,
+        cwd: task.cwd,
+        providerExtensions: "",
+      },
+      tokens: 0,
+    });
+    _setRunAgentSessionForTesting(async () => abandonedRun(safety.promise));
+
+    try {
+      const result = await runResolvedTask(
+        makeTestEnv(),
+        task,
+        progress(task),
+        0,
+      );
+      expect(sessionQuarantineOf(result)).toBeDefined();
+      expect(configFor("quarantined-hit")).toBeUndefined();
+      expect(disposed).toBe(0);
+      safety.resolve();
+      await safety.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(disposed).toBe(1);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _resetPoolForTesting();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("scratch path projection failure preserves quarantine and defers cleanup", async () => {
+    const safety = deferred();
+    let disposed = 0;
+    let cleaned = 0;
+    const session = { dispose: () => disposed++ } as unknown as AgentSession;
+    _setAcquireAgentSessionForTesting(async () => ({
+      session,
+      sessionManager: undefined,
+      sessionFile: undefined,
+      lifecycleOwnsSession: true,
+    }));
+    _setRunAgentSessionForTesting(async () =>
+      markSessionQuarantined(
+        {
+          ...abandonedRun(safety.promise),
+          touchedFiles: ["/scratch/result.txt"],
+        },
+        { safe: safety.promise },
+      ),
+    );
+    _setCreateScratchWorkspaceForTesting(async (sourceCwd) => ({
+      sourceRoot: sourceCwd,
+      sourceCwd,
+      scratchRoot: "/scratch",
+      cwd: "/scratch",
+      mapPathToSource: (candidate: string) => candidate,
+      resolveReportedPath: async () => {
+        throw new Error("projection failed");
+      },
+      resolveAttributedPath: async (candidate: string) => candidate,
+      isDisposablePath: async () => true,
+      cleanup: async () => {
+        cleaned++;
+      },
+    }));
+    const task = makeBaseTask({ workspace: "scratch" });
+
+    try {
+      const result = await runResolvedTask(
+        makeTestEnv(),
+        task,
+        progress(task),
+        0,
+      );
+      expect(result.error).toContain("projection failed");
+      expect(result.incomplete).toBe("quiescence_abandoned");
+      expect(sessionQuarantineOf(result)?.safe).toBe(safety.promise);
+      expect(disposed).toBe(0);
+      expect(cleaned).toBe(0);
+
+      safety.resolve();
+      await safety.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(disposed).toBe(1);
+      expect(cleaned).toBe(1);
+    } finally {
+      _setCreateScratchWorkspaceForTesting(undefined);
+      _setRunAgentSessionForTesting(undefined);
+      _setAcquireAgentSessionForTesting(undefined);
+    }
+  });
+
+  test("scratch keeps its tree and fresh session until safety confirmation", async () => {
+    const safety = deferred();
+    let disposed = 0;
+    let cleaned = 0;
+    const scratchRoot = path.join(os.tmpdir(), "delegate-quarantined-scratch");
+    const session = { dispose: () => disposed++ } as unknown as AgentSession;
+    _setAcquireAgentSessionForTesting(async () => ({
+      session,
+      sessionManager: undefined,
+      sessionFile: undefined,
+      lifecycleOwnsSession: true,
+    }));
+    _setRunAgentSessionForTesting(async () => abandonedRun(safety.promise));
+    _setCreateScratchWorkspaceForTesting(async (sourceCwd) => ({
+      sourceRoot: sourceCwd,
+      sourceCwd,
+      scratchRoot,
+      cwd: scratchRoot,
+      mapPathToSource: (candidate: string) => candidate,
+      resolveReportedPath: async (candidate: string) => candidate,
+      resolveAttributedPath: async (candidate: string) => candidate,
+      isDisposablePath: async () => true,
+      cleanup: async () => {
+        cleaned++;
+      },
+    }));
+    const task = makeBaseTask({ workspace: "scratch" });
+
+    try {
+      const result = await runResolvedTask(
+        makeTestEnv(),
+        task,
+        progress(task),
+        0,
+      );
+      expect(sessionQuarantineOf(result)).toBeDefined();
+      expect(disposed).toBe(0);
+      expect(cleaned).toBe(0);
+      safety.resolve();
+      await safety.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(disposed).toBe(1);
+      expect(cleaned).toBe(1);
+    } finally {
+      _setCreateScratchWorkspaceForTesting(undefined);
+      _setRunAgentSessionForTesting(undefined);
+      _setAcquireAgentSessionForTesting(undefined);
     }
   });
 });

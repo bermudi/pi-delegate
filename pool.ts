@@ -286,6 +286,21 @@ export function recordUse(sessionId: string, tokens: number): boolean {
   return true;
 }
 
+/** Remove an exact live session from reuse without aborting or disposing it.
+ * Lifecycle uses this only after runner reports quiescence abandonment: any
+ * ordinary pool close would race provider/extension work that may still be
+ * running. The caller retains the detached session until its background safety
+ * promise resolves. */
+export function _quarantinePooledAgentWithoutDisposal(
+  sessionId: string,
+  expectedSession: AgentSession,
+): boolean {
+  const existing = agentPool.get(sessionId);
+  if (!existing || existing.session !== expectedSession) return false;
+  agentPool.delete(sessionId);
+  return true;
+}
+
 // ── Read-only defaults (for task-resolution) ──────────────────────────────
 
 /** Frozen config for a pooled session, or undefined if not pooled. Lock-free —

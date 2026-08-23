@@ -2275,6 +2275,22 @@ describe("formatCompletedTask", () => {
     expect(lines).toHaveLength(2);
   });
 
+  test("marks abandoned accounting and evidence as incomplete lower bounds", () => {
+    const result = makeResult({
+      error: "Stalled: cancellation could not prove quiescence",
+      incomplete: "quiescence_abandoned",
+    });
+    const lines = formatCompletedTask(makeTask(), result);
+    expect(lines.join("\n")).toContain("[INCOMPLETE: quiescence was abandoned");
+    expect(lines.join("\n")).toContain(
+      "token usage, and cost are lower bounds",
+    );
+    expect(taskMetaBase(result)).toEqual([
+      fmtDuration(1500),
+      `≥${fmtTokens(42)} tokens (incomplete)`,
+    ]);
+  });
+
   test("emits a [WARNING:] line per task warning, before the body", () => {
     const lines = formatCompletedTask(
       makeTask({ warnings: ["unknown tool: foo", "model fallback"] }),

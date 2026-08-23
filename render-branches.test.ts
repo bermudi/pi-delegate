@@ -342,13 +342,52 @@ describe("render-branches compatibility fallback", () => {
         expect(ctx.lines.join("\n")).not.toContain("LIVE_ACTIVITY");
         expect(ctx.lines.join("\n")).not.toContain("waiting");
         expect(ctx.lines.join("\n")).not.toContain("running in background");
-        if (ticketStatus === "cancelled" && rowStatus === "pending") {
+        expect(ctx.lines[0]).toContain("1/1 finished");
+        if (ticketStatus === "cancelled") {
+          expect(ctx.lines[0]).toContain("1 cancelled");
+          expect(ctx.lines[0]).not.toContain("failed");
           expect(ctx.lines.join("\n")).toContain("CANCELLED");
+          expect(ctx.lines.join("\n")).not.toContain("PENDING");
         } else {
+          expect(ctx.lines[0]).toContain("1 failed");
+          expect(ctx.lines[0]).not.toContain("cancelled");
           expect(ctx.lines.join("\n")).toContain("FINAL_STATS");
         }
       }
     }
+  });
+
+  test("separates failed and cancelled rows in a cancelled terminal summary", async () => {
+    const { renderFinalBranch } = await import("./render-branches.ts");
+    const progress: TaskProgress[] = [
+      { ...makeTask(0).progress, status: "done" },
+      { ...makeTask(1).progress, status: "failed", error: "boom" },
+      { ...makeTask(2).progress, status: "running" },
+    ];
+    const ctx = {
+      progress,
+      taskResults: [makeTask(0).result, { error: "boom" }, { error: "abort" }],
+      total: progress.length,
+      w: 120,
+      expanded: false,
+      state: {},
+      theme: {
+        fg: (_: string, text: string) => text,
+        bold: (text: string) => text,
+      } as never,
+      lines: [] as string[],
+      ticketId: "ticket-1",
+      ticketStatus: "cancelled" as const,
+    };
+
+    renderFinalBranch(ctx, {
+      statJoin: () => "",
+      modelLabel: () => "",
+      compactActivity: () => "thinking…",
+      pushWarnings: () => undefined,
+    });
+
+    expect(ctx.lines[0]).toContain("3/3 finished · 1 failed · 1 cancelled");
   });
 
   test("keeps fully finalized tickets live until their ticket status settles", async () => {
@@ -467,6 +506,54 @@ describe("render-branches compatibility fallback", () => {
     expect(ctx.lines[0]).toBe(
       `1 running · 2/3 finished · 1 failed · 60 tokens${toolExpandHint() ? ` · ${toolExpandHint()}` : ""}`,
     );
+  });
+
+  test("sanitizes expanded live output before rendering", async () => {
+    const { renderPartialBranch } = await import("./render-branches.ts");
+    const progress: TaskProgress = {
+      ...makeTask(0).progress,
+      status: "running",
+      activities: [
+        {
+          id: "live",
+          name: "bash",
+          args: { command: "run" },
+          startTime: Date.now() - 10,
+          liveOutput:
+            "safe\x9d0;terminal title\x07 text\nback\bspace\x07\x00\n\x90hidden\x9cvisible",
+        },
+      ],
+    };
+    const ctx = {
+      progress: [progress],
+      taskResults: [],
+      total: 1,
+      w: 120,
+      expanded: true,
+      state: {},
+      theme: {
+        fg: (_: string, text: string) => text,
+        bold: (text: string) => text,
+      } as never,
+      lines: [] as string[],
+    };
+
+    renderPartialBranch(ctx, {
+      statJoin: () => "",
+      modelLabel: () => "",
+      compactActivity: () => "bash run",
+      pushWarnings: () => undefined,
+    });
+
+    const rendered = ctx.lines.join("\n");
+    expect(rendered).toContain("safe text");
+    expect(rendered).toContain("back space");
+    expect(rendered).toContain("visible");
+    expect(rendered).not.toContain("terminal title");
+    expect(rendered).not.toContain("hidden");
+    expect(
+      ctx.lines.some((line) => /[\u0000-\u001f\u007f-\u009f]/.test(line)),
+    ).toBe(false);
   });
 
   test("uses distinct markers for current work, history, and results", async () => {
@@ -628,6 +715,52 @@ describe("render-result visual hierarchy", () => {
 
     expect(fakeText.text).toContain("1/1 finished · 1 tokens · 10ms");
     expect(fgCalls).toContainEqual(["dim", " · 10ms · 1 tokens"]);
+  });
+
+  test("renders abandoned token accounting and evidence as incomplete", () => {
+    const pair = makeTask(0);
+    pair.progress.status = "failed";
+    pair.progress.error = "Stalled";
+    pair.progress.incomplete = "quiescence_abandoned";
+    pair.result.error = "Stalled";
+    pair.result.incomplete = "quiescence_abandoned";
+    const fakeText = {
+      text: "",
+      setText(text: string) {
+        this.text = text;
+      },
+    };
+
+    renderDelegateResult(
+      {
+        details: {
+          tasks: [],
+          results: [pair.result],
+          progress: [pair.progress],
+          elapsedMs: 10,
+        },
+      } as never,
+      { isPartial: false, expanded: true },
+      {
+        fg: (_token: string, text: string) => text,
+        bold: (text: string) => text,
+      } as never,
+      {
+        state: {},
+        lastComponent: fakeText as never,
+        invalidate: () => {},
+        executionStarted: false,
+        isPartial: false,
+      },
+    );
+
+    expect(fakeText.text).toContain(
+      "≥1 tokens · incomplete accounting/evidence",
+    );
+    expect(fakeText.text).toContain("≥1 tokens (incomplete)");
+    expect(fakeText.text).toContain(
+      "INCOMPLETE: accounting and output/file evidence are lower bounds",
+    );
   });
 });
 

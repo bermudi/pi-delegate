@@ -197,6 +197,8 @@ export interface TaskProgress {
   toolUses: number;
   error?: string;
   failureKind?: TaskFailureKind;
+  /** Terminal lower-bound result returned after quiescence abandonment. */
+  incomplete?: "quiescence_abandoned";
   model?: string;
   lastActivityAt?: number;
   activities: ToolActivity[];
@@ -231,17 +233,21 @@ export interface TaskResult {
   error?: string;
   /** Stable machine-readable failure reason; error remains human-facing. */
   failureKind?: TaskFailureKind;
+  /** The task returned while its quarantined AgentSession could still run.
+   * Output, file evidence, token usage, and cost are lower bounds rather than
+   * final accounting. */
+  incomplete?: "quiescence_abandoned";
   durationMs: number;
   /** Display token count for the task, derived from the compaction-inclusive
    *  session-stat delta. This matches `usage.totalTokens`; the usage object
    *  additionally preserves the provider breakdown and cost. */
   tokens: number;
-  /** Full provider Usage consumed by this task, including compacted-away
-   *  history. Always present (`emptyUsage()` on no-op/early-failure paths) so a
-   *  sync delegate call can fold subagent spend into the parent's session
-   *  total. Aggregate `cost.total` is accurate; the per-component cost fields
-   *  stay 0 because `getSessionStats()` exposes only the aggregate cost — and
-   *  Pi sums `cost.total` for nested usage anyway. */
+  /** Full provider Usage observed for this task, including compacted-away
+   *  history. Always present (`emptyUsage()` on no-op/early-failure paths).
+   *  When `incomplete` is absent, sync delegate can fold it into the parent and
+   *  aggregate `cost.total` is final. For an abandoned task it is only a lower
+   *  bound and dispatch omits top-level nested usage. Per-component cost fields
+   *  stay 0 because `getSessionStats()` exposes only aggregate cost. */
   usage: Usage;
   /** Scratch results are excluded from shared-file conflict detection and never resumable. */
   workspace?: WorkspaceMode;

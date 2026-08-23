@@ -369,6 +369,11 @@ export function formatFailedTask(
   config?: import("./config.ts").DelegateConfig,
 ): string[] {
   const parts: string[] = [];
+  if (r.incomplete === "quiescence_abandoned") {
+    parts.push(
+      "[INCOMPLETE: quiescence was abandoned; output, file evidence, token usage, and cost are lower bounds while the quarantined session settles.]",
+    );
+  }
   const isAbort = r.error === "Aborted";
   // Empty string is falsy but not nullish — `||` covers both undefined and "".
   const failParts = [r.error || "unknown error"];
@@ -449,8 +454,13 @@ export function formatCompletedTask(
   if (result.error) {
     parts.push(...formatFailedTask(result, task.cwd, config));
   } else {
+    if (result.incomplete === "quiescence_abandoned") {
+      parts.push(
+        "[INCOMPLETE: quiescence was abandoned; output, file evidence, token usage, and cost are lower bounds while the quarantined session settles.]",
+      );
+    }
     const meta = [
-      `OK | ${fmtDuration(result.durationMs)} | ${fmtTokens(result.tokens)} tokens`,
+      `OK | ${fmtDuration(result.durationMs)} | ${taskTokenLabel(result)}`,
     ];
     if (result.sessionFile) meta.push(shortenPath(result.sessionFile));
     const touched = relativeTouchedSummary(result.touchedFiles, task.cwd);
@@ -538,8 +548,16 @@ export function compactActivity(p: TaskProgress): string {
 
 /** Per-task stats core: [duration, tokens]. Callers append medium-specific
  *  extras (touched files; themed join). */
+export function taskTokenLabel(
+  result: Pick<TaskResult, "tokens" | "incomplete">,
+): string {
+  return result.incomplete === "quiescence_abandoned"
+    ? `≥${fmtTokens(result.tokens)} tokens (incomplete)`
+    : `${fmtTokens(result.tokens)} tokens`;
+}
+
 export function taskMetaBase(r: TaskResult): string[] {
-  return [fmtDuration(r.durationMs), `${fmtTokens(r.tokens)} tokens`];
+  return [fmtDuration(r.durationMs), taskTokenLabel(r)];
 }
 
 /** Pending-task waiting label: "queued (N running)" at the concurrency cap,

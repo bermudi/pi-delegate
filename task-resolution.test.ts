@@ -15,7 +15,11 @@ import {
   _setDelegateConfigForTesting,
 } from "./config.ts";
 import { DEFAULT_TOOLS } from "./constants.ts";
-import type { AgentConfig, TaskDef } from "./types.ts";
+import {
+  _resetQuarantineRegistryForTesting,
+  reserveSessionQuarantine,
+} from "./session-quarantine.ts";
+import type { AgentConfig, ResolvedTask, TaskDef } from "./types.ts";
 
 const START =
   "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n";
@@ -77,6 +81,37 @@ describe("stripInheritedProjectContext", () => {
 });
 
 describe("validateTasks", () => {
+  afterEach(() => {
+    _resetQuarantineRegistryForTesting();
+  });
+
+  test("rejects quarantined sessionId reuse until safety confirmation", async () => {
+    let confirmSafe!: () => void;
+    const safe = new Promise<void>((resolve) => {
+      confirmSafe = resolve;
+    });
+    reserveSessionQuarantine(
+      {
+        sessionId: "abandoned-session",
+        prompt: "old task",
+        workspace: "shared",
+        tools: ["read"],
+      } as ResolvedTask,
+      { safe },
+    );
+    const tasks = [{ prompt: "continue", sessionId: "abandoned-session" }];
+
+    const rejected = validateTasks(tasks, new Map(), undefined);
+    expect(rejected?.content[0]?.text).toContain(
+      "SessionId(s) quarantined after quiescence abandonment",
+    );
+
+    confirmSafe();
+    await safe;
+    await Promise.resolve();
+    expect(validateTasks(tasks, new Map(), undefined)).toBeNull();
+  });
+
   test("rejects duplicate task ids in one dispatch", () => {
     const tasks: TaskDef[] = [
       { id: "same", prompt: "one" },

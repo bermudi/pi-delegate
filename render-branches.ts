@@ -12,9 +12,14 @@ import {
   spinnerFrame,
   formatToolCallShort,
   previewOutputLine,
+  taskTokenLabel,
   waitingLabel,
 } from "./format.ts";
-import { stripAnsi, resolveCarriageReturn } from "./utils.ts";
+import {
+  resolveCarriageReturn,
+  sanitizeTerminalLine,
+  stripAnsi,
+} from "./utils.ts";
 import { getMaxConcurrent } from "./config.ts";
 import { toolExpandHint } from "./key-hints.ts";
 import type { TaskProgress, TaskResult } from "./types.ts";
@@ -86,6 +91,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
   const failed = progress.filter((p) => p.status === "failed").length;
   const running = progress.filter((p) => p.status === "running").length;
   const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
+  const hasIncomplete = progress.some((p) => p.incomplete !== undefined);
 
   // Keep the live and final summaries in the same order so the header remains
   // easy to scan as a partial result resolves into its final form.
@@ -93,7 +99,11 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
   if (running > 0) headerParts.push(`${running} running`);
   headerParts.push(`${finished}/${total} finished`);
   if (failed > 0) headerParts.push(`${failed} failed`);
-  headerParts.push(`${fmtTokens(totalTokens)} tokens`);
+  headerParts.push(
+    hasIncomplete
+      ? `≥${fmtTokens(totalTokens)} tokens · incomplete accounting/evidence`
+      : `${fmtTokens(totalTokens)} tokens`,
+  );
   if (state.startedAt)
     headerParts.push(fmtDuration(Date.now() - state.startedAt));
   const stateLabel =
@@ -122,7 +132,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       case "done":
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? `${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}` : ""}`,
+            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? `${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)])}` : ""}`,
             w,
           ),
         );
@@ -194,12 +204,13 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
                   );
                   // Show live stdout/stderr preview for streaming tools
                   if (activity.liveOutput) {
-                    const clean = stripAnsi(
-                      resolveCarriageReturn(activity.liveOutput),
+                    const clean = resolveCarriageReturn(
+                      stripAnsi(activity.liveOutput),
                     );
                     const preview = clean
                       .split("\n")
-                      .filter((l) => l.trim())
+                      .map(sanitizeTerminalLine)
+                      .filter(Boolean)
                       .slice(-3);
                     for (const outLine of preview) {
                       lines.push(
@@ -278,6 +289,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
   const running = progress.filter((p) => p.status === "running").length;
   const pending = progress.filter((p) => p.status === "pending").length;
   const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
+  const hasIncomplete = progress.some((p) => p.incomplete !== undefined);
   const ticketId = ctx.ticketId;
   const ticketStatus = ctx.ticketStatus;
   // A terminal ticket can retain a stale running/pending row while its workers
@@ -287,6 +299,14 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     ticketStatus === undefined ||
     ticketStatus === "running" ||
     ticketStatus === "cancelling";
+  // Terminal tickets render stale running/pending rows with a failure glyph.
+  // Count those rows the same way in the terminal summary.
+  const terminalUnfinished = ticketIsLive ? 0 : running + pending;
+  const terminalFinalized = finalized + terminalUnfinished;
+  const terminalCancelled =
+    ticketStatus === "cancelled" ? terminalUnfinished : 0;
+  const terminalFailed =
+    failed + (ticketStatus === "cancelled" ? 0 : terminalUnfinished);
   let elapsed: string | undefined;
   if (ctx.elapsedMs !== undefined) {
     elapsed = fmtDuration(ctx.elapsedMs);
@@ -317,12 +337,20 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       "",
     );
   } else {
-    const headerParts = [`${finalized}/${total} finished`];
-    if (failed > 0) headerParts.push(`${failed} failed`);
-    headerParts.push(`${fmtTokens(totalTokens)} tokens`);
+    const headerParts = [`${terminalFinalized}/${total} finished`];
+    if (terminalFailed > 0) headerParts.push(`${terminalFailed} failed`);
+    if (terminalCancelled > 0)
+      headerParts.push(`${terminalCancelled} cancelled`);
+    headerParts.push(
+      hasIncomplete
+        ? `≥${fmtTokens(totalTokens)} tokens · incomplete accounting/evidence`
+        : `${fmtTokens(totalTokens)} tokens`,
+    );
     if (elapsed) headerParts.push(elapsed);
     const glyph =
-      ticketStatus === "cancelled" || ticketStatus === "failed" || failed > 0
+      ticketStatus === "cancelled" ||
+      ticketStatus === "failed" ||
+      terminalFailed > 0
         ? theme.fg("error", "✗")
         : theme.fg("success", "✓");
     lines.push(
@@ -335,16 +363,16 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const p = progress[i]!;
     const r = taskResults[i];
     const ind = indent(i, total);
-    const isCancelledPending =
-      ticketStatus === "cancelled" && p.status === "pending";
     const isTerminalUnfinished =
       !ticketIsLive && (p.status === "running" || p.status === "pending");
+    const isCancelledUnfinished =
+      ticketStatus === "cancelled" && isTerminalUnfinished;
 
-    // Unified status glyphs: ✓ done, ✗ failed, ◐ running, ○ pending.
-    // Unfinished rows on terminal tickets show as failed so stale progress is
-    // never mistaken for work that is still running or queued.
+    // Unified status glyphs: ✓ done, ✗ failed/cancelled, ◐ running, ○ pending.
+    // Terminal unfinished rows never retain a live glyph; their tail identifies
+    // cancellation separately from failure.
     let icon: string;
-    if (isCancelledPending || isTerminalUnfinished) {
+    if (isTerminalUnfinished) {
       icon = theme.fg("error", "✗");
     } else if (p.status === "done") {
       icon = theme.fg("success", "✓");
@@ -361,20 +389,18 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const previewBudget = Math.max(1, w - 30 - taskIdWidth);
     const taskPreview = theme.fg("muted", ` — ${trunc(p.task, previewBudget)}`);
     const isLive =
-      ticketIsLive &&
-      (p.status === "running" ||
-        (p.status === "pending" && !isCancelledPending));
+      ticketIsLive && (p.status === "running" || p.status === "pending");
     // Live tasks show an activity/waiting hint instead of final stats.
     const liveTail =
-      p.status === "pending" && !isCancelledPending
+      p.status === "pending"
         ? theme.fg("muted", ` ${waitingLabel(running, getMaxConcurrent())}`)
         : "";
-    const cancelledTail = isCancelledPending
+    const cancelledTail = isCancelledUnfinished
       ? theme.fg("error", " · CANCELLED")
       : "";
     lines.push(
       truncLine(
-        `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${taskIdTag}${taskPreview}${expanded ? modelLabel(p) : ""}${isLive ? liveTail : cancelledTail || (expanded ? statJoin([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`]) : "")}`,
+        `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${taskIdTag}${taskPreview}${expanded ? modelLabel(p) : ""}${isLive ? liveTail : cancelledTail || (expanded ? statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)]) : "")}`,
         w,
       ),
     );
@@ -412,10 +438,23 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       );
     }
 
+    if (
+      !isLive &&
+      ((r && "incomplete" in r && r.incomplete === "quiescence_abandoned") ||
+        p.incomplete === "quiescence_abandoned")
+    ) {
+      lines.push(
+        truncLine(
+          `${ind}${theme.fg("warning", "INCOMPLETE: accounting and output/file evidence are lower bounds; session quarantined")}`,
+          w,
+        ),
+      );
+    }
+
     // Surface errors even when output exists (agent may have emitted text before failing).
-    // Live tasks and cancelled-but-not-started tasks already show their status
-    // on the row, so don't duplicate it as an error line.
-    if (!isLive && !isCancelledPending && r && "error" in r && r.error) {
+    // Live and cancelled unfinished tasks already show their status on the
+    // row, so don't duplicate it as an error line.
+    if (!isLive && !isCancelledUnfinished && r && "error" in r && r.error) {
       lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
     }
     if (r && "integration" in r && r.integration) {
