@@ -10,7 +10,13 @@
  */
 import { describe, expect, mock, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getGitChangedFiles } from "./file-tracking.ts";
@@ -1217,6 +1223,10 @@ describe("runAgentSession abort re-check", () => {
     _setStallTimeoutForTesting(15);
     let idle = false;
     let aborts = 0;
+    let resolvePrompt!: () => void;
+    const promptDone = new Promise<void>((resolve) => {
+      resolvePrompt = resolve;
+    });
     const { session } = fakeSession({
       prompt: (emit) => {
         emit({
@@ -1225,7 +1235,7 @@ describe("runAgentSession abort re-check", () => {
           toolName: "write",
           args: { path: "possibly-written.txt", content: "data" },
         });
-        return new Promise<void>(() => {});
+        return promptDone;
       },
       isIdle: () => idle,
       abort: () => {
@@ -1245,16 +1255,20 @@ describe("runAgentSession abort re-check", () => {
         Date.now(),
       );
 
-      expect(aborts).toBe(1);
+      expect(aborts).toBeGreaterThanOrEqual(1);
       expect(result.failureKind).toBe("stalled");
       expect(result.error).toContain("Stalled:");
+      expect(result.incomplete).toBe("quiescence_abandoned");
       expect(result.touchedFiles).toContain(
         path.join(process.cwd(), "possibly-written.txt"),
       );
       expect(result.attributedFiles).toContain(
         path.join(process.cwd(), "possibly-written.txt"),
       );
+      resolvePrompt();
+      await sessionQuarantineOf(result)!.safe;
     } finally {
+      resolvePrompt();
       _setStallTimeoutForTesting(undefined);
     }
   });
@@ -2479,6 +2493,59 @@ describe("touched-file tracking", () => {
     }
   });
 
+  test("attributes write-through to the execution-time symlink target", async () => {
+    if (process.platform === "win32") return;
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "delegate-runner-symlink-snapshot-"),
+    );
+    try {
+      const oldTarget = path.join(tmpDir, "old-target.txt");
+      const newTarget = path.join(tmpDir, "new-target.txt");
+      const link = path.join(tmpDir, "target-link.txt");
+      writeFileSync(oldTarget, "before\n");
+      writeFileSync(newTarget, "new\n");
+      symlinkSync(oldTarget, link);
+
+      const { session } = fakeSession({
+        prompt: async (emit) => {
+          emit({
+            type: "tool_execution_start",
+            toolCallId: "tc-write-link",
+            toolName: "write",
+            args: { path: link, content: "written" },
+          });
+          writeFileSync(link, "written through old target\n");
+          unlinkSync(link);
+          symlinkSync(newTarget, link);
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "tc-write-link",
+            toolName: "write",
+            result: { content: [] },
+            isError: false,
+          });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: tmpDir },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.attributedFiles).toContain(oldTarget);
+      expect(result.attributedFiles).not.toContain(newTarget);
+      expect(result.touchedFiles).toContain(link);
+      expect(result.touchedFiles).toContain(oldTarget);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test("bash mutation in a git repo is captured via git diff", async () => {
     const tmpDir = mkdtempSync(
       path.join(os.tmpdir(), "delegate-runner-touched-git-"),
@@ -2888,15 +2955,19 @@ describe("runAgentSession deadline", () => {
     expect(result.prompted).toBe(true);
   });
 
-  test("deadline does not await a prompt promise that ignores abort", async () => {
-    let idle = false;
+  test("quarantines a pending prompt even when cancellation leaves the session idle", async () => {
+    let resolvePrompt!: () => void;
+    const promptDone = new Promise<void>((resolve) => {
+      resolvePrompt = resolve;
+    });
     let aborts = 0;
     const { session } = fakeSession({
-      prompt: () => new Promise<void>(() => {}),
-      isIdle: () => idle,
+      prompt: () => promptDone,
+      // Regression: AgentSession can report idle while the provider/tool-owned
+      // prompt promise is still unresolved.
+      isIdle: () => true,
       abort: () => {
         aborts++;
-        idle = true;
       },
     });
 
@@ -2912,9 +2983,22 @@ describe("runAgentSession deadline", () => {
       start + 15,
     );
 
-    expect(aborts).toBe(1);
+    expect(aborts).toBeGreaterThanOrEqual(1);
     expect(result.failureKind).toBe("deadline_exceeded");
     expect(result.error).toContain("Deadline exceeded");
+    expect(result.incomplete).toBe("quiescence_abandoned");
+    const quarantine = sessionQuarantineOf(result);
+    expect(quarantine).toBeDefined();
+
+    let safe = false;
+    void quarantine!.safe.then(() => {
+      safe = true;
+    });
+    await sleep(5);
+    expect(safe).toBe(false);
+    resolvePrompt();
+    await quarantine!.safe;
+    expect(safe).toBe(true);
   });
 
   test("parent abort wins when the signal fires after the deadline", async () => {

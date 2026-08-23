@@ -35,6 +35,7 @@ import {
   _setRunAgentSessionForTesting,
   _setAcquireAgentSessionForTesting,
   _setCreateScratchWorkspaceForTesting,
+  _setQuarantinePooledSessionDetachForTesting,
   _setWholeTaskRetryForTesting,
   isModelAttributableError,
   runResolvedTask,
@@ -3992,6 +3993,93 @@ describe("quiescence-abandoned session ownership", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(disposed).toBe(1);
     } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _resetPoolForTesting();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("failed pooled detachment blocks reuse until safe without disposing the indexed session", async () => {
+    _resetPoolForTesting();
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "delegate-quarantine-detach-failure-"),
+    );
+    const sessionFile = path.join(root, "session.jsonl");
+    fs.writeFileSync(sessionFile, "");
+    const safety = deferred();
+    let disposed = 0;
+    const session = { dispose: () => disposed++ } as unknown as AgentSession;
+    const manager = {
+      getSessionFile: () => sessionFile,
+    } as unknown as SessionManager;
+    const task = makeBaseTask({
+      workspace: "shared",
+      cwd: root,
+      sessionId: "detach-invariant-failure",
+    });
+    commit("detach-invariant-failure", {
+      session,
+      sessionManager: manager,
+      sessionFile,
+      frozen: {
+        systemPrompt: task.systemPrompt,
+        model: task.model,
+        thinking: task.thinking,
+        tools: task.tools,
+        cwd: task.cwd,
+        providerExtensions: "",
+      },
+      tokens: 0,
+    });
+    _setRunAgentSessionForTesting(async () => abandonedRun(safety.promise));
+    _setQuarantinePooledSessionDetachForTesting(() => false);
+
+    try {
+      const result = await runResolvedTask(
+        makeTestEnv(),
+        task,
+        progress(task),
+        0,
+      );
+      expect(sessionQuarantineOf(result)).toBeDefined();
+      expect(configFor("detach-invariant-failure")).toBeDefined();
+      expect(disposed).toBe(0);
+
+      const blocked = await runResolvedTask(
+        makeTestEnv(),
+        task,
+        progress(task),
+        0,
+      );
+      expect(blocked.error).toContain("is quarantined");
+      expect(disposed).toBe(0);
+
+      safety.resolve();
+      await safety.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(configFor("detach-invariant-failure")).toBeDefined();
+      expect(disposed).toBe(0);
+
+      _setRunAgentSessionForTesting(async () => ({
+        output: "reused safely",
+        durationMs: 1,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+        prompted: true,
+      }));
+      const reused = await runResolvedTask(
+        makeTestEnv(),
+        task,
+        progress(task),
+        0,
+      );
+      expect(reused.error).toBeUndefined();
+      expect(reused.output).toBe("reused safely");
+      expect(disposed).toBe(0);
+    } finally {
+      _setQuarantinePooledSessionDetachForTesting(undefined);
       _setRunAgentSessionForTesting(undefined);
       _resetPoolForTesting();
       fs.rmSync(root, { recursive: true, force: true });

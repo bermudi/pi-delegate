@@ -1,6 +1,77 @@
 import { execFile } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ToolActivity } from "./types.ts";
+
+function activityPath(
+  activity: Pick<ToolActivity, "args">,
+  cwd: string,
+): string | undefined {
+  const raw =
+    activity.args?.path ?? activity.args?.file_path ?? activity.args?.filePath;
+  return typeof raw === "string" && raw ? path.resolve(cwd, raw) : undefined;
+}
+
+/**
+ * Capture the physical target of an edit/write call before tool work begins.
+ *
+ * realpathSync handles an existing symlink leaf directly. For a target that
+ * does not yet exist, walk to a resolvable ancestor and append the missing
+ * suffix, preserving write-through attribution through symlinked directories.
+ * Dangling symlinks retain their intended target conservatively. `undefined`
+ * means canonicalization was ambiguous; callers then keep the lexical path.
+ */
+export function snapshotPhysicalToolTarget(
+  activity: Pick<ToolActivity, "args">,
+  cwd: string,
+): string | undefined {
+  const candidate = activityPath(activity, cwd);
+  if (!candidate) return undefined;
+
+  const resolvePhysical = (
+    value: string,
+    seen: Set<string>,
+  ): string | undefined => {
+    const absolute = path.resolve(value);
+    if (seen.has(absolute)) return undefined;
+    seen.add(absolute);
+
+    try {
+      return fs.realpathSync.native(absolute);
+    } catch (error) {
+      const code =
+        error instanceof Error && "code" in error
+          ? (error as NodeJS.ErrnoException).code
+          : undefined;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
+    }
+
+    try {
+      if (fs.lstatSync(absolute).isSymbolicLink()) {
+        const target = fs.readlinkSync(absolute);
+        return resolvePhysical(
+          path.resolve(path.dirname(absolute), target),
+          seen,
+        );
+      }
+    } catch (error) {
+      const code =
+        error instanceof Error && "code" in error
+          ? (error as NodeJS.ErrnoException).code
+          : undefined;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
+    }
+
+    const parent = path.dirname(absolute);
+    if (parent === absolute) return undefined;
+    const physicalParent = resolvePhysical(parent, seen);
+    return physicalParent
+      ? path.resolve(physicalParent, path.basename(absolute))
+      : undefined;
+  };
+
+  return resolvePhysical(candidate, new Set<string>());
+}
 
 /**
  * Return absolute paths reported as changed by Git in the task cwd.
@@ -68,11 +139,25 @@ export function extractTouchedFromActivities(
   cwd: string,
 ): string[] {
   const files = new Set<string>();
-  for (const a of activities) {
-    if (a.name !== "edit" && a.name !== "write") continue;
-    const raw = a.args?.path ?? a.args?.file_path ?? a.args?.filePath;
-    if (typeof raw !== "string" || !raw) continue;
-    files.add(path.resolve(cwd, raw));
+  for (const activity of activities) {
+    if (activity.name !== "edit" && activity.name !== "write") continue;
+    const lexicalPath = activityPath(activity, cwd);
+    if (lexicalPath) files.add(lexicalPath);
+  }
+  return [...files];
+}
+
+/** Physical edit/write evidence attributable to this run. The execution-time
+ * snapshot wins over the mutable final filesystem view. */
+export function extractAttributedFromActivities(
+  activities: ToolActivity[],
+  cwd: string,
+): string[] {
+  const files = new Set<string>();
+  for (const activity of activities) {
+    if (activity.name !== "edit" && activity.name !== "write") continue;
+    const target = activity.physicalTarget ?? activityPath(activity, cwd);
+    if (target) files.add(target);
   }
   return [...files];
 }

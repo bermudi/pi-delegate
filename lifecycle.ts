@@ -43,6 +43,10 @@ let runAgentSessionForTesting: RunAgentSession = runAgentSession;
 type CreateScratchWorkspace = typeof createScratchWorkspace;
 let createScratchWorkspaceForTesting: CreateScratchWorkspace =
   createScratchWorkspace;
+type DetachQuarantinedPooledSession =
+  typeof pool._quarantinePooledAgentWithoutDisposal;
+let detachQuarantinedPooledSessionForTesting: DetachQuarantinedPooledSession =
+  pool._quarantinePooledAgentWithoutDisposal;
 
 export function _setRunAgentSessionForTesting(
   override: RunAgentSession | undefined,
@@ -55,6 +59,14 @@ export function _setCreateScratchWorkspaceForTesting(
   override: CreateScratchWorkspace | undefined,
 ): void {
   createScratchWorkspaceForTesting = override ?? createScratchWorkspace;
+}
+
+/** @internal Simulate a pooled-detachment invariant failure in lifecycle tests. */
+export function _setQuarantinePooledSessionDetachForTesting(
+  override: DetachQuarantinedPooledSession | undefined,
+): void {
+  detachQuarantinedPooledSessionForTesting =
+    override ?? pool._quarantinePooledAgentWithoutDisposal;
 }
 
 /**
@@ -154,14 +166,22 @@ function quarantineAcquiredSession(
   acquired: AcquiredSession,
   quarantine: SessionQuarantine,
 ): void {
-  if (!acquired.lifecycleOwnsSession && task.sessionId) {
-    const detached = pool._quarantinePooledAgentWithoutDisposal(
-      task.sessionId,
-      acquired.session,
-    );
+  let mayDisposeAfterSafety = acquired.lifecycleOwnsSession;
+  if (!acquired.lifecycleOwnsSession) {
+    const detached = task.sessionId
+      ? detachQuarantinedPooledSessionForTesting(
+          task.sessionId,
+          acquired.session,
+        )
+      : false;
+    mayDisposeAfterSafety = detached;
     if (!detached) {
+      // The pool may still index this exact object. Keep its quarantine
+      // reservation fail-closed until safety, but never schedule disposal of an
+      // object that another owner still retains. Once safe, normal pooled reuse
+      // is preferable to poisoning the indexed session with a deferred dispose.
       console.error(
-        `[delegate] CRITICAL: could not detach abandoned pooled AgentSession '${task.sessionId}'; refusing immediate disposal`,
+        `[delegate] CRITICAL: could not detach abandoned pooled AgentSession${task.sessionId ? ` '${task.sessionId}'` : ""}; retaining the indexed session without disposal until it is safe for pooled reuse`,
       );
     }
   }
@@ -170,20 +190,34 @@ function quarantineAcquiredSession(
   // active dispatch reservation is released.
   reserveSessionQuarantine(task, quarantine);
   console.error(
-    `[delegate] AgentSession${task.sessionId ? ` '${task.sessionId}'` : ""} quarantined; deferred disposal is waiting for background quiescence confirmation`,
+    mayDisposeAfterSafety
+      ? `[delegate] AgentSession${task.sessionId ? ` '${task.sessionId}'` : ""} quarantined; deferred disposal is waiting for background quiescence confirmation`
+      : `[delegate] AgentSession${task.sessionId ? ` '${task.sessionId}'` : ""} quarantined; pooled reuse remains blocked until background quiescence confirmation`,
   );
-  observeQuarantineSafety(
-    quarantine,
-    "quarantined AgentSession disposal",
-    () => disposeSession(acquired.session, "quarantined subagent"),
-    (error) => {
-      // A rejected safety proof is not permission to clean anything.
-      console.error(
-        "[delegate] quarantined AgentSession safety monitor failed; retaining the session indefinitely",
-        error,
-      );
-    },
-  );
+  const onSafetyFailure = (error: unknown): void => {
+    // A rejected safety proof is not permission to clean anything.
+    console.error(
+      "[delegate] quarantined AgentSession safety monitor failed; retaining the session indefinitely",
+      error,
+    );
+  };
+  if (mayDisposeAfterSafety) {
+    observeQuarantineSafety(
+      quarantine,
+      "quarantined AgentSession disposal",
+      () => disposeSession(acquired.session, "quarantined subagent"),
+      onSafetyFailure,
+    );
+  } else {
+    // Observe only for a loud monitor failure. No disposal callback may be
+    // attached while the pool still indexes the session object.
+    observeQuarantineSafety(
+      quarantine,
+      "retained pooled AgentSession safety",
+      () => {},
+      onSafetyFailure,
+    );
+  }
 }
 
 /** Merge per-attempt activities into a live history list while preserving

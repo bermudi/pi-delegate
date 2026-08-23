@@ -1,34 +1,12 @@
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
-import { promises as asyncFs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getOutputSpillTail, getOutputSpillThreshold } from "./config.ts";
 
 const SPILL_PREFIX = "delegate-output-";
-/** Delegate never removes a spill while its pointer may still be fresh in
- * model context. Older files are swept opportunistically; the OS may retain
- * them longer according to its own temp policy. */
-export const OUTPUT_SPILL_RETENTION_MS = 24 * 60 * 60 * 1000;
-const SPILL_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
-const SPILL_SWEEP_RETRY_BACKOFF_MS = 60 * 1000;
-const SPILL_SWEEP_WARNING_INTERVAL_MS = 60 * 60 * 1000;
 const RANDOM_SUFFIX_BYTES = 16;
 const CREATE_ATTEMPTS = 5;
-const lastSuccessfulSpillSweepAtByDir = new Map<string, number>();
-const lastSpillSweepAttemptAtByDir = new Map<string, number>();
-const lastSpillSweepWarningAtByDir = new Map<string, number>();
-const spillSweepsInFlight = new Map<string, Promise<void>>();
-
-type SpillSweep = (
-  dir: string,
-  now?: number,
-  retentionMs?: number,
-) => Promise<void>;
-
-let spillSweep: SpillSweep = sweepStaleSpillFiles;
-let spillSweepNow = Date.now;
-let spillSweepWarn = (message: string): void => console.warn(message);
 
 // ── Spill: keep subagent final-output bloat out of the LLM context ───────
 //
@@ -39,8 +17,10 @@ let spillSweepWarn = (message: string): void => console.warn(message);
 //
 // The spill is a greppable plain-text `.md` projection of the *final output*
 // only. The full transcript already lives in the session `.jsonl`; this does
-// not duplicate it. Design: lossless always — if the spill write fails, we
-// degrade to today's behavior (full output in context) rather than hard-truncate.
+// not duplicate it. Delegate never deletes spills because their pointers can
+// persist in transcripts; lifecycle is left to the OS temp policy. Design:
+// lossless always — if the spill write fails, we degrade to today's behavior
+// (full output in context) rather than hard-truncate.
 
 /** Decision over an output string: spill or not, and what stays in-context. */
 export interface SpillDecision {
@@ -82,164 +62,6 @@ function errorCode(error: unknown): unknown {
     : undefined;
 }
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/** Remove only Delegate spill files older than the retention window.
- *
- * This is deliberately independent of the 30-minute ticket TTL: a spill path
- * may already be present in model context after its ticket leaves the poll
- * registry. Cleanup is best-effort and never removes fresh files. Benign
- * ENOENT races are ignored; other per-file failures are reported together so
- * the scheduler can warn once rather than flooding stderr.
- */
-export async function sweepStaleSpillFiles(
-  dir: string = os.tmpdir(),
-  now = Date.now(),
-  retentionMs = OUTPUT_SPILL_RETENTION_MS,
-): Promise<void> {
-  let names: string[];
-  try {
-    names = await asyncFs.readdir(dir);
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return;
-    throw error;
-  }
-
-  const failures: Error[] = [];
-  for (const name of names) {
-    if (!name.startsWith(SPILL_PREFIX) || !name.endsWith(".md")) continue;
-    const filePath = path.join(dir, name);
-    try {
-      const stat = await asyncFs.lstat(filePath);
-      if (stat.isFile() && now - stat.mtimeMs > retentionMs) {
-        await asyncFs.rm(filePath, { force: true });
-      }
-    } catch (error) {
-      // A concurrent process or temp cleaner may win either race.
-      if (errorCode(error) === "ENOENT") continue;
-      failures.push(new Error(`${filePath}: ${describeError(error)}`));
-    }
-  }
-
-  if (failures.length > 0) {
-    throw new AggregateError(
-      failures,
-      `failed to sweep ${failures.length} spill file${failures.length === 1 ? "" : "s"}`,
-    );
-  }
-}
-
-function warnAboutSpillSweepFailure(dir: string, error: unknown): void {
-  const now = spillSweepNow();
-  const lastWarningAt = lastSpillSweepWarningAtByDir.get(dir);
-  if (
-    lastWarningAt !== undefined &&
-    now - lastWarningAt < SPILL_SWEEP_WARNING_INTERVAL_MS
-  ) {
-    return;
-  }
-  lastSpillSweepWarningAtByDir.set(dir, now);
-
-  const detail =
-    error instanceof AggregateError
-      ? `${error.message}: ${error.errors.map(describeError).join("; ")}`
-      : describeError(error);
-  try {
-    spillSweepWarn(`[delegate] spill cleanup failed (${dir}): ${detail}`);
-  } catch {
-    // Logging must not turn a best-effort background cleanup into a rejection.
-  }
-}
-
-/**
- * Start a due sweep in a later microtask. The returned promise always settles
- * successfully: production deliberately fire-and-forgets it, while tests can
- * await the same promise through `_spillSweepTestHooks`.
- */
-function maybeScheduleStaleSpillSweep(dir: string): Promise<void> | undefined {
-  const now = spillSweepNow();
-  const lastSuccessfulSweepAt = lastSuccessfulSpillSweepAtByDir.get(dir);
-  if (
-    lastSuccessfulSweepAt !== undefined &&
-    now - lastSuccessfulSweepAt < SPILL_SWEEP_INTERVAL_MS
-  ) {
-    return undefined;
-  }
-
-  const existing = spillSweepsInFlight.get(dir);
-  if (existing) return existing;
-
-  // Completion and attempt timing are deliberately separate: success keeps
-  // the normal hourly cadence, while failure becomes retryable after a short
-  // backoff instead of making every subsequent spill rescan the directory.
-  const lastAttemptAt = lastSpillSweepAttemptAtByDir.get(dir);
-  if (
-    lastAttemptAt !== undefined &&
-    now - lastAttemptAt < SPILL_SWEEP_RETRY_BACKOFF_MS
-  ) {
-    return undefined;
-  }
-  lastSpillSweepAttemptAtByDir.set(dir, now);
-
-  let completion!: Promise<void>;
-  completion = Promise.resolve()
-    .then(() => spillSweep(dir, now, OUTPUT_SPILL_RETENTION_MS))
-    .then(() => {
-      // A failed or partially failed sweep remains immediately retryable.
-      lastSuccessfulSpillSweepAtByDir.set(dir, spillSweepNow());
-    })
-    .catch((error: unknown) => {
-      try {
-        warnAboutSpillSweepFailure(dir, error);
-      } catch {
-        // Keep the fire-and-forget promise fulfilled even if an injected test
-        // clock or an unusual error object breaks warning formatting.
-      }
-    })
-    .finally(() => {
-      if (spillSweepsInFlight.get(dir) === completion) {
-        spillSweepsInFlight.delete(dir);
-      }
-    });
-  spillSweepsInFlight.set(dir, completion);
-  return completion;
-}
-
-/**
- * Test-only controls for deterministic background-sweep assertions. Reset must
- * be called only after `awaitPending()` so a prior injected sweep cannot write
- * into freshly reset state.
- */
-export const _spillSweepTestHooks = {
-  setDependencies(overrides: {
-    sweep?: SpillSweep;
-    now?: () => number;
-    warn?: (message: string) => void;
-  }): void {
-    spillSweep = overrides.sweep ?? sweepStaleSpillFiles;
-    spillSweepNow = overrides.now ?? Date.now;
-    spillSweepWarn = overrides.warn ?? ((message) => console.warn(message));
-  },
-  async awaitPending(): Promise<void> {
-    await Promise.all([...spillSweepsInFlight.values()]);
-  },
-  reset(): void {
-    if (spillSweepsInFlight.size > 0) {
-      throw new Error(
-        "cannot reset spill sweep state while a sweep is pending",
-      );
-    }
-    spillSweep = sweepStaleSpillFiles;
-    spillSweepNow = Date.now;
-    spillSweepWarn = (message) => console.warn(message);
-    lastSuccessfulSpillSweepAtByDir.clear();
-    lastSpillSweepAttemptAtByDir.clear();
-    lastSpillSweepWarningAtByDir.clear();
-  },
-};
-
 /**
  * Write the full output to a temp `.md` file and return its path, or `null`
  * on failure. Never throws — callers rely on the lossless-degrade guarantee.
@@ -255,9 +77,6 @@ export function spillToTempFile(
   suffix?: string,
   dir: string = os.tmpdir(),
 ): string | null {
-  // The cleanup promise handles its own failure and starts in a later
-  // microtask, keeping directory scans and removals off result delivery.
-  void maybeScheduleStaleSpillSweep(dir);
   const safeLabel = label.replace(/[^\w.-]+/g, "_").slice(0, 64) || "agent";
   const attempts = suffix === undefined ? CREATE_ATTEMPTS : 1;
   let lastPath = path.join(dir, `${SPILL_PREFIX}${safeLabel}-unknown.md`);
@@ -364,7 +183,7 @@ function spillPointer(
   filePath: string,
   fullChars: number,
 ): string {
-  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n Delegate cleanup is eligible after 24 hours, but OS temp cleanup may delete it sooner; \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
+  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n retention follows OS temp policy; \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
 }
 
 /**

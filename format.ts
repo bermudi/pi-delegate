@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { renderOutputForLLM } from "./spill.ts";
 import { getOutputSpillThreshold, getOutputSpillTail } from "./config.ts";
 import { toolExpandHint } from "./key-hints.ts";
+import { sanitizeTerminalLine } from "./utils.ts";
 import type {
   ResolvedTask,
   TaskProgress,
@@ -194,7 +195,9 @@ export function trunc(s: string, n: number): string {
 
 /** Render an optional task `id` in a compact, visually distinct form. */
 export function formatTaskId(id: string | undefined): string {
-  return id ? ` #${id}` : "";
+  if (!id) return "";
+  const safeId = sanitizeTerminalLine(id);
+  return safeId ? ` #${safeId}` : "";
 }
 
 /**
@@ -211,7 +214,7 @@ export function previewOutputLine(output: string, maxWidth: number): string {
   const clean = output.trim();
   if (!clean || clean === "(no output)") return "";
   for (const raw of clean.split("\n")) {
-    const line = raw.trim();
+    const line = sanitizeTerminalLine(raw);
     if (!line) continue;
     // Strip leading markdown noise so the preview reads as content, not markup.
     const stripped = line
@@ -246,20 +249,23 @@ function firstArg(
   return undefined;
 }
 
-/** Render a compact, human-readable summary of a tool call. */
+/** Render a compact, terminal-safe, single-line summary of a tool call. */
 export function formatToolCallShort(
   name: string,
   args: Record<string, unknown>,
 ): string {
-  if (!args || typeof args !== "object") return name;
+  const safeName = sanitizeTerminalLine(name);
+  if (!args || typeof args !== "object") return safeName;
   switch (name) {
     case "bash": {
-      const cmd = firstArg(args, "command") ?? "...";
+      const cmd = sanitizeTerminalLine(firstArg(args, "command") ?? "...");
       const maxLen = 80;
       return `$ ${cmd.length > maxLen ? cmd.slice(0, maxLen) + "…" : cmd}`;
     }
     case "read": {
-      const p = shortenPath(firstArg(args, "path", ["file_path"]) ?? "...");
+      const p = shortenPath(
+        sanitizeTerminalLine(firstArg(args, "path", ["file_path"]) ?? "..."),
+      );
       const offset = typeof args.offset === "number" ? args.offset : undefined;
       const limit = typeof args.limit === "number" ? args.limit : undefined;
       let line = `read ${p}`;
@@ -271,16 +277,20 @@ export function formatToolCallShort(
       return line;
     }
     case "write": {
-      const p = shortenPath(firstArg(args, "path", ["file_path"]) ?? "...");
+      const p = shortenPath(
+        sanitizeTerminalLine(firstArg(args, "path", ["file_path"]) ?? "..."),
+      );
       const lines = String(args.content ?? "").split("\n").length;
       return `write ${p}${lines > 1 ? ` (${lines} lines)` : ""}`;
     }
     case "edit": {
-      const p = shortenPath(firstArg(args, "path", ["file_path"]) ?? "...");
+      const p = shortenPath(
+        sanitizeTerminalLine(firstArg(args, "path", ["file_path"]) ?? "..."),
+      );
       return `edit ${p}`;
     }
     default: {
-      // Try to pick a meaningful first arg before falling back to JSON
+      // Try to pick a meaningful first arg before falling back to JSON.
       for (const key of [
         "command",
         "path",
@@ -293,15 +303,18 @@ export function formatToolCallShort(
       ]) {
         const val = args[key];
         if (typeof val === "string" && val.trim()) {
-          const preview = val.length > 50 ? val.slice(0, 50) + "…" : val;
-          return `${name} ${preview}`;
+          const safeValue = sanitizeTerminalLine(val);
+          const preview =
+            safeValue.length > 50 ? safeValue.slice(0, 50) + "…" : safeValue;
+          return `${safeName} ${preview}`;
         }
       }
       try {
-        const preview = JSON.stringify(args).slice(0, 50);
-        return `${name} ${preview}${preview.length >= 50 ? "…" : ""}`;
+        const serialized = sanitizeTerminalLine(JSON.stringify(args));
+        const preview = serialized.slice(0, 50);
+        return `${safeName} ${preview}${serialized.length > 50 ? "…" : ""}`;
       } catch {
-        return name;
+        return safeName;
       }
     }
   }
@@ -343,6 +356,10 @@ function isResumableSessionFile(sessionFile: string): boolean {
   return false;
 }
 
+/** Shared LLM-facing warning for results returned before proven quiescence. */
+export const INCOMPLETE_QUIESCENCE_WARNING =
+  "[INCOMPLETE: quiescence was abandoned; output, file evidence, token usage, and cost are lower bounds while the quarantined session settles.]";
+
 /**
  * Render a failed or aborted task's result lines for LLM consumption.
  *
@@ -370,9 +387,7 @@ export function formatFailedTask(
 ): string[] {
   const parts: string[] = [];
   if (r.incomplete === "quiescence_abandoned") {
-    parts.push(
-      "[INCOMPLETE: quiescence was abandoned; output, file evidence, token usage, and cost are lower bounds while the quarantined session settles.]",
-    );
+    parts.push(INCOMPLETE_QUIESCENCE_WARNING);
   }
   const isAbort = r.error === "Aborted";
   // Empty string is falsy but not nullish — `||` covers both undefined and "".
@@ -455,9 +470,7 @@ export function formatCompletedTask(
     parts.push(...formatFailedTask(result, task.cwd, config));
   } else {
     if (result.incomplete === "quiescence_abandoned") {
-      parts.push(
-        "[INCOMPLETE: quiescence was abandoned; output, file evidence, token usage, and cost are lower bounds while the quarantined session settles.]",
-      );
+      parts.push(INCOMPLETE_QUIESCENCE_WARNING);
     }
     const meta = [
       `OK | ${fmtDuration(result.durationMs)} | ${taskTokenLabel(result)}`,
@@ -526,7 +539,9 @@ export function latestActivity(p: TaskProgress): ToolActivity | null {
 export function formatActivityLabel(p: TaskProgress): string {
   const activity = inFlightActivity(p) ?? latestActivity(p);
   if (!activity) return "thinking";
-  const call = formatToolCallShort(activity.name, activity.args);
+  const call = sanitizeTerminalLine(
+    formatToolCallShort(activity.name, activity.args),
+  );
   if (!activity.result) return call;
   return `last: ${call}`;
 }
@@ -537,7 +552,9 @@ export function formatActivityLabel(p: TaskProgress): string {
 export function compactActivity(p: TaskProgress): string {
   const activity = inFlightActivity(p) ?? latestActivity(p);
   if (!activity) return "thinking…";
-  const call = formatToolCallShort(activity.name, activity.args);
+  const call = sanitizeTerminalLine(
+    formatToolCallShort(activity.name, activity.args),
+  );
   if (!activity.result) {
     const toolAge = fmtDuration(Date.now() - activity.startTime);
     return `${call} | ${toolAge}`;

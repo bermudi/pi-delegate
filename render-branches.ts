@@ -18,6 +18,7 @@ import {
 import {
   resolveCarriageReturn,
   sanitizeTerminalLine,
+  sanitizeTerminalText,
   stripAnsi,
 } from "./utils.ts";
 import { getMaxConcurrent } from "./config.ts";
@@ -30,7 +31,7 @@ import type { TaskProgress, TaskResult } from "./types.ts";
  * so a single missing host hook cannot crash the renderer.
  */
 function renderOutputLines(raw: string, width: number): string[] {
-  const trimmed = raw.trim();
+  const trimmed = sanitizeTerminalText(raw).trim();
   if (!trimmed) return [];
   try {
     if (typeof getMarkdownTheme !== "function") return trimmed.split("\n");
@@ -123,6 +124,10 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
   for (let i = 0; i < total; i++) {
     const p = progress[i]!;
     const ind = indent(i, total);
+    const agent = sanitizeTerminalLine(p.agent);
+    const task = sanitizeTerminalLine(p.task);
+    const taskId = formatTaskId(p.id);
+    const taskIdTag = taskId ? theme.fg("accent", taskId) : "";
     const runParts: string[] = [];
     if (p.toolUses > 0)
       runParts.push(`${p.toolUses} tool${p.toolUses > 1 ? "s" : ""}`);
@@ -132,13 +137,15 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       case "done":
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? `${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)])}` : ""}`,
+            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(agent)}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? `${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)])}` : ""}`,
             w,
           ),
         );
         if (expanded) {
           for (const activity of p.activities.slice(-3)) {
-            const call = formatToolCallShort(activity.name, activity.args);
+            const call = sanitizeTerminalLine(
+              formatToolCallShort(activity.name, activity.args),
+            );
             const icon = activity.result?.isError
               ? theme.fg("error", "✗")
               : theme.fg("success", "✓");
@@ -151,13 +158,15 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       case "failed":
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? modelLabel(p) : ""}${p.error ? theme.fg("error", ` · ${p.error}`) : ""}`,
+            `${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(agent)}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? modelLabel(p) : ""}${p.error ? theme.fg("error", ` · ${sanitizeTerminalLine(p.error)}`) : ""}`,
             w,
           ),
         );
         if (expanded) {
           for (const activity of p.activities.slice(-3)) {
-            const call = formatToolCallShort(activity.name, activity.args);
+            const call = sanitizeTerminalLine(
+              formatToolCallShort(activity.name, activity.args),
+            );
             const icon = activity.result?.isError
               ? theme.fg("error", "✗")
               : theme.fg("success", "✓");
@@ -183,7 +192,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
           const glyph = theme.fg("warning", spinnerFrame());
           lines.push(
             truncLine(
-              `${tree(i, total)} ${glyph} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? `${modelLabel(p)}${statJoin(runParts)}` : ""}${issueTag}${theme.fg("dim", ageTag)}`,
+              `${tree(i, total)} ${glyph} ${theme.bold(agent)}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? `${modelLabel(p)}${statJoin(runParts)}` : ""}${issueTag}${theme.fg("dim", ageTag)}`,
               w,
             ),
           );
@@ -192,7 +201,9 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
             // ── Expanded: recent activity history (like done/failed) ──
             if (p.activities.length > 0) {
               for (const activity of p.activities.slice(-5)) {
-                const call = formatToolCallShort(activity.name, activity.args);
+                const call = sanitizeTerminalLine(
+                  formatToolCallShort(activity.name, activity.args),
+                );
                 if (!activity.result) {
                   // In-flight
                   const elapsed = ` | ${fmtDuration(Date.now() - activity.startTime)}`;
@@ -244,7 +255,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
             // emitting it per task repeats the hint for every running agent.
             lines.push(
               truncLine(
-                `${ind}${theme.fg("warning", "›")} ${compactActivity(p)}`,
+                `${ind}${theme.fg("warning", "›")} ${sanitizeTerminalLine(compactActivity(p))}`,
                 w,
               ),
             );
@@ -260,7 +271,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
         );
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${p.id ? theme.fg("accent", formatTaskId(p.id)) : ""}${theme.fg("muted", ` — ${p.task}`)}${expanded ? modelLabel(p) : ""}${queuedTag}`,
+            `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(agent)}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? modelLabel(p) : ""}${queuedTag}`,
             w,
           ),
         );
@@ -307,6 +318,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     ticketStatus === "cancelled" ? terminalUnfinished : 0;
   const terminalFailed =
     failed + (ticketStatus === "cancelled" ? 0 : terminalUnfinished);
+  const ticketWasCancelled = ticketStatus === "cancelled";
   let elapsed: string | undefined;
   if (ctx.elapsedMs !== undefined) {
     elapsed = fmtDuration(ctx.elapsedMs);
@@ -314,7 +326,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     elapsed = fmtDuration(Date.now() - state.startedAt);
   }
 
-  const ticketLabel = ticketId ? `ticket ${ticketId} · ` : "";
+  const safeTicketId = ticketId ? sanitizeTerminalLine(ticketId) : "";
+  const ticketLabel = safeTicketId ? `ticket ${safeTicketId} · ` : "";
   const expandHint = toolExpandHint();
   const detailHint =
     !expanded && expandHint ? ` · ${theme.fg("accent", expandHint)}` : "";
@@ -341,6 +354,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     if (terminalFailed > 0) headerParts.push(`${terminalFailed} failed`);
     if (terminalCancelled > 0)
       headerParts.push(`${terminalCancelled} cancelled`);
+    // Cancellation is a ticket-level outcome even when every worker returned a
+    // normal terminal row. Keep it distinct from actual failed-row counts.
+    if (ticketWasCancelled) headerParts.push("ticket cancelled");
     headerParts.push(
       hasIncomplete
         ? `≥${fmtTokens(totalTokens)} tokens · incomplete accounting/evidence`
@@ -363,6 +379,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const p = progress[i]!;
     const r = taskResults[i];
     const ind = indent(i, total);
+    const agent = sanitizeTerminalLine(p.agent);
+    const task = sanitizeTerminalLine(p.task);
     const isTerminalUnfinished =
       !ticketIsLive && (p.status === "running" || p.status === "pending");
     const isCancelledUnfinished =
@@ -383,11 +401,11 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     } else {
       icon = theme.fg("muted", "○");
     }
-    const taskId = p.id ? formatTaskId(p.id) : "";
-    const taskIdTag = p.id ? theme.fg("accent", taskId) : "";
-    const taskIdWidth = p.id ? taskId.length : 0;
+    const taskId = formatTaskId(p.id);
+    const taskIdTag = taskId ? theme.fg("accent", taskId) : "";
+    const taskIdWidth = taskId.length;
     const previewBudget = Math.max(1, w - 30 - taskIdWidth);
-    const taskPreview = theme.fg("muted", ` — ${trunc(p.task, previewBudget)}`);
+    const taskPreview = theme.fg("muted", ` — ${trunc(task, previewBudget)}`);
     const isLive =
       ticketIsLive && (p.status === "running" || p.status === "pending");
     // Live tasks show an activity/waiting hint instead of final stats.
@@ -400,14 +418,17 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       : "";
     lines.push(
       truncLine(
-        `${tree(i, total)} ${icon} ${theme.bold(p.agent)}${taskIdTag}${taskPreview}${expanded ? modelLabel(p) : ""}${isLive ? liveTail : cancelledTail || (expanded ? statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)]) : "")}`,
+        `${tree(i, total)} ${icon} ${theme.bold(agent)}${taskIdTag}${taskPreview}${expanded ? modelLabel(p) : ""}${isLive ? liveTail : cancelledTail || (expanded ? statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)]) : "")}`,
         w,
       ),
     );
 
     if (isLive && p.status === "running") {
       lines.push(
-        truncLine(`${ind}${theme.fg("warning", "›")} ${compactActivity(p)}`, w),
+        truncLine(
+          `${ind}${theme.fg("warning", "›")} ${sanitizeTerminalLine(compactActivity(p))}`,
+          w,
+        ),
       );
     }
 
@@ -417,7 +438,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     // Tool activities: compact summary only in expanded mode, terminal tasks only.
     if (p.activities.length > 0 && expanded && !isLive) {
       const names = p.activities
-        .map((a) => a.name)
+        .map((a) => sanitizeTerminalLine(a.name))
+        .filter(Boolean)
         .filter((n, i, arr) => arr.indexOf(n) === i);
       const nameList =
         names.slice(0, 4).join(", ") +
@@ -455,7 +477,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     // Live and cancelled unfinished tasks already show their status on the
     // row, so don't duplicate it as an error line.
     if (!isLive && !isCancelledUnfinished && r && "error" in r && r.error) {
-      lines.push(truncLine(`${ind}${theme.fg("error", r.error)}`, w));
+      const error = sanitizeTerminalLine(r.error);
+      if (error) lines.push(truncLine(`${ind}${theme.fg("error", error)}`, w));
     }
     if (r && "integration" in r && r.integration) {
       const integration = r.integration;
@@ -474,14 +497,14 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
         if (integration.patchPath)
           lines.push(
             truncLine(
-              `${ind}${theme.fg("dim", `patch: ${integration.patchPath}`)}`,
+              `${ind}${theme.fg("dim", `patch: ${sanitizeTerminalLine(integration.patchPath)}`)}`,
               w,
             ),
           );
         if (integration.worktreePath)
           lines.push(
             truncLine(
-              `${ind}${theme.fg("dim", `worktree: ${integration.worktreePath}`)}`,
+              `${ind}${theme.fg("dim", `worktree: ${sanitizeTerminalLine(integration.worktreePath)}`)}`,
               w,
             ),
           );

@@ -15,6 +15,7 @@ import {
   type RenderHelpers,
 } from "./render-branches.ts";
 import type { DelegateDetails, TaskProgress } from "./types.ts";
+import { sanitizeTerminalLine, sanitizeTerminalText } from "./utils.ts";
 
 /** Build the shared helpers bound to a theme, width, and the lines sink.
  *  Both render branches consume one bound set so warning/activity formatting
@@ -26,8 +27,10 @@ function makeRenderHelpers(
 ): RenderHelpers {
   const statJoin = (parts: string[]) =>
     parts.length ? theme.fg("dim", ` · ${parts.join(" · ")}`) : "";
-  const modelLabel = (p: TaskProgress) =>
-    p.model ? theme.fg("dim", ` · ${p.model}`) : "";
+  const modelLabel = (p: TaskProgress) => {
+    const model = p.model ? sanitizeTerminalLine(p.model) : "";
+    return model ? theme.fg("dim", ` · ${model}`) : "";
+  };
 
   // Push muted warning lines for a task under its status row. Rendered in
   // both partial and final views so a human watching the TUI sees that tools
@@ -35,11 +38,21 @@ function makeRenderHelpers(
   const pushWarnings = (p: TaskProgress, ind: string) => {
     if (!p.warnings?.length) return;
     for (const wn of p.warnings) {
-      lines.push(truncLine(`${ind}${theme.fg("warning", `⚠ ${wn}`)}`, w));
+      const warning = sanitizeTerminalLine(wn);
+      if (warning) {
+        lines.push(
+          truncLine(`${ind}${theme.fg("warning", `⚠ ${warning}`)}`, w),
+        );
+      }
     }
   };
 
-  return { statJoin, modelLabel, compactActivity, pushWarnings };
+  return {
+    statJoin,
+    modelLabel,
+    compactActivity: (p) => sanitizeTerminalLine(compactActivity(p)),
+    pushWarnings,
+  };
 }
 
 /** Minimal structural view of Pi's `ToolRenderContext` used by the delegate
@@ -157,7 +170,10 @@ export function renderDelegateResult(
         ?.filter((c) => c.type === "text")
         .map((c) => c.text)
         .join("\n") ?? "";
-    text.setText(content ? `${ctx.standalone ? "" : "\n"}${content}` : "");
+    const safeContent = sanitizeTerminalText(content);
+    text.setText(
+      safeContent ? `${ctx.standalone ? "" : "\n"}${safeContent}` : "",
+    );
     return text;
   }
 
@@ -192,16 +208,16 @@ export function renderDelegateResult(
   // Surface batch-level warnings at the top of the TUI. The same text already
   // lives in textual content, but the progress renderer ignores content.
   if (details?.dispatchWarning) {
-    lines.push(
-      truncLine(theme.fg("warning", `⚠ ${details.dispatchWarning}`), w),
-      "",
-    );
+    const warning = sanitizeTerminalLine(details.dispatchWarning);
+    if (warning) {
+      lines.push(truncLine(theme.fg("warning", `⚠ ${warning}`), w), "");
+    }
   }
   if (details?.overlapWarning) {
-    lines.push(
-      truncLine(theme.fg("warning", `⚠ ${details.overlapWarning}`), w),
-      "",
-    );
+    const warning = sanitizeTerminalLine(details.overlapWarning);
+    if (warning) {
+      lines.push(truncLine(theme.fg("warning", `⚠ ${warning}`), w), "");
+    }
   }
   if (details?.crossLeafDelivery) {
     lines.push(

@@ -84,8 +84,12 @@ export function stripAnsi(text: string): string {
       index++;
       while (index < text.length) {
         const value = text.charCodeAt(index);
-        index++;
         if (value < 0x20 || value > 0x2f) break;
+        index++;
+      }
+      if (index < text.length) {
+        const final = text.charCodeAt(index);
+        if (final >= 0x30 && final <= 0x7e) index++;
       }
       continue;
     }
@@ -146,16 +150,22 @@ function skipCsi(text: string, index: number): number {
 }
 
 /**
+ * Remove terminal controls from untrusted multiline text while preserving its
+ * line and ordinary whitespace structure for markdown/plain-text rendering.
+ */
+export function sanitizeTerminalText(text: string): string {
+  return stripAnsi(text)
+    .replace(/\r\n?|\u2028|\u2029/g, "\n")
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]+/g, " ");
+}
+
+/**
  * Flatten untrusted text for one terminal row. ANSI sequences and terminal
  * controls are removed before whitespace is normalized, so callers can safely
  * truncate and store the result without preserving a partial escape sequence.
  */
 export function sanitizeTerminalLine(text: string): string {
-  return stripAnsi(text)
-    .replace(/[\r\n\u2028\u2029]+/g, " ")
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return sanitizeTerminalText(text).replace(/\s+/g, " ").trim();
 }
 
 /** Resolve carriage-return progress bars to their final line state. */

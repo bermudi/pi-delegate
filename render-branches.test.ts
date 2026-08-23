@@ -388,6 +388,41 @@ describe("render-branches compatibility fallback", () => {
     });
 
     expect(ctx.lines[0]).toContain("3/3 finished · 1 failed · 1 cancelled");
+    expect(ctx.lines[0]).toContain("ticket cancelled");
+  });
+
+  test("shows ticket cancellation after normal settlement and counts failed rows separately", async () => {
+    const { renderFinalBranch } = await import("./render-branches.ts");
+    const progress: TaskProgress[] = [
+      { ...makeTask(0).progress, status: "done" },
+      { ...makeTask(1).progress, status: "failed", error: "Aborted" },
+    ];
+    const ctx = {
+      progress,
+      taskResults: [makeTask(0).result, { error: "Aborted" }],
+      total: progress.length,
+      w: 120,
+      expanded: false,
+      state: {},
+      theme: {
+        fg: (_: string, text: string) => text,
+        bold: (text: string) => text,
+      } as never,
+      lines: [] as string[],
+      ticketId: "ticket-1",
+      ticketStatus: "cancelled" as const,
+    };
+
+    renderFinalBranch(ctx, {
+      statJoin: () => "",
+      modelLabel: () => "",
+      compactActivity: () => "thinking…",
+      pushWarnings: () => undefined,
+    });
+
+    expect(ctx.lines[0]).toContain(
+      "2/2 finished · 1 failed · ticket cancelled",
+    );
   });
 
   test("keeps fully finalized tickets live until their ticket status settles", async () => {
@@ -554,6 +589,123 @@ describe("render-branches compatibility fallback", () => {
     expect(
       ctx.lines.some((line) => /[\u0000-\u001f\u007f-\u009f]/.test(line)),
     ).toBe(false);
+  });
+
+  test("sanitizes tool arguments, errors, warnings, and caller labels before rendering", () => {
+    const control = (label: string) => `\x1b]0;${label}\x07`;
+    const progress: TaskProgress[] = [
+      {
+        ...makeTask(0).progress,
+        agent: `runner${control("AGENT_ATTACK")} safe`,
+        id: `id${control("ID_ATTACK")} safe`,
+        task: `task${control("TASK_ATTACK")} safe`,
+        model: `provider/model${control("MODEL_ATTACK")} safe`,
+        status: "running",
+        warnings: [`warn${control("WARNING_ATTACK")} ok\nsecond`],
+        activities: [
+          {
+            id: "live",
+            name: "bash",
+            args: {
+              command: `echo safe${control("TOOL_ATTACK")}\nnext`,
+            },
+            startTime: Date.now() - 10,
+          },
+        ],
+      },
+      {
+        ...makeTask(1).progress,
+        status: "failed",
+        error: `progress error${control("PROGRESS_ERROR_ATTACK")} safe\nnext`,
+        warnings: [],
+        activities: [
+          {
+            id: "failed-tool",
+            name: `provider_tool${control("TOOL_NAME_ATTACK")} safe`,
+            args: {
+              query: `query safe${control("TOOL_QUERY_ATTACK")}\nnext`,
+            },
+            startTime: Date.now() - 20,
+            endTime: Date.now() - 10,
+            result: { content: [], isError: true },
+          },
+        ],
+      },
+    ];
+    const results = [
+      makeTask(0).result,
+      {
+        ...makeTask(1).result,
+        error: `result error${control("RESULT_ERROR_ATTACK")} safe\nnext`,
+        output: `output${control("OUTPUT_ATTACK")} safe\nnext\x00`,
+      },
+    ];
+    const theme = {
+      fg: (_: string, text: string) => text,
+      bold: (text: string) => text,
+    } as never;
+    const render = (isPartial: boolean, expanded: boolean): string => {
+      const text = {
+        value: "",
+        setText(value: string) {
+          this.value = value;
+        },
+      };
+      renderDelegateResult(
+        {
+          details: {
+            tasks: [],
+            results,
+            progress,
+            dispatchWarning: `dispatch${control("DISPATCH_WARNING_ATTACK")} safe`,
+            overlapWarning: `overlap${control("OVERLAP_WARNING_ATTACK")} safe`,
+          },
+        } as never,
+        { isPartial, expanded },
+        theme,
+        {
+          state: {},
+          lastComponent: text as never,
+          invalidate: () => {},
+          executionStarted: isPartial,
+          isPartial,
+        },
+      );
+      return text.value;
+    };
+
+    const compact = render(true, false);
+    const partial = render(true, true);
+    const final = render(false, true);
+    const rendered = `${compact}\n${partial}\n${final}`;
+    expect(compact).toContain("$ echo safe next");
+    expect(partial).toContain("$ echo safe next");
+    expect(partial).toContain("⚠ warn ok second");
+    expect(partial).toContain("⚠ dispatch safe");
+    expect(partial).toContain("⚠ overlap safe");
+    expect(partial).toContain("progress error safe next");
+    expect(partial).toContain("provider_tool safe query safe next");
+    expect(final).toContain("result error safe next");
+    expect(final).toContain("output safe");
+    expect(final).toContain("provider/model safe");
+    for (const marker of [
+      "AGENT_ATTACK",
+      "ID_ATTACK",
+      "TASK_ATTACK",
+      "MODEL_ATTACK",
+      "WARNING_ATTACK",
+      "DISPATCH_WARNING_ATTACK",
+      "OVERLAP_WARNING_ATTACK",
+      "TOOL_ATTACK",
+      "TOOL_NAME_ATTACK",
+      "TOOL_QUERY_ATTACK",
+      "PROGRESS_ERROR_ATTACK",
+      "RESULT_ERROR_ATTACK",
+      "OUTPUT_ATTACK",
+    ]) {
+      expect(rendered).not.toContain(marker);
+    }
+    expect(rendered).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
   });
 
   test("uses distinct markers for current work, history, and results", async () => {

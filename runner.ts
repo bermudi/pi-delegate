@@ -5,7 +5,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   getGitChangedFiles,
+  extractAttributedFromActivities,
   extractTouchedFromActivities,
+  snapshotPhysicalToolTarget,
 } from "./file-tracking.ts";
 import { extractTextFromPartialResult, extractOutput } from "./utils.ts";
 import { snapshotSessionUsage, usageDelta, emptyUsage } from "./usage.ts";
@@ -126,12 +128,19 @@ export async function runAgentSession(
   let clearDeadline: (() => void) | undefined;
   let prompted = false;
   let cancellationDispatched = false;
+  let promptSettled = false;
   let promptSettlement:
     | Promise<
         | { status: "not_started" | "fulfilled" }
         | { status: "rejected"; error: unknown }
       >
     | undefined;
+  const currentCancellationSource = (): CancellationSource | undefined => {
+    if (signal?.aborted) return "parent-aborted";
+    if (deadlineExceeded) return "deadline";
+    if (stalled) return "stalled";
+    return undefined;
+  };
   let recoveryBarrier: QuiescenceBarrier | undefined;
   let abandonmentSafety: Promise<void> | undefined;
   let unsubscribeFull: (() => void) | undefined;
@@ -178,14 +187,7 @@ export async function runAgentSession(
   const barrier = createQuiescenceBarrier({
     session,
     timings: quiescenceTimingsForTesting,
-    cancellation: () =>
-      signal?.aborted
-        ? "parent-aborted"
-        : deadlineExceeded
-          ? "deadline"
-          : stalled
-            ? "stalled"
-            : undefined,
+    cancellation: currentCancellationSource,
     cancel: (source) => requestSessionCancellation(source),
   });
   // Once the bounded cancelled unwind gives up, do not start another full
@@ -194,17 +196,16 @@ export async function runAgentSession(
   // waiting on work that the host cannot prove has stopped.
   let sessionAbandoned = false;
   let startAbandonedRecovery!: (source: CancellationSource) => Promise<void>;
+  const quarantineSession = (source: CancellationSource): void => {
+    if (sessionAbandoned) return;
+    sessionAbandoned = true;
+    abandonmentSafety ??= startAbandonedRecovery(source);
+  };
   const waitForSessionQuiescence = async () => {
     if (sessionAbandoned) return "abandoned" as const;
     const outcome = await barrier.wait();
     if (outcome === "abandoned") {
-      sessionAbandoned = true;
-      const source = signal?.aborted
-        ? "parent-aborted"
-        : deadlineExceeded
-          ? "deadline"
-          : "stalled";
-      abandonmentSafety ??= startAbandonedRecovery(source);
+      quarantineSession(currentCancellationSource() ?? "stalled");
     }
     return outcome;
   };
@@ -342,17 +343,17 @@ export async function runAgentSession(
     if (!onProgress) return;
     const delta = currentUsage().totalTokens;
     try {
+      const cancellationSource = currentCancellationSource();
       onProgress({
         tokens: delta,
         toolUses,
         durationMs: Date.now() - startTime,
         lastActivityAt,
         activities: [...activities],
-        failureKind: signal?.aborted
-          ? undefined
-          : deadlineExceeded
+        failureKind:
+          cancellationSource === "deadline"
             ? "deadline_exceeded"
-            : stalled
+            : cancellationSource === "stalled"
               ? "stalled"
               : undefined,
       });
@@ -609,6 +610,15 @@ export async function runAgentSession(
           args: event.args,
           startTime: now,
         };
+        if (event.toolName === "edit" || event.toolName === "write") {
+          // AgentSession emits this boundary synchronously before invoking the
+          // tool. Capture the physical target now: after execution a tool can
+          // delete or retarget the symlink it wrote through.
+          activity.physicalTarget = snapshotPhysicalToolTarget(
+            activity,
+            config.cwd,
+          );
+        }
         pendingById.set(event.toolCallId, activity);
         activities.push(activity);
         noteActivity(`executing tool '${event.toolName}'`);
@@ -837,22 +847,33 @@ export async function runAgentSession(
     // that callback starts a newly cancelled prompt. Rejections are converted
     // to data so a late rejection after abandonment cannot become an unhandled
     // promise rejection.
-    promptSettlement = Promise.resolve().then(async () => {
-      if (cancellationDispatched) return { status: "not_started" as const };
-      prompted = true;
-      try {
-        await session.prompt(prompt);
-        return { status: "fulfilled" as const };
-      } catch (error) {
-        return { status: "rejected" as const, error };
-      }
-    });
+    promptSettlement = Promise.resolve()
+      .then(async () => {
+        if (cancellationDispatched) return { status: "not_started" as const };
+        prompted = true;
+        try {
+          await session.prompt(prompt);
+          return { status: "fulfilled" as const };
+        } catch (error) {
+          return { status: "rejected" as const, error };
+        }
+      })
+      .then((outcome) => {
+        promptSettled = true;
+        return outcome;
+      });
     const promptOutcome = await Promise.race([
       promptSettlement,
       cancellationRequested.then(() => ({ status: "cancelled" as const })),
     ]);
     if (promptOutcome.status === "rejected") throw promptOutcome.error;
     await waitForSessionQuiescence();
+    if (promptOutcome.status === "cancelled" && !promptSettled) {
+      // isIdle/quiescence can lie while a provider/tool keeps prompt() pending.
+      // Returning that object to lifecycle would permit reuse or disposal while
+      // ignored work still owns it, so force the existing quarantine recovery.
+      quarantineSession(currentCancellationSource() ?? "stalled");
+    }
 
     // The model is done; inactivity is no longer the right watchdog. Git
     // evidence collection can take several seconds (up to 5s per git call),
@@ -872,7 +893,7 @@ export async function runAgentSession(
     // cancellation is still unwinding. Wait for the same quiescence barrier so
     // lifecycle does not dispose/reuse the session while compaction or an
     // extension callback is still active.
-    if (deadlineExceeded || signal?.aborted) {
+    if (currentCancellationSource()) {
       await waitForSessionQuiescence();
       // Cancellation unwind can mutate files after the first Git snapshot.
       // Recollect only after the final bounded quiescence decision and union
@@ -891,19 +912,26 @@ export async function runAgentSession(
     const output = capturedOutput();
     const usage = currentUsage();
     const fromActivities = extractTouchedFromActivities(activities, config.cwd);
+    const attributedFiles = extractAttributedFromActivities(
+      activities,
+      config.cwd,
+    );
     const fromGit =
       gitBaseline && gitAfter
         ? [...gitAfter].filter((f) => !gitBaseline.has(f))
         : [];
-    const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
-    const attributedFiles = fromActivities;
-    const errorMessage = signal?.aborted
-      ? "Aborted"
-      : deadlineExceeded
-        ? deadlineError()
-        : stalled
-          ? stallError()
-          : state.errorMessage;
+    const touchedFiles = [
+      ...new Set([...fromActivities, ...attributedFiles, ...fromGit]),
+    ];
+    const cancellationSource = currentCancellationSource();
+    const errorMessage =
+      cancellationSource === "parent-aborted"
+        ? "Aborted"
+        : cancellationSource === "deadline"
+          ? deadlineError()
+          : cancellationSource === "stalled"
+            ? stallError()
+            : state.errorMessage;
 
     return finishResult({
       output: output || "(no output)",
@@ -913,11 +941,10 @@ export async function runAgentSession(
       usage,
       touchedFiles,
       attributedFiles,
-      failureKind: signal?.aborted
-        ? undefined
-        : deadlineExceeded
+      failureKind:
+        cancellationSource === "deadline"
           ? "deadline_exceeded"
-          : stalled
+          : cancellationSource === "stalled"
             ? "stalled"
             : undefined,
       prompted,
@@ -944,7 +971,7 @@ export async function runAgentSession(
     // cancellation is still unwinding. Wait for the same quiescence barrier so
     // lifecycle does not dispose/reuse the session while compaction or an
     // extension callback is still active.
-    if (deadlineExceeded || signal?.aborted) {
+    if (currentCancellationSource()) {
       await waitForSessionQuiescence();
       // As in the success path, the unwind itself can change Git-visible
       // files. Preserve the first observation if recollection fails and union
@@ -961,22 +988,29 @@ export async function runAgentSession(
     const partialOutput = capturedOutput();
     const usage = currentUsage();
     const fromActivities = extractTouchedFromActivities(activities, config.cwd);
+    const attributedFiles = extractAttributedFromActivities(
+      activities,
+      config.cwd,
+    );
     const fromGit =
       gitBaseline && gitAfter
         ? [...gitAfter].filter((f) => !gitBaseline.has(f))
         : [];
-    const touchedFiles = [...new Set([...fromActivities, ...fromGit])];
-    const attributedFiles = fromActivities;
+    const touchedFiles = [
+      ...new Set([...fromActivities, ...attributedFiles, ...fromGit]),
+    ];
 
-    const msg = signal?.aborted
-      ? "Aborted"
-      : deadlineExceeded
-        ? deadlineError()
-        : stalled
-          ? stallError()
-          : err instanceof Error
-            ? err.message
-            : String(err);
+    const cancellationSource = currentCancellationSource();
+    const msg =
+      cancellationSource === "parent-aborted"
+        ? "Aborted"
+        : cancellationSource === "deadline"
+          ? deadlineError()
+          : cancellationSource === "stalled"
+            ? stallError()
+            : err instanceof Error
+              ? err.message
+              : String(err);
     return finishResult({
       output: partialOutput || "(no output)",
       error: msg,
@@ -985,11 +1019,10 @@ export async function runAgentSession(
       usage,
       touchedFiles,
       attributedFiles,
-      failureKind: signal?.aborted
-        ? undefined
-        : deadlineExceeded
+      failureKind:
+        cancellationSource === "deadline"
           ? "deadline_exceeded"
-          : stalled
+          : cancellationSource === "stalled"
             ? "stalled"
             : undefined,
       prompted,

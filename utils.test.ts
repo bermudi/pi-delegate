@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { sanitizeTerminalLine, stripAnsi } from "./utils.ts";
+import {
+  sanitizeTerminalLine,
+  sanitizeTerminalText,
+  stripAnsi,
+} from "./utils.ts";
 
 describe("terminal text sanitization", () => {
   test("stripAnsi removes C1 and ESC-prefixed control strings with either ST form", () => {
@@ -14,6 +18,11 @@ describe("terminal text sanitization", () => {
     expect(stripAnsi(input)).toBe("abcdefghijkl");
   });
 
+  test("sanitizeTerminalText preserves layout while removing terminal controls", () => {
+    const input = "  one\x1b]0;title\x07\t two\r\nthree\x00  ";
+    expect(sanitizeTerminalText(input)).toBe("  one  two\nthree   ");
+  });
+
   test("sanitizeTerminalLine removes BEL, backspace, and residual controls", () => {
     const input = "one\x07two\bthree\x00four\x7ffive\x85six\x9cseven\n eight";
     const sanitized = sanitizeTerminalLine(input);
@@ -25,5 +34,9 @@ describe("terminal text sanitization", () => {
   test("unterminated control strings are handled without repeated rescanning", () => {
     const hostile = "\x1b]".repeat(100_000);
     expect(stripAnsi(hostile)).toBe("");
+  });
+
+  test("malformed generic ESC does not split or remove Unicode text", () => {
+    expect(stripAnsi("a\x1b😀b")).toBe("a😀b");
   });
 });

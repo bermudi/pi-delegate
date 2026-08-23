@@ -165,6 +165,9 @@ export interface ToolActivity {
   id: string;
   name: string;
   args: Record<string, unknown>;
+  /** Physical edit/write target captured synchronously when tool execution
+   * starts, before the tool can replace, delete, or retarget a symlink. */
+  physicalTarget?: string;
   result?: {
     content: Array<{ type: string; text?: string }>;
     isError: boolean;

@@ -1,4 +1,4 @@
-import { describe, expect, test, afterEach } from "bun:test";
+import { describe, expect, test, afterAll } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,36 +7,14 @@ import {
   spillToTempFile,
   renderOutputForLLM,
   renderOutputForPoll,
-  sweepStaleSpillFiles,
-  _spillSweepTestHooks,
 } from "./spill.ts";
 
-// Sweep any spill files this suite (or production code under test) drops in
-// the system tmpdir. Production removes only files older than its retention
-// window, but tests must not leak fresh artifacts.
-function sweepSpillFiles(): void {
-  const dir = os.tmpdir();
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const name of entries) {
-    if (name.startsWith("delegate-output-")) {
-      try {
-        fs.rmSync(path.join(dir, name), { force: true });
-      } catch {
-        /* best-effort */
-      }
-    }
-  }
-}
+const testSpillDir = fs.mkdtempSync(
+  path.join(os.tmpdir(), "delegate-spill-test-"),
+);
 
-afterEach(async () => {
-  await _spillSweepTestHooks.awaitPending();
-  _spillSweepTestHooks.reset();
-  sweepSpillFiles();
+afterAll(() => {
+  fs.rmSync(testSpillDir, { recursive: true, force: true });
 });
 
 // ── decideSpill (pure) ───────────────────────────────────────────────────
@@ -102,15 +80,19 @@ describe("decideSpill", () => {
 describe("spillToTempFile", () => {
   test("writes the full content to a file under os.tmpdir() and returns its path", () => {
     const out = "the full output\nwith multiple lines";
-    const p = spillToTempFile(out, "scout", "abc123");
-    expect(p).not.toBeNull();
-    expect(p!).toMatch(/delegate-output-scout-abc123\.md$/);
-    expect(path.dirname(p!)).toBe(os.tmpdir());
-    expect(fs.readFileSync(p!, "utf8")).toBe(out);
+    const p = spillToTempFile(out, "scout");
+    try {
+      expect(p).not.toBeNull();
+      expect(p!).toMatch(/delegate-output-scout-[0-9a-f]{32}\.md$/);
+      expect(path.dirname(p!)).toBe(os.tmpdir());
+      expect(fs.readFileSync(p!, "utf8")).toBe(out);
+    } finally {
+      if (p) fs.rmSync(p, { force: true });
+    }
   });
 
   test("sanitizes the label so agent names cannot escape the filename", () => {
-    const p = spillToTempFile("x", "scout/../../../etc", "zz");
+    const p = spillToTempFile("x", "scout/../../../etc", "zz", testSpillDir);
     expect(p).not.toBeNull();
     const name = path.basename(p!);
     // No path separators survive sanitization — slashes become underscores —
@@ -121,13 +103,13 @@ describe("spillToTempFile", () => {
   });
 
   test("unique names via distinct suffixes (suffix is injectable)", () => {
-    const a = spillToTempFile("x", "scout", "aa0000");
-    const b = spillToTempFile("x", "scout", "bb1111");
+    const a = spillToTempFile("x", "scout", "aa0000", testSpillDir);
+    const b = spillToTempFile("x", "scout", "bb1111", testSpillDir);
     expect(a).not.toBe(b);
   });
 
   test("production names carry 128 bits of random suffix", () => {
-    const p = spillToTempFile("x", "scout");
+    const p = spillToTempFile("x", "scout", undefined, testSpillDir);
     expect(p).not.toBeNull();
     expect(path.basename(p!)).toMatch(
       /^delegate-output-scout-[0-9a-f]{32}\.md$/,
@@ -135,169 +117,30 @@ describe("spillToTempFile", () => {
   });
 
   test("exclusive creation never overwrites a colliding spill", () => {
-    const existing = spillToTempFile("first", "scout", "collision");
+    const existing = spillToTempFile(
+      "first",
+      "scout",
+      "collision",
+      testSpillDir,
+    );
     expect(existing).not.toBeNull();
-    const collided = spillToTempFile("second", "scout", "collision");
+    const collided = spillToTempFile(
+      "second",
+      "scout",
+      "collision",
+      testSpillDir,
+    );
     expect(collided).toBeNull();
     expect(fs.readFileSync(existing!, "utf8")).toBe("first");
   });
 
-  test("stale cleanup removes old spills but retains fresh context pointers", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-spill-sweep-"));
-    try {
-      const oldPath = path.join(dir, "delegate-output-old-deadbeef.md");
-      const freshPath = path.join(dir, "delegate-output-fresh-cafebabe.md");
-      fs.writeFileSync(oldPath, "old");
-      fs.writeFileSync(freshPath, "fresh");
-      const now = Date.now();
-      fs.utimesSync(oldPath, new Date(now - 2_000), new Date(now - 2_000));
-      fs.utimesSync(freshPath, new Date(now - 500), new Date(now - 500));
-
-      await sweepStaleSpillFiles(dir, now, 1_000);
-
-      expect(fs.existsSync(oldPath)).toBe(false);
-      expect(fs.existsSync(freshPath)).toBe(true);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("missing spill directories are a benign cleanup race", async () => {
-    await expect(
-      sweepStaleSpillFiles(
-        path.join(os.tmpdir(), `delegate-spill-missing-${Date.now()}`),
-      ),
-    ).resolves.toBeUndefined();
-  });
-
-  test("schedules cleanup after synchronous spill delivery", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-spill-async-"));
-    let started = 0;
-    let release!: () => void;
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    _spillSweepTestHooks.setDependencies({
-      sweep: () => {
-        started++;
-        return blocked;
-      },
-    });
-
-    try {
-      const spilled = spillToTempFile("full output", "scout", "async", dir);
-      expect(spilled).not.toBeNull();
-      expect(fs.readFileSync(spilled!, "utf8")).toBe("full output");
-      // The sweep implementation has not even been entered on the result
-      // delivery stack; it starts in the next microtask.
-      expect(started).toBe(0);
-
-      await Promise.resolve();
-      expect(started).toBe(1);
-      release();
-      await _spillSweepTestHooks.awaitPending();
-    } finally {
-      release();
-      await _spillSweepTestHooks.awaitPending();
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("failed sweeps back off without consuming the successful sweep interval", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-spill-retry-"));
-    const retryBackoffMs = 60 * 1000;
-    const sweepIntervalMs = 60 * 60 * 1000;
-    let now = 100;
-    let attempts = 0;
-    _spillSweepTestHooks.setDependencies({
-      now: () => now,
-      warn: () => {},
-      sweep: async () => {
-        attempts++;
-        if (attempts === 1) throw new Error("temporary cleanup failure");
-      },
-    });
-
-    try {
-      expect(spillToTempFile("one", "scout", "retry-1", dir)).not.toBeNull();
-      await _spillSweepTestHooks.awaitPending();
-      expect(attempts).toBe(1);
-
-      // More spills, even just before the retry deadline, do not rescan.
-      expect(spillToTempFile("two", "scout", "retry-2", dir)).not.toBeNull();
-      now += retryBackoffMs - 1;
-      expect(spillToTempFile("three", "scout", "retry-3", dir)).not.toBeNull();
-      await _spillSweepTestHooks.awaitPending();
-      expect(attempts).toBe(1);
-
-      // A later spill retries after backoff and succeeds.
-      now++;
-      expect(spillToTempFile("four", "scout", "retry-4", dir)).not.toBeNull();
-      await _spillSweepTestHooks.awaitPending();
-      expect(attempts).toBe(2);
-
-      // Success starts the longer normal cadence; the shorter retry backoff
-      // no longer controls eligibility.
-      now += retryBackoffMs;
-      expect(spillToTempFile("five", "scout", "retry-5", dir)).not.toBeNull();
-      await _spillSweepTestHooks.awaitPending();
-      expect(attempts).toBe(2);
-
-      now += sweepIntervalMs - retryBackoffMs;
-      expect(spillToTempFile("six", "scout", "retry-6", dir)).not.toBeNull();
-      await _spillSweepTestHooks.awaitPending();
-      expect(attempts).toBe(3);
-    } finally {
-      await _spillSweepTestHooks.awaitPending();
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("failed sweep warnings stay aggregated and rate-limited across retries", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-spill-warn-"));
-    const retryBackoffMs = 60 * 1000;
-    const warningIntervalMs = 60 * 60 * 1000;
-    const warnings: string[] = [];
-    let now = 100;
-    let attempts = 0;
-    _spillSweepTestHooks.setDependencies({
-      now: () => now,
-      warn: (message) => warnings.push(message),
-      sweep: async () => {
-        attempts++;
-        throw new AggregateError(
-          [new Error("stat denied"), new Error("remove denied")],
-          "failed to sweep 2 spill files",
-        );
-      },
-    });
-
-    try {
-      expect(spillToTempFile("one", "scout", "warn-1", dir)).not.toBeNull();
-      await _spillSweepTestHooks.awaitPending();
-      expect(attempts).toBe(1);
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain("stat denied; remove denied");
-
-      now += retryBackoffMs;
-      expect(spillToTempFile("two", "scout", "warn-2", dir)).not.toBeNull();
-      await _spillSweepTestHooks.awaitPending();
-      expect(attempts).toBe(2);
-      expect(warnings).toHaveLength(1);
-
-      now = 100 + warningIntervalMs;
-      expect(spillToTempFile("three", "scout", "warn-3", dir)).not.toBeNull();
-      await _spillSweepTestHooks.awaitPending();
-      expect(attempts).toBe(3);
-      expect(warnings).toHaveLength(2);
-    } finally {
-      await _spillSweepTestHooks.awaitPending();
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   test("file is created mode 0o600 (owner read/write only)", () => {
-    const p = spillToTempFile("secret output", "reviewer", "perm");
+    const p = spillToTempFile(
+      "secret output",
+      "reviewer",
+      "perm",
+      testSpillDir,
+    );
     expect(p).not.toBeNull();
     const mode = fs.statSync(p!).mode & 0o777;
     expect(mode).toBe(0o600);
@@ -335,6 +178,7 @@ describe("renderOutputForLLM", () => {
     const rendered = renderOutputForLLM(out, "scout", {
       thresholdChars: 200,
       tailChars: 30,
+      dir: testSpillDir,
     });
 
     // The tail is kept; the head is not.
@@ -344,7 +188,8 @@ describe("renderOutputForLLM", () => {
     // Pointer names a real file and states the size.
     expect(rendered).toContain("spilled to");
     expect(rendered).toContain("above is the tail");
-    expect(rendered).toContain("OS temp cleanup may delete it sooner");
+    expect(rendered).toContain("retention follows OS temp policy");
+    expect(rendered).not.toMatch(/\b\d+\s*(hours?|days?)\b/i);
 
     // Extract the path and confirm the full output (incl. head) was written.
     const match = rendered.match(/spilled to (.+?) —/);

@@ -238,6 +238,43 @@ describe("Git-native isolated workspace", () => {
     );
   });
 
+  test("preserves the execution-time external target after a worker retargets the symlink", async () => {
+    if (process.platform === "win32") return;
+    const external = path.join(root, "external-retarget-snapshot");
+    fs.mkdirSync(external);
+    const oldTarget = path.join(external, "old.txt");
+    const newTarget = path.join(external, "new.txt");
+    fs.writeFileSync(oldTarget, "before\n");
+    fs.writeFileSync(newTarget, "new\n");
+    fs.symlinkSync(oldTarget, path.join(repo, "snapshot-link"));
+
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    const workerLink = path.join(one!.cwd, "snapshot-link");
+    fs.writeFileSync(workerLink, "written through original\n");
+    fs.unlinkSync(workerLink);
+    fs.symlinkSync(newTarget, workerLink);
+    const workerResult = success();
+    // This is the shape produced by runner: lexical touched evidence plus the
+    // physical target captured at tool_execution_start.
+    workerResult.touchedFiles = [workerLink, oldTarget];
+    workerResult.attributedFiles = [oldTarget];
+
+    const [result] = await batch!.reconcile([workerResult]);
+
+    expect(result!.integration?.status).toBe("applied_unverified");
+    expect(result!.touchedFiles).toEqual([
+      path.join(repo, "snapshot-link"),
+      oldTarget,
+    ]);
+    expect(result!.attributedFiles).toEqual([oldTarget]);
+    expect(result!.attributedFiles).not.toContain(newTarget);
+    expect(fs.readlinkSync(path.join(repo, "snapshot-link"))).toBe(newTarget);
+    expect(fs.readFileSync(oldTarget, "utf8")).toBe(
+      "written through original\n",
+    );
+  });
+
   test("keeps broken symlink attribution conservative", async () => {
     if (process.platform === "win32") return;
     const external = path.join(root, "external-broken");
