@@ -205,9 +205,8 @@ describe("dispatch-time shared-write gate", () => {
       { cwd: tmpDir },
     );
     const model = { provider: "test", id: "model" } as any;
-    let runIndex = 0;
-    _setRunAgentSessionForTesting(async (_session, _prompt, config) => {
-      const index = runIndex++;
+    _setRunAgentSessionForTesting(async (_session, prompt, config) => {
+      const index = prompt === "one" ? 0 : 1;
       writeFileSync(path.join(config.cwd, `${index}.txt`), `task ${index}\n`);
       return {
         output: "done",
@@ -266,10 +265,7 @@ describe("dispatch-time shared-write gate", () => {
         result.details.results.map((entry) =>
           "touchedFiles" in entry ? entry.touchedFiles : [],
         ),
-      ).toEqual([
-        [path.join(tmpDir, "0.txt")],
-        [path.join(tmpDir, "1.txt")],
-      ]);
+      ).toEqual([[path.join(tmpDir, "0.txt")], [path.join(tmpDir, "1.txt")]]);
       expect(readFileSync(path.join(tmpDir, "0.txt"), "utf8")).toBe("task 0\n");
       expect(readFileSync(path.join(tmpDir, "1.txt"), "utf8")).toBe("task 1\n");
     } finally {

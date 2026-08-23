@@ -33,6 +33,7 @@ import {
 } from "./host.ts";
 import {
   _setRunAgentSessionForTesting,
+  _setAcquireAgentSessionForTesting,
   _setCreateScratchWorkspaceForTesting,
   _setWholeTaskRetryForTesting,
   isModelAttributableError,
@@ -204,6 +205,81 @@ function makeProgressCapture(): {
 }
 
 // ── Test Suite ─────────────────────────────────────────────────────────────
+
+describe("session acquisition cancellation", () => {
+  test("deadline abandons a hung acquisition and disposes a session that materializes late", async () => {
+    let resolveAcquisition!: (value: any) => void;
+    let disposed = 0;
+    _setAcquireAgentSessionForTesting(
+      () =>
+        new Promise((resolve) => {
+          resolveAcquisition = resolve;
+        }),
+    );
+    const task = makeBaseTask({ deadlineMs: 20 });
+
+    try {
+      const result = await runResolvedTask(
+        makeTestEnv(),
+        task,
+        {
+          index: 0,
+          agent: task.agentName,
+          task: task.prompt,
+          status: "pending",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+        0,
+      );
+
+      expect(result.failureKind).toBe("deadline_exceeded");
+      expect(result.error).toContain("Deadline exceeded");
+
+      resolveAcquisition({
+        session: { dispose: () => disposed++ },
+        sessionManager: undefined,
+        sessionFile: undefined,
+        lifecycleOwnsSession: true,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(disposed).toBe(1);
+    } finally {
+      _setAcquireAgentSessionForTesting(undefined);
+    }
+  });
+
+  test("parent cancellation abandons a hung acquisition", async () => {
+    const controller = new AbortController();
+    _setAcquireAgentSessionForTesting(() => new Promise(() => {}));
+    const task = makeBaseTask();
+
+    try {
+      setTimeout(() => controller.abort(), 20);
+      const result = await runResolvedTask(
+        makeTestEnv({ signal: controller.signal }),
+        task,
+        {
+          index: 0,
+          agent: task.agentName,
+          task: task.prompt,
+          status: "pending",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+        0,
+      );
+
+      expect(result.error).toBe("Aborted");
+    } finally {
+      _setAcquireAgentSessionForTesting(undefined);
+    }
+  });
+});
 
 describe("delegate task lifecycle integration", () => {
   let ts: TestSession | undefined;

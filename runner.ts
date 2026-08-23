@@ -33,6 +33,15 @@ export function formatDeadlineExceededError(budgetMs: number): string {
   )} wall-clock budget and was cooperatively aborted (not a hard kill). Completed writes and commands remain.`;
 }
 
+function unionGitEvidence(
+  first: Set<string> | undefined,
+  second: Set<string> | undefined,
+): Set<string> | undefined {
+  if (!first) return second;
+  if (!second) return first;
+  return new Set([...first, ...second]);
+}
+
 /**
  * Run a single prompt against a live `AgentSession` and report progress.
  *
@@ -101,8 +110,13 @@ export async function runAgentSession(
   let deadlineExceeded = false;
   let clearDeadline: (() => void) | undefined;
   let prompted = false;
+  let cancellationDispatched = false;
   const activities: ToolActivity[] = [];
   const pendingById = new Map<string, ToolActivity>();
+  let notifyCancellationRequested!: () => void;
+  const cancellationRequested = new Promise<void>((resolve) => {
+    notifyCancellationRequested = resolve;
+  });
 
   // AgentSession.prompt() can return while an agent_settled extension callback
   // is still running fire-and-forget work through ctx.compact(). The barrier
@@ -120,9 +134,20 @@ export async function runAgentSession(
             : undefined,
     cancel: (source) => requestSessionCancellation(source),
   });
-  const waitForSessionQuiescence = () => barrier.wait();
+  // Once the bounded cancelled unwind gives up, do not start another full
+  // unwind budget later in the same runner. The session may still be active,
+  // but cancellation has an explicit terminal path instead of repeatedly
+  // waiting on work that the host cannot prove has stopped.
+  let sessionAbandoned = false;
+  const waitForSessionQuiescence = async () => {
+    if (sessionAbandoned) return "abandoned" as const;
+    const outcome = await barrier.wait();
+    if (outcome === "abandoned") sessionAbandoned = true;
+    return outcome;
+  };
 
   const requestSessionCancellation = (source: CancellationSource): void => {
+    cancellationDispatched = true;
     const logFailure = (operation: string, error: unknown) => {
       console.error(`[delegate] ${source} subagent ${operation} failed`, error);
     };
@@ -149,6 +174,9 @@ export async function runAgentSession(
     // callback delayed by async auth). The barrier re-aborts it rather than
     // letting it mutate files after the task is considered cancelled.
     barrier.noteCancellationRequested();
+    // Wake the prompt race only after every cooperative cancellation request
+    // has been dispatched and the barrier knows its cancellation generation.
+    notifyCancellationRequested();
   };
 
   // Snapshot cumulative usage before the prompt so we can report only the
@@ -578,6 +606,10 @@ export async function runAgentSession(
   // can still start a subagent that writes files and gets pooled.
   if (signal?.aborted) {
     abortHandler?.();
+    // A pooled session can still have extension-started work even though this
+    // runner never prompts it. Use the same bounded cancelled unwind as every
+    // other cancellation path before returning ownership.
+    await waitForSessionQuiescence();
     // The early return skips the try/finally below, so clean up the
     // subscription and abort listener here — otherwise they leak on every
     // already-aborted call, which is especially harmful for pooled sessions
@@ -649,8 +681,29 @@ export async function runAgentSession(
     armDeadlineWatchdog();
     fireProgress();
 
-    prompted = true;
-    await session.prompt(prompt);
+    // AgentSession.abort() normally settles prompt(), but providers/tools can
+    // ignore cancellation and leave that promise pending forever. Race prompt
+    // settlement against cancellation, then use the barrier's bounded unwind.
+    // Prompt start is queued, so a cancellation dispatched in that window must be checked
+    // again inside the queued callback; otherwise the runner can return while
+    // that callback starts a newly cancelled prompt. Rejections are converted
+    // to data so a late rejection after abandonment cannot become an unhandled
+    // promise rejection.
+    const promptSettlement = Promise.resolve().then(async () => {
+      if (cancellationDispatched) return { status: "not_started" as const };
+      prompted = true;
+      try {
+        await session.prompt(prompt);
+        return { status: "fulfilled" as const };
+      } catch (error) {
+        return { status: "rejected" as const, error };
+      }
+    });
+    const promptOutcome = await Promise.race([
+      promptSettlement,
+      cancellationRequested.then(() => ({ status: "cancelled" as const })),
+    ]);
+    if (promptOutcome.status === "rejected") throw promptOutcome.error;
     await waitForSessionQuiescence();
 
     // The model is done; inactivity is no longer the right watchdog. Git
@@ -661,7 +714,7 @@ export async function runAgentSession(
     phase = "collecting git evidence";
     lastActivityAt = Date.now();
 
-    const gitAfter = await getGitChangedFiles(config.cwd);
+    let gitAfter = await getGitChangedFiles(config.cwd);
     if (deadlineAt && Date.now() >= deadlineAt && !deadlineExceeded) {
       abortForDeadline();
     }
@@ -671,7 +724,17 @@ export async function runAgentSession(
     // cancellation is still unwinding. Wait for the same quiescence barrier so
     // lifecycle does not dispose/reuse the session while compaction or an
     // extension callback is still active.
-    if (deadlineExceeded || signal?.aborted) await waitForSessionQuiescence();
+    if (deadlineExceeded || signal?.aborted) {
+      await waitForSessionQuiescence();
+      // Cancellation unwind can mutate files after the first Git snapshot.
+      // Recollect only after the final bounded quiescence decision and union
+      // both observations: a later failure or reverted file must not erase
+      // evidence already observed before the unwind settled.
+      gitAfter = unionGitEvidence(
+        gitAfter,
+        await getGitChangedFiles(config.cwd),
+      );
+    }
 
     // Recompute evidence after the final quiescence wait. Output, usage,
     // activity-derived touched files, and the session error state can all be
@@ -723,7 +786,7 @@ export async function runAgentSession(
     phase = "collecting git evidence";
     lastActivityAt = Date.now();
 
-    const gitAfter = await getGitChangedFiles(config.cwd);
+    let gitAfter = await getGitChangedFiles(config.cwd);
     if (deadlineAt && Date.now() >= deadlineAt && !deadlineExceeded) {
       abortForDeadline();
     }
@@ -733,7 +796,16 @@ export async function runAgentSession(
     // cancellation is still unwinding. Wait for the same quiescence barrier so
     // lifecycle does not dispose/reuse the session while compaction or an
     // extension callback is still active.
-    if (deadlineExceeded || signal?.aborted) await waitForSessionQuiescence();
+    if (deadlineExceeded || signal?.aborted) {
+      await waitForSessionQuiescence();
+      // As in the success path, the unwind itself can change Git-visible
+      // files. Preserve the first observation if recollection fails and union
+      // both successful observations so transient changes remain evidence.
+      gitAfter = unionGitEvidence(
+        gitAfter,
+        await getGitChangedFiles(config.cwd),
+      );
+    }
 
     // Recompute evidence after the final quiescence wait. Output, usage, and
     // activity-derived touched files can all be mutated by the unwinding work

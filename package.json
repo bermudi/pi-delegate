@@ -23,14 +23,14 @@
     ]
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.80.9",
-    "@earendil-works/pi-ai": "^0.80.9",
-    "@earendil-works/pi-coding-agent": "^0.80.9",
-    "@earendil-works/pi-tui": "^0.80.9",
+    "@earendil-works/pi-agent-core": "^0.84.2",
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
     "@marcfargas/pi-test-harness": "^0.6.1",
-    "esbuild": "^0.27.0",
-    "prettier": "^3.8.4",
-    "typescript": "^5.9.0"
+    "esbuild": "^0.28.2",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3"
   },
   "patchedDependencies": {
     "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
@@ -40,9 +40,14 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=.build/delegate.bundle.ts",
-    "format": "prettier --write \"**/*.ts\""
+    "format": "prettier --write \"**/*.ts\"",
+    "format:check": "prettier --check \"**/*.ts\""
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.52"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9",
+    "protobufjs": "8.7.2"
   }
 }

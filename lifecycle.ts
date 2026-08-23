@@ -597,6 +597,15 @@ async function acquireAgentSession(
   return createFreshSession(env, task);
 }
 
+let acquireAgentSessionForTesting = acquireAgentSession;
+
+/** @internal Test-only session-acquisition seam. */
+export function _setAcquireAgentSessionForTesting(
+  override: typeof acquireAgentSession | undefined,
+): void {
+  acquireAgentSessionForTesting = override ?? acquireAgentSession;
+}
+
 /**
  * Resolve the `sessionFile` to report on a TaskResult.
  *
@@ -1018,6 +1027,53 @@ async function settlePooledAttempt(
   return sessionReleased;
 }
 
+type AcquisitionOutcome =
+  | { status: "acquired"; value: AcquireResult }
+  | { status: "abandoned"; reason: "parent-aborted" | "deadline" };
+
+/**
+ * Wait for materialization only while the task remains live. Host dependency or
+ * session construction can wedge without yielding an AgentSession to abort, so
+ * cancellation/deadline must have an explicit abandoned-acquisition path too.
+ * A session that materializes late is disposed immediately and is never
+ * prompted or pooled.
+ */
+async function awaitSessionAcquisition(
+  acquisition: Promise<AcquireResult>,
+  signal: AbortSignal | undefined,
+  deadlineAt: number | undefined,
+): Promise<AcquisitionOutcome> {
+  let stop!: (reason: "parent-aborted" | "deadline") => void;
+  const stopped = new Promise<"parent-aborted" | "deadline">((resolve) => {
+    stop = resolve;
+  });
+  const onAbort = () => stop("parent-aborted");
+  signal?.addEventListener("abort", onAbort, { once: true });
+  let clearDeadline: (() => void) | undefined;
+  if (deadlineAt !== undefined) {
+    clearDeadline = scheduleDeadline(deadlineAt, () => stop("deadline"));
+  }
+  if (signal?.aborted) onAbort();
+  else if (deadlineAt !== undefined && Date.now() >= deadlineAt)
+    stop("deadline");
+
+  try {
+    return await Promise.race([
+      acquisition.then((value): AcquisitionOutcome => ({
+        status: "acquired",
+        value,
+      })),
+      stopped.then((reason): AcquisitionOutcome => ({
+        status: "abandoned",
+        reason,
+      })),
+    ]);
+  } finally {
+    clearDeadline?.();
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 /** Acquire, prompt, and settle one attempt. Mutates `accounting` on success. */
 async function runTaskAttempt(
   env: TaskRunEnv,
@@ -1032,7 +1088,32 @@ async function runTaskAttempt(
     noteAttemptProgress(env, p, u, timing, accounting);
   };
 
-  const acquired = await acquireAgentSession(env, task, p);
+  const acquisition = acquireAgentSessionForTesting(env, task, p);
+  const acquisitionOutcome = await awaitSessionAcquisition(
+    acquisition,
+    env.signal,
+    timing.deadlineAt,
+  );
+  if (acquisitionOutcome.status === "abandoned") {
+    // Acquisition itself is not cancellable upstream. Consume its eventual
+    // outcome and dispose any late lifecycle-owned session; otherwise a late
+    // rejection would be unhandled or a late session would leak resources.
+    void acquisition.then(
+      (late) => {
+        if (!("error" in late)) disposeOwnedSession(late);
+      },
+      (error) => {
+        console.error(
+          "[delegate] abandoned subagent acquisition later failed",
+          error,
+        );
+      },
+    );
+    return acquisitionOutcome.reason === "parent-aborted"
+      ? failTask(task, "Aborted")
+      : deadlineExceededResult(task, timing);
+  }
+  const acquired = acquisitionOutcome.value;
   if ("error" in acquired) return acquired.error;
 
   // A pool hit is already owned by the pool. Fresh/resumed sessions belong

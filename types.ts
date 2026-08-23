@@ -70,6 +70,7 @@ export interface TicketWaiter {
   resolve: (result: AgentToolResult<DelegateDetails>) => void;
   reject: (reason: unknown) => void;
   clearDeadline?: () => void;
+  removeAbortListener?: () => void;
   settled: boolean;
 }
 
@@ -112,6 +113,10 @@ export interface AsyncTicket {
   /** Immutable dispatch-scoped delegate.json snapshot used by async workers and
    *  later result formatting. */
   config?: import("./config.ts").DelegateConfig;
+  /** Memoized terminal projection, populated only after workers settle. Besides
+   * avoiding repeated work, this keeps repeated poll/wait calls from creating
+   * duplicate output spill files without freezing a shutdown-time partial result. */
+  formattedResult?: AgentToolResult<DelegateDetails>;
 }
 
 /** Live parent settings captured when a delegate call starts. The built-in

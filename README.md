@@ -67,21 +67,17 @@ across `.pi/agents/`, `~/.pi/agent/agents/`, `~/.agents/`, `.claude/agents/`,
 workspace — `scout` stays read-only and `reviewer` stays scratch unless the
 file explicitly sets `tools` or `workspace`. Fresh built-ins inherit the
 parent's exact model object and thinking level; an explicit `model`/`thinking`
-in the Markdown file replaces that inheritance. Task fields always win, and for
-`scout`/`coder`/`reviewer` overrides in `~/.pi/agent/delegate.json`
-(`agentOverrides` / `agentOverridesByParentModel`) win over the
-Markdown file, while `default` ignores overrides and uses only an explicit
-Markdown `model`/`thinking` when present. `delegate.json` is the permanent
-config file (user scope, global), and edits apply from the next delegate call.
-
-For the v0.1.12 migration release only, legacy user and nearest-project
-`settings.json` `delegate.agentOverrides` /
-`delegate.agentOverridesByParentModel` still supply `model` and `thinking`
-when a modern value is absent. Modern `delegate.json` wins field-by-field.
-Legacy `tools` is never honored because a project file must not restore shell
-capability. This bridge is removed in v0.1.13. Project-local replacements are
-`.pi/agents/*.md` profiles or explicit task `model`/`thinking` fields; there
-will be no new project-level delegate config file.
+in the Markdown file replaces that inheritance. Task fields always win. For
+each unset `model`, `thinking`, or `tools` field on
+`scout`/`coder`/`reviewer`, an exact-parent-model override in
+`agentOverridesByParentModel` wins over the unconditional `agentOverrides`,
+which wins over explicit Markdown frontmatter. `default` is the exception: it
+ignores both `delegate.json` override maps, but task fields still win and
+explicit `default.md` fields still override inherited parent values.
+`~/.pi/agent/delegate.json` is the only delegate config file (user scope,
+global), and edits apply from the next delegate call. Project-local
+configuration belongs in `.pi/agents/*.md` profiles or explicit task fields;
+Delegate ignores legacy `delegate` fields in project `.pi/settings.json`.
 
 ### Disposable scratch workspace
 
@@ -217,8 +213,9 @@ over an installed extension.
   model, tools, and thinking level; the Markdown body is its system prompt. A
   same-named file for a built-in (`default`/`scout`/`coder`/`reviewer`)
   overrides that built-in; a prompt-only override keeps the built-in's tools
-  and workspace, and an explicit `model`/`thinking` replaces parent inheritance
-  (for `default` settings are ignored, for others settings win over the file).
+  and workspace, and an explicit `model`/`thinking` replaces parent inheritance.
+  For `default`, the `delegate.json` override maps are ignored (task fields still
+  win); for the other built-ins, those maps win field-by-field over frontmatter.
 - **Ad-hoc subagent** — A subagent created from inline task fields instead of a
   named Markdown agent profile. In current output this is labeled `ad-hoc`.
 - **Inline task** — The task object itself when its configuration is supplied

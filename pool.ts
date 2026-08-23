@@ -128,6 +128,21 @@ function waitForActiveSessionLocks(): Promise<void> {
   return Promise.all(locks).then(() => undefined);
 }
 
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+  if (typeof value !== "object" || value === null || seen.has(value)) {
+    return value;
+  }
+  seen.add(value);
+  const record = value as Record<PropertyKey, unknown>;
+  for (const key of Reflect.ownKeys(value)) deepFreeze(record[key], seen);
+  return Object.freeze(value);
+}
+
+/** Defensive value copy for the capability configuration crossing the pool seam. */
+function cloneFrozenConfig(config: FrozenConfig): FrozenConfig {
+  return deepFreeze(structuredClone(config));
+}
+
 // ── Read + validate ───────────────────────────────────────────────────────
 
 /** Look up a pooled session and validate a reuse request against its frozen
@@ -248,7 +263,7 @@ export function commit(sessionId: string, payload: CommitPayload): boolean {
     session: payload.session,
     sessionManager: payload.sessionManager,
     sessionFile: payload.sessionFile,
-    config: payload.frozen,
+    config: cloneFrozenConfig(payload.frozen),
     lastUsed: now(),
     createdAt: now(),
     totalTokens: payload.tokens,
@@ -274,14 +289,15 @@ export function recordUse(sessionId: string, tokens: number): boolean {
 // ── Read-only defaults (for task-resolution) ──────────────────────────────
 
 /** Frozen config for a pooled session, or undefined if not pooled. Lock-free —
- *  safe because the frozen config is write-only at insert and never mutated
- *  thereafter (only stats mutate, via commit, and those do not touch the
- *  returned object). Used by resolveTasks to default {systemPrompt, model,
- *  thinking, tools} for a task that supplies only a sessionId. */
+ *  safe because the stored config is a deeply frozen defensive copy. Callers
+ *  receive another frozen copy so values crossing the pool seam cannot mutate
+ *  its capability contract. Used by resolveTasks to default {systemPrompt,
+ *  model, thinking, tools} for a task that supplies only a sessionId. */
 export function configFor(
   sessionId: string,
 ): Readonly<FrozenConfig> | undefined {
-  return agentPool.get(sessionId)?.config;
+  const config = agentPool.get(sessionId)?.config;
+  return config ? cloneFrozenConfig(config) : undefined;
 }
 
 // ── Lock primitive (D1) ───────────────────────────────────────────────────

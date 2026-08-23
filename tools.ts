@@ -35,10 +35,11 @@ const PROVIDER_TOOLS: Readonly<Record<string, readonly string[]>> = {
 };
 
 export function availableToolNames(modelProvider?: string): string[] {
-  return [
-    ...Object.keys(TOOL_FACTORIES),
-    ...(modelProvider ? (PROVIDER_TOOLS[modelProvider] ?? []) : []),
-  ];
+  const providerTools =
+    modelProvider && Object.hasOwn(PROVIDER_TOOLS, modelProvider)
+      ? PROVIDER_TOOLS[modelProvider]
+      : undefined;
+  return [...Object.keys(TOOL_FACTORIES), ...(providerTools ?? [])];
 }
 
 /** Expand tool-group shorthands (`*`, `ro`) into concrete tool lists.

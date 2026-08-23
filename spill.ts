@@ -4,6 +4,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getOutputSpillTail, getOutputSpillThreshold } from "./config.ts";
 
+const SPILL_PREFIX = "delegate-output-";
+/** Delegate never removes a spill while its pointer may still be fresh in
+ * model context. Older files are swept opportunistically; the OS may retain
+ * them longer according to its own temp policy. */
+export const OUTPUT_SPILL_RETENTION_MS = 24 * 60 * 60 * 1000;
+const SPILL_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+const RANDOM_SUFFIX_BYTES = 16;
+const CREATE_ATTEMPTS = 5;
+const lastSpillSweepAtByDir = new Map<string, number>();
+
 // ── Spill: keep subagent final-output bloat out of the LLM context ───────
 //
 // Two audiences share one source of truth (`result.output`):
@@ -50,33 +60,103 @@ export function decideSpill(
   return { spill: true, inContext: tailOf(output, opts.tailChars), fullChars };
 }
 
+/** Remove only Delegate spill files older than the retention window.
+ *
+ * This is deliberately independent of the 30-minute ticket TTL: a spill path
+ * may already be present in model context after its ticket leaves the poll
+ * registry. Cleanup is best-effort and never removes fresh files.
+ */
+export function sweepStaleSpillFiles(
+  dir: string = os.tmpdir(),
+  now = Date.now(),
+  retentionMs = OUTPUT_SPILL_RETENTION_MS,
+): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(SPILL_PREFIX) || !name.endsWith(".md")) continue;
+    const filePath = path.join(dir, name);
+    try {
+      const stat = fs.lstatSync(filePath);
+      if (stat.isFile() && now - stat.mtimeMs > retentionMs) {
+        fs.rmSync(filePath, { force: true });
+      }
+    } catch {
+      // Another process may have removed it; cleanup must not block delivery.
+    }
+  }
+}
+
+function maybeSweepStaleSpillFiles(dir: string): void {
+  const now = Date.now();
+  const lastSweepAt = lastSpillSweepAtByDir.get(dir) ?? 0;
+  if (now - lastSweepAt < SPILL_SWEEP_INTERVAL_MS) return;
+  lastSpillSweepAtByDir.set(dir, now);
+  sweepStaleSpillFiles(dir, now);
+}
+
 /**
  * Write the full output to a temp `.md` file and return its path, or `null`
  * on failure. Never throws — callers rely on the lossless-degrade guarantee.
  *
- * Path shape: `os.tmpdir()/delegate-output-<sanitized-label>-<6hex>.md`,
- * mode 0o600. The label is sanitized (subagent precedent) so agent names
- * can't escape the filename. `suffix` (and `dir`) are injectable so tests get
- * deterministic, collision-free names and can point at an unwritable dir to
- * exercise the failure path without mocking.
+ * Files are mode 0o600 and opened with `wx`: even an improbable collision can
+ * never overwrite another spill. Production names use 128 bits of randomness
+ * and retry collisions. `suffix` and `dir` remain injectable for focused I/O
+ * tests; a supplied suffix is attempted exactly once.
  */
 export function spillToTempFile(
   output: string,
   label: string,
-  suffix: string = randomBytes(3).toString("hex"),
+  suffix?: string,
   dir: string = os.tmpdir(),
 ): string | null {
-  const safeLabel = label.replace(/[^\w.-]+/g, "_");
-  const filePath = path.join(dir, `delegate-output-${safeLabel}-${suffix}.md`);
-  try {
-    fs.writeFileSync(filePath, output, { mode: 0o600 });
-    return filePath;
-  } catch (e) {
-    console.warn(
-      `[delegate] spill write failed (${filePath}): ${e instanceof Error ? e.message : String(e)}`,
-    );
-    return null;
+  maybeSweepStaleSpillFiles(dir);
+  const safeLabel = label.replace(/[^\w.-]+/g, "_").slice(0, 64) || "agent";
+  const attempts = suffix === undefined ? CREATE_ATTEMPTS : 1;
+  let lastPath = path.join(dir, `${SPILL_PREFIX}${safeLabel}-unknown.md`);
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let fd: number | undefined;
+    try {
+      const candidate =
+        suffix ?? randomBytes(RANDOM_SUFFIX_BYTES).toString("hex");
+      lastPath = path.join(dir, `${SPILL_PREFIX}${safeLabel}-${candidate}.md`);
+      fd = fs.openSync(lastPath, "wx", 0o600);
+      fs.writeFileSync(fd, output);
+      fs.closeSync(fd);
+      return lastPath;
+    } catch (error) {
+      lastError = error;
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Continue to remove the incomplete file below.
+        }
+        try {
+          fs.rmSync(lastPath, { force: true });
+        } catch {
+          // Best effort; the caller still receives the full output in context.
+        }
+      }
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (suffix === undefined && code === "EEXIST") continue;
+      break;
+    }
   }
+
+  console.warn(
+    `[delegate] spill write failed (${lastPath}): ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  );
+  return null;
 }
 
 /**
@@ -119,17 +199,23 @@ export function renderOutputForLLM(
  * The output is a moving target mid-flight (a done task's full spill lands at
  * ticket completion via `formatCompletedTask`); writing a file per poll would
  * churn paths and confuse the LLM. So the poll stays bounded with a tail and
- * a note pointing to the eventual spill. Under the tail budget → unchanged.
+ * accurately says whether completion will spill or include the full output.
+ * Under the tail budget → unchanged.
  */
 export function renderOutputForPoll(
   output: string,
-  opts?: { tailChars?: number },
+  opts?: { tailChars?: number; thresholdChars?: number },
 ): string {
   if (!output || !output.trim() || output === "(no output)") return output;
   const tailChars = opts?.tailChars ?? getOutputSpillTail();
   if (output.length <= tailChars) return output;
+  const thresholdChars = opts?.thresholdChars ?? getOutputSpillThreshold();
   const tail = tailOf(output, tailChars);
-  return `…${tail}\n[truncated — full output is spilled to a file when the ticket completes]`;
+  const completionNote =
+    output.length > thresholdChars
+      ? "full output is spilled to a file when the ticket completes"
+      : "full output will be included when the ticket completes";
+  return `…${tail}\n[truncated in this poll — ${completionNote}]`;
 }
 
 /** Assemble the tail + pointer block emitted on a successful spill. */
@@ -138,7 +224,7 @@ function spillPointer(
   filePath: string,
   fullChars: number,
 ): string {
-  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
+  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n retained by Delegate for at least 24 hours; \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
 }
 
 /**

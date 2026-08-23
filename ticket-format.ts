@@ -12,7 +12,7 @@ import {
   formatTouchedOverlapWarning,
 } from "./format.ts";
 import { renderOutputForPoll } from "./spill.ts";
-import { getOutputSpillTail } from "./config.ts";
+import { getOutputSpillTail, getOutputSpillThreshold } from "./config.ts";
 import type {
   AsyncTicket,
   DelegateDetails,
@@ -120,12 +120,15 @@ function formatSettledPollLines(
   const meta = taskMetaBase(result);
   appendTouchedMeta(meta, result, task);
   const tailChars = getOutputSpillTail(ticket.config);
+  const thresholdChars = getOutputSpillThreshold(ticket.config);
   if (!failed) {
     const lines = [
       `✓ ${result.agent}${formatTaskId(result.id)} · ${meta.join(" · ")}`,
     ];
     if (result.output && result.output !== "(no output)") {
-      lines.push(renderOutputForPoll(result.output, { tailChars }));
+      lines.push(
+        renderOutputForPoll(result.output, { tailChars, thresholdChars }),
+      );
     }
     return lines;
   }
@@ -136,7 +139,9 @@ function formatSettledPollLines(
   if (result.sessionFile)
     lines.push(`  session: ${shortenPath(result.sessionFile)}`);
   if (result.output && result.output !== "(no output)") {
-    lines.push(renderOutputForPoll(result.output, { tailChars }));
+    lines.push(
+      renderOutputForPoll(result.output, { tailChars, thresholdChars }),
+    );
   }
   return lines;
 }

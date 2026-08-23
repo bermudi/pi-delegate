@@ -7,11 +7,12 @@ import {
   spillToTempFile,
   renderOutputForLLM,
   renderOutputForPoll,
+  sweepStaleSpillFiles,
 } from "./spill.ts";
 
 // Sweep any spill files this suite (or production code under test) drops in
-// the system tmpdir. Production ships no sweeper (tmpreaper owns that), but
-// tests must not leak.
+// the system tmpdir. Production removes only files older than its retention
+// window, but tests must not leak fresh artifacts.
 function sweepSpillFiles(): void {
   const dir = os.tmpdir();
   let entries: string[];
@@ -120,6 +121,42 @@ describe("spillToTempFile", () => {
     expect(a).not.toBe(b);
   });
 
+  test("production names carry 128 bits of random suffix", () => {
+    const p = spillToTempFile("x", "scout");
+    expect(p).not.toBeNull();
+    expect(path.basename(p!)).toMatch(
+      /^delegate-output-scout-[0-9a-f]{32}\.md$/,
+    );
+  });
+
+  test("exclusive creation never overwrites a colliding spill", () => {
+    const existing = spillToTempFile("first", "scout", "collision");
+    expect(existing).not.toBeNull();
+    const collided = spillToTempFile("second", "scout", "collision");
+    expect(collided).toBeNull();
+    expect(fs.readFileSync(existing!, "utf8")).toBe("first");
+  });
+
+  test("stale cleanup removes old spills but retains fresh context pointers", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-spill-sweep-"));
+    try {
+      const oldPath = path.join(dir, "delegate-output-old-deadbeef.md");
+      const freshPath = path.join(dir, "delegate-output-fresh-cafebabe.md");
+      fs.writeFileSync(oldPath, "old");
+      fs.writeFileSync(freshPath, "fresh");
+      const now = Date.now();
+      fs.utimesSync(oldPath, new Date(now - 2_000), new Date(now - 2_000));
+      fs.utimesSync(freshPath, new Date(now - 500), new Date(now - 500));
+
+      sweepStaleSpillFiles(dir, now, 1_000);
+
+      expect(fs.existsSync(oldPath)).toBe(false);
+      expect(fs.existsSync(freshPath)).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("file is created mode 0o600 (owner read/write only)", () => {
     const p = spillToTempFile("secret output", "reviewer", "perm");
     expect(p).not.toBeNull();
@@ -209,11 +246,23 @@ describe("renderOutputForPoll", () => {
     expect(renderOutputForPoll(out, { tailChars: 100 })).toBe(out);
   });
 
+  test("does not promise a spill when output is below the spill threshold", () => {
+    const rendered = renderOutputForPoll("x".repeat(50), {
+      tailChars: 10,
+      thresholdChars: 100,
+    });
+    expect(rendered).toContain("full output will be included");
+    expect(rendered).not.toContain("spilled to a file");
+  });
+
   test("over tail budget returns the tail + a note, and writes NO file", () => {
     const head = "HEADMARKER" + "a".repeat(300);
     const tail = "b".repeat(300) + "TAILMARKER";
     const out = head + tail;
-    const rendered = renderOutputForPoll(out, { tailChars: 30 });
+    const rendered = renderOutputForPoll(out, {
+      tailChars: 30,
+      thresholdChars: 100,
+    });
     expect(rendered).toContain("…");
     expect(rendered).toContain("TAILMARKER");
     expect(rendered).not.toContain("HEADMARKER");

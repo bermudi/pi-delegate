@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { getEventListeners } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -73,11 +74,6 @@ import {
   withSessionLock,
   getHostDeps,
   invalidateHostDepsCache,
-  readDelegateSettingsFile,
-  findLegacyDelegateSettings,
-  warnLegacyDelegateSettingsMoved,
-  loadDelegateSettings,
-  clearDelegateSettingsCache,
   loadDelegateConfig,
   getAgentOverrides,
   reloadDelegateConfig,
@@ -112,7 +108,17 @@ import {
 } from "./host.ts";
 import { registerProviderExtensionNotifier } from "./provider-extensions.ts";
 import { resolveTasks, validateTasks } from "./task-resolution.ts";
+import { toolExpandHint } from "./key-hints.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
+import { availableToolNames } from "./tools.ts";
+import { generateTicketId } from "./tickets.ts";
+
+function expectToolExpandHint(text: string, present: boolean): void {
+  const hint = toolExpandHint();
+  if (!hint) return;
+  if (present) expect(text).toContain(hint);
+  else expect(text).not.toContain(hint);
+}
 
 // ── Integration test imports ──────────────────────────────────────────────
 
@@ -580,6 +586,14 @@ describe("resolveToolGroups", () => {
     expect(resolveToolGroups(["constructor"])).toEqual(["constructor"]);
     expect(resolveToolGroups(["toString"])).toEqual(["toString"]);
     expect(resolveToolGroups(["__proto__"])).toEqual(["__proto__"]);
+  });
+
+  test("does not treat Object.prototype names as provider tool lists", () => {
+    for (const provider of ["constructor", "toString", "__proto__"]) {
+      expect(() => availableToolNames(provider)).not.toThrow();
+      expect(availableToolNames(provider)).toEqual(Object.keys(TOOL_FACTORIES));
+    }
+    expect(availableToolNames("openai-codex")).toContain("web_search");
   });
 });
 
@@ -1371,6 +1385,23 @@ describe("findAvailableAlternative", () => {
       ["opencode-go/deepseek-v4-pro", true],
     ]);
     const registry = makeRegistry([brokenModel, workingAlt], authMap);
+    expect(findAvailableAlternative(brokenModel, registry)).toBe(workingAlt);
+  });
+
+  test("skips unauthenticated alternatives before selecting a fallback", () => {
+    const unauthenticatedAlt = {
+      provider: "other",
+      id: "deepseek-v4-pro",
+    } as any;
+    const authMap = new Map([
+      ["deepseek/deepseek-v4-pro", false],
+      ["other/deepseek-v4-pro", false],
+      ["opencode-go/deepseek-v4-pro", true],
+    ]);
+    const registry = makeRegistry(
+      [brokenModel, unauthenticatedAlt, workingAlt],
+      authMap,
+    );
     expect(findAvailableAlternative(brokenModel, registry)).toBe(workingAlt);
   });
 
@@ -2642,43 +2673,6 @@ describe("constants", () => {
 
 // ── Settings Overrides ──────────────────────────────────────────────────────
 
-describe("readDelegateSettingsFile", () => {
-  let tmpDir: string;
-
-  beforeEach(() => {
-    tmpDir = makeTempDir();
-  });
-  afterEach(() => {
-    cleanup(tmpDir);
-  });
-
-  test("returns null for nonexistent file", () => {
-    expect(
-      readDelegateSettingsFile(path.join(tmpDir, "nonexistent.json")),
-    ).toBeNull();
-  });
-
-  test("parses valid JSON settings", () => {
-    const file = path.join(tmpDir, "settings.json");
-    writeFileSync(
-      file,
-      JSON.stringify({
-        delegate: {
-          agentOverrides: { reviewer: { model: "zai/glm-5-turbo" } },
-        },
-      }),
-    );
-    const result = readDelegateSettingsFile(file);
-    expect(result?.delegate).toBeDefined();
-  });
-
-  test("returns null for invalid JSON", () => {
-    const file = path.join(tmpDir, "bad.json");
-    writeFileSync(file, "not json");
-    expect(readDelegateSettingsFile(file)).toBeNull();
-  });
-});
-
 describe("delegate.json agentOverrides", () => {
   let tmpDir: string;
 
@@ -2942,201 +2936,6 @@ describe("malformed delegate.json numeric fields", () => {
     expect(getStallTimeoutMs(malformed)).toBe(15 * 60 * 1000);
     expect(getConcurrencyLimit("openai/gpt-5", malformed)).toBe(
       MAX_CONCURRENCY,
-    );
-  });
-});
-
-describe("legacy pi settings detection", () => {
-  let tmpDir: string;
-  let projectDir: string;
-
-  beforeEach(() => {
-    tmpDir = makeTempDir("delegate-legacy-");
-    projectDir = path.join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    mock.module("node:os", () => ({ ...os, homedir: () => tmpDir }));
-    clearDelegateSettingsCache();
-  });
-
-  afterEach(() => {
-    mock.module("node:os", () => os);
-    cleanup(tmpDir);
-  });
-
-  function writeSettings(rel: string, body: unknown) {
-    const file = path.join(tmpDir, rel);
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, JSON.stringify(body));
-  }
-
-  test("detects a delegate block in user and project settings.json", () => {
-    writeSettings(path.join(".pi", "agent", "settings.json"), {
-      delegate: { agentOverrides: { scout: { model: "a/b" } } },
-    });
-    writeSettings(path.join("project", ".pi", "settings.json"), {
-      delegate: { agentOverrides: { coder: { model: "c/d" } } },
-    });
-    const found = findLegacyDelegateSettings(projectDir);
-    expect(found).toHaveLength(2);
-    expect(found[0].endsWith(path.join(".pi", "agent", "settings.json"))).toBe(
-      true,
-    );
-    expect(found[1].endsWith(path.join(".pi", "settings.json"))).toBe(true);
-  });
-
-  test("settings without a delegate block are not flagged", () => {
-    writeSettings(path.join(".pi", "agent", "settings.json"), {
-      defaultProvider: "opencode",
-    });
-    writeSettings(path.join("project", ".pi", "settings.json"), {
-      treeFilterMode: "no-tools",
-    });
-    expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
-  });
-
-  test("migration detection reports failures without blocking dispatch", () => {
-    mock.module("node:os", () => ({
-      ...os,
-      homedir: () => {
-        throw new Error("homedir unavailable");
-      },
-    }));
-
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown) => warnings.push(String(message));
-    try {
-      expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
-      expect(() => warnLegacyDelegateSettingsMoved(projectDir)).not.toThrow();
-    } finally {
-      console.warn = originalWarn;
-    }
-
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("homedir unavailable");
-    expect(warnings[0]).toContain("delegate.json");
-  });
-
-  test("caches malformed settings detection until the file changes", () => {
-    const settingsPath = path.join(tmpDir, ".pi", "agent", "settings.json");
-    mkdirSync(path.dirname(settingsPath), { recursive: true });
-    writeFileSync(settingsPath, "{ not json");
-
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown) => warnings.push(String(message));
-    try {
-      expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
-      expect(findLegacyDelegateSettings(projectDir)).toEqual([]);
-    } finally {
-      console.warn = originalWarn;
-    }
-
-    expect(
-      warnings.filter((warning) =>
-        warning.includes("could not read settings file"),
-      ),
-    ).toHaveLength(1);
-  });
-
-  test("warns once per source/cwd through stderr and the TUI", () => {
-    writeSettings(path.join(".pi", "agent", "settings.json"), {
-      delegate: { agentOverridesByParentModel: {} },
-    });
-    const warnings: string[] = [];
-    const notices: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown) => warnings.push(String(message));
-    try {
-      warnLegacyDelegateSettingsMoved(projectDir, (message) =>
-        notices.push(message),
-      );
-      warnLegacyDelegateSettingsMoved(projectDir, (message) =>
-        notices.push(message),
-      );
-    } finally {
-      console.warn = originalWarn;
-    }
-    expect(warnings).toHaveLength(1);
-    expect(notices).toHaveLength(1);
-    expect(warnings[0]).toContain("delegate.json");
-    expect(warnings[0]).toContain("v0.1.13");
-  });
-
-  test("warns when a legacy block is added after an earlier no-block call", () => {
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown) => warnings.push(String(message));
-    try {
-      // First call finds nothing — the cwd must not be marked as warned.
-      warnLegacyDelegateSettingsMoved(projectDir);
-      expect(warnings).toHaveLength(0);
-
-      // Legacy block appears later; the next call must still warn.
-      writeSettings(path.join("project", ".pi", "settings.json"), {
-        delegate: { agentOverrides: {} },
-      });
-      warnLegacyDelegateSettingsMoved(projectDir);
-    } finally {
-      console.warn = originalWarn;
-    }
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("delegate.json");
-  });
-
-  test("resolveTasks warns for legacy delegate blocks in every resolved task cwd", () => {
-    const webDir = path.join(tmpDir, "web");
-    const apiDir = path.join(tmpDir, "api");
-    mkdirSync(webDir, { recursive: true });
-    mkdirSync(apiDir, { recursive: true });
-    writeSettings(path.join("web", ".pi", "settings.json"), {
-      delegate: { agentOverrides: {} },
-    });
-    writeSettings(path.join("api", ".pi", "settings.json"), {
-      delegate: { agentOverridesByParentModel: {} },
-    });
-
-    const parentModel = {
-      provider: "openrouter",
-      id: "deepseek-v4-pro",
-    } as any;
-    const registry = {
-      getAvailable: () => [parentModel],
-      find: () => parentModel,
-      hasConfiguredAuth: () => true,
-    } as any;
-
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown) => warnings.push(String(message));
-    try {
-      resolveTasks(
-        [
-          { prompt: "web work", cwd: "../web" },
-          { prompt: "api work", cwd: "../api" },
-        ] as any,
-        {
-          cwd: projectDir,
-          model: parentModel,
-          modelRegistry: registry,
-          sessionManager: undefined,
-          getSystemPrompt: () => "parent",
-        } as any,
-        new Map(),
-        { thinking: "off", tools: ["read"] },
-      );
-    } finally {
-      console.warn = originalWarn;
-    }
-
-    expect(
-      warnings.filter((w) => w.includes("delegate.json")).length,
-    ).toBeGreaterThanOrEqual(2);
-    expect(warnings.some((w) => w.includes(path.join(webDir, ".pi")))).toBe(
-      true,
-    );
-    expect(warnings.some((w) => w.includes(path.join(apiDir, ".pi")))).toBe(
-      true,
     );
   });
 });
@@ -3754,7 +3553,8 @@ describe("delegate renderers", () => {
       results: [
         {
           agent: "reviewer",
-          output: "Useful answer first.\n\nFull explanation only when expanded.",
+          output:
+            "Useful answer first.\n\nFull explanation only when expanded.",
           durationMs: 1200,
           tokens: 42,
           touchedFiles: [],
@@ -3794,17 +3594,13 @@ describe("delegate renderers", () => {
         return text;
       },
     };
-    const collapsed = renderer!(
-      message as never,
-      { expanded: false },
-      theme,
-    );
+    const collapsed = renderer!(message as never, { expanded: false }, theme);
     const collapsedText = collapsed!.render(200).join("\n");
     expect(collapsedText.startsWith(" ")).toBe(true);
     expect(backgroundCalls).toContain("toolSuccessBg");
     expect(collapsedText).toContain("ticket taste123");
     expect(collapsedText).toContain("2.5s");
-    expect(collapsedText).toContain("Ctrl+O expand");
+    expectToolExpandHint(collapsedText, true);
     expect(collapsedText).toContain(
       "Result delivered from another session-tree branch",
     );
@@ -3812,14 +3608,10 @@ describe("delegate renderers", () => {
     expect(collapsedText).not.toContain("RAW ASYNC RESULT");
     expect(collapsedText).not.toContain("Full explanation only when expanded.");
 
-    const expanded = renderer!(
-      message as never,
-      { expanded: true },
-      theme,
-    );
+    const expanded = renderer!(message as never, { expanded: true }, theme);
     const expandedText = expanded!.render(200).join("\n");
     expect(expandedText).toContain("Full explanation only when expanded.");
-    expect(expandedText).not.toContain("Ctrl+O expand");
+    expectToolExpandHint(expandedText, false);
 
     backgroundCalls.length = 0;
     const failed = renderer!(
@@ -3966,7 +3758,7 @@ describe("delegate renderers", () => {
       },
     };
 
-    // Collapsed: compact activity + Ctrl+O hint
+    // Collapsed: compact activity + the effective host expand hint
     const compact = toolDef!.renderResult(
       result,
       { isPartial: true, expanded: false },
@@ -3974,7 +3766,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const compactText = (compact as any).getText();
-    expect(compactText).toContain("Ctrl+O expand");
+    expectToolExpandHint(compactText, true);
     // Current in-flight tool shown compactly
     expect(compactText).toContain("$ git status");
     expect(compactText).not.toContain("→ read src/config.ts");
@@ -4249,7 +4041,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const compactText = (compact as any).getText();
-    expect(compactText).toContain("Ctrl+O expand");
+    expectToolExpandHint(compactText, true);
     expect(compactText).not.toContain("→ read a.ts");
     expect(compactText).toContain("├─");
 
@@ -4335,7 +4127,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const compactText = (compact as any).getText();
-    expect(compactText).toContain("Ctrl+O expand");
+    expectToolExpandHint(compactText, true);
     expect(compactText).toContain("read 4.ts");
     expect(compactText).not.toContain("1.ts");
 
@@ -4607,7 +4399,7 @@ describe("delegate renderers", () => {
     expect(rendered).toContain("cancellation pending");
   });
 
-  test("collapsed running shows › with current tool and Ctrl+O hint", async () => {
+  test("collapsed running shows › with current tool and the effective expand hint", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
@@ -4658,7 +4450,7 @@ describe("delegate renderers", () => {
       ctx,
     );
     const rendered = (text as any).getText();
-    expect(rendered).toContain("Ctrl+O expand");
+    expectToolExpandHint(rendered, true);
     expect(rendered).toContain("›");
     // Current in-flight tool shown compactly
     expect(rendered).toContain("$ npm test");
@@ -4700,7 +4492,7 @@ describe("delegate renderers", () => {
     );
     const rendered = (text as any).getText();
     expect(rendered).toContain("thinking…");
-    expect(rendered).toContain("Ctrl+O expand");
+    expectToolExpandHint(rendered, true);
   });
 
   test("expanded running shows current tool with elapsed duration", async () => {
@@ -4759,8 +4551,8 @@ describe("delegate renderers", () => {
     // Completed tools also shown in expanded running
     expect(rendered).toContain("→ read a.ts");
     expect(rendered).toContain("✓");
-    // Ctrl+O hint only in collapsed running
-    expect(rendered).not.toContain("Ctrl+O expand");
+    // Expand hint only in collapsed running
+    expectToolExpandHint(rendered, false);
   });
 
   test("expanded running shows live output from tool_execution_update", async () => {
@@ -4821,8 +4613,8 @@ describe("delegate renderers", () => {
     expect(rendered).toContain("FAIL src/broken.test.ts");
     // Carriage returns resolved (progress bars show final state)
     expect(rendered).not.toContain("\r");
-    // Ctrl+O hint not shown in expanded
-    expect(rendered).not.toContain("Ctrl+O expand");
+    // Expand hint not shown in expanded
+    expectToolExpandHint(rendered, false);
   });
 
   test("collapsed done hides activities, expanded shows them", async () => {
@@ -5331,6 +5123,56 @@ describe("delegate pool", () => {
     expect(calls).toEqual(["abort", "dispose"]);
     expect(configFor("test-session")).toBeUndefined();
     expect(await closePooledAgent("test-session")).toBe(false);
+  });
+
+  test("pooled configs defensively clone and freeze inputs and outputs", () => {
+    const frozen = {
+      systemPrompt: "test",
+      model: {
+        provider: "test",
+        id: "model",
+        compat: { supportsFoo: true },
+      } as any,
+      thinking: "off" as const,
+      tools: ["read"],
+      cwd: "/tmp",
+    };
+    commit("immutable-config", {
+      session: {} as any,
+      sessionManager: {} as any,
+      sessionFile: "/tmp/immutable-config.jsonl",
+      frozen,
+      tokens: 0,
+    });
+
+    frozen.tools.push("bash");
+    frozen.model.provider = "mutated";
+    frozen.model.compat.supportsFoo = false;
+
+    const first = configFor("immutable-config")!;
+    expect(first.tools).toEqual(["read"]);
+    expect(first.model.provider).toBe("test");
+    expect((first.model as any).compat.supportsFoo).toBe(true);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.tools)).toBe(true);
+    expect(Object.isFrozen(first.model)).toBe(true);
+    expect(Object.isFrozen((first.model as any).compat)).toBe(true);
+    expect(() => (first.tools as string[]).push("write")).toThrow();
+    expect(() => {
+      (first.model as any).provider = "output-mutation";
+    }).toThrow();
+
+    const second = configFor("immutable-config")!;
+    expect(second).not.toBe(first);
+    expect(second.tools).toEqual(["read"]);
+    expect(second.model.provider).toBe("test");
+    expect(
+      checkout("immutable-config", {
+        cwd: "/tmp",
+        thinking: "off",
+        tools: ["read"],
+      }).status,
+    ).toBe("hit");
   });
 
   test("closePooledAgent disposes and removes after abort timeout", async () => {
@@ -5869,6 +5711,32 @@ describe("async ticket registry", () => {
     _resetPoolForTesting();
     ts?.dispose();
     ts = undefined;
+  });
+
+  test("generateTicketId retries collisions without replacing the existing ticket", () => {
+    const existing = {
+      id: "deadbeef",
+      created: Date.now(),
+      tasks: [],
+      resolved: [],
+      status: "running",
+      results: [],
+      progress: [],
+      controller: new AbortController(),
+    } as AsyncTicket;
+    ticketRegistry.set(existing.id, existing);
+
+    const values = ["deadbeef", "feedface"].map(
+      (id) => Number.parseInt(id, 36) / 36 ** 8,
+    );
+    const originalRandom = Math.random;
+    Math.random = () => values.shift()!;
+    try {
+      expect(generateTicketId()).toBe("feedface");
+      expect(ticketRegistry.get("deadbeef")).toBe(existing);
+    } finally {
+      Math.random = originalRandom;
+    }
   });
 
   test("sweepTickets leaves long-running tickets alone", () => {
@@ -7305,6 +7173,50 @@ describe("async delegate integration", () => {
     expect(result.content[0]!.text).toContain("PENDING — result not available");
   });
 
+  test("formatCompletedTicket does not memoize a shutdown snapshot before late workers settle", () => {
+    const ticket: AsyncTicket = {
+      id: "late-shutdown-result",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "slow task" }],
+      resolved: [
+        {
+          prompt: "slow task",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "scout",
+          warnings: [],
+        },
+      ],
+      status: "cancelled",
+      results: [undefined],
+      progress: mkProgress(["running"]),
+      controller: new AbortController(),
+      workersSettled: false,
+    };
+
+    const shutdownSnapshot = formatCompletedTicket(ticket);
+    expect(shutdownSnapshot.content[0]!.text).toContain(
+      "CANCELLED — task aborted mid-run",
+    );
+    expect(ticket.formattedResult).toBeUndefined();
+
+    ticket.results[0] = { ...mkResult(), output: "late worker result" };
+    ticket.progress = mkProgress(["done"]);
+    ticket.workersSettled = true;
+
+    const settledSnapshot = formatCompletedTicket(ticket);
+    expect(settledSnapshot).not.toBe(shutdownSnapshot);
+    expect(settledSnapshot.content[0]!.text).toContain("late worker result");
+    expect(settledSnapshot.details.results[0]!.output).toBe(
+      "late worker result",
+    );
+    expect(formatCompletedTicket(ticket)).toBe(settledSnapshot);
+  });
+
   test("formatCompletedTicket keeps FULL output in details.results[i].output even when spilled from content", () => {
     // The one-source-two-projections invariant: the LLM-facing `content` is
     // bounded (tail + pointer), but `details.results[i].output` still carries
@@ -7345,6 +7257,11 @@ describe("async delegate integration", () => {
     };
     const result = formatCompletedTicket(ticket);
     const text = result.content[0]!.text;
+    const repeated = formatCompletedTicket(ticket);
+    // Terminal formatting is memoized: repeated poll/wait calls reuse the same
+    // content and therefore the same single spill artifact.
+    expect(repeated).toBe(result);
+    expect(repeated.content[0]!.text).toBe(text);
     // Content is bounded: tail present, head absent, pointer present.
     expect(text).toContain("TAILMARKER");
     expect(text).not.toContain("HEADMARKER");
@@ -8109,16 +8026,21 @@ describe("async delegate integration", () => {
     };
     ticketRegistry.set("timeout-wait", ticket);
 
-    const result = await handleWait(
+    const parentController = new AbortController();
+    const wait = handleWait(
       { ticket: "timeout-wait", timeoutMs: 10 },
-      undefined,
+      parentController.signal,
       undefined,
       {} as any,
     );
+    expect(getEventListeners(parentController.signal, "abort")).toHaveLength(1);
+
+    const result = await wait;
     expect(result.content[0].text).toContain("still running");
     expect(result.content[0].text).toContain("timed out");
     expect(ticket.status).toBe("running");
     expect(controller.signal.aborted).toBe(false);
+    expect(getEventListeners(parentController.signal, "abort")).toHaveLength(0);
   });
 
   test("wait chunks oversized timeouts instead of firing immediately", async () => {
@@ -10438,79 +10360,5 @@ describe("touched-file overlap warning", () => {
     const text = result.content[0]!.text;
     expect(text).not.toContain("does not isolate or serialize file access");
     expect(result.details.overlapWarning).toBeUndefined();
-  });
-});
-
-describe("public export compatibility", () => {
-  test("loadDelegateSettings preserves its deprecated cwd-based merged view", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "delegate-compat-"));
-    mock.module("node:os", () => ({ ...os, homedir: () => root }));
-    const project = path.join(root, "project");
-    const cwd = path.join(project, "nested");
-    try {
-      mkdirSync(path.join(root, ".pi", "agent"), { recursive: true });
-      mkdirSync(path.join(project, ".pi"), { recursive: true });
-      mkdirSync(cwd, { recursive: true });
-      writeFileSync(
-        path.join(root, ".pi", "agent", "settings.json"),
-        JSON.stringify({
-          delegate: {
-            agentOverrides: {
-              scout: { model: "user/model", thinking: "low" },
-            },
-          },
-        }),
-      );
-      writeFileSync(
-        path.join(project, ".pi", "settings.json"),
-        JSON.stringify({
-          delegate: {
-            agentOverrides: { scout: { model: "project/model" } },
-          },
-        }),
-      );
-
-      expect(loadDelegateSettings(cwd)?.agentOverrides?.scout).toEqual({
-        model: "project/model",
-        thinking: "low",
-      });
-    } finally {
-      clearDelegateSettingsCache();
-      mock.module("node:os", () => os);
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("clearDelegateSettingsCache clears the legacy warning cwd set", () => {
-    const tmpRoot = mkdtempSync(path.join(os.tmpdir(), "delegate-compat-"));
-    const projectDir = path.join(tmpRoot, "project");
-    mkdirSync(projectDir, { recursive: true });
-    const settings = path.join(tmpRoot, ".pi", "settings.json");
-    mkdirSync(path.dirname(settings), { recursive: true });
-    writeFileSync(
-      settings,
-      JSON.stringify({ delegate: { agentOverrides: {} } }),
-    );
-    // Pin the user scope to tmpRoot so warnLegacyDelegateSettingsMoved can't
-    // consult the real ~/.pi settings, which would make the warning counts
-    // below machine-dependent.
-    mock.module("node:os", () => ({ ...os, homedir: () => tmpRoot }));
-
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown) => warnings.push(String(message));
-    try {
-      warnLegacyDelegateSettingsMoved(projectDir);
-      expect(warnings).toHaveLength(1);
-      // Without clearing the cache, a second call would stay quiet.
-      clearDelegateSettingsCache();
-      warnLegacyDelegateSettingsMoved(projectDir);
-    } finally {
-      console.warn = originalWarn;
-      clearDelegateSettingsCache();
-      mock.module("node:os", () => os);
-    }
-    expect(warnings).toHaveLength(2);
-    rmSync(tmpRoot, { recursive: true, force: true });
   });
 });

@@ -16,6 +16,7 @@ import {
 } from "./format.ts";
 import { stripAnsi, resolveCarriageReturn } from "./utils.ts";
 import { getMaxConcurrent } from "./config.ts";
+import { toolExpandHint } from "./key-hints.ts";
 import type { TaskProgress, TaskResult } from "./types.ts";
 
 /**
@@ -99,9 +100,10 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
     ctx.ticketStatus === "cancelling"
       ? `${theme.fg("error", "■ cancelling")} · `
       : "";
+  const expandHint = toolExpandHint();
   const detailHint =
-    !expanded && running > 0
-      ? ` · ${theme.fg("accent", "Ctrl+O expand")}`
+    !expanded && running > 0 && expandHint
+      ? ` · ${theme.fg("accent", expandHint)}`
       : "";
   lines.push(
     `${stateLabel}${theme.fg("muted", headerParts.join(" · "))}${detailHint}`,
@@ -227,8 +229,8 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
             }
           } else {
             // ── Collapsed: compact tool line with duration ─────
-            // The Ctrl+O affordance lives once in the header now — emitting
-            // it per task just repeats the same hint for every running agent.
+            // The host-configured expand affordance lives once in the header;
+            // emitting it per task repeats the hint for every running agent.
             lines.push(
               truncLine(
                 `${ind}${theme.fg("warning", "›")} ${compactActivity(p)}`,
@@ -293,9 +295,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
   }
 
   const ticketLabel = ticketId ? `ticket ${ticketId} · ` : "";
-  const detailHint = !expanded
-    ? ` · ${theme.fg("accent", "Ctrl+O expand")}`
-    : "";
+  const expandHint = toolExpandHint();
+  const detailHint =
+    !expanded && expandHint ? ` · ${theme.fg("accent", expandHint)}` : "";
   if (ticketId && ticketIsLive) {
     // Background ticket — frame it as in-progress, not a finished result.
     const ticketParts = [`${finalized}/${total} finished`];
@@ -379,10 +381,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
 
     if (isLive && p.status === "running") {
       lines.push(
-        truncLine(
-          `${ind}${theme.fg("warning", "›")} ${compactActivity(p)}`,
-          w,
-        ),
+        truncLine(`${ind}${theme.fg("warning", "›")} ${compactActivity(p)}`, w),
       );
     }
 

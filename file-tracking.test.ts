@@ -87,7 +87,7 @@ describe("extractTouchedFromActivities", () => {
     ]);
   });
 
-  test("excludes failed edit/write calls from touched/attributed files", () => {
+  test("conservatively includes failed edit/write calls", () => {
     const activities = [
       {
         id: "1",
@@ -108,49 +108,13 @@ describe("extractTouchedFromActivities", () => {
       },
     ];
 
-    const result = extractTouchedFromActivities(activities as any, cwd);
-
-    expect(result).toEqual([path.resolve(cwd, "ok.ts")]);
+    expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
+      path.resolve(cwd, "ok.ts"),
+      path.resolve(cwd, "bad.ts"),
+    ]);
   });
 
-  test("a failed edit/write call does not trigger an overlap warning", () => {
-    const shared = path.resolve(cwd, "shared.ts");
-    const taskA = extractTouchedFromActivities(
-      [
-        {
-          id: "1",
-          name: "write",
-          args: { path: "shared.ts", content: "..." },
-          startTime: 0,
-          result: { content: [], isError: false },
-        },
-      ] as any,
-      cwd,
-    );
-    const taskB = extractTouchedFromActivities(
-      [
-        {
-          id: "2",
-          name: "edit",
-          args: { path: "shared.ts" },
-          startTime: 0,
-          result: { content: [], isError: true },
-        },
-      ] as any,
-      cwd,
-    );
-
-    expect(taskA).toEqual([shared]);
-    expect(taskB).toEqual([]);
-    expect(
-      findTouchedOverlaps([
-        { attributedFiles: taskA },
-        { attributedFiles: taskB },
-      ]),
-    ).toEqual([]);
-  });
-
-  test("excludes edit/write calls with no terminal result from touched/attributed files", () => {
+  test("conservatively includes interrupted edit/write calls", () => {
     const activities = [
       {
         id: "1",
@@ -167,14 +131,15 @@ describe("extractTouchedFromActivities", () => {
       },
     ];
 
-    const result = extractTouchedFromActivities(activities as any, cwd);
-
-    expect(result).toEqual([path.resolve(cwd, "src/ok.ts")]);
+    expect(extractTouchedFromActivities(activities as any, cwd)).toEqual([
+      path.resolve(cwd, "src/ok.ts"),
+      path.resolve(cwd, "src/interrupted.ts"),
+    ]);
   });
 
-  test("an interrupted edit/write call does not trigger an overlap warning", () => {
+  test("failed and interrupted calls conservatively trigger overlap warnings", () => {
     const shared = path.resolve(cwd, "shared.ts");
-    const taskA = extractTouchedFromActivities(
+    const successful = extractTouchedFromActivities(
       [
         {
           id: "1",
@@ -186,10 +151,22 @@ describe("extractTouchedFromActivities", () => {
       ] as any,
       cwd,
     );
-    const taskB = extractTouchedFromActivities(
+    const failed = extractTouchedFromActivities(
       [
         {
           id: "2",
+          name: "edit",
+          args: { path: "shared.ts" },
+          startTime: 0,
+          result: { content: [], isError: true },
+        },
+      ] as any,
+      cwd,
+    );
+    const interrupted = extractTouchedFromActivities(
+      [
+        {
+          id: "3",
           name: "write",
           args: { path: "shared.ts", content: "..." },
           startTime: 0,
@@ -198,13 +175,14 @@ describe("extractTouchedFromActivities", () => {
       cwd,
     );
 
-    expect(taskA).toEqual([shared]);
-    expect(taskB).toEqual([]);
+    expect(failed).toEqual([shared]);
+    expect(interrupted).toEqual([shared]);
     expect(
       findTouchedOverlaps([
-        { attributedFiles: taskA },
-        { attributedFiles: taskB },
+        { attributedFiles: successful },
+        { attributedFiles: failed },
+        { attributedFiles: interrupted },
       ]),
-    ).toEqual([]);
+    ).toEqual([shared]);
   });
 });

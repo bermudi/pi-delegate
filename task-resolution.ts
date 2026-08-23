@@ -25,10 +25,6 @@ import {
 } from "./config.ts";
 import type { DelegateConfig } from "./config.ts";
 import { resolveCwd } from "./utils.ts";
-import {
-  loadDelegateSettings,
-  warnLegacyDelegateSettingsMoved,
-} from "./settings.ts";
 import type {
   AgentConfig,
   DelegateToolCtx,
@@ -238,9 +234,7 @@ export function resolveTasks(
     ctx.getSystemPrompt?.(),
   );
 
-  // Modern overrides come from delegate.json. A one-release bridge below also
-  // reads legacy settings.json model/thinking values; modern values win
-  // field-by-field and legacy tools are never honored.
+  // Agent overrides come exclusively from the user-scoped delegate.json.
   const agentOverrides = getAgentOverrides(dispatchConfig);
   const overridesByParentModel = getAgentOverridesByParentModel(dispatchConfig);
 
@@ -251,13 +245,6 @@ export function resolveTasks(
       : undefined;
     const isBuiltinAgent = agent?.builtin === true;
     const cwd = resolveCwd(t.cwd ?? ctx.cwd, ctx.cwd);
-
-    // A task can resolve to a different cwd than the parent; legacy
-    // `delegate` blocks in those project settings must be surfaced too.
-    warnLegacyDelegateSettingsMoved(cwd, (message) =>
-      ctx.ui?.notify(message, "warning"),
-    );
-    const legacySettings = loadDelegateSettings(cwd);
 
     // delegate.json agent overrides for this agent. `default` bypasses them
     // entirely (it mirrors the live parent by contract).
@@ -274,20 +261,6 @@ export function resolveTasks(
     const agentOverride =
       t.agent && !isDefaultAgent
         ? getOwnMapValue(agentOverrides, t.agent)
-        : undefined;
-    const legacyParentModelOverride =
-      t.agent && !isDefaultAgent && parentModelKey
-        ? getOwnMapValue(
-            getOwnMapValue(
-              legacySettings?.agentOverridesByParentModel,
-              parentModelKey,
-            ),
-            t.agent,
-          )
-        : undefined;
-    const legacyAgentOverride =
-      t.agent && !isDefaultAgent
-        ? getOwnMapValue(legacySettings?.agentOverrides, t.agent)
         : undefined;
 
     // Build system prompt. Explicit task prompts and named agent prompts
@@ -426,11 +399,10 @@ export function resolveTasks(
 
     if (t.sessionAction !== "close" && t.sessionAction !== "list") {
       const agentType = t.agent ?? "inline";
-      // The built-in `default` profile bypasses delegate/settings model
-      // overrides for backwards compatibility. The other built-ins accept
-      // task and settings.json model overrides, but deliberately ignore the
-      // legacy delegate.json agent model map so they inherit the parent unless
-      // an explicit modern override wins.
+      // The built-in `default` profile bypasses delegate.json model overrides.
+      // The other built-ins accept task and modern agent overrides, but
+      // deliberately ignore the legacy delegate.json agent model map so they
+      // inherit the parent unless an explicit modern override wins.
       // Overridden built-ins can still provide an explicit `model` in their
       // Markdown frontmatter – when `explicitModel` is set, honor it instead
       // of silently ignoring it (which would contradict the Markdown contract).
@@ -440,16 +412,10 @@ export function resolveTasks(
           ? (t.model ??
             parentModelOverride?.model ??
             agentOverride?.model ??
-            legacyParentModelOverride?.model ??
-            legacyAgentOverride?.model ??
             (agent?.explicitModel ? agent.model : undefined))
           : resolveModelSpec({
               taskModel:
-                t.model ??
-                parentModelOverride?.model ??
-                agentOverride?.model ??
-                legacyParentModelOverride?.model ??
-                legacyAgentOverride?.model,
+                t.model ?? parentModelOverride?.model ?? agentOverride?.model,
               agentType,
               frontmatterModel: agent?.model,
               config: dispatchConfig,
@@ -477,7 +443,16 @@ export function resolveTasks(
         } else if (isDefaultAgent) {
           requestedModel = ctx.model;
         }
-        model = pooledConfig.model;
+        const frozenModel = pooledConfig.model;
+        // configFor() returns a defensive clone. Recover the registry's
+        // canonical instance for downstream identity compatibility while the
+        // pool keeps validating against its immutable value snapshot.
+        model =
+          ctx.model?.provider === frozenModel.provider &&
+          ctx.model.id === frozenModel.id
+            ? ctx.model
+            : (ctx.modelRegistry.find(frozenModel.provider, frozenModel.id) ??
+              frozenModel);
       } else {
         const resolvedRequest = modelSpec
           ? resolveModelRequest(modelSpec, ctx.modelRegistry, ctx.model)
@@ -488,7 +463,7 @@ export function resolveTasks(
         modelSuffix = resolvedRequest?.strippedSuffix;
 
         // The selected model spec is explicit regardless of whether it came
-        // from the task, settings, or named-agent frontmatter. If it cannot
+        // from the task, delegate config, or named-agent frontmatter. If it cannot
         // resolve, fail loudly instead of silently falling back to the parent.
         const explicitRequest = modelSpec;
         if (explicitRequest && !resolvedModel) {
@@ -524,8 +499,6 @@ export function resolveTasks(
           ? (t.thinking ??
             parentModelOverride?.thinking ??
             agentOverride?.thinking ??
-            legacyParentModelOverride?.thinking ??
-            legacyAgentOverride?.thinking ??
             (agent?.explicitThinking ? agent.thinking : undefined) ??
             modelSuffix ??
             parentDefaults.thinking ??
@@ -534,8 +507,6 @@ export function resolveTasks(
           : (t.thinking ??
             parentModelOverride?.thinking ??
             agentOverride?.thinking ??
-            legacyParentModelOverride?.thinking ??
-            legacyAgentOverride?.thinking ??
             (agent?.explicitThinking ? agent.thinking : undefined) ??
             (isPoolHit ? pooledConfig?.thinking : undefined) ??
             modelSuffix ??
@@ -544,8 +515,6 @@ export function resolveTasks(
         : (t.thinking ??
           parentModelOverride?.thinking ??
           agentOverride?.thinking ??
-          legacyParentModelOverride?.thinking ??
-          legacyAgentOverride?.thinking ??
           agent?.thinking ??
           (isPoolHit ? pooledConfig?.thinking : undefined) ??
           modelSuffix ??

@@ -133,6 +133,28 @@ describe("runAgentSession abort re-check", () => {
     expect(prompted()).toBe(false);
   });
 
+  test("cancellation queued before prompt start never invokes prompt", async () => {
+    const controller = new AbortController();
+    const { session, prompted } = fakeSession({ messages: [] });
+
+    const running = runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      controller.signal,
+      undefined,
+      new Set<string>(),
+      Date.now(),
+    );
+    // runAgentSession has queued its prompt callback but has not entered it yet.
+    controller.abort();
+    const result = await running;
+
+    expect(result.error).toBe("Aborted");
+    expect(result.prompted).toBe(false);
+    expect(prompted()).toBe(false);
+  });
+
   test("no signal still prompts normally", async () => {
     let resolved = false;
     const { session, prompted } = fakeSession({
@@ -1119,6 +1141,52 @@ describe("runAgentSession abort re-check", () => {
       expect(result.error).toContain("Stalled: no AgentSession activity");
       expect(result.error).toContain("starting agent");
       expect(result.error).not.toContain("streaming model output");
+    } finally {
+      _setStallTimeoutForTesting(undefined);
+    }
+  });
+
+  test("stall cancellation does not await a prompt promise that never settles", async () => {
+    _setStallTimeoutForTesting(15);
+    let idle = false;
+    let aborts = 0;
+    const { session } = fakeSession({
+      prompt: (emit) => {
+        emit({
+          type: "tool_execution_start",
+          toolCallId: "interrupted-write",
+          toolName: "write",
+          args: { path: "possibly-written.txt", content: "data" },
+        });
+        return new Promise<void>(() => {});
+      },
+      isIdle: () => idle,
+      abort: () => {
+        aborts++;
+        idle = true;
+      },
+    });
+
+    try {
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        undefined,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(aborts).toBe(1);
+      expect(result.failureKind).toBe("stalled");
+      expect(result.error).toContain("Stalled:");
+      expect(result.touchedFiles).toContain(
+        path.join(process.cwd(), "possibly-written.txt"),
+      );
+      expect(result.attributedFiles).toContain(
+        path.join(process.cwd(), "possibly-written.txt"),
+      );
     } finally {
       _setStallTimeoutForTesting(undefined);
     }
@@ -2753,6 +2821,35 @@ describe("runAgentSession deadline", () => {
     expect(result.prompted).toBe(true);
   });
 
+  test("deadline does not await a prompt promise that ignores abort", async () => {
+    let idle = false;
+    let aborts = 0;
+    const { session } = fakeSession({
+      prompt: () => new Promise<void>(() => {}),
+      isIdle: () => idle,
+      abort: () => {
+        aborts++;
+        idle = true;
+      },
+    });
+
+    const start = Date.now();
+    const result = await runAgentSession(
+      session as never,
+      "do work",
+      { cwd: process.cwd() },
+      undefined,
+      undefined,
+      new Set<string>(),
+      start,
+      start + 15,
+    );
+
+    expect(aborts).toBe(1);
+    expect(result.failureKind).toBe("deadline_exceeded");
+    expect(result.error).toContain("Deadline exceeded");
+  });
+
   test("parent abort wins when the signal fires after the deadline", async () => {
     let cancelled = false;
     const controller = new AbortController();
@@ -2994,7 +3091,7 @@ describe("runAgentSession deadline", () => {
       expect(result.failureKind).toBe("deadline_exceeded");
       expect(result.error).toContain("Deadline exceeded");
       expect(result.output).toBe("done before git");
-      expect(gitCalls).toBe(1);
+      expect(gitCalls).toBe(2);
       expect(result.prompted).toBe(true);
     } finally {
       mock.restore();
@@ -3033,7 +3130,7 @@ describe("runAgentSession deadline", () => {
 
       expect(result.failureKind).toBe("deadline_exceeded");
       expect(result.error).toContain("Deadline exceeded");
-      expect(gitCalls).toBe(1);
+      expect(gitCalls).toBe(2);
       expect(result.prompted).toBe(true);
     } finally {
       mock.restore();
@@ -3099,7 +3196,7 @@ describe("runAgentSession deadline", () => {
       expect(result.failureKind).toBe("deadline_exceeded");
       expect(result.error).toContain("Deadline exceeded");
       expect(result.output).toBe("done before git");
-      expect(gitCalls).toBe(1);
+      expect(gitCalls).toBe(2);
       expect(gitDone).toBe(true);
       expect(postGitSettled).toBe(true);
       expect(result.prompted).toBe(true);
@@ -3108,10 +3205,14 @@ describe("runAgentSession deadline", () => {
     }
   });
 
-  test("recomputes output, usage, and touched files after the second quiescence wait", async () => {
+  test("recomputes output, usage, activities, and Git evidence after final cancellation quiescence", async () => {
     let gitCalls = 0;
     let gitDone = false;
     let idle = true;
+    const postQuiescenceGitFile = path.join(
+      process.cwd(),
+      "post-quiescence-git.txt",
+    );
     let postGitSettled = false;
     let abortCalled = false;
     let tokensTotal = 0;
@@ -3119,7 +3220,9 @@ describe("runAgentSession deadline", () => {
       gitCalls++;
       await sleep(150);
       gitDone = true;
-      return new Set<string>();
+      return gitCalls === 1
+        ? new Set<string>()
+        : new Set([postQuiescenceGitFile]);
     };
     mock.module("./file-tracking.ts", () => ({
       ...fileTracking,
@@ -3216,7 +3319,9 @@ describe("runAgentSession deadline", () => {
           f.includes("post-deadline.txt"),
         ),
       ).toBe(true);
-      expect(gitCalls).toBe(1);
+      expect(result.touchedFiles).toContain(postQuiescenceGitFile);
+      expect(result.attributedFiles).not.toContain(postQuiescenceGitFile);
+      expect(gitCalls).toBe(2);
       expect(gitDone).toBe(true);
       expect(postGitSettled).toBe(true);
       expect(result.prompted).toBe(true);
@@ -3274,7 +3379,7 @@ describe("runAgentSession deadline", () => {
       expect(result.failureKind).toBe("deadline_exceeded");
       expect(result.error).toContain("Deadline exceeded");
       expect(result.output).toBe("done before git");
-      expect(gitCalls).toBe(1);
+      expect(gitCalls).toBe(2);
       expect(result.prompted).toBe(true);
     } finally {
       mock.restore();
@@ -3319,7 +3424,7 @@ describe("runAgentSession deadline", () => {
 
       expect(result.failureKind).toBe("deadline_exceeded");
       expect(result.error).toContain("Deadline exceeded");
-      expect(gitCalls).toBe(1);
+      expect(gitCalls).toBe(2);
       expect(result.prompted).toBe(true);
     } finally {
       mock.restore();
@@ -3328,6 +3433,138 @@ describe("runAgentSession deadline", () => {
 });
 
 describe("runAgentSession parent abort during git evidence", () => {
+  test("unions Git evidence from before and after cancellation quiescence on success", async () => {
+    const controller = new AbortController();
+    const beforeUnwind = path.join(process.cwd(), "before-unwind.txt");
+    const afterUnwind = path.join(process.cwd(), "after-unwind.txt");
+    let gitCalls = 0;
+    const gitSnapshots = async (): Promise<Set<string>> => {
+      gitCalls++;
+      if (gitCalls === 1) {
+        controller.abort();
+        return new Set([beforeUnwind]);
+      }
+      return new Set([afterUnwind]);
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: gitSnapshots,
+    }));
+    try {
+      const answer = {
+        role: "assistant",
+        content: [{ type: "text", text: "done before git" }],
+      };
+      const { session } = fakeSession({
+        prompt: async (emit) => {
+          emit({ type: "message_end", message: answer });
+          emit({ type: "agent_end", messages: [answer], willRetry: false });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        controller.signal,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.error).toBe("Aborted");
+      expect(result.touchedFiles).toContain(beforeUnwind);
+      expect(result.touchedFiles).toContain(afterUnwind);
+      expect(gitCalls).toBe(2);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  test("preserves initial Git evidence when success-path resnapshot fails", async () => {
+    const controller = new AbortController();
+    const beforeUnwind = path.join(process.cwd(), "success-before-unwind.txt");
+    let gitCalls = 0;
+    const gitSnapshots = async (): Promise<Set<string> | undefined> => {
+      gitCalls++;
+      if (gitCalls === 1) {
+        controller.abort();
+        return new Set([beforeUnwind]);
+      }
+      return undefined;
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: gitSnapshots,
+    }));
+    try {
+      const { session } = fakeSession({
+        prompt: async (emit) => {
+          emit({ type: "agent_end", messages: [], willRetry: false });
+          emit({ type: "agent_settled" });
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        controller.signal,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.error).toBe("Aborted");
+      expect(result.touchedFiles).toContain(beforeUnwind);
+      expect(gitCalls).toBe(2);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  test("preserves initial Git evidence when error-path resnapshot fails", async () => {
+    const controller = new AbortController();
+    const beforeUnwind = path.join(process.cwd(), "error-before-unwind.txt");
+    let gitCalls = 0;
+    const gitSnapshots = async (): Promise<Set<string> | undefined> => {
+      gitCalls++;
+      if (gitCalls === 1) {
+        controller.abort();
+        return new Set([beforeUnwind]);
+      }
+      return undefined;
+    };
+    mock.module("./file-tracking.ts", () => ({
+      ...fileTracking,
+      getGitChangedFiles: gitSnapshots,
+    }));
+    try {
+      const { session } = fakeSession({
+        prompt: async () => {
+          throw new Error("simulated prompt failure");
+        },
+      });
+
+      const result = await runAgentSession(
+        session as never,
+        "do work",
+        { cwd: process.cwd() },
+        controller.signal,
+        undefined,
+        new Set<string>(),
+        Date.now(),
+      );
+
+      expect(result.error).toBe("Aborted");
+      expect(result.touchedFiles).toContain(beforeUnwind);
+      expect(gitCalls).toBe(2);
+    } finally {
+      mock.restore();
+    }
+  });
+
   test("parent abort during git evidence collection awaits a second quiescence", async () => {
     const controller = new AbortController();
     let gitCalls = 0;
@@ -3391,7 +3628,7 @@ describe("runAgentSession parent abort during git evidence", () => {
 
       expect(result.error).toBe("Aborted");
       expect(result.prompted).toBe(true);
-      expect(gitCalls).toBe(1);
+      expect(gitCalls).toBe(2);
       expect(gitDone).toBe(true);
       expect(postGitSettled).toBe(true);
     } finally {
@@ -3448,7 +3685,7 @@ describe("runAgentSession parent abort during git evidence", () => {
 
       expect(result.error).toBe("Aborted");
       expect(result.prompted).toBe(true);
-      expect(gitCalls).toBe(1);
+      expect(gitCalls).toBe(2);
       expect(gitDone).toBe(true);
       expect(postGitSettled).toBe(true);
     } finally {
@@ -3553,7 +3790,7 @@ describe("runAgentSession parent abort during git evidence", () => {
           f.includes("post-abort.txt"),
         ),
       ).toBe(true);
-      expect(gitCalls).toBe(1);
+      expect(gitCalls).toBe(2);
       expect(gitDone).toBe(true);
       expect(postGitSettled).toBe(true);
       expect(result.prompted).toBe(true);

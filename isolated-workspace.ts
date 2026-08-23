@@ -97,6 +97,189 @@ function isWithin(root: string, candidate: string): boolean {
   );
 }
 
+interface PhysicalReportedPath {
+  path: string;
+  /** The path crossed a symlink that could not be fully resolved, or path
+   * resolution itself failed. Such attribution must be retained rather than
+   * assumed to be an ordinary path inside the disposable worktree. */
+  uncertain: boolean;
+}
+
+/** Resolve symlinked ancestors even when the reported leaf no longer exists.
+ * The final component is followed only for explicit edit/write attribution:
+ * Git may instead be reporting a symlink node that was itself added or changed.
+ * Resolution failures are data, not reconciliation failures; callers retain
+ * uncertain attribution conservatively. */
+async function physicalReportedPath(
+  candidate: string,
+  followFinalSymlink: boolean,
+): Promise<PhysicalReportedPath> {
+  let cursor = followFinalSymlink ? candidate : path.dirname(candidate);
+  const suffix = followFinalSymlink ? [] : [path.basename(candidate)];
+
+  for (;;) {
+    try {
+      const physical = await fs.promises.realpath(cursor);
+      return { path: path.resolve(physical, ...suffix), uncertain: false };
+    } catch (error) {
+      const code =
+        error instanceof Error && "code" in error
+          ? (error as NodeJS.ErrnoException).code
+          : undefined;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        return { path: candidate, uncertain: true };
+      }
+
+      // realpath reports ENOENT for a dangling symlink. Before walking up to
+      // an existing parent (which would incorrectly make it look internal),
+      // preserve the symlink's intended target and mark it uncertain.
+      let stat: fs.Stats | undefined;
+      try {
+        stat = await fs.promises.lstat(cursor);
+      } catch (lstatError) {
+        const lstatCode =
+          lstatError instanceof Error && "code" in lstatError
+            ? (lstatError as NodeJS.ErrnoException).code
+            : undefined;
+        if (lstatCode !== "ENOENT" && lstatCode !== "ENOTDIR") {
+          return { path: candidate, uncertain: true };
+        }
+      }
+      if (stat?.isSymbolicLink()) {
+        try {
+          const target = await fs.promises.readlink(cursor);
+          const intended = path.resolve(
+            path.dirname(cursor),
+            target,
+            ...suffix,
+          );
+          const resolved = await physicalReportedPath(intended, true);
+          return { path: resolved.path, uncertain: true };
+        } catch {
+          return { path: candidate, uncertain: true };
+        }
+      }
+
+      const parent = path.dirname(cursor);
+      if (parent === cursor) {
+        return { path: candidate, uncertain: true };
+      }
+      suffix.unshift(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+function mapReportedPathToSource(
+  group: IsolatedGroup,
+  physicalWorkerRoot: string,
+  candidate: string,
+): string {
+  return isWithin(physicalWorkerRoot, candidate)
+    ? path.join(group.sourceRoot, path.relative(physicalWorkerRoot, candidate))
+    : candidate;
+}
+
+async function changedWorkerPaths(
+  workerRoot: string,
+  baselineCommit: string,
+): Promise<Set<string> | undefined> {
+  try {
+    const [tracked, untracked] = await Promise.all([
+      git(["diff", "--name-only", "-z", "--no-renames", baselineCommit, "--"], {
+        cwd: workerRoot,
+      }),
+      git(["ls-files", "--others", "--exclude-standard", "-z"], {
+        cwd: workerRoot,
+      }),
+    ]);
+    return new Set(
+      `${tracked.stdout}${untracked.stdout}`
+        .split("\0")
+        .filter(Boolean)
+        .map((relative) => path.resolve(workerRoot, relative)),
+    );
+  } catch {
+    // Reporting is conservative when Git evidence cannot be reconstructed.
+    return undefined;
+  }
+}
+
+async function classifyReportedFiles(
+  group: IsolatedGroup,
+  worker: IsolatedWorker,
+  result: TaskResult,
+): Promise<void> {
+  const physicalWorkerRoot = await fs.promises.realpath(worker.workerRoot);
+  const gitChanged = await changedWorkerPaths(
+    worker.workerRoot,
+    group.baselineCommit,
+  );
+  const attributedCandidates = [
+    ...new Set(
+      (result.attributedFiles ?? []).map((candidate) =>
+        path.resolve(worker.cwd, candidate),
+      ),
+    ),
+  ];
+
+  // Attribution is resolved separately from Git's symlink-node evidence so a
+  // write-through followed by replacement can preserve both the source-mapped
+  // node and its external physical target. An unchanged final symlink appeared
+  // only because edit/write attribution is part of touchedFiles, so avoid
+  // inventing Git evidence for that node.
+  const attributedSet = new Set(attributedCandidates);
+  const touched = (
+    await Promise.all(
+      result.touchedFiles.map(async (candidate) => {
+        const absolute = path.resolve(worker.cwd, candidate);
+        const finalStat = await fs.promises.lstat(absolute).catch(() => null);
+        if (
+          attributedSet.has(absolute) &&
+          finalStat?.isSymbolicLink() &&
+          gitChanged !== undefined &&
+          !gitChanged.has(absolute)
+        ) {
+          return undefined;
+        }
+        const resolved = await physicalReportedPath(absolute, false);
+        return mapReportedPathToSource(
+          group,
+          physicalWorkerRoot,
+          resolved.path,
+        );
+      }),
+    )
+  ).filter((candidate): candidate is string => candidate !== undefined);
+  const attributed = await Promise.all(
+    attributedCandidates.map(async (candidate) => {
+      const resolved = await physicalReportedPath(candidate, true);
+      return {
+        ...resolved,
+        reportedPath: mapReportedPathToSource(
+          group,
+          physicalWorkerRoot,
+          resolved.path,
+        ),
+      };
+    }),
+  );
+  const escapedOrUncertain = attributed.filter(
+    (candidate) =>
+      candidate.uncertain || !isWithin(physicalWorkerRoot, candidate.path),
+  );
+
+  result.attributedFiles = [
+    ...new Set(escapedOrUncertain.map((candidate) => candidate.reportedPath)),
+  ];
+  result.touchedFiles = [
+    ...new Set([
+      ...touched,
+      ...escapedOrUncertain.map((candidate) => candidate.reportedPath),
+    ]),
+  ];
+}
+
 async function repositoryRoot(cwd: string): Promise<string> {
   const physicalCwd = await fs.promises.realpath(cwd);
   let root: string;
@@ -357,33 +540,24 @@ async function reconcileGroup(
     const worker = workers.get(taskIndex)!;
     const result = results[taskIndex]!;
     result.workspace = "isolated";
-    result.touchedFiles = result.touchedFiles.map((candidate) => {
-      const absolute = path.resolve(worker.cwd, candidate);
-      return isWithin(worker.workerRoot, absolute)
-        ? path.join(
-            group.sourceRoot,
-            path.relative(worker.workerRoot, absolute),
-          )
-        : absolute;
-    });
-    // Writes inside the worktree did not touch the source concurrently.
-    // Preserve only explicitly attributed paths that escaped the worktree.
-    result.attributedFiles = (result.attributedFiles ?? [])
-      .map((candidate) => path.resolve(worker.cwd, candidate))
-      .filter((candidate) => !isWithin(worker.workerRoot, candidate));
-    if (result.error) {
-      result.integration = {
-        status: "discarded",
-        proposedFiles: [],
-        appliedFiles: [],
-      };
-      await removeWorktree(group.sourceRoot, worker.workerRoot);
-      continue;
-    }
 
     let proposedFiles: string[] = [];
     try {
+      // A child that outlived prompt quiescence can still race symlink
+      // inspection. Stop it before reporting paths even when its task failed.
       await stopWorkspaceProcesses(worker.workerRoot);
+      await classifyReportedFiles(group, worker, result);
+
+      if (result.error) {
+        result.integration = {
+          status: "discarded",
+          proposedFiles: [],
+          appliedFiles: [],
+        };
+        await removeWorktree(group.sourceRoot, worker.workerRoot);
+        continue;
+      }
+
       const proposalTree = await snapshotTree(
         worker.workerRoot,
         group.baselineCommit,

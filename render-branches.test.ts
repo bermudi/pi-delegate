@@ -1,5 +1,6 @@
 import { describe, expect, test, mock } from "bun:test";
 import { renderDelegateResult } from "./render-result.ts";
+import { toolExpandHint } from "./key-hints.ts";
 import type { Usage } from "@earendil-works/pi-ai";
 import type {
   DelegateDetails,
@@ -418,7 +419,7 @@ describe("render-branches compatibility fallback", () => {
     });
 
     expect(ctx.lines[0]).toBe(
-      "✓ 1/1 finished · 1 tokens · Ctrl+O expand",
+      `✓ 1/1 finished · 1 tokens${toolExpandHint() ? ` · ${toolExpandHint()}` : ""}`,
     );
   });
 
@@ -464,7 +465,7 @@ describe("render-branches compatibility fallback", () => {
     });
 
     expect(ctx.lines[0]).toBe(
-      "1 running · 2/3 finished · 1 failed · 60 tokens · Ctrl+O expand",
+      `1 running · 2/3 finished · 1 failed · 60 tokens${toolExpandHint() ? ` · ${toolExpandHint()}` : ""}`,
     );
   });
 

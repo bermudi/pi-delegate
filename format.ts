@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { renderOutputForLLM } from "./spill.ts";
 import { getOutputSpillThreshold, getOutputSpillTail } from "./config.ts";
+import { toolExpandHint } from "./key-hints.ts";
 import type {
   ResolvedTask,
   TaskProgress,
@@ -136,9 +137,13 @@ export function applyLineBudget(lines: string[], expanded: boolean): string[] {
   const budget = Math.max(10, Math.min(18, Math.floor(rows * 0.4)));
   if (lines.length <= budget) return [...lines];
   const hidden = lines.length - budget + 1;
+  const expandHint = toolExpandHint("expands");
   return [
     ...lines.slice(0, budget - 1),
-    truncLine(`… ${hidden} lines hidden · Ctrl+O expands`, getTermWidth()),
+    truncLine(
+      `… ${hidden} lines hidden${expandHint ? ` · ${expandHint}` : ""}`,
+      getTermWidth(),
+    ),
   ];
 }
 

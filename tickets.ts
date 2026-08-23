@@ -94,8 +94,13 @@ export const ticketRegistry = new TicketRegistry();
 
 /** Generate a short human-copyable identifier for an async ticket. */
 export function generateTicketId(): string {
-  // 8-char alphanumeric, no lookalikes
-  return Math.random().toString(36).slice(2, 10);
+  // Retry on the extremely unlikely collision rather than allowing Map.set()
+  // in dispatch to replace a still-retained ticket.
+  let id: string;
+  do {
+    id = Math.random().toString(36).slice(2, 10);
+  } while (!id || ticketRegistry.has(id));
+  return id;
 }
 
 /** Remove completed tickets after their retention TTL. Running tickets have no
@@ -220,6 +225,14 @@ export function resolveFinalTicketStatus(
 export function formatCompletedTicket(
   ticket: AsyncTicket,
 ): AgentToolResult<DelegateDetails> {
+  // Shutdown can make a ticket terminal while its workers are still unwinding.
+  // Do not freeze that partial projection: late TaskResults must appear in a
+  // later poll once the worker-settled barrier has resolved. Tickets created
+  // before this marker existed (including simple fixtures) are already safe to
+  // memoize because only live async dispatches explicitly set it false.
+  const canMemoize = ticket.workersSettled !== false;
+  if (canMemoize && ticket.formattedResult) return ticket.formattedResult;
+
   const parts: string[] = [];
   const succeeded = ticket.results.filter(
     (r) => r && !("error" in r && r.error),
@@ -278,7 +291,7 @@ export function formatCompletedTicket(
     );
   }
 
-  return {
+  const formatted: AgentToolResult<DelegateDetails> = {
     content: [{ type: "text", text: parts.join("\n\n") }],
     details: {
       tasks: ticket.tasks,
@@ -300,6 +313,8 @@ export function formatCompletedTicket(
       dispatchWarning: ticket.dispatchWarning,
     },
   };
+  if (canMemoize) ticket.formattedResult = formatted;
+  return formatted;
 }
 
 // ── Waiter helpers ─────────────────────────────────────────────────────────
@@ -427,6 +442,9 @@ function settleWaiter(
   if (w.settled) return;
   w.settled = true;
   w.clearDeadline?.();
+  w.clearDeadline = undefined;
+  w.removeAbortListener?.();
+  w.removeAbortListener = undefined;
   w.resolve(result);
 }
 
@@ -749,13 +767,13 @@ export function handleWait(
     };
 
     if (signal) {
-      signal.addEventListener(
-        "abort",
-        () => {
-          abortWaiter(waiter, ticket);
-        },
-        { once: true },
-      );
+      const onAbort = () => {
+        abortWaiter(waiter, ticket);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      waiter.removeAbortListener = () => {
+        signal.removeEventListener("abort", onAbort);
+      };
     }
 
     if (

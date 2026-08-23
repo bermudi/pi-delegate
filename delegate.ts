@@ -145,14 +145,6 @@ export {
   resolveModelRequest,
   findAvailableAlternative,
 } from "./model.ts";
-export {
-  readDelegateSettingsFile,
-  findLegacyDelegateSettings,
-  warnLegacyDelegateSettingsMoved,
-  loadDelegateSettings,
-  clearDelegateSettingsCache,
-} from "./settings.ts";
-export type { DelegateSettings } from "./settings.ts";
 export { resolveCwd, extractOutput, extractUsage } from "./utils.ts";
 export {
   decideSpill,

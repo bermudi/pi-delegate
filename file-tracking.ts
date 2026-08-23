@@ -54,14 +54,14 @@ export async function getGitChangedFiles(
 /**
  * Extract file paths from explicit edit/write tool calls in the activity log.
  *
- * This is the reliable, activity-based contribution to touched-file tracking.
- * Only completed, successful tool calls are counted: an activity must have a
- * terminal `result` and `result.isError` must be false. Interrupted or in-flight
- * calls (no `result`) and failed calls (`result.isError` true) are skipped,
- * because they did not actually mutate the file. bash mutations are NOT captured
- * here; they are only captured by git diff when the task cwd is inside a git
- * repo with git available. The combined touchedFiles list is therefore a lower
- * bound: absence does not mean a file was unchanged.
+ * This is the conservative, activity-based contribution to touched-file
+ * tracking. Every started edit/write call with a usable path is counted:
+ * write/edit tools can mutate before returning an error, and cancellation can
+ * interrupt them after mutation but before a terminal result is emitted.
+ * bash mutations are NOT captured here; they are only captured by git diff when
+ * the task cwd is inside a git repo with git available. The combined
+ * touchedFiles list is therefore still a lower bound: absence does not mean a
+ * file was unchanged.
  */
 export function extractTouchedFromActivities(
   activities: ToolActivity[],
@@ -70,7 +70,6 @@ export function extractTouchedFromActivities(
   const files = new Set<string>();
   for (const a of activities) {
     if (a.name !== "edit" && a.name !== "write") continue;
-    if (!a.result || a.result.isError) continue;
     const raw = a.args?.path ?? a.args?.file_path ?? a.args?.filePath;
     if (typeof raw !== "string" || !raw) continue;
     files.add(path.resolve(cwd, raw));

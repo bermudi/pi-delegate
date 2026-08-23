@@ -15,10 +15,6 @@ import {
   _setDelegateConfigForTesting,
 } from "./config.ts";
 import { DEFAULT_TOOLS } from "./constants.ts";
-import {
-  clearDelegateSettingsCache,
-  loadDelegateSettings,
-} from "./settings.ts";
 import type { AgentConfig, TaskDef } from "./types.ts";
 
 const START =
@@ -142,7 +138,6 @@ describe("resolveTasks error messages", () => {
   beforeEach(() => {
     _resetDelegateConfigForTesting();
     _resetPoolForTesting();
-    clearDelegateSettingsCache();
   });
 
   afterEach(() => {
@@ -303,7 +298,6 @@ describe("resolveTasks tool resolution", () => {
   beforeEach(() => {
     _resetDelegateConfigForTesting();
     _resetPoolForTesting();
-    clearDelegateSettingsCache();
   });
 
   afterEach(() => {
@@ -1078,7 +1072,61 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
     expect(task.tools).toEqual(["read", "bash"]);
   });
 
-  test("temporarily bridges legacy model/thinking but never tools", () => {
+  test("resolves modern overrides by field: task > parent-model > unconditional > Markdown", () => {
+    const taskModel = { provider: "openai", id: "task-model" } as any;
+    const scopedModel = { provider: "zai", id: "scoped-model" } as any;
+    const unconditionalModel = {
+      provider: "google",
+      id: "unconditional-model",
+    } as any;
+    mkdirSync(path.join(projectDir, ".pi", "agents"), { recursive: true });
+    writeFileSync(
+      path.join(projectDir, ".pi", "agents", "scout.md"),
+      `---\nname: scout\ndescription: Scout\nmodel: anthropic/markdown-model\nthinking: low\ntools: read\n---\nMarkdown scout.\n`,
+    );
+    _setDelegateConfigForTesting({
+      agentOverrides: {
+        scout: { model: "google/unconditional-model", thinking: "medium" },
+      },
+      agentOverridesByParentModel: {
+        "openrouter/deepseek-v4-pro": {
+          // Unset fields must continue through the unconditional override to
+          // Markdown rather than treating this object as a wholesale winner.
+          scout: { model: "zai/scoped-model" },
+        },
+      },
+    });
+    const agents = discoverAgents(projectDir);
+    const resolve = (task: Record<string, unknown>) =>
+      resolveTasks(
+        [{ agent: "scout", prompt: "go", ...task }] as any,
+        {
+          cwd: projectDir,
+          model: parentModel,
+          modelRegistry: makeRegistry([
+            taskModel,
+            scopedModel,
+            unconditionalModel,
+          ]),
+          sessionManager: undefined,
+          getSystemPrompt: () => "p",
+        } as any,
+        agents,
+        { thinking: "off", tools: DEFAULT_TOOLS },
+      )[0];
+
+    const fromTask = resolve({ model: "openai/task-model", thinking: "max" });
+    expect(fromTask.model).toBe(taskModel);
+    expect(fromTask.thinking).toBe("max");
+    expect(fromTask.tools).toEqual(["read"]); // Markdown fallback
+
+    const fromConfig = resolve({});
+    expect(fromConfig.model).toBe(scopedModel); // scoped > unconditional
+    expect(fromConfig.thinking).toBe("medium"); // unconditional fallback
+    expect(fromConfig.tools).toEqual(["read"]); // Markdown fallback
+  });
+
+  test("ignores legacy project .pi/settings.json delegate fields, including bash tools", () => {
     mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
     writeFileSync(
       path.join(projectDir, ".pi", "settings.json"),
@@ -1087,8 +1135,17 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
           agentOverrides: {
             scout: {
               model: "zai/glm-5-turbo",
-              thinking: "high",
+              thinking: "max",
               tools: ["bash"],
+            },
+          },
+          agentOverridesByParentModel: {
+            "openrouter/deepseek-v4-pro": {
+              scout: {
+                model: "zai/glm-5-turbo",
+                thinking: "high",
+                tools: ["bash"],
+              },
             },
           },
         },
@@ -1105,86 +1162,13 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
         getSystemPrompt: () => "p",
       } as any,
       new Map(Object.entries(BUILTIN_AGENT_CONFIGS)),
-      { thinking: "off", tools: DEFAULT_TOOLS },
+      { thinking: "medium", tools: DEFAULT_TOOLS },
     );
 
-    expect(task.model).toBe(overrideModel);
-    expect(task.thinking).toBe("high");
+    expect(task.model).toBe(parentModel);
+    expect(task.thinking).toBe("medium");
     expect(task.tools).toEqual(["read", "grep", "find", "ls"]);
-  });
-
-  test("modern fields win individually and legacy edits/deletes apply immediately", () => {
-    const settingsDir = path.join(projectDir, ".pi");
-    const settingsPath = path.join(settingsDir, "settings.json");
-    mkdirSync(settingsDir, { recursive: true });
-    const writeLegacy = (model: string, thinking: string) =>
-      writeFileSync(
-        settingsPath,
-        JSON.stringify({
-          delegate: {
-            agentOverrides: { scout: { model, thinking } },
-          },
-        }),
-      );
-    writeLegacy("zai/glm-5-turbo", "high");
-    _setDelegateConfigForTesting({
-      agentOverrides: { scout: { thinking: "low" } },
-    });
-    const alternate = { provider: "openai", id: "gpt-5" } as any;
-    const resolve = () =>
-      resolveTasks(
-        [{ agent: "scout", prompt: "go" }] as any,
-        {
-          cwd: projectDir,
-          model: parentModel,
-          modelRegistry: makeRegistry([overrideModel, alternate]),
-          sessionManager: undefined,
-          getSystemPrompt: () => "p",
-        } as any,
-        new Map(Object.entries(BUILTIN_AGENT_CONFIGS)),
-        { thinking: "off", tools: DEFAULT_TOOLS },
-      )[0];
-
-    expect(resolve().model).toBe(overrideModel);
-    expect(resolve().thinking).toBe("low");
-
-    writeLegacy("openai/gpt-5", "max");
-    expect(resolve().model).toBe(alternate);
-    expect(resolve().thinking).toBe("low");
-
-    rmSync(settingsPath);
-    expect(resolve().model).toBe(parentModel);
-    expect(resolve().thinking).toBe("low");
-  });
-
-  test("legacy compatibility maps keep a null prototype", () => {
-    mkdirSync(path.join(projectDir, ".pi"), { recursive: true });
-    writeFileSync(
-      path.join(projectDir, ".pi", "settings.json"),
-      JSON.stringify({
-        delegate: {
-          agentOverrides: { scout: { thinking: "low" } },
-          agentOverridesByParentModel: {
-            "openrouter/deepseek-v4-pro": {
-              scout: { model: "zai/glm-5-turbo" },
-            },
-          },
-        },
-      }),
-    );
-
-    const legacy = loadDelegateSettings(projectDir)!;
-    expect(Object.getPrototypeOf(legacy.agentOverrides)).toBeNull();
-    expect(
-      Object.getPrototypeOf(legacy.agentOverridesByParentModel),
-    ).toBeNull();
-    expect(
-      Object.getPrototypeOf(
-        legacy.agentOverridesByParentModel?.[
-          "openrouter/deepseek-v4-pro"
-        ] as object,
-      ),
-    ).toBeNull();
+    expect(task.tools).not.toContain("bash");
   });
 });
 

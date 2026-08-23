@@ -646,6 +646,11 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     ticketSignal,
   )
     .then(() => {
+      // mapConcurrentByModel is the worker-settled barrier. Publish that before
+      // terminal formatting/delivery so the final spill projection is safely
+      // memoized; shutdown may already have formatted an intentionally uncached
+      // partial snapshot while this flag was false.
+      ticket.workersSettled = true;
       // Shutdown marks the ticket terminal before cooperative worker aborts
       // have finished. Still write one final aggregate after every result has
       // landed; the immediate shutdown snapshot may have missed late usage.
@@ -673,6 +678,8 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       finishLiveSettlement(ticket);
     })
     .catch((err) => {
+      // mapConcurrentByModel waits for all sibling workers before rejecting.
+      ticket.workersSettled = true;
       // Defense-in-depth — should not happen if individual tasks catch properly.
       // Even an unexpected worker rejection must leave the shutdown aggregate
       // with every result that did settle, without touching the stale UI.
