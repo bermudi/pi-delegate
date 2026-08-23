@@ -282,7 +282,7 @@ export function renderAsyncDelegateMessage(
   const failed =
     status === "failed" ||
     status === "cancelled" ||
-    message.details?.progress.some((task) => task.status === "failed");
+    message.details?.progress?.some((task) => task.status === "failed");
   const pending = status === "running" || status === "cancelling";
   let background: "toolPendingBg" | "toolErrorBg" | "toolSuccessBg" =
     "toolSuccessBg";

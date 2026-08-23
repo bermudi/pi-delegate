@@ -3682,6 +3682,24 @@ describe("delegate renderers", () => {
     );
     failed!.render(200);
     expect(backgroundCalls).toContain("toolErrorBg");
+
+    backgroundCalls.length = 0;
+    const withoutProgress = renderer!(
+      {
+        ...message,
+        details: {
+          tasks: details.tasks,
+          results: details.results,
+          status: "done",
+        },
+      } as never,
+      { expanded: false },
+      theme,
+    );
+    expect(withoutProgress!.render(200).join("\n")).toContain(
+      "RAW ASYNC RESULT SHOULD NOT BE DUMPED",
+    );
+    expect(backgroundCalls).toContain("toolSuccessBg");
   });
 
   test("renderResult hides output and tool summary in collapsed final mode", async () => {
