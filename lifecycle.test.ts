@@ -50,6 +50,7 @@ import { emptyUsage } from "./usage.ts";
 import {
   _resetQuarantineRegistryForTesting,
   markSessionQuarantined,
+  quarantinedTasks,
   sessionQuarantineOf,
 } from "./session-quarantine.ts";
 import {
@@ -213,6 +214,12 @@ function makeProgressCapture(): {
 // ── Test Suite ─────────────────────────────────────────────────────────────
 
 describe("session acquisition cancellation", () => {
+  afterEach(() => {
+    _setAcquireAgentSessionForTesting(undefined);
+    _setCreateScratchWorkspaceForTesting(undefined);
+    _resetQuarantineRegistryForTesting();
+  });
+
   test("deadline abandons a hung acquisition and disposes a session that materializes late", async () => {
     let resolveAcquisition!: (value: any) => void;
     let disposed = 0;
@@ -262,28 +269,99 @@ describe("session acquisition cancellation", () => {
     _setAcquireAgentSessionForTesting(() => new Promise(() => {}));
     const task = makeBaseTask();
 
-    try {
-      setTimeout(() => controller.abort(), 20);
-      const result = await runResolvedTask(
-        makeTestEnv({ signal: controller.signal }),
-        task,
-        {
-          index: 0,
-          agent: task.agentName,
-          task: task.prompt,
-          status: "pending",
-          durationMs: 0,
-          tokens: 0,
-          toolUses: 0,
-          activities: [],
-        },
-        0,
-      );
+    setTimeout(() => controller.abort(), 20);
+    const result = await runResolvedTask(
+      makeTestEnv({ signal: controller.signal }),
+      task,
+      {
+        index: 0,
+        agent: task.agentName,
+        task: task.prompt,
+        status: "pending",
+        durationMs: 0,
+        tokens: 0,
+        toolUses: 0,
+        activities: [],
+      },
+      0,
+    );
 
-      expect(result.error).toBe("Aborted");
-    } finally {
-      _setAcquireAgentSessionForTesting(undefined);
-    }
+    expect(result.error).toBe("Aborted");
+    expect(sessionQuarantineOf(result)).toBeDefined();
+  });
+
+  test("scratch cleanup waits for hung acquisition settlement and async late disposal", async () => {
+    let resolveAcquisition!: (value: any) => void;
+    let resolveDisposal!: () => void;
+    let disposalStarted = 0;
+    let cleaned = 0;
+    _setAcquireAgentSessionForTesting(
+      () =>
+        new Promise((resolve) => {
+          resolveAcquisition = resolve;
+        }),
+    );
+    _setCreateScratchWorkspaceForTesting(async (sourceCwd) => ({
+      sourceRoot: sourceCwd,
+      sourceCwd,
+      scratchRoot: "/scratch-hung-acquisition",
+      cwd: "/scratch-hung-acquisition",
+      mapPathToSource: (candidate: string) => candidate,
+      resolveReportedPath: async (candidate: string) => candidate,
+      resolveAttributedPath: async (candidate: string) => candidate,
+      isDisposablePath: async () => true,
+      cleanup: async () => {
+        cleaned++;
+      },
+    }));
+    const task = makeBaseTask({ workspace: "scratch", deadlineMs: 20 });
+
+    const result = await runResolvedTask(
+      makeTestEnv(),
+      task,
+      {
+        index: 0,
+        agent: task.agentName,
+        task: task.prompt,
+        status: "pending",
+        durationMs: 0,
+        tokens: 0,
+        toolUses: 0,
+        activities: [],
+      },
+      0,
+    );
+
+    const quarantine = sessionQuarantineOf(result);
+    expect(result.failureKind).toBe("deadline_exceeded");
+    expect(quarantine).toBeDefined();
+    expect(cleaned).toBe(0);
+    expect(quarantinedTasks()).toHaveLength(1);
+
+    resolveAcquisition({
+      session: {
+        dispose: () => {
+          disposalStarted++;
+          return new Promise<void>((resolve) => {
+            resolveDisposal = resolve;
+          });
+        },
+      },
+      sessionManager: undefined,
+      sessionFile: undefined,
+      lifecycleOwnsSession: true,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(disposalStarted).toBe(1);
+    expect(cleaned).toBe(0);
+    expect(quarantinedTasks()).toHaveLength(1);
+
+    resolveDisposal();
+    await quarantine!.safe;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cleaned).toBe(1);
+    expect(quarantinedTasks()).toHaveLength(0);
   });
 });
 
@@ -4082,6 +4160,80 @@ describe("quiescence-abandoned session ownership", () => {
       _setQuarantinePooledSessionDetachForTesting(undefined);
       _setRunAgentSessionForTesting(undefined);
       _resetPoolForTesting();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("canonical resumeFrom lock rejects a queued alias after abandonment", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "delegate-quarantine-resume-lock-"),
+    );
+    const transcript = path.join(root, "session.jsonl");
+    const alias = path.join(root, "alias.jsonl");
+    fs.writeFileSync(transcript, "{}\n");
+    fs.symlinkSync(transcript, alias);
+    const safety = deferred();
+    const runGate = deferred();
+    let runs = 0;
+    let acquisitions = 0;
+    let disposed = 0;
+    _setAcquireAgentSessionForTesting(async () => {
+      acquisitions++;
+      return {
+        session: { dispose: () => disposed++ } as unknown as AgentSession,
+        sessionManager: undefined,
+        sessionFile: transcript,
+        lifecycleOwnsSession: true,
+      };
+    });
+    _setRunAgentSessionForTesting(async () => {
+      runs++;
+      await runGate.promise;
+      return abandonedRun(safety.promise);
+    });
+    const firstTask = makeBaseTask({
+      workspace: "shared",
+      resumeFrom: transcript,
+    });
+    const queuedAliasTask = makeBaseTask({
+      workspace: "shared",
+      resumeFrom: alias,
+    });
+
+    try {
+      const first = runResolvedTask(
+        makeTestEnv(),
+        firstTask,
+        progress(firstTask),
+        0,
+      );
+      while (runs === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      const queued = runResolvedTask(
+        makeTestEnv(),
+        queuedAliasTask,
+        progress(queuedAliasTask),
+        0,
+      );
+      await Promise.resolve();
+      expect(acquisitions).toBe(1);
+
+      runGate.resolve();
+      const firstResult = await first;
+      const queuedResult = await queued;
+      expect(sessionQuarantineOf(firstResult)).toBeDefined();
+      expect(queuedResult.error).toContain("resumeFrom transcript");
+      expect(queuedResult.error).toContain("is quarantined");
+      expect(acquisitions).toBe(1);
+
+      safety.resolve();
+      await safety.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(disposed).toBe(1);
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setAcquireAgentSessionForTesting(undefined);
       fs.rmSync(root, { recursive: true, force: true });
     }
   });

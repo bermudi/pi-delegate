@@ -13,7 +13,10 @@ import {
 } from "./tools.ts";
 import { configFor } from "./pool.ts";
 import { isSessionBusy } from "./tickets.ts";
-import { isSessionIdQuarantined } from "./session-quarantine.ts";
+import {
+  isResumeFromQuarantined,
+  isSessionIdQuarantined,
+} from "./session-quarantine.ts";
 import { BUILTIN_AGENT_CONFIGS, buildSubagentSystemPrompt } from "./agents.ts";
 import { buildParentTranscript } from "./parent-context.ts";
 import { findAvailableAlternative, resolveModelRequest } from "./model.ts";
@@ -174,7 +177,21 @@ export function validateTasks(
   const quarantinedSessions = sessionIds.filter(isSessionIdQuarantined);
   if (quarantinedSessions.length) {
     return noticeResult(
-      `SessionId(s) quarantined after quiescence abandonment: ${quarantinedSessions.join(", ")}. Wait for background safety confirmation before reusing each sessionId.`,
+      `SessionId(s) quarantined after abandonment: ${quarantinedSessions.join(", ")}. Wait for background safety confirmation before reusing each sessionId.`,
+      tasks,
+      parentModelId,
+    );
+  }
+
+  const quarantinedResumes = tasks
+    .map((task) => task.resumeFrom)
+    .filter(
+      (resumeFrom): resumeFrom is string =>
+        resumeFrom !== undefined && isResumeFromQuarantined(resumeFrom),
+    );
+  if (quarantinedResumes.length) {
+    return noticeResult(
+      `resumeFrom transcript(s) quarantined after abandonment: ${[...new Set(quarantinedResumes)].join(", ")}. Wait for background safety confirmation before resuming each transcript.`,
       tasks,
       parentModelId,
     );

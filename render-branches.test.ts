@@ -391,7 +391,7 @@ describe("render-branches compatibility fallback", () => {
     expect(ctx.lines[0]).toContain("ticket cancelled");
   });
 
-  test("shows ticket cancellation after normal settlement and counts failed rows separately", async () => {
+  test("renders a settled user-aborted task as cancelled, not failed", async () => {
     const { renderFinalBranch } = await import("./render-branches.ts");
     const progress: TaskProgress[] = [
       { ...makeTask(0).progress, status: "done" },
@@ -421,8 +421,27 @@ describe("render-branches compatibility fallback", () => {
     });
 
     expect(ctx.lines[0]).toContain(
-      "2/2 finished · 1 failed · ticket cancelled",
+      "2/2 finished · 1 cancelled · ticket cancelled",
     );
+    expect(ctx.lines[0]).not.toContain("failed");
+    expect(ctx.lines.join("\n")).toContain("CANCELLED");
+    expect(ctx.lines.join("\n")).not.toContain("Aborted");
+
+    const syncCtx = {
+      ...ctx,
+      ticketId: undefined,
+      ticketStatus: undefined,
+      lines: [] as string[],
+    };
+    renderFinalBranch(syncCtx, {
+      statJoin: () => "",
+      modelLabel: () => "",
+      compactActivity: () => "thinking…",
+      pushWarnings: () => undefined,
+    });
+    expect(syncCtx.lines[0]).toContain("2/2 finished · 1 cancelled");
+    expect(syncCtx.lines[0]).not.toContain("failed");
+    expect(syncCtx.lines.join("\n")).toContain("CANCELLED");
   });
 
   test("keeps fully finalized tickets live until their ticket status settles", async () => {

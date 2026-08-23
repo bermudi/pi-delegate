@@ -1,7 +1,13 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import {
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  mkdtempSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import {
   stripInheritedProjectContext,
@@ -103,13 +109,60 @@ describe("validateTasks", () => {
 
     const rejected = validateTasks(tasks, new Map(), undefined);
     expect(rejected?.content[0]?.text).toContain(
-      "SessionId(s) quarantined after quiescence abandonment",
+      "SessionId(s) quarantined after abandonment",
     );
 
     confirmSafe();
     await safe;
     await Promise.resolve();
     expect(validateTasks(tasks, new Map(), undefined)).toBeNull();
+  });
+
+  test("rejects a canonical alias of a quarantined resumeFrom transcript", async () => {
+    const root = mkdtempSync(
+      path.join(tmpdir(), "delegate-resume-quarantine-"),
+    );
+    const transcript = path.join(root, "session.jsonl");
+    const alias = path.join(root, "session-alias.jsonl");
+    writeFileSync(transcript, "{}\n");
+    symlinkSync(transcript, alias);
+    let confirmSafe!: () => void;
+    const safe = new Promise<void>((resolve) => {
+      confirmSafe = resolve;
+    });
+    reserveSessionQuarantine(
+      {
+        resumeFrom: transcript,
+        prompt: "old task",
+        workspace: "shared",
+        tools: ["read"],
+      } as ResolvedTask,
+      { safe },
+    );
+
+    try {
+      const rejected = validateTasks(
+        [{ prompt: "resume alias", resumeFrom: alias }],
+        new Map(),
+        undefined,
+      );
+      expect(rejected?.content[0]?.text).toContain(
+        "resumeFrom transcript(s) quarantined after abandonment",
+      );
+
+      confirmSafe();
+      await safe;
+      await Promise.resolve();
+      expect(
+        validateTasks(
+          [{ prompt: "resume alias", resumeFrom: alias }],
+          new Map(),
+          undefined,
+        ),
+      ).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("rejects duplicate task ids in one dispatch", () => {

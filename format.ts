@@ -505,6 +505,13 @@ export function formatCompletedTask(
     for (const conflict of integration.conflicts ?? []) {
       parts.push(`conflict: ${conflict.path}: ${conflict.reason}`);
     }
+    for (const issue of "classificationIssues" in integration
+      ? (integration.classificationIssues ?? [])
+      : []) {
+      parts.push(
+        `attribution classification issue: ${issue.path}: ${issue.reason}`,
+      );
+    }
     if (integration.status === "applied_unverified") {
       parts.push(
         'Changes were applied but not verified. Suggested next call: delegate({ tasks: [{ agent: "reviewer", workspace: "scratch", prompt: "Review the applied isolated changes and run the relevant tests." }] })',

@@ -8,6 +8,30 @@ const SPILL_PREFIX = "delegate-output-";
 const RANDOM_SUFFIX_BYTES = 16;
 const CREATE_ATTEMPTS = 5;
 
+type SpillFileOperations = {
+  open: (filePath: string, flags: string, mode: number) => number;
+  write: (fd: number, output: string) => void;
+  close: (fd: number) => void;
+  remove: (filePath: string) => void;
+};
+
+const defaultSpillFileOperations: SpillFileOperations = {
+  open: (filePath, flags, mode) => fs.openSync(filePath, flags, mode),
+  write: (fd, output) => fs.writeFileSync(fd, output),
+  close: (fd) => fs.closeSync(fd),
+  remove: (filePath) => fs.rmSync(filePath, { force: true }),
+};
+let spillFileOperations = defaultSpillFileOperations;
+
+/** @internal Test-only I/O seam for deterministic write/cleanup failures. */
+export function _setSpillFileOperationsForTesting(
+  overrides: Partial<SpillFileOperations> | undefined,
+): void {
+  spillFileOperations = overrides
+    ? { ...defaultSpillFileOperations, ...overrides }
+    : defaultSpillFileOperations;
+}
+
 // ── Spill: keep subagent final-output bloat out of the LLM context ───────
 //
 // Two audiences share one source of truth (`result.output`):
@@ -88,22 +112,24 @@ export function spillToTempFile(
       const candidate =
         suffix ?? randomBytes(RANDOM_SUFFIX_BYTES).toString("hex");
       lastPath = path.join(dir, `${SPILL_PREFIX}${safeLabel}-${candidate}.md`);
-      fd = fs.openSync(lastPath, "wx", 0o600);
-      fs.writeFileSync(fd, output);
-      fs.closeSync(fd);
+      fd = spillFileOperations.open(lastPath, "wx", 0o600);
+      spillFileOperations.write(fd, output);
+      spillFileOperations.close(fd);
       return lastPath;
     } catch (error) {
       lastError = error;
       if (fd !== undefined) {
         try {
-          fs.closeSync(fd);
+          spillFileOperations.close(fd);
         } catch {
           // Continue to remove the incomplete file below.
         }
         try {
-          fs.rmSync(lastPath, { force: true });
-        } catch {
-          // Best effort; the caller still receives the full output in context.
+          spillFileOperations.remove(lastPath);
+        } catch (cleanupError) {
+          console.warn(
+            `[delegate] spill partial-file cleanup failed (${lastPath}): ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          );
         }
       }
       const code = errorCode(error);

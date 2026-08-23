@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +8,7 @@ import { findTouchedOverlaps } from "./format.ts";
 import {
   extractTouchedFromActivities,
   getGitChangedFiles,
+  snapshotPhysicalToolTarget,
 } from "./file-tracking.ts";
 
 describe("getGitChangedFiles", () => {
@@ -53,6 +55,64 @@ describe("getGitChangedFiles", () => {
 
       expect(files).toBeUndefined();
     } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("snapshotPhysicalToolTarget", () => {
+  test("marks EACCES canonicalization uncertain and logs candidate plus errno", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "delegate-attribution-"));
+    const candidate = path.join(cwd, "blocked.txt");
+    const original = fs.realpathSync.native;
+    const realpath = spyOn(fs.realpathSync, "native").mockImplementation(((
+      value: fs.PathLike,
+    ) => {
+      if (path.resolve(String(value)) === candidate) {
+        throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      }
+      return original(value);
+    }) as typeof fs.realpathSync.native);
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const attribution = snapshotPhysicalToolTarget(
+        { name: "write", args: { path: candidate } },
+        cwd,
+      );
+      expect(attribution).toEqual({
+        lexicalPath: candidate,
+        preExecutionPhysicalPath: undefined,
+        provenance: "write",
+        uncertain: true,
+      });
+      expect(String(log.mock.calls[0]?.[0])).toContain(candidate);
+      expect(String(log.mock.calls[0]?.[0])).toContain("errno=EACCES");
+    } finally {
+      realpath.mockRestore();
+      log.mockRestore();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("marks ELOOP canonicalization uncertain and logs candidate plus errno", () => {
+    if (process.platform === "win32") return;
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "delegate-attribution-"));
+    const candidate = path.join(cwd, "loop-a");
+    fs.symlinkSync("loop-b", candidate);
+    fs.symlinkSync("loop-a", path.join(cwd, "loop-b"));
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const attribution = snapshotPhysicalToolTarget(
+        { name: "edit", args: { path: candidate } },
+        cwd,
+      );
+      expect(attribution?.lexicalPath).toBe(candidate);
+      expect(attribution?.preExecutionPhysicalPath).toBeUndefined();
+      expect(attribution?.uncertain).toBe(true);
+      expect(String(log.mock.calls[0]?.[0])).toContain(candidate);
+      expect(String(log.mock.calls[0]?.[0])).toContain("errno=ELOOP");
+    } finally {
+      log.mockRestore();
       rmSync(cwd, { recursive: true, force: true });
     }
   });

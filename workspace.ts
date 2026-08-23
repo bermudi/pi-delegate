@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { scheduleDeadline } from "./timer.ts";
+import type { FileAttribution } from "./types.ts";
 
 const SCRATCH_CONTAINER_NAME = ".pi-delegate-scratch";
 const SCRATCH_LEASE_PREFIX = "lease-";
@@ -29,6 +30,16 @@ export interface ScratchWorkspace {
    * compare with the host path they actually touched.
    */
   resolveAttributedPath(candidate: string): Promise<string | undefined>;
+  /** Project structured attribution without re-resolving its execution-time
+   * physical snapshot. Uncertain internal evidence is retained. */
+  resolveFileAttribution?(
+    attribution: FileAttribution,
+  ): Promise<FileAttribution | undefined>;
+  /** Project the lexical touched-path half of structured attribution. An
+   * unchanged copied symlink node is suppressed; changed nodes stay lexical. */
+  resolveAttributedLexicalTouch?(
+    attribution: FileAttribution,
+  ): Promise<string | undefined>;
   /** True when the existing path resolves inside the disposable tree. */
   isDisposablePath(candidate: string): Promise<boolean>;
   cleanup(): Promise<void>;
@@ -794,6 +805,56 @@ export async function createScratchWorkspace(
       return isWithin(completedRoot, absolute) ? undefined : absolute;
     }
   };
+  const mapDisposableLexically = (candidate: string): string => {
+    const absolute = path.resolve(candidate);
+    return isWithin(completedRoot, absolute)
+      ? path.join(sourceRoot!, path.relative(completedRoot, absolute))
+      : absolute;
+  };
+  const resolveFileAttribution = async (
+    attribution: FileAttribution,
+  ): Promise<FileAttribution | undefined> => {
+    const physical = attribution.preExecutionPhysicalPath;
+    // A certain physical snapshot inside scratch is disposable. Crucially, do
+    // not realpath it now: the tool may have replaced that node with a symlink.
+    if (
+      physical &&
+      !attribution.uncertain &&
+      isWithin(completedRoot, physical)
+    ) {
+      return undefined;
+    }
+    return {
+      ...attribution,
+      lexicalPath: mapDisposableLexically(attribution.lexicalPath),
+      preExecutionPhysicalPath: physical
+        ? mapDisposableLexically(physical)
+        : undefined,
+    };
+  };
+  const resolveAttributedLexicalTouch = async (
+    attribution: FileAttribution,
+  ): Promise<string | undefined> => {
+    const lexical = path.resolve(attribution.lexicalPath);
+    if (!isWithin(completedRoot, lexical)) return lexical;
+    const source = path.join(
+      sourceRoot!,
+      path.relative(completedRoot, lexical),
+    );
+    const [scratchStat, sourceStat] = await Promise.all([
+      fs.promises.lstat(lexical).catch(() => undefined),
+      fs.promises.lstat(source).catch(() => undefined),
+    ]);
+    if (scratchStat?.isSymbolicLink() && sourceStat?.isSymbolicLink()) {
+      const [scratchTarget, sourceTarget] = await Promise.all([
+        fs.promises.readlink(lexical),
+        fs.promises.readlink(source),
+      ]);
+      if (scratchTarget === sourceTarget) return undefined;
+    }
+    // This is evidence about the lexical node, not its current target.
+    return source;
+  };
   return {
     sourceRoot: sourceRoot!,
     sourceCwd: sourceCwd!,
@@ -806,6 +867,8 @@ export async function createScratchWorkspace(
     },
     resolveReportedPath,
     resolveAttributedPath,
+    resolveFileAttribution,
+    resolveAttributedLexicalTouch,
     async isDisposablePath(candidate: string): Promise<boolean> {
       return (await resolveAttributedPath(candidate)) === undefined;
     },

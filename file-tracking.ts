@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ToolActivity } from "./types.ts";
+import type { FileAttribution, ToolActivity } from "./types.ts";
 
 function activityPath(
   activity: Pick<ToolActivity, "args">,
@@ -12,65 +12,99 @@ function activityPath(
   return typeof raw === "string" && raw ? path.resolve(cwd, raw) : undefined;
 }
 
+function errnoOf(error: unknown): string {
+  return error instanceof Error && "code" in error
+    ? String((error as NodeJS.ErrnoException).code ?? "UNKNOWN")
+    : "UNKNOWN";
+}
+
+function logCanonicalizationFailure(candidate: string, error: unknown): void {
+  console.error(
+    `[delegate] could not canonicalize edit/write target '${candidate}' (errno=${errnoOf(error)}); retaining uncertain lexical attribution`,
+  );
+}
+
+interface PhysicalSnapshot {
+  path?: string;
+  uncertain: boolean;
+}
+
 /**
- * Capture the physical target of an edit/write call before tool work begins.
+ * Capture edit/write attribution before tool work begins.
  *
  * realpathSync handles an existing symlink leaf directly. For a target that
  * does not yet exist, walk to a resolvable ancestor and append the missing
  * suffix, preserving write-through attribution through symlinked directories.
- * Dangling symlinks retain their intended target conservatively. `undefined`
- * means canonicalization was ambiguous; callers then keep the lexical path.
+ * Dangling symlinks retain their intended target but are marked uncertain.
+ * Non-ENOENT/ENOTDIR failures are actionable and logged with the lexical
+ * candidate and errno; callers retain that uncertain lexical evidence.
  */
 export function snapshotPhysicalToolTarget(
-  activity: Pick<ToolActivity, "args">,
+  activity: Pick<ToolActivity, "args" | "name">,
   cwd: string,
-): string | undefined {
+): FileAttribution | undefined {
+  if (activity.name !== "edit" && activity.name !== "write") return undefined;
   const candidate = activityPath(activity, cwd);
   if (!candidate) return undefined;
 
   const resolvePhysical = (
     value: string,
     seen: Set<string>,
-  ): string | undefined => {
+  ): PhysicalSnapshot => {
     const absolute = path.resolve(value);
-    if (seen.has(absolute)) return undefined;
+    if (seen.has(absolute)) return { uncertain: true };
     seen.add(absolute);
 
     try {
-      return fs.realpathSync.native(absolute);
+      return { path: fs.realpathSync.native(absolute), uncertain: false };
     } catch (error) {
-      const code =
-        error instanceof Error && "code" in error
-          ? (error as NodeJS.ErrnoException).code
-          : undefined;
-      if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
+      const code = errnoOf(error);
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        logCanonicalizationFailure(candidate, error);
+        return { uncertain: true };
+      }
     }
 
     try {
       if (fs.lstatSync(absolute).isSymbolicLink()) {
         const target = fs.readlinkSync(absolute);
-        return resolvePhysical(
+        const resolved = resolvePhysical(
           path.resolve(path.dirname(absolute), target),
           seen,
         );
+        return { ...resolved, uncertain: true };
       }
     } catch (error) {
-      const code =
-        error instanceof Error && "code" in error
-          ? (error as NodeJS.ErrnoException).code
-          : undefined;
-      if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
+      const code = errnoOf(error);
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        logCanonicalizationFailure(candidate, error);
+        return { uncertain: true };
+      }
     }
 
     const parent = path.dirname(absolute);
-    if (parent === absolute) return undefined;
+    if (parent === absolute) return { uncertain: true };
     const physicalParent = resolvePhysical(parent, seen);
-    return physicalParent
-      ? path.resolve(physicalParent, path.basename(absolute))
-      : undefined;
+    return {
+      path: physicalParent.path
+        ? path.resolve(physicalParent.path, path.basename(absolute))
+        : undefined,
+      uncertain: physicalParent.uncertain,
+    };
   };
 
-  return resolvePhysical(candidate, new Set<string>());
+  const snapshot = resolvePhysical(candidate, new Set<string>());
+  return {
+    lexicalPath: candidate,
+    preExecutionPhysicalPath: snapshot.path,
+    provenance: activity.name,
+    uncertain: snapshot.uncertain,
+  };
+}
+
+/** Stable string projection used for overlap reporting. */
+export function projectedAttributionPath(attribution: FileAttribution): string {
+  return attribution.preExecutionPhysicalPath ?? attribution.lexicalPath;
 }
 
 /**
@@ -147,17 +181,27 @@ export function extractTouchedFromActivities(
   return [...files];
 }
 
-/** Physical edit/write evidence attributable to this run. The execution-time
- * snapshot wins over the mutable final filesystem view. */
+/** Provenance-bearing edit/write evidence attributable to this run. */
 export function extractAttributedFromActivities(
   activities: ToolActivity[],
   cwd: string,
-): string[] {
-  const files = new Set<string>();
+): FileAttribution[] {
+  const files = new Map<string, FileAttribution>();
   for (const activity of activities) {
     if (activity.name !== "edit" && activity.name !== "write") continue;
-    const target = activity.physicalTarget ?? activityPath(activity, cwd);
-    if (target) files.add(target);
+    const lexicalPath = activityPath(activity, cwd);
+    const attribution =
+      activity.fileAttribution ??
+      (lexicalPath
+        ? {
+            lexicalPath,
+            provenance: activity.name,
+            uncertain: true,
+          }
+        : undefined);
+    if (!attribution) continue;
+    const key = `${attribution.provenance}\0${attribution.lexicalPath}\0${attribution.preExecutionPhysicalPath ?? ""}\0${attribution.uncertain}`;
+    files.set(key, attribution);
   }
-  return [...files];
+  return [...files.values()];
 }

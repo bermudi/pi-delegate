@@ -191,8 +191,27 @@ describe("Git-native isolated workspace", () => {
     fs.writeFileSync(throughDirectoryLink, "directory link write\n");
     fs.writeFileSync(throughFileLink, "file link write\n");
     const workerResult = success();
-    workerResult.touchedFiles = [throughDirectoryLink, throughFileLink];
-    workerResult.attributedFiles = [throughDirectoryLink, throughFileLink];
+    workerResult.touchedFiles = [
+      throughDirectoryLink,
+      throughFileLink,
+      externalFile,
+      externalDirect,
+    ];
+    workerResult.attributedFiles = [externalFile, externalDirect];
+    workerResult.fileAttributions = [
+      {
+        lexicalPath: throughDirectoryLink,
+        preExecutionPhysicalPath: externalFile,
+        provenance: "write",
+        uncertain: false,
+      },
+      {
+        lexicalPath: throughFileLink,
+        preExecutionPhysicalPath: externalDirect,
+        provenance: "write",
+        uncertain: false,
+      },
+    ];
 
     const [result] = await batch!.reconcile([workerResult]);
 
@@ -201,6 +220,38 @@ describe("Git-native isolated workspace", () => {
     expect(result!.attributedFiles).toEqual([externalFile, externalDirect]);
     expect(result!.touchedFiles).not.toContain(
       path.join(repo, "escape-dir", "outside.txt"),
+    );
+  });
+
+  test("suppresses an unchanged symlink node while retaining its changed physical target", async () => {
+    if (process.platform === "win32") return;
+    fs.symlinkSync("shared.txt", path.join(repo, "internal-link"));
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "--quiet", "-m", "add internal link"]);
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    const workerLink = path.join(one!.cwd, "internal-link");
+    const workerTarget = path.join(one!.cwd, "shared.txt");
+    fs.writeFileSync(workerLink, "through link\n");
+    const workerResult = success();
+    workerResult.touchedFiles = [workerLink, workerTarget];
+    workerResult.attributedFiles = [workerTarget];
+    workerResult.fileAttributions = [
+      {
+        lexicalPath: workerLink,
+        preExecutionPhysicalPath: workerTarget,
+        provenance: "write",
+        uncertain: false,
+      },
+    ];
+
+    const [result] = await batch!.reconcile([workerResult]);
+
+    expect(result!.integration?.status).toBe("applied_unverified");
+    expect(result!.touchedFiles).toEqual([path.join(repo, "shared.txt")]);
+    expect(result!.attributedFiles).toEqual([]);
+    expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
+      "through link\n",
     );
   });
 
@@ -259,6 +310,14 @@ describe("Git-native isolated workspace", () => {
     // physical target captured at tool_execution_start.
     workerResult.touchedFiles = [workerLink, oldTarget];
     workerResult.attributedFiles = [oldTarget];
+    workerResult.fileAttributions = [
+      {
+        lexicalPath: workerLink,
+        preExecutionPhysicalPath: oldTarget,
+        provenance: "write",
+        uncertain: false,
+      },
+    ];
 
     const [result] = await batch!.reconcile([workerResult]);
 
@@ -273,6 +332,58 @@ describe("Git-native isolated workspace", () => {
     expect(fs.readFileSync(oldTarget, "utf8")).toBe(
       "written through original\n",
     );
+  });
+
+  test("does not re-resolve a physical snapshot after that node becomes a symlink", async () => {
+    if (process.platform === "win32") return;
+    const external = path.join(root, "replacement-target.txt");
+    fs.writeFileSync(external, "external\n");
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    const workerNode = path.join(one!.cwd, "shared.txt");
+    fs.unlinkSync(workerNode);
+    fs.symlinkSync(external, workerNode);
+    const workerResult = success();
+    workerResult.touchedFiles = [workerNode];
+    workerResult.attributedFiles = [workerNode];
+    workerResult.fileAttributions = [
+      {
+        lexicalPath: workerNode,
+        preExecutionPhysicalPath: workerNode,
+        provenance: "edit",
+        uncertain: false,
+      },
+    ];
+
+    const [result] = await batch!.reconcile([workerResult]);
+
+    expect(result!.integration?.status).toBe("applied_unverified");
+    expect(result!.touchedFiles).toEqual([path.join(repo, "shared.txt")]);
+    expect(result!.attributedFiles).toEqual([]);
+    expect(fs.readlinkSync(path.join(repo, "shared.txt"))).toBe(external);
+    expect(fs.readFileSync(external, "utf8")).toBe("external\n");
+  });
+
+  test("retains uncertain structured attribution inside the disposable worker", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    const candidate = path.join(one!.cwd, "shared.txt");
+    const workerResult = success();
+    workerResult.touchedFiles = [candidate];
+    workerResult.attributedFiles = [candidate];
+    workerResult.fileAttributions = [
+      {
+        lexicalPath: candidate,
+        provenance: "write",
+        uncertain: true,
+      },
+    ];
+
+    const [result] = await batch!.reconcile([workerResult]);
+
+    expect(result!.integration?.status).toBe("no_changes");
+    expect(result!.attributedFiles).toEqual([path.join(repo, "shared.txt")]);
+    expect(result!.fileAttributions?.[0]?.uncertain).toBe(true);
   });
 
   test("keeps broken symlink attribution conservative", async () => {
@@ -371,6 +482,25 @@ describe("Git-native isolated workspace", () => {
     expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
       "baseline\n",
     );
+    expect(privateRefs(repo)).toEqual([]);
+  });
+
+  test("classification failure keeps an existing task failure discarded and removes its worker", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    const failed = { ...success(), error: "original worker failure" };
+    failed.touchedFiles = [null as never];
+
+    const [result] = await batch!.reconcile([failed]);
+
+    expect(result!.error).toBe("original worker failure");
+    expect(result!.integration?.status).toBe("discarded");
+    if (result!.integration?.status === "discarded") {
+      expect(result!.integration.classificationIssues?.[0]?.path).toBe(
+        "(attribution)",
+      );
+    }
+    expect(fs.existsSync(one!.cwd)).toBe(false);
     expect(privateRefs(repo)).toEqual([]);
   });
 

@@ -8,7 +8,12 @@ import {
   observeQuarantineSafety,
   sessionQuarantineOf,
 } from "./session-quarantine.ts";
-import type { ResolvedTask, TaskIntegration, TaskResult } from "./types.ts";
+import type {
+  FileAttribution,
+  ResolvedTask,
+  TaskIntegration,
+  TaskResult,
+} from "./types.ts";
 
 const GIT_TIMEOUT_MS = 5 * 60 * 1000;
 const PATH_CLASSIFICATION_CONCURRENCY = 16;
@@ -103,6 +108,21 @@ function isWithin(root: string, candidate: string): boolean {
   );
 }
 
+function errnoOf(error: unknown): string {
+  return error instanceof Error && "code" in error
+    ? String((error as NodeJS.ErrnoException).code ?? "UNKNOWN")
+    : "UNKNOWN";
+}
+
+function logPathCanonicalizationFailure(
+  candidate: string,
+  error: unknown,
+): void {
+  console.error(
+    `[delegate] could not canonicalize reported path '${candidate}' (errno=${errnoOf(error)}); retaining uncertain attribution`,
+  );
+}
+
 interface PhysicalReportedPath {
   path: string;
   /** The path crossed a symlink that could not be fully resolved, or path
@@ -133,6 +153,7 @@ async function physicalReportedPath(
           ? (error as NodeJS.ErrnoException).code
           : undefined;
       if (code !== "ENOENT" && code !== "ENOTDIR") {
+        logPathCanonicalizationFailure(candidate, error);
         return { path: candidate, uncertain: true };
       }
 
@@ -148,6 +169,7 @@ async function physicalReportedPath(
             ? (lstatError as NodeJS.ErrnoException).code
             : undefined;
         if (lstatCode !== "ENOENT" && lstatCode !== "ENOTDIR") {
+          logPathCanonicalizationFailure(candidate, lstatError);
           return { path: candidate, uncertain: true };
         }
       }
@@ -161,7 +183,11 @@ async function physicalReportedPath(
           );
           const resolved = await physicalReportedPath(intended, true);
           return { path: resolved.path, uncertain: true };
-        } catch {
+        } catch (error) {
+          const code = errnoOf(error);
+          if (code !== "ENOENT" && code !== "ENOTDIR") {
+            logPathCanonicalizationFailure(candidate, error);
+          }
           return { path: candidate, uncertain: true };
         }
       }
@@ -226,29 +252,46 @@ async function classifyReportedFiles(
     worker.workerRoot,
     group.baselineCommit,
   );
-  const attributedCandidates = [
-    ...new Set(
-      (result.attributedFiles ?? []).map((candidate) =>
-        path.resolve(worker.cwd, candidate),
-      ),
-    ),
-  ];
+  const structured = result.fileAttributions ?? [];
+  const legacyCandidates = structured.length
+    ? []
+    : [
+        ...new Set(
+          (result.attributedFiles ?? []).map((candidate) =>
+            path.resolve(worker.cwd, candidate),
+          ),
+        ),
+      ];
+  const attributionByLexical = new Map(
+    structured.map((entry) => [path.resolve(entry.lexicalPath), entry]),
+  );
+  const legacySet = new Set(legacyCandidates);
+  const distinctPhysicalSnapshots = new Set(
+    structured
+      .filter(
+        (entry) =>
+          entry.preExecutionPhysicalPath !== undefined &&
+          path.resolve(entry.preExecutionPhysicalPath) !==
+            path.resolve(entry.lexicalPath),
+      )
+      .map((entry) => path.resolve(entry.preExecutionPhysicalPath!)),
+  );
 
-  // Attribution is resolved separately from Git's symlink-node evidence so a
-  // write-through followed by replacement can preserve both the source-mapped
-  // node and its external physical target. An unchanged final symlink appeared
-  // only because edit/write attribution is part of touchedFiles, so avoid
-  // inventing Git evidence for that node. Bound filesystem classification: a
-  // model can report an arbitrarily large path list and Promise.all would issue
-  // every lstat/realpath at once.
-  const attributedSet = new Set(attributedCandidates);
+  // Trusted physical snapshots are immutable evidence: never resolve them
+  // against the final worker tree. The associated lexical path is used only to
+  // decide whether a symlink node itself changed. Legacy string-only evidence
+  // retains the older conservative final-view classification.
   const candidates = [
     ...result.touchedFiles.map((candidate) => ({
       kind: "touched" as const,
       candidate,
     })),
-    ...attributedCandidates.map((candidate) => ({
-      kind: "attributed" as const,
+    ...structured.map((attribution) => ({
+      kind: "structured" as const,
+      attribution,
+    })),
+    ...legacyCandidates.map((candidate) => ({
+      kind: "legacy" as const,
       candidate,
     })),
   ];
@@ -258,9 +301,18 @@ async function classifyReportedFiles(
     async (entry) => {
       if (entry.kind === "touched") {
         const absolute = path.resolve(worker.cwd, entry.candidate);
+        if (distinctPhysicalSnapshots.has(absolute)) {
+          return {
+            kind: "touched" as const,
+            path: mapReportedPathToSource(group, physicalWorkerRoot, absolute),
+          };
+        }
+        const associated =
+          attributionByLexical.get(absolute) ??
+          (legacySet.has(absolute) ? true : undefined);
         const finalStat = await fs.promises.lstat(absolute).catch(() => null);
         if (
-          attributedSet.has(absolute) &&
+          associated &&
           finalStat?.isSymbolicLink() &&
           gitChanged !== undefined &&
           !gitChanged.has(absolute)
@@ -278,11 +330,35 @@ async function classifyReportedFiles(
         };
       }
 
+      if (entry.kind === "structured") {
+        const evidence = entry.attribution;
+        const physical = evidence.preExecutionPhysicalPath;
+        const resolved = {
+          path: physical
+            ? path.resolve(physical)
+            : path.resolve(evidence.lexicalPath),
+          uncertain: evidence.uncertain || physical === undefined,
+        };
+        return {
+          kind: "attributed" as const,
+          value: {
+            ...resolved,
+            evidence,
+            reportedPath: mapReportedPathToSource(
+              group,
+              physicalWorkerRoot,
+              resolved.path,
+            ),
+          },
+        };
+      }
+
       const resolved = await physicalReportedPath(entry.candidate, true);
       return {
         kind: "attributed" as const,
         value: {
           ...resolved,
+          evidence: undefined,
           reportedPath: mapReportedPathToSource(
             group,
             physicalWorkerRoot,
@@ -316,6 +392,26 @@ async function classifyReportedFiles(
       candidate.uncertain || !isWithin(physicalWorkerRoot, candidate.path),
   );
 
+  result.fileAttributions = escapedOrUncertain
+    .filter(
+      (
+        candidate,
+      ): candidate is typeof candidate & { evidence: FileAttribution } =>
+        candidate.evidence !== undefined,
+    )
+    .map((candidate) => ({
+      ...candidate.evidence,
+      lexicalPath: mapReportedPathToSource(
+        group,
+        physicalWorkerRoot,
+        path.resolve(candidate.evidence.lexicalPath),
+      ),
+      preExecutionPhysicalPath:
+        candidate.evidence.preExecutionPhysicalPath === undefined
+          ? undefined
+          : candidate.reportedPath,
+      uncertain: candidate.uncertain,
+    }));
   result.attributedFiles = [
     ...new Set(escapedOrUncertain.map((candidate) => candidate.reportedPath)),
   ];
@@ -637,18 +733,31 @@ async function reconcileGroup(
       // A child that outlived prompt quiescence can still race symlink
       // inspection. Stop it before reporting paths even when its task failed.
       await stopWorkspaceProcesses(worker.workerRoot);
-      await classifyReportedFiles(group, worker, result);
 
       if (result.error) {
+        let classificationIssues:
+          Array<{ path: string; reason: string }> | undefined;
+        try {
+          await classifyReportedFiles(group, worker, result);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          classificationIssues = [{ path: "(attribution)", reason }];
+          console.error(
+            `[delegate] failed to classify paths for already-failed isolated worker '${worker.workerRoot}'; discarding and removing it without changing the task failure`,
+            error,
+          );
+        }
         result.integration = {
           status: "discarded",
           proposedFiles: [],
           appliedFiles: [],
+          ...(classificationIssues ? { classificationIssues } : {}),
         };
         await removeWorktree(group.sourceRoot, worker.workerRoot);
         continue;
       }
 
+      await classifyReportedFiles(group, worker, result);
       const proposalTree = await snapshotTree(
         worker.workerRoot,
         group.baselineCommit,

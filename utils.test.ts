@@ -36,6 +36,12 @@ describe("terminal text sanitization", () => {
     expect(stripAnsi(hostile)).toBe("");
   });
 
+  test("malformed CSI stops before TAB, LF, and CR to preserve diagnostic layout", () => {
+    const input = "head\x1b[31\tcolumn\x1b[32\nline\x9b33\rtail";
+    expect(stripAnsi(input)).toBe("head\tcolumn\nline\rtail");
+    expect(sanitizeTerminalText(input)).toBe("head column\nline\ntail");
+  });
+
   test("malformed generic ESC does not split or remove Unicode text", () => {
     expect(stripAnsi("a\x1b😀b")).toBe("a😀b");
   });

@@ -732,6 +732,60 @@ describe("scratch workspace", () => {
   );
 
   scratchTest(
+    "projects structured attribution without re-resolving snapshots and suppresses unchanged symlinks",
+    async () => {
+      if (process.platform === "win32") return;
+      const parent = testParent();
+      const repo = path.join(parent, "repo");
+      const outside = path.join(parent, "outside.txt");
+      fs.mkdirSync(repo);
+      fs.writeFileSync(path.join(repo, "node.txt"), "baseline");
+      fs.writeFileSync(path.join(repo, "target.txt"), "target");
+      fs.symlinkSync("target.txt", path.join(repo, "link.txt"));
+      fs.writeFileSync(outside, "outside");
+      execFileSync("git", ["init", "--quiet"], { cwd: repo });
+      try {
+        const workspace = await createScratchWorkspace(repo);
+        const node = path.join(workspace.cwd, "node.txt");
+        fs.unlinkSync(node);
+        fs.symlinkSync(outside, node);
+
+        expect(
+          await workspace.resolveFileAttribution?.({
+            lexicalPath: node,
+            preExecutionPhysicalPath: node,
+            provenance: "write",
+            uncertain: false,
+          }),
+        ).toBeUndefined();
+        expect(
+          await workspace.resolveAttributedLexicalTouch?.({
+            lexicalPath: path.join(workspace.cwd, "link.txt"),
+            preExecutionPhysicalPath: path.join(workspace.cwd, "target.txt"),
+            provenance: "edit",
+            uncertain: false,
+          }),
+        ).toBeUndefined();
+        expect(
+          await workspace.resolveFileAttribution?.({
+            lexicalPath: path.join(workspace.cwd, "uncertain.txt"),
+            provenance: "write",
+            uncertain: true,
+          }),
+        ).toEqual({
+          lexicalPath: path.join(repo, "uncertain.txt"),
+          preExecutionPhysicalPath: undefined,
+          provenance: "write",
+          uncertain: true,
+        });
+        await workspace.cleanup();
+      } finally {
+        cleanTestDir(parent);
+      }
+    },
+  );
+
+  scratchTest(
     "rejects symlinks that let relative writes escape the copied tree",
     async () => {
       const parent = testParent();

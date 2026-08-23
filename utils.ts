@@ -143,6 +143,9 @@ function skipControlString(
 function skipCsi(text: string, index: number): number {
   while (index < text.length) {
     const code = text.charCodeAt(index);
+    // A malformed CSI must not consume diagnostic layout while searching for
+    // a final byte. Leave common layout controls for the outer sanitizer.
+    if (code === 0x09 || code === 0x0a || code === 0x0d) return index;
     index++;
     if (code >= 0x40 && code <= 0x7e) break;
   }

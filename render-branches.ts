@@ -281,6 +281,15 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
   }
 }
 
+function hasUserCancellationMarker(
+  progress: TaskProgress,
+  result: TaskResult | { error: string } | undefined,
+): boolean {
+  if (progress.error === "Aborted") return true;
+  if (result && "error" in result && result.error === "Aborted") return true;
+  return false;
+}
+
 /** Final (or async-ticket poll) view — static status glyphs, output previews,
  *  markdown rendering in expanded mode, and the ticket banner for live
  *  background tickets. */
@@ -295,8 +304,16 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
   // this branch must render every status. A ticket banner is shown when
   // details.ticketId is present so the human sees this is background work.
   const succeeded = progress.filter((p) => p.status === "done").length;
-  const failed = progress.filter((p) => p.status === "failed").length;
-  const finalized = succeeded + failed;
+  const cancelled = progress.filter(
+    (p, index) =>
+      p.status === "failed" && hasUserCancellationMarker(p, taskResults[index]),
+  ).length;
+  const failed = progress.filter(
+    (p, index) =>
+      p.status === "failed" &&
+      !hasUserCancellationMarker(p, taskResults[index]),
+  ).length;
+  const finalized = succeeded + failed + cancelled;
   const running = progress.filter((p) => p.status === "running").length;
   const pending = progress.filter((p) => p.status === "pending").length;
   const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
@@ -310,12 +327,13 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     ticketStatus === undefined ||
     ticketStatus === "running" ||
     ticketStatus === "cancelling";
-  // Terminal tickets render stale running/pending rows with a failure glyph.
-  // Count those rows the same way in the terminal summary.
+  // Terminal tickets render stale running/pending rows with a terminal glyph.
+  // A caller-aborted task retains the explicit `Aborted` progress/result marker
+  // after settling; count it as cancelled rather than as a generic failure.
   const terminalUnfinished = ticketIsLive ? 0 : running + pending;
   const terminalFinalized = finalized + terminalUnfinished;
   const terminalCancelled =
-    ticketStatus === "cancelled" ? terminalUnfinished : 0;
+    cancelled + (ticketStatus === "cancelled" ? terminalUnfinished : 0);
   const terminalFailed =
     failed + (ticketStatus === "cancelled" ? 0 : terminalUnfinished);
   const ticketWasCancelled = ticketStatus === "cancelled";
@@ -337,6 +355,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     if (running > 0) ticketParts.push(`${running} active`);
     if (pending > 0) ticketParts.push(`${pending} queued`);
     if (failed > 0) ticketParts.push(`${failed} failed`);
+    if (cancelled > 0) ticketParts.push(`${cancelled} cancelled`);
     const glyph =
       ticketStatus === "cancelling"
         ? theme.fg("error", "■")
@@ -366,7 +385,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const glyph =
       ticketStatus === "cancelled" ||
       ticketStatus === "failed" ||
-      terminalFailed > 0
+      terminalFailed > 0 ||
+      terminalCancelled > 0
         ? theme.fg("error", "✗")
         : theme.fg("success", "✓");
     lines.push(
@@ -385,6 +405,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       !ticketIsLive && (p.status === "running" || p.status === "pending");
     const isCancelledUnfinished =
       ticketStatus === "cancelled" && isTerminalUnfinished;
+    const isCancelledResult =
+      p.status === "failed" && hasUserCancellationMarker(p, r);
+    const isCancelledTask = isCancelledUnfinished || isCancelledResult;
 
     // Unified status glyphs: ✓ done, ✗ failed/cancelled, ◐ running, ○ pending.
     // Terminal unfinished rows never retain a live glyph; their tail identifies
@@ -413,7 +436,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       p.status === "pending"
         ? theme.fg("muted", ` ${waitingLabel(running, getMaxConcurrent())}`)
         : "";
-    const cancelledTail = isCancelledUnfinished
+    const cancelledTail = isCancelledTask
       ? theme.fg("error", " · CANCELLED")
       : "";
     lines.push(
@@ -474,9 +497,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     }
 
     // Surface errors even when output exists (agent may have emitted text before failing).
-    // Live and cancelled unfinished tasks already show their status on the
-    // row, so don't duplicate it as an error line.
-    if (!isLive && !isCancelledUnfinished && r && "error" in r && r.error) {
+    // Live and cancelled tasks already show their status on the row, so don't
+    // duplicate it as an error line.
+    if (!isLive && !isCancelledTask && r && "error" in r && r.error) {
       const error = sanitizeTerminalLine(r.error);
       if (error) lines.push(truncLine(`${ind}${theme.fg("error", error)}`, w));
     }

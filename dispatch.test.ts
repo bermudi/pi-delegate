@@ -7,7 +7,10 @@ import {
   _setGlobalConcurrencyLimitForTesting,
   _resetGlobalConcurrencyForTesting,
 } from "./concurrency.ts";
-import { _setRunAgentSessionForTesting } from "./lifecycle.ts";
+import {
+  _setAcquireAgentSessionForTesting,
+  _setRunAgentSessionForTesting,
+} from "./lifecycle.ts";
 import { _resetPoolForTesting, commit } from "./pool.ts";
 import { emptyUsage } from "./usage.ts";
 import {
@@ -204,12 +207,80 @@ describe("dispatch-time shared-write gate", () => {
       });
 
       expect(result.content[0]?.text).toContain(
-        "SessionId(s) quarantined after quiescence abandonment",
+        "SessionId(s) quarantined after abandonment",
       );
       expect(result.details.progress).toEqual([]);
       expect(ticketRegistry.size).toBe(0);
     },
   );
+
+  test("hung acquisition keeps shared-write admission reserved until late disposal", async () => {
+    let resolveAcquisition!: (value: any) => void;
+    let disposed = 0;
+    _setAcquireAgentSessionForTesting(
+      () =>
+        new Promise((resolve) => {
+          resolveAcquisition = resolve;
+        }),
+    );
+    const model = { provider: "test", id: "model" } as any;
+    const input = (prompt: string, deadlineMs?: number) => ({
+      pi: {} as any,
+      params: {
+        tasks: [
+          {
+            prompt,
+            cwd: tmpDir,
+            workspace: "shared" as const,
+            tools: ["write"],
+            deadlineMs,
+          },
+        ],
+      },
+      ctx: {
+        cwd: tmpDir,
+        model,
+        modelRegistry: {
+          getAvailable: () => [model],
+          find: () => model,
+          hasConfiguredAuth: () => true,
+        },
+        getSystemPrompt: () => "parent",
+      } as any,
+      agents: new Map(),
+      parentModelId: model.id,
+      parentDefaults: {
+        thinking: "off" as const,
+        tools: ["read", "write", "edit", "bash"],
+      },
+      signal: undefined,
+      onUpdate: undefined,
+    });
+
+    try {
+      const first = await dispatchDelegate(input("hung writer", 20));
+      expect(first.details.results[0]?.failureKind).toBe("deadline_exceeded");
+      expect(quarantinedTasks()).toHaveLength(1);
+
+      const blocked = await dispatchDelegate(input("overlapping writer"));
+      expect(blocked.content[0]?.text).toContain(
+        "Rejected before dispatch; no tasks were started.",
+      );
+      expect(blocked.content[0]?.text).toContain("quarantined ad-hoc task");
+
+      resolveAcquisition({
+        session: { dispose: () => disposed++ },
+        sessionManager: undefined,
+        sessionFile: undefined,
+        lifecycleOwnsSession: true,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(disposed).toBe(1);
+      expect(quarantinedTasks()).toHaveLength(0);
+    } finally {
+      _setAcquireAgentSessionForTesting(undefined);
+    }
+  });
 
   test.each([
     ["sync", false],

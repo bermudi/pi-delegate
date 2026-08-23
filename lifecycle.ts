@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   createAgentSession,
   SessionManager,
@@ -20,7 +21,10 @@ import {
   persistSessionHeader,
 } from "./sessions.ts";
 import { runAgentSession, formatDeadlineExceededError } from "./runner.ts";
-import { getGitChangedFiles } from "./file-tracking.ts";
+import {
+  getGitChangedFiles,
+  projectedAttributionPath,
+} from "./file-tracking.ts";
 import { getHostDeps } from "./host.ts";
 import { resolveCwd, validateResumeFromPath } from "./utils.ts";
 import { getWholeTaskMaxRetries, getWholeTaskBaseDelayMs } from "./config.ts";
@@ -29,11 +33,14 @@ import { scheduleDeadline } from "./timer.ts";
 import { recordTask } from "./telemetry.ts";
 import { createScratchWorkspace, ScratchDeadlineError } from "./workspace.ts";
 import {
+  isResumeFromQuarantined,
   isSessionIdQuarantined,
+  markSessionQuarantined,
   observeQuarantineSafety,
   propagateSessionQuarantine,
   reserveSessionQuarantine,
   sessionQuarantineOf,
+  withResumeFromLock,
   type SessionQuarantine,
 } from "./session-quarantine.ts";
 
@@ -718,39 +725,39 @@ function resolveResumableSessionFile(
 
 /** Run a single resolved task. Single source of truth for the per-task lifecycle.
  *  Used by both sync (params.async === false) and async (params.async === true) paths.
- *  When task.sessionId is set, the entire acquire/run/close lifecycle runs under
- *  a per-session mutex so concurrent tasks with the same sessionId serialize
- *  cleanly. The lock also covers sessionAction='close' and the early-busy/abort paths. */
+ *  sessionId work is serialized by the pool lock; resumeFrom work is also
+ *  serialized by canonical transcript identity. The quarantine check happens
+ *  only after both applicable locks are held, closing the validation-to-run
+ *  race for a queued call. */
 export async function runResolvedTask(
   env: TaskRunEnv,
   task: ResolvedTask,
   p: TaskProgress,
   taskIndex: number,
 ): Promise<TaskResult> {
-  if (task.sessionId) {
-    return pool.withSessionLock(task.sessionId, async () => {
-      // Validation may have run while an earlier synchronous use of this key
-      // was still active. Recheck after acquiring the per-session lock so an
-      // abandonment published by that use cannot be bypassed by a queued call.
-      if (isSessionIdQuarantined(task.sessionId!)) {
+  return withResumeFromLock(task.resumeFrom, async () => {
+    const runLocked = async (): Promise<TaskResult> => {
+      let quarantineError: string | undefined;
+      if (task.sessionId && isSessionIdQuarantined(task.sessionId)) {
+        quarantineError = `SessionId '${task.sessionId}' is quarantined after abandonment. Wait for background safety confirmation before reusing it.`;
+      } else if (task.resumeFrom && isResumeFromQuarantined(task.resumeFrom)) {
+        quarantineError = `resumeFrom transcript '${task.resumeFrom}' is quarantined after abandonment. Wait for background safety confirmation before resuming it.`;
+      }
+      if (quarantineError) {
         return recordTaskOutcome(
           env,
           p,
           task,
-          finishTask(
-            env,
-            p,
-            failTask(
-              task,
-              `SessionId '${task.sessionId}' is quarantined after quiescence abandonment. Wait for background safety confirmation before reusing it.`,
-            ),
-          ),
+          finishTask(env, p, failTask(task, quarantineError)),
         );
       }
       return runResolvedTaskUnlocked(env, task, p, taskIndex);
-    });
-  }
-  return runResolvedTaskUnlocked(env, task, p, taskIndex);
+    };
+
+    return task.sessionId
+      ? pool.withSessionLock(task.sessionId, runLocked)
+      : runLocked();
+  });
 }
 
 async function runResolvedTaskUnlocked(
@@ -848,24 +855,72 @@ async function runResolvedTaskUnlocked(
     // Keep the pre-mapping result in `result` so the catch below can preserve
     // its paid-for counters if path mapping throws mid-rewrite.
     result = outcome.result;
+    const fileAttributions = result.fileAttributions ?? [];
+    const attributionByLexical = new Map(
+      fileAttributions.map((entry) => [path.resolve(entry.lexicalPath), entry]),
+    );
+    const attributedPhysicalPaths = new Set(
+      fileAttributions
+        .filter(
+          (entry) =>
+            entry.preExecutionPhysicalPath !== undefined &&
+            path.resolve(entry.preExecutionPhysicalPath) !==
+              path.resolve(entry.lexicalPath),
+        )
+        .map((entry) => path.resolve(entry.preExecutionPhysicalPath!)),
+    );
+    const projectedAttributions = (
+      await Promise.all(
+        fileAttributions.map((entry) =>
+          workspace.resolveFileAttribution
+            ? workspace.resolveFileAttribution(entry)
+            : Promise.resolve(entry),
+        ),
+      )
+    ).filter(
+      (entry): entry is NonNullable<typeof entry> => entry !== undefined,
+    );
+    const projectedTouched = (
+      await Promise.all(
+        result.touchedFiles.map((file) => {
+          const absolute = path.resolve(file);
+          // Preserve this touched-file evidence, but project it lexically: a
+          // realpath now could follow a replacement symlink. attributedFiles
+          // separately decides whether the physical target was disposable.
+          if (attributedPhysicalPaths.has(absolute)) {
+            return workspace.mapPathToSource(absolute);
+          }
+          const attribution = attributionByLexical.get(absolute);
+          if (attribution && workspace.resolveAttributedLexicalTouch) {
+            return workspace.resolveAttributedLexicalTouch(attribution);
+          }
+          return workspace.resolveReportedPath(file);
+        }),
+      )
+    ).filter((file): file is string => file !== undefined);
+    const projectedAttributedFiles = fileAttributions.length
+      ? projectedAttributions.map(projectedAttributionPath)
+      : (
+          await Promise.all(
+            (result.attributedFiles ?? []).map((file) =>
+              workspace.resolveAttributedPath(file),
+            ),
+          )
+        ).filter((file): file is string => file !== undefined);
     result = {
       ...result,
       workspace: "scratch",
       sessionFile: undefined,
-      touchedFiles: await Promise.all(
-        result.touchedFiles.map((file) => workspace.resolveReportedPath(file)),
-      ),
-      // Writes inside scratch are discarded and cannot conflict. Explicit
-      // writes outside scratch (for example an absolute host path) persist and
-      // must remain attributable for overlap warnings. Resolve those paths
-      // physically so aliases to the same host file compare equally.
-      attributedFiles: (
-        await Promise.all(
-          (result.attributedFiles ?? []).map((file) =>
-            workspace.resolveAttributedPath(file),
-          ),
-        )
-      ).filter((file): file is string => file !== undefined),
+      fileAttributions: projectedAttributions,
+      touchedFiles: [
+        ...new Set([
+          ...projectedTouched,
+          ...(fileAttributions.length ? projectedAttributedFiles : []),
+        ]),
+      ],
+      // Certain writes inside scratch are discarded. External and uncertain
+      // evidence remains attributable without re-resolving physical snapshots.
+      attributedFiles: [...new Set(projectedAttributedFiles)],
     };
   } catch (error) {
     const failedProjection = {
@@ -1061,6 +1116,7 @@ function deadlineExceededResult(
     sessionFile: prior?.sessionFile,
     touchedFiles: prior?.touchedFiles ?? [],
     attributedFiles: prior?.attributedFiles ?? [],
+    fileAttributions: prior?.fileAttributions,
   };
 }
 
@@ -1215,6 +1271,51 @@ async function awaitSessionAcquisition(
   }
 }
 
+/** Publish ownership for an acquisition that outlived its task. The safety
+ * promise intentionally uses no polling timer: a construction promise that
+ * never settles retains the reservation but cannot by itself keep Node alive.
+ * A late lifecycle-owned session must finish disposal before safety fulfills. */
+function quarantineAbandonedAcquisition(
+  task: ResolvedTask,
+  acquisition: Promise<AcquireResult>,
+): SessionQuarantine {
+  const safe = acquisition.then(
+    async (late) => {
+      if ("error" in late || !late.lifecycleOwnsSession) return;
+      try {
+        // AgentSession.dispose is currently synchronous, but awaiting its
+        // runtime return also handles extension implementations that perform
+        // asynchronous teardown or reject.
+        await (late.session.dispose as unknown as () => void | Promise<void>)();
+      } catch (error) {
+        console.error(
+          "[delegate] late abandoned subagent disposal failed; retaining quarantine",
+          error,
+        );
+        throw error;
+      }
+    },
+    (error) => {
+      // Rejection proves that acquisition produced no session. Handle it here
+      // so the abandoned promise can never become an unhandled rejection.
+      try {
+        console.error(
+          "[delegate] abandoned subagent acquisition settled with an error",
+          error,
+        );
+      } catch {
+        // Logging replacements must not turn a safely settled acquisition into
+        // a rejected safety proof.
+      }
+    },
+  );
+  const quarantine = { safe };
+  // Publish before returning the terminal task result. This bridges shared
+  // admission from the active dispatch reservation to quarantine atomically.
+  reserveSessionQuarantine(task, quarantine);
+  return quarantine;
+}
+
 /** Acquire, prompt, and settle one attempt. Mutates `accounting` on success. */
 async function runTaskAttempt(
   env: TaskRunEnv,
@@ -1236,26 +1337,14 @@ async function runTaskAttempt(
     timing.deadlineAt,
   );
   if (acquisitionOutcome.status === "abandoned") {
-    // Acquisition itself is not cancellable upstream. Consume its eventual
-    // outcome and dispose any late lifecycle-owned session; otherwise a late
-    // rejection would be unhandled or a late session would leak resources.
-    void acquisition
-      .then((late) => {
-        if (!("error" in late)) disposeOwnedSession(late);
-      })
-      .catch((error) => {
-        try {
-          console.error(
-            "[delegate] abandoned subagent acquisition cleanup failed",
-            error,
-          );
-        } catch {
-          // A late cleanup observer must never become an unhandled rejection.
-        }
-      });
-    return acquisitionOutcome.reason === "parent-aborted"
-      ? failTask(task, "Aborted")
-      : deadlineExceededResult(task, timing);
+    // Acquisition itself is not cancellable upstream. Its quarantine remains
+    // active until the promise settles and any late session finishes disposal.
+    const quarantine = quarantineAbandonedAcquisition(task, acquisition);
+    const result =
+      acquisitionOutcome.reason === "parent-aborted"
+        ? failTask(task, "Aborted")
+        : deadlineExceededResult(task, timing);
+    return markSessionQuarantined(result, quarantine);
   }
   const acquired = acquisitionOutcome.value;
   if ("error" in acquired) return acquired.error;
@@ -1354,6 +1443,7 @@ async function runTaskAttempt(
       sessionFile,
       touchedFiles: r.touchedFiles,
       attributedFiles: r.attributedFiles ?? [],
+      fileAttributions: r.fileAttributions,
     });
   } finally {
     // This runs for ordinary success, normal provider failure, whole-task

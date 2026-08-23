@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
   decideSpill,
   spillToTempFile,
+  _setSpillFileOperationsForTesting,
   renderOutputForLLM,
   renderOutputForPoll,
 } from "./spill.ts";
@@ -156,6 +157,43 @@ describe("spillToTempFile", () => {
       "/nonexistent-dir-delegate-spill-test",
     );
     expect(p).toBeNull();
+  });
+
+  test("logs partial-file cleanup failure separately without hiding the write failure", () => {
+    const partialPath = path.join(
+      testSpillDir,
+      "delegate-output-scout-cleanup-fail.md",
+    );
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) =>
+      warnings.push(args.map(String).join(" "));
+    _setSpillFileOperationsForTesting({
+      write: (fd) => {
+        fs.writeFileSync(fd, "partial");
+        throw new Error("primary write failure");
+      },
+      remove: () => {
+        throw new Error("cleanup removal failure");
+      },
+    });
+
+    try {
+      expect(
+        spillToTempFile("full output", "scout", "cleanup-fail", testSpillDir),
+      ).toBeNull();
+      expect(warnings).toHaveLength(2);
+      expect(warnings[0]).toContain(
+        `spill partial-file cleanup failed (${partialPath})`,
+      );
+      expect(warnings[0]).toContain("cleanup removal failure");
+      expect(warnings[1]).toContain(`spill write failed (${partialPath})`);
+      expect(warnings[1]).toContain("primary write failure");
+    } finally {
+      _setSpillFileOperationsForTesting(undefined);
+      console.warn = originalWarn;
+      fs.rmSync(partialPath, { force: true });
+    }
   });
 });
 

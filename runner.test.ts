@@ -2539,6 +2539,12 @@ describe("touched-file tracking", () => {
 
       expect(result.attributedFiles).toContain(oldTarget);
       expect(result.attributedFiles).not.toContain(newTarget);
+      expect(result.fileAttributions).toContainEqual({
+        lexicalPath: link,
+        preExecutionPhysicalPath: oldTarget,
+        provenance: "write",
+        uncertain: false,
+      });
       expect(result.touchedFiles).toContain(link);
       expect(result.touchedFiles).toContain(oldTarget);
     } finally {

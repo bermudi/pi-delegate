@@ -7,6 +7,7 @@ import {
   getGitChangedFiles,
   extractAttributedFromActivities,
   extractTouchedFromActivities,
+  projectedAttributionPath,
   snapshotPhysicalToolTarget,
 } from "./file-tracking.ts";
 import { extractTextFromPartialResult, extractOutput } from "./utils.ts";
@@ -23,6 +24,7 @@ import { markSessionQuarantined } from "./session-quarantine.ts";
 import type { Usage } from "@earendil-works/pi-ai";
 import type {
   AgentProgressUpdate,
+  FileAttribution,
   TaskFailureKind,
   ToolActivity,
 } from "./types.ts";
@@ -54,6 +56,33 @@ function unionGitEvidence(
   if (!first) return second;
   if (!second) return first;
   return new Set([...first, ...second]);
+}
+
+function cancellationFailureKind(
+  source: CancellationSource | undefined,
+): TaskFailureKind | undefined {
+  if (source === "deadline") return "deadline_exceeded";
+  if (source === "stalled") return "stalled";
+  return undefined;
+}
+
+/** Apply cancellation precedence without obscuring it in nested conditionals. */
+function resolveRunFailure(
+  source: CancellationSource | undefined,
+  fallbackError: string | undefined,
+  deadlineError: () => string,
+  stallError: () => string,
+): { error: string | undefined; failureKind: TaskFailureKind | undefined } {
+  if (source === "parent-aborted") {
+    return { error: "Aborted", failureKind: undefined };
+  }
+  if (source === "deadline") {
+    return { error: deadlineError(), failureKind: "deadline_exceeded" };
+  }
+  if (source === "stalled") {
+    return { error: stallError(), failureKind: "stalled" };
+  }
+  return { error: fallbackError, failureKind: undefined };
 }
 
 /**
@@ -107,6 +136,8 @@ export async function runAgentSession(
   touchedFiles: string[];
   /** Files directly attributable to this run's edit/write tool calls. */
   attributedFiles: string[];
+  /** Provenance-bearing evidence behind attributedFiles. */
+  fileAttributions: FileAttribution[];
   failureKind?: TaskFailureKind;
   /** Whether `session.prompt()` was actually invoked. Distinguishes a pre-prompt
    *  deadline (session never used) from a mid-prompt deadline (session was
@@ -350,12 +381,7 @@ export async function runAgentSession(
         durationMs: Date.now() - startTime,
         lastActivityAt,
         activities: [...activities],
-        failureKind:
-          cancellationSource === "deadline"
-            ? "deadline_exceeded"
-            : cancellationSource === "stalled"
-              ? "stalled"
-              : undefined,
+        failureKind: cancellationFailureKind(cancellationSource),
       });
     } catch (error) {
       console.error("[delegate] progress callback threw; continuing", error);
@@ -614,7 +640,7 @@ export async function runAgentSession(
           // AgentSession emits this boundary synchronously before invoking the
           // tool. Capture the physical target now: after execution a tool can
           // delete or retarget the symlink it wrote through.
-          activity.physicalTarget = snapshotPhysicalToolTarget(
+          activity.fileAttribution = snapshotPhysicalToolTarget(
             activity,
             config.cwd,
           );
@@ -783,6 +809,7 @@ export async function runAgentSession(
       usage: emptyUsage(),
       touchedFiles: [],
       attributedFiles: [],
+      fileAttributions: [],
       prompted: false,
     });
   }
@@ -816,6 +843,7 @@ export async function runAgentSession(
         usage: emptyUsage(),
         touchedFiles: [],
         attributedFiles: [],
+        fileAttributions: [],
         prompted: false,
       });
     }
@@ -827,6 +855,7 @@ export async function runAgentSession(
       usage: emptyUsage(),
       touchedFiles: [],
       attributedFiles: [],
+      fileAttributions: [],
       failureKind: "deadline_exceeded" as const,
       prompted: false,
     });
@@ -912,10 +941,11 @@ export async function runAgentSession(
     const output = capturedOutput();
     const usage = currentUsage();
     const fromActivities = extractTouchedFromActivities(activities, config.cwd);
-    const attributedFiles = extractAttributedFromActivities(
+    const fileAttributions = extractAttributedFromActivities(
       activities,
       config.cwd,
     );
+    const attributedFiles = fileAttributions.map(projectedAttributionPath);
     const fromGit =
       gitBaseline && gitAfter
         ? [...gitAfter].filter((f) => !gitBaseline.has(f))
@@ -923,30 +953,23 @@ export async function runAgentSession(
     const touchedFiles = [
       ...new Set([...fromActivities, ...attributedFiles, ...fromGit]),
     ];
-    const cancellationSource = currentCancellationSource();
-    const errorMessage =
-      cancellationSource === "parent-aborted"
-        ? "Aborted"
-        : cancellationSource === "deadline"
-          ? deadlineError()
-          : cancellationSource === "stalled"
-            ? stallError()
-            : state.errorMessage;
+    const failure = resolveRunFailure(
+      currentCancellationSource(),
+      state.errorMessage,
+      deadlineError,
+      stallError,
+    );
 
     return finishResult({
       output: output || "(no output)",
-      error: errorMessage,
+      error: failure.error,
       durationMs: Date.now() - startTime,
       tokens: usage.totalTokens,
       usage,
       touchedFiles,
       attributedFiles,
-      failureKind:
-        cancellationSource === "deadline"
-          ? "deadline_exceeded"
-          : cancellationSource === "stalled"
-            ? "stalled"
-            : undefined,
+      fileAttributions,
+      failureKind: failure.failureKind,
       prompted,
     });
   } catch (err) {
@@ -988,10 +1011,11 @@ export async function runAgentSession(
     const partialOutput = capturedOutput();
     const usage = currentUsage();
     const fromActivities = extractTouchedFromActivities(activities, config.cwd);
-    const attributedFiles = extractAttributedFromActivities(
+    const fileAttributions = extractAttributedFromActivities(
       activities,
       config.cwd,
     );
+    const attributedFiles = fileAttributions.map(projectedAttributionPath);
     const fromGit =
       gitBaseline && gitAfter
         ? [...gitAfter].filter((f) => !gitBaseline.has(f))
@@ -1000,31 +1024,23 @@ export async function runAgentSession(
       ...new Set([...fromActivities, ...attributedFiles, ...fromGit]),
     ];
 
-    const cancellationSource = currentCancellationSource();
-    const msg =
-      cancellationSource === "parent-aborted"
-        ? "Aborted"
-        : cancellationSource === "deadline"
-          ? deadlineError()
-          : cancellationSource === "stalled"
-            ? stallError()
-            : err instanceof Error
-              ? err.message
-              : String(err);
+    const fallbackError = err instanceof Error ? err.message : String(err);
+    const failure = resolveRunFailure(
+      currentCancellationSource(),
+      fallbackError,
+      deadlineError,
+      stallError,
+    );
     return finishResult({
       output: partialOutput || "(no output)",
-      error: msg,
+      error: failure.error,
       durationMs: Date.now() - startTime,
       tokens: usage.totalTokens,
       usage,
       touchedFiles,
       attributedFiles,
-      failureKind:
-        cancellationSource === "deadline"
-          ? "deadline_exceeded"
-          : cancellationSource === "stalled"
-            ? "stalled"
-            : undefined,
+      fileAttributions,
+      failureKind: failure.failureKind,
       prompted,
     });
   } finally {

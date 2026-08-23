@@ -1,4 +1,6 @@
 import type { ResolvedTask } from "./types.ts";
+import { canonicalPath } from "./trusted-paths.ts";
+import { resolveCwd } from "./utils.ts";
 
 /**
  * Internal, non-serialized hand-off for a runner that returned before its
@@ -20,12 +22,30 @@ export type WithSessionQuarantine = {
 interface QuarantineReservation {
   task: ResolvedTask;
   quarantine: SessionQuarantine;
+  /** Physical transcript identity captured while the abandoned task still
+   * owns it. This prevents a symlink or lexical alias from bypassing the
+   * quarantine with a second `resumeFrom`. */
+  resumeFromIdentity?: string;
 }
 
 /** Process-local admission reservations for abandoned tasks. A reservation is
  * removed only when its safety proof fulfills; rejection is not evidence that
  * the session stopped mutating. */
 const quarantineReservations = new Map<symbol, QuarantineReservation>();
+
+/** Per-transcript locks close the validation-to-dispatch race for resume-only
+ * tasks (which have no sessionId and therefore do not use the pool lock). */
+const resumeFromLocks = new Map<string, Promise<void>>();
+
+/** Resolve an existing resume transcript to the physical path used as its
+ * process-local identity. Invalid or missing paths are left to normal
+ * resumeFrom validation and cannot match a reservation created from an
+ * existing transcript. */
+export function canonicalResumeFromIdentity(
+  resumeFrom: string | undefined,
+): string | undefined {
+  return resumeFrom ? canonicalPath(resolveCwd(resumeFrom)) : undefined;
+}
 
 function logObserverFailure(description: string, error: unknown): void {
   try {
@@ -74,13 +94,19 @@ export function observeQuarantineSafety(
     );
 }
 
-/** Reserve the task's shared-write capability and session id until safe. */
+/** Reserve the task's shared-write capability and logical session identities
+ * until safe. Transcript identity is canonicalized at publication time while
+ * the path is known to belong to the abandoned acquisition/session. */
 export function reserveSessionQuarantine(
   task: ResolvedTask,
   quarantine: SessionQuarantine,
 ): void {
   const key = Symbol("quarantined-task");
-  quarantineReservations.set(key, { task, quarantine });
+  quarantineReservations.set(key, {
+    task,
+    quarantine,
+    resumeFromIdentity: canonicalResumeFromIdentity(task.resumeFrom),
+  });
   observeQuarantineSafety(
     quarantine,
     "quarantine admission reservation release",
@@ -104,10 +130,46 @@ export function isSessionIdQuarantined(sessionId: string): boolean {
   return false;
 }
 
+export function isResumeFromQuarantined(resumeFrom: string): boolean {
+  const identity = canonicalResumeFromIdentity(resumeFrom);
+  if (!identity) return false;
+  for (const reservation of quarantineReservations.values()) {
+    if (reservation.resumeFromIdentity === identity) return true;
+  }
+  return false;
+}
+
+/** Serialize uses of one physical resume transcript so a queued call rechecks
+ * quarantine after the preceding owner publishes an abandonment reservation. */
+export async function withResumeFromLock<T>(
+  resumeFrom: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const identity = canonicalResumeFromIdentity(resumeFrom);
+  if (!identity) return fn();
+
+  const previous = resumeFromLocks.get(identity);
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  resumeFromLocks.set(identity, current);
+  try {
+    if (previous) await previous;
+    return await fn();
+  } finally {
+    release();
+    if (resumeFromLocks.get(identity) === current) {
+      resumeFromLocks.delete(identity);
+    }
+  }
+}
+
 /** @internal Test-only reset. Existing safety observers are token-scoped, so a
  * late fulfillment cannot delete a reservation created after the reset. */
 export function _resetQuarantineRegistryForTesting(): void {
   quarantineReservations.clear();
+  resumeFromLocks.clear();
 }
 
 export function markSessionQuarantined<T extends object>(

@@ -161,13 +161,26 @@ export interface ResolvedTask {
   providerExtensionSources?: string;
 }
 
+export interface FileAttribution {
+  /** Absolute path spelled by the tool call. This remains associated with the
+   * physical snapshot so a later symlink cannot change what the call targeted. */
+  lexicalPath: string;
+  /** Physical target captured synchronously at tool_execution_start. Consumers
+   * must not resolve this path again against the mutable post-execution tree. */
+  preExecutionPhysicalPath?: string;
+  /** Which explicit native tool supplied this evidence. */
+  provenance: "edit" | "write";
+  /** Canonicalization was incomplete or ambiguous. Such evidence is retained
+   * conservatively even when its lexical path is in a disposable workspace. */
+  uncertain: boolean;
+}
+
 export interface ToolActivity {
   id: string;
   name: string;
   args: Record<string, unknown>;
-  /** Physical edit/write target captured synchronously when tool execution
-   * starts, before the tool can replace, delete, or retarget a symlink. */
-  physicalTarget?: string;
+  /** Structured edit/write attribution captured before execution. */
+  fileAttribution?: FileAttribution;
   result?: {
     content: Array<{ type: string; text?: string }>;
     isError: boolean;
@@ -263,6 +276,9 @@ export interface TaskResult {
    *  for overlap detection so concurrent tasks in the same repo do not
    *  fabricate false conflicts from shared git snapshots. */
   attributedFiles?: string[];
+  /** Provenance-bearing evidence behind attributedFiles. Optional for legacy
+   * callers/tests that only provide the projected string list. */
+  fileAttributions?: FileAttribution[];
   /** Git-native proposal/reconciliation outcome for workspace:"isolated". */
   integration?: TaskIntegration;
 }
@@ -296,6 +312,9 @@ export type TaskIntegration =
     })
   | (TaskIntegrationWithoutRecovery & {
       status: "discarded";
+      /** Reporting-only issues encountered while classifying a failed task's
+       * paths. They do not turn the discarded proposal into an apply failure. */
+      classificationIssues?: Array<{ path: string; reason: string }>;
     })
   | (TaskIntegrationFiles & {
       status: "conflict";
