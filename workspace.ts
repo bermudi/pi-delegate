@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { revalidateFileAttribution } from "./file-tracking.ts";
 import { scheduleDeadline } from "./timer.ts";
 import type { FileAttribution } from "./types.ts";
 
@@ -195,6 +196,30 @@ function isWithin(root: string, candidate: string): boolean {
       !relative.startsWith(`..${path.sep}`) &&
       !path.isAbsolute(relative))
   );
+}
+
+function errnoOf(error: unknown): string {
+  return error instanceof Error && "code" in error
+    ? String((error as NodeJS.ErrnoException).code ?? "UNKNOWN")
+    : "UNKNOWN";
+}
+
+function logScratchProjectionFailure(
+  operation: "lstat" | "readlink",
+  candidate: string,
+  error: unknown,
+): void {
+  const safeCandidate = JSON.stringify(candidate)
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+  console.error(
+    `[delegate] scratch attribution ${operation} failed for ${safeCandidate} (errno=${errnoOf(error)}); retaining lexical source evidence`,
+  );
+}
+
+function isExpectedPathRace(error: unknown): boolean {
+  const code = errnoOf(error);
+  return code === "ENOENT" || code === "ENOTDIR" || code === "EINVAL";
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -812,8 +837,9 @@ export async function createScratchWorkspace(
       : absolute;
   };
   const resolveFileAttribution = async (
-    attribution: FileAttribution,
+    original: FileAttribution,
   ): Promise<FileAttribution | undefined> => {
+    const attribution = revalidateFileAttribution(original);
     const physical = attribution.preExecutionPhysicalPath;
     // A certain physical snapshot inside scratch is disposable. Crucially, do
     // not realpath it now: the tool may have replaced that node with a symlink.
@@ -841,16 +867,46 @@ export async function createScratchWorkspace(
       sourceRoot!,
       path.relative(completedRoot, lexical),
     );
+    const inspect = async (
+      candidate: string,
+    ): Promise<fs.Stats | undefined> => {
+      try {
+        return await fs.promises.lstat(candidate);
+      } catch (error) {
+        if (!isExpectedPathRace(error)) {
+          logScratchProjectionFailure("lstat", candidate, error);
+        }
+        return undefined;
+      }
+    };
     const [scratchStat, sourceStat] = await Promise.all([
-      fs.promises.lstat(lexical).catch(() => undefined),
-      fs.promises.lstat(source).catch(() => undefined),
+      inspect(lexical),
+      inspect(source),
     ]);
     if (scratchStat?.isSymbolicLink() && sourceStat?.isSymbolicLink()) {
+      const read = async (candidate: string): Promise<string | undefined> => {
+        try {
+          return await fs.promises.readlink(candidate);
+        } catch (error) {
+          if (!isExpectedPathRace(error)) {
+            logScratchProjectionFailure("readlink", candidate, error);
+          }
+          return undefined;
+        }
+      };
       const [scratchTarget, sourceTarget] = await Promise.all([
-        fs.promises.readlink(lexical),
-        fs.promises.readlink(source),
+        read(lexical),
+        read(source),
       ]);
-      if (scratchTarget === sourceTarget) return undefined;
+      // A readlink race is not evidence that the nodes matched. Keep the
+      // lexical source path rather than dropping it or rejecting the result.
+      if (
+        scratchTarget !== undefined &&
+        sourceTarget !== undefined &&
+        scratchTarget === sourceTarget
+      ) {
+        return undefined;
+      }
     }
     // This is evidence about the lexical node, not its current target.
     return source;

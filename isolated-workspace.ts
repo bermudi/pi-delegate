@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { mapConcurrent } from "./concurrency.ts";
+import { revalidateFileAttribution } from "./file-tracking.ts";
 import {
   observeQuarantineSafety,
   sessionQuarantineOf,
@@ -19,12 +20,28 @@ const GIT_TIMEOUT_MS = 5 * 60 * 1000;
 const PATH_CLASSIFICATION_CONCURRENCY = 16;
 const PROCESS_GRACE_MS = 500;
 let artifactBaseOverrideForTesting: string | undefined;
+let removeWorktreeHookForTesting:
+  | ((
+      destination: string,
+    ) => boolean | undefined | Promise<boolean | undefined>)
+  | undefined;
 
 /** @internal Keep tests out of the developer's real ~/.pi directory. */
 export function _setIsolatedArtifactRootForTesting(
   root: string | undefined,
 ): void {
   artifactBaseOverrideForTesting = root;
+}
+
+/** @internal Deterministic failure/order seam for worktree cleanup tests. */
+export function _setRemoveWorktreeHookForTesting(
+  hook:
+    | ((
+        destination: string,
+      ) => boolean | undefined | Promise<boolean | undefined>)
+    | undefined,
+): void {
+  removeWorktreeHookForTesting = hook;
 }
 
 interface CommandResult {
@@ -114,12 +131,33 @@ function errnoOf(error: unknown): string {
     : "UNKNOWN";
 }
 
+function pathEntryExists(candidate: string): boolean {
+  try {
+    fs.lstatSync(candidate);
+    return true;
+  } catch (error) {
+    const code = errnoOf(error);
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
+    console.error(
+      `[delegate] could not verify isolated recovery path ${JSON.stringify(candidate)} (errno=${code}); treating it as retained`,
+    );
+    return true;
+  }
+}
+
 function logPathCanonicalizationFailure(
   candidate: string,
   error: unknown,
 ): void {
+  const safeCandidate = JSON.stringify(
+    candidate.length > 1_024
+      ? `${candidate.slice(0, 1_024)}…[truncated ${candidate.length - 1_024} chars]`
+      : candidate,
+  )
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
   console.error(
-    `[delegate] could not canonicalize reported path '${candidate}' (errno=${errnoOf(error)}); retaining uncertain attribution`,
+    `[delegate] could not canonicalize reported path ${safeCandidate} (errno=${errnoOf(error)}); retaining uncertain attribution`,
   );
 }
 
@@ -252,7 +290,9 @@ async function classifyReportedFiles(
     worker.workerRoot,
     group.baselineCommit,
   );
-  const structured = result.fileAttributions ?? [];
+  const structured = (result.fileAttributions ?? []).map(
+    revalidateFileAttribution,
+  );
   const legacyCandidates = structured.length
     ? []
     : [
@@ -506,33 +546,37 @@ async function removeWorktree(
   root: string,
   destination: string,
 ): Promise<boolean> {
+  const override = await removeWorktreeHookForTesting?.(destination);
+  if (override !== undefined) return override;
   try {
     await git(["worktree", "remove", "--force", destination], { cwd: root });
-    return true;
+    if (!pathEntryExists(destination)) return true;
+    console.error(
+      `[delegate] Git reported isolated worktree removal success but the recovery path remains at ${JSON.stringify(destination)}`,
+    );
+    return false;
   } catch (error) {
-    let stillRegistered = true;
-    try {
-      const listed = await git(["worktree", "list", "--porcelain", "-z"], {
-        cwd: root,
-      });
-      stillRegistered = listed.stdout
-        .split("\0")
-        .some(
-          (entry) =>
-            entry.startsWith("worktree ") &&
-            path.resolve(entry.slice("worktree ".length)) ===
-              path.resolve(destination),
-        );
-    } catch {
-      // Fail closed: if registration cannot be checked, preserve the files.
-    }
-    if (!stillRegistered) return true;
+    // The command can report failure after completing removal. Only treat that
+    // as success when the recovery path itself is definitely gone.
+    if (!pathEntryExists(destination)) return true;
+    // An unregistered directory is still recovery evidence. Do not silently
+    // call it removed or recursively delete it after Git declined the cleanup.
     console.error(
       `[delegate] failed to remove isolated worktree '${destination}'`,
       error,
     );
     return false;
   }
+}
+
+async function requireWorktreeRemoved(
+  root: string,
+  destination: string,
+): Promise<void> {
+  if (await removeWorktree(root, destination)) return;
+  throw new Error(
+    `Could not remove isolated worktree; recovery workspace retained at ${JSON.stringify(destination)}.`,
+  );
 }
 
 async function changedFiles(
@@ -625,6 +669,25 @@ interface IsolatedGroup {
   baselineCommit: string;
   baselineRef: string;
   taskIndexes: number[];
+  /** Deferred quarantine cleanup must not run Git worktree operations while the
+   * group is still reconciling candidates/source state. */
+  reconciliationDone: Promise<void>;
+  finishReconciliation: () => void;
+  deferredCleanupTail: Promise<void>;
+}
+
+function enqueueDeferredGroupCleanup(
+  group: IsolatedGroup,
+  cleanup: () => Promise<void>,
+): Promise<void> {
+  const run = async () => {
+    await group.reconciliationDone;
+    await cleanup();
+  };
+  const queued = group.deferredCleanupTail.then(run, run);
+  // Keep the serialization chain usable after a surfaced callback failure.
+  group.deferredCleanupTail = queued.catch(() => {});
+  return queued;
 }
 
 interface IsolatedWorker {
@@ -699,25 +762,56 @@ async function reconcileGroup(
       observeQuarantineSafety(
         quarantine,
         "deferred isolated worker cleanup",
-        async () => {
-          try {
-            await stopWorkspaceProcesses(worker.workerRoot);
-            const removed = await removeWorktree(
-              group.sourceRoot,
-              worker.workerRoot,
-            );
-            if (removed) {
+        async () =>
+          enqueueDeferredGroupCleanup(group, async () => {
+            try {
+              await stopWorkspaceProcesses(worker.workerRoot);
+              const removed = await removeWorktree(
+                group.sourceRoot,
+                worker.workerRoot,
+              );
+              if (removed) {
+                console.error(
+                  `[delegate] safely cleaned deferred isolated worker '${worker.workerRoot}'`,
+                );
+              } else {
+                result.integration = {
+                  status: "apply_failed",
+                  proposedFiles: [],
+                  appliedFiles: [],
+                  conflicts: [
+                    {
+                      path: "(workspace cleanup)",
+                      reason:
+                        "Deferred isolated worker removal failed; recovery workspace retained.",
+                    },
+                  ],
+                  worktreePath: worker.workerRoot,
+                };
+                console.error(
+                  `[delegate] deferred isolated worker cleanup could not remove '${worker.workerRoot}'; retaining it as recovery evidence`,
+                );
+              }
+            } catch (error) {
+              result.integration = {
+                status: "apply_failed",
+                proposedFiles: [],
+                appliedFiles: [],
+                conflicts: [
+                  {
+                    path: "(workspace cleanup)",
+                    reason:
+                      error instanceof Error ? error.message : String(error),
+                  },
+                ],
+                worktreePath: worker.workerRoot,
+              };
               console.error(
-                `[delegate] safely cleaned deferred isolated worker '${worker.workerRoot}'`,
+                `[delegate] deferred isolated worker cleanup failed for '${worker.workerRoot}'; retaining it`,
+                error,
               );
             }
-          } catch (error) {
-            console.error(
-              `[delegate] deferred isolated worker cleanup failed for '${worker.workerRoot}'; retaining it`,
-              error,
-            );
-          }
-        },
+          }),
         (error) => {
           console.error(
             `[delegate] isolated AgentSession safety monitor failed; retaining worker '${worker.workerRoot}' indefinitely`,
@@ -747,13 +841,21 @@ async function reconcileGroup(
             error,
           );
         }
+        if (classificationIssues) {
+          // The original lists may contain worker-relative paths that become
+          // dangling as soon as the disposable worktree is removed. Never
+          // publish those stale paths after classification failed.
+          result.touchedFiles = [];
+          result.attributedFiles = [];
+          result.fileAttributions = [];
+        }
         result.integration = {
           status: "discarded",
           proposedFiles: [],
           appliedFiles: [],
           ...(classificationIssues ? { classificationIssues } : {}),
         };
-        await removeWorktree(group.sourceRoot, worker.workerRoot);
+        await requireWorktreeRemoved(group.sourceRoot, worker.workerRoot);
         continue;
       }
 
@@ -783,7 +885,7 @@ async function reconcileGroup(
         group.baselineCommit,
         proposalCommit,
       );
-      await removeWorktree(group.sourceRoot, worker.workerRoot);
+      await requireWorktreeRemoved(group.sourceRoot, worker.workerRoot);
 
       if (!proposedFiles.length) {
         result.integration = {
@@ -818,7 +920,7 @@ async function reconcileGroup(
           proposedFiles,
           appliedFiles: proposedFiles,
         };
-        await removeWorktree(group.sourceRoot, candidateRoot);
+        await requireWorktreeRemoved(group.sourceRoot, candidateRoot);
       } catch (error) {
         const reason =
           error instanceof GitCommandError
@@ -843,7 +945,7 @@ async function reconcileGroup(
         worker.proposalRef,
       );
       const patchExists = fs.existsSync(worker.patchPath);
-      const worktreeExists = fs.existsSync(worker.workerRoot);
+      const worktreeExists = pathEntryExists(worker.workerRoot);
       result.integration = {
         status: "apply_failed",
         proposedFiles,
@@ -863,7 +965,7 @@ async function reconcileGroup(
   }
 
   if (integratedCommit === group.baselineCommit) {
-    await removeWorktree(group.sourceRoot, pristineRoot);
+    await requireWorktreeRemoved(group.sourceRoot, pristineRoot);
     return;
   }
 
@@ -897,7 +999,7 @@ async function reconcileGroup(
         patchPath: worker.patchPath,
       };
     }
-    await removeWorktree(group.sourceRoot, pristineRoot);
+    await requireWorktreeRemoved(group.sourceRoot, pristineRoot);
     return;
   }
 
@@ -969,7 +1071,7 @@ async function reconcileGroup(
     return;
   }
 
-  await removeWorktree(group.sourceRoot, pristineRoot);
+  await requireWorktreeRemoved(group.sourceRoot, pristineRoot);
 }
 
 async function deletePrivateRefs(
@@ -1011,14 +1113,7 @@ async function markGroupReconciliationFailure(
   for (const taskIndex of group.taskIndexes) {
     const result = results[taskIndex]!;
     const current = result.integration;
-    if (
-      current?.status === "conflict" ||
-      current?.status === "apply_failed" ||
-      current?.status === "no_changes" ||
-      current?.status === "discarded"
-    ) {
-      continue;
-    }
+    if (current?.status === "conflict") continue;
 
     const worker = workers.get(taskIndex)!;
     const proposalExists = await privateRefExists(
@@ -1026,9 +1121,9 @@ async function markGroupReconciliationFailure(
       worker.proposalRef,
     );
     const patchExists = fs.existsSync(worker.patchPath);
-    const recoveryWorktree = fs.existsSync(worker.workerRoot)
+    const recoveryWorktree = pathEntryExists(worker.workerRoot)
       ? worker.workerRoot
-      : fs.existsSync(pristineRoot)
+      : pathEntryExists(pristineRoot)
         ? pristineRoot
         : undefined;
     result.workspace = "isolated";
@@ -1141,6 +1236,10 @@ export async function prepareIsolatedBatch(
           cwd: sourceRoot,
           signal,
         });
+        let finishReconciliation!: () => void;
+        const reconciliationDone = new Promise<void>((resolve) => {
+          finishReconciliation = resolve;
+        });
         group = {
           sourceRoot,
           sourceHead,
@@ -1148,6 +1247,9 @@ export async function prepareIsolatedBatch(
           baselineCommit,
           baselineRef,
           taskIndexes: [],
+          reconciliationDone,
+          finishReconciliation,
+          deferredCleanupTail: Promise.resolve(),
         };
         groupsByRoot.set(sourceRoot, group);
       }
@@ -1215,15 +1317,26 @@ export async function prepareIsolatedBatch(
     async reconcile(results: TaskResult[]): Promise<TaskResult[]> {
       for (const group of groupsByRoot.values()) {
         try {
-          await reconcileGroup(group, workers, results);
-        } catch (error) {
-          console.error(
-            "[delegate] isolated group reconciliation failed",
-            error,
-          );
-          await markGroupReconciliationFailure(group, workers, results, error);
+          try {
+            await reconcileGroup(group, workers, results);
+          } catch (error) {
+            console.error(
+              "[delegate] isolated group reconciliation failed",
+              error,
+            );
+            await markGroupReconciliationFailure(
+              group,
+              workers,
+              results,
+              error,
+            );
+          }
+          await cleanupCompletedGroupRefs(group, workers, results);
+        } finally {
+          // Unblocks and serializes any safety-confirmed quarantine cleanups
+          // only after all candidate/source/ref work for this group is done.
+          group.finishReconciliation();
         }
-        await cleanupCompletedGroupRefs(group, workers, results);
       }
       return results;
     },

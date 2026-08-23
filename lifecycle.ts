@@ -33,14 +33,14 @@ import { scheduleDeadline } from "./timer.ts";
 import { recordTask } from "./telemetry.ts";
 import { createScratchWorkspace, ScratchDeadlineError } from "./workspace.ts";
 import {
-  isResumeFromQuarantined,
+  isResumeFromIdentityQuarantined,
   isSessionIdQuarantined,
   markSessionQuarantined,
   observeQuarantineSafety,
   propagateSessionQuarantine,
   reserveSessionQuarantine,
   sessionQuarantineOf,
-  withResumeFromLock,
+  withResumeTranscriptLock,
   type SessionQuarantine,
 } from "./session-quarantine.ts";
 
@@ -113,12 +113,14 @@ function failTask(
   task: ResolvedTask,
   error: string,
   sessionFile?: string,
+  failureKind?: TaskResult["failureKind"],
 ): TaskResult {
   return {
     id: task.id,
     agent: task.agentName,
     output: "",
     error,
+    failureKind,
     durationMs: 0,
     tokens: 0,
     usage: emptyUsage(),
@@ -194,8 +196,10 @@ function quarantineAcquiredSession(
   }
 
   // Publish the admission reservation before this task can return and its
-  // active dispatch reservation is released.
-  reserveSessionQuarantine(task, quarantine);
+  // active dispatch reservation is released. task.resumeFrom is already the
+  // canonical path passed to acquisition; never resolve the caller's alias
+  // again here.
+  reserveSessionQuarantine(task, quarantine, task.resumeFrom);
   console.error(
     mayDisposeAfterSafety
       ? `[delegate] AgentSession${task.sessionId ? ` '${task.sessionId}'` : ""} quarantined; deferred disposal is waiting for background quiescence confirmation`
@@ -440,6 +444,7 @@ function canRetryWholeTask(
   // are the direct side-effect signals.
   return (
     !sessionQuarantineOf(result) &&
+    result.failureKind !== "cancelled" &&
     result.failureKind !== "stalled" &&
     result.failureKind !== "model_error" &&
     result.failureKind !== "deadline_exceeded" &&
@@ -735,27 +740,74 @@ export async function runResolvedTask(
   p: TaskProgress,
   taskIndex: number,
 ): Promise<TaskResult> {
-  return withResumeFromLock(task.resumeFrom, async () => {
+  return withResumeTranscriptLock(task.resumeFrom, async (transcript) => {
+    let executionTask = task;
+    if (task.resumeFrom) {
+      const resumeFromPathError = validateResumeFromPath(task.resumeFrom);
+      if (resumeFromPathError) {
+        return recordTaskOutcome(
+          env,
+          p,
+          task,
+          finishTask(
+            env,
+            p,
+            failTask(
+              task,
+              `resumeFrom: invalid session path: ${resumeFromPathError}; got ${JSON.stringify(task.resumeFrom)}`,
+            ),
+          ),
+        );
+      }
+      if (!transcript?.canonicalPath || !transcript.exists) {
+        const missingPath =
+          transcript?.lexicalPath ?? resolveCwd(task.resumeFrom);
+        return recordTaskOutcome(
+          env,
+          p,
+          task,
+          finishTask(
+            env,
+            p,
+            failTask(
+              task,
+              `resumeFrom: file not found or could not be resolved: ${missingPath}`,
+              missingPath,
+            ),
+          ),
+        );
+      }
+      // Every check, acquisition, and quarantine publication below uses this
+      // one physical identity. Never consult the caller's mutable alias again.
+      executionTask = { ...task, resumeFrom: transcript.canonicalPath };
+    }
+
     const runLocked = async (): Promise<TaskResult> => {
       let quarantineError: string | undefined;
-      if (task.sessionId && isSessionIdQuarantined(task.sessionId)) {
-        quarantineError = `SessionId '${task.sessionId}' is quarantined after abandonment. Wait for background safety confirmation before reusing it.`;
-      } else if (task.resumeFrom && isResumeFromQuarantined(task.resumeFrom)) {
+      if (
+        executionTask.sessionId &&
+        isSessionIdQuarantined(executionTask.sessionId)
+      ) {
+        quarantineError = `SessionId '${executionTask.sessionId}' is quarantined after abandonment. Wait for background safety confirmation before reusing it.`;
+      } else if (
+        executionTask.resumeFrom &&
+        isResumeFromIdentityQuarantined(executionTask.resumeFrom)
+      ) {
         quarantineError = `resumeFrom transcript '${task.resumeFrom}' is quarantined after abandonment. Wait for background safety confirmation before resuming it.`;
       }
       if (quarantineError) {
         return recordTaskOutcome(
           env,
           p,
-          task,
-          finishTask(env, p, failTask(task, quarantineError)),
+          executionTask,
+          finishTask(env, p, failTask(executionTask, quarantineError)),
         );
       }
-      return runResolvedTaskUnlocked(env, task, p, taskIndex);
+      return runResolvedTaskUnlocked(env, executionTask, p, taskIndex);
     };
 
-    return task.sessionId
-      ? pool.withSessionLock(task.sessionId, runLocked)
+    return executionTask.sessionId
+      ? pool.withSessionLock(executionTask.sessionId, runLocked)
       : runLocked();
   });
 }
@@ -833,7 +885,11 @@ async function runResolvedTaskUnlocked(
               ? formatDeadlineExceededError(task.deadlineMs ?? 0)
               : setupError,
         ),
-        failureKind: deadlineExceeded ? "deadline_exceeded" : undefined,
+        failureKind: env.signal?.aborted
+          ? "cancelled"
+          : deadlineExceeded
+            ? "deadline_exceeded"
+            : undefined,
         durationMs: Date.now() - startedAt,
       }),
     );
@@ -869,44 +925,91 @@ async function runResolvedTaskUnlocked(
         )
         .map((entry) => path.resolve(entry.preExecutionPhysicalPath!)),
     );
-    const projectedAttributions = (
-      await Promise.all(
-        fileAttributions.map((entry) =>
-          workspace.resolveFileAttribution
-            ? workspace.resolveFileAttribution(entry)
-            : Promise.resolve(entry),
-        ),
-      )
-    ).filter(
-      (entry): entry is NonNullable<typeof entry> => entry !== undefined,
+    const logProjectionFailure = (
+      kind: string,
+      candidate: string,
+      error: unknown,
+    ) => {
+      const safeJson = (value: string) =>
+        JSON.stringify(
+          value.length > 1_024
+            ? `${value.slice(0, 1_024)}…[truncated ${value.length - 1_024} chars]`
+            : value,
+        )
+          .replace(/\u2028/g, "\\u2028")
+          .replace(/\u2029/g, "\\u2029");
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(
+        `[delegate] scratch ${kind} projection failed for ${safeJson(candidate)} (reason=${safeJson(reason)}); retaining conservative lexical evidence`,
+      );
+    };
+    const attributionSettled = await Promise.allSettled(
+      fileAttributions.map((entry) =>
+        workspace.resolveFileAttribution
+          ? workspace.resolveFileAttribution(entry)
+          : Promise.resolve(entry),
+      ),
     );
-    const projectedTouched = (
-      await Promise.all(
-        result.touchedFiles.map((file) => {
-          const absolute = path.resolve(file);
-          // Preserve this touched-file evidence, but project it lexically: a
-          // realpath now could follow a replacement symlink. attributedFiles
-          // separately decides whether the physical target was disposable.
-          if (attributedPhysicalPaths.has(absolute)) {
-            return workspace.mapPathToSource(absolute);
-          }
-          const attribution = attributionByLexical.get(absolute);
-          if (attribution && workspace.resolveAttributedLexicalTouch) {
-            return workspace.resolveAttributedLexicalTouch(attribution);
-          }
-          return workspace.resolveReportedPath(file);
-        }),
-      )
-    ).filter((file): file is string => file !== undefined);
-    const projectedAttributedFiles = fileAttributions.length
-      ? projectedAttributions.map(projectedAttributionPath)
-      : (
-          await Promise.all(
-            (result.attributedFiles ?? []).map((file) =>
-              workspace.resolveAttributedPath(file),
-            ),
-          )
-        ).filter((file): file is string => file !== undefined);
+    const projectedAttributions = attributionSettled
+      .map((settled, index) => {
+        if (settled.status === "fulfilled") return settled.value;
+        const entry = fileAttributions[index]!;
+        logProjectionFailure("attribution", entry.lexicalPath, settled.reason);
+        return {
+          ...entry,
+          lexicalPath: workspace.mapPathToSource(entry.lexicalPath),
+          preExecutionPhysicalPath: entry.preExecutionPhysicalPath
+            ? workspace.mapPathToSource(entry.preExecutionPhysicalPath)
+            : undefined,
+          uncertain: true,
+        };
+      })
+      .filter(
+        (entry): entry is NonNullable<typeof entry> => entry !== undefined,
+      );
+    const touchedSettled = await Promise.allSettled(
+      result.touchedFiles.map(async (file) => {
+        const absolute = path.resolve(file);
+        // Preserve this touched-file evidence, but project it lexically: a
+        // realpath now could follow a replacement symlink. attributedFiles
+        // separately decides whether the physical target was disposable.
+        if (attributedPhysicalPaths.has(absolute)) {
+          return workspace.mapPathToSource(absolute);
+        }
+        const attribution = attributionByLexical.get(absolute);
+        if (attribution && workspace.resolveAttributedLexicalTouch) {
+          return workspace.resolveAttributedLexicalTouch(attribution);
+        }
+        return workspace.resolveReportedPath(file);
+      }),
+    );
+    const projectedTouched = touchedSettled
+      .map((settled, index) => {
+        if (settled.status === "fulfilled") return settled.value;
+        const file = result!.touchedFiles[index]!;
+        logProjectionFailure("touched-path", file, settled.reason);
+        return workspace.mapPathToSource(file);
+      })
+      .filter((file): file is string => file !== undefined);
+    let projectedAttributedFiles: string[];
+    if (fileAttributions.length) {
+      projectedAttributedFiles = projectedAttributions.map(
+        projectedAttributionPath,
+      );
+    } else {
+      const legacy = result.attributedFiles ?? [];
+      const legacySettled = await Promise.allSettled(
+        legacy.map((file) => workspace.resolveAttributedPath(file)),
+      );
+      projectedAttributedFiles = legacySettled
+        .map((settled, index) => {
+          if (settled.status === "fulfilled") return settled.value;
+          const file = legacy[index]!;
+          logProjectionFailure("attributed-path", file, settled.reason);
+          return workspace.mapPathToSource(file);
+        })
+        .filter((file): file is string => file !== undefined);
+    }
     result = {
       ...result,
       workspace: "scratch",
@@ -1192,8 +1295,8 @@ async function settlePooledAttempt(
   // A pre-prompt deadline (runner never called session.prompt()) left
   // the session in its pre-task state, so return it to the pool intact.
   if (
+    r.failureKind === "cancelled" ||
     r.failureKind === "stalled" ||
-    r.error === "Aborted" ||
     (r.failureKind === "deadline_exceeded" && r.prompted !== false)
   ) {
     try {
@@ -1312,7 +1415,8 @@ function quarantineAbandonedAcquisition(
   const quarantine = { safe };
   // Publish before returning the terminal task result. This bridges shared
   // admission from the active dispatch reservation to quarantine atomically.
-  reserveSessionQuarantine(task, quarantine);
+  // task.resumeFrom is the exact identity supplied to acquisition.
+  reserveSessionQuarantine(task, quarantine, task.resumeFrom);
   return quarantine;
 }
 
@@ -1342,7 +1446,7 @@ async function runTaskAttempt(
     const quarantine = quarantineAbandonedAcquisition(task, acquisition);
     const result =
       acquisitionOutcome.reason === "parent-aborted"
-        ? failTask(task, "Aborted")
+        ? failTask(task, "Aborted", undefined, "cancelled")
         : deadlineExceededResult(task, timing);
     return markSessionQuarantined(result, quarantine);
   }
@@ -1359,7 +1463,7 @@ async function runTaskAttempt(
     // cancelled ticket should not even start the subagent (no file writes, no
     // pool insert).
     if (env.signal?.aborted) {
-      return failTask(task, "Aborted");
+      return failTask(task, "Aborted", undefined, "cancelled");
     }
 
     // Snapshot git status before the run so touchedFiles can diff after.
@@ -1386,7 +1490,7 @@ async function runTaskAttempt(
     // collecting post-prompt evidence. Keep cancellation from looking like
     // success; finally below releases any uncommitted session.
     if (env.signal?.aborted && !r.error) {
-      r = { ...r, error: "Aborted" };
+      r = { ...r, error: "Aborted", failureKind: "cancelled" };
     }
 
     const quarantine = sessionQuarantineOf(r);
@@ -1538,7 +1642,7 @@ async function runWithWholeTaskRetries(
       // while recording that the retry loop was aborted. The task already
       // paid for every completed attempt, including the one before sleep;
       // counters are reconciled by the single return below.
-      result = { ...result, error: "Aborted" };
+      result = { ...result, error: "Aborted", failureKind: "cancelled" };
       break;
     }
 
@@ -1575,7 +1679,11 @@ async function runResolvedTaskCore(
 ): Promise<TaskOutcome> {
   try {
     if (env.signal?.aborted) {
-      return finishTask(env, p, failTask(task, "Aborted"));
+      return finishTask(
+        env,
+        p,
+        failTask(task, "Aborted", undefined, "cancelled"),
+      );
     }
 
     // Primary busy validation is in execute() before ticket creation.

@@ -6,8 +6,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   _setIsolatedArtifactRootForTesting,
+  _setRemoveWorktreeHookForTesting,
   prepareIsolatedBatch,
 } from "./isolated-workspace.ts";
+import { snapshotPhysicalToolTarget } from "./file-tracking.ts";
 import { emptyUsage } from "./usage.ts";
 import { markSessionQuarantined } from "./session-quarantine.ts";
 import type { ResolvedTask, TaskResult } from "./types.ts";
@@ -72,6 +74,7 @@ describe("Git-native isolated workspace", () => {
 
   afterEach(() => {
     _setIsolatedArtifactRootForTesting(undefined);
+    _setRemoveWorktreeHookForTesting(undefined);
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -334,6 +337,35 @@ describe("Git-native isolated workspace", () => {
     );
   });
 
+  test("marks a changed pre-execution symlink chain uncertain and retains it", async () => {
+    if (process.platform === "win32") return;
+    const oldTarget = path.join(root, "old-external.txt");
+    const newTarget = path.join(root, "new-external.txt");
+    fs.writeFileSync(oldTarget, "old\n");
+    fs.writeFileSync(newTarget, "new\n");
+    fs.symlinkSync(oldTarget, path.join(repo, "chain-link"));
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    const workerLink = path.join(one!.cwd, "chain-link");
+    const attribution = snapshotPhysicalToolTarget(
+      { name: "write", args: { path: workerLink } },
+      one!.cwd,
+    )!;
+    expect(attribution.uncertain).toBe(false);
+    fs.unlinkSync(workerLink);
+    fs.symlinkSync(newTarget, workerLink);
+    const workerResult = success();
+    workerResult.touchedFiles = [workerLink];
+    workerResult.attributedFiles = [oldTarget];
+    workerResult.fileAttributions = [attribution];
+
+    const [result] = await batch!.reconcile([workerResult]);
+
+    expect(result!.fileAttributions?.[0]?.uncertain).toBe(true);
+    expect(result!.attributedFiles).toContain(oldTarget);
+    expect(result!.integration?.status).toBe("applied_unverified");
+  });
+
   test("does not re-resolve a physical snapshot after that node becomes a symlink", async () => {
     if (process.platform === "win32") return;
     const external = path.join(root, "replacement-target.txt");
@@ -500,8 +532,27 @@ describe("Git-native isolated workspace", () => {
         "(attribution)",
       );
     }
+    expect(result!.touchedFiles).toEqual([]);
+    expect(result!.attributedFiles).toEqual([]);
+    expect(result!.fileAttributions).toEqual([]);
     expect(fs.existsSync(one!.cwd)).toBe(false);
     expect(privateRefs(repo)).toEqual([]);
+  });
+
+  test("surfaces failed worker removal with apply_failed recovery metadata", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    const failed = { ...success(), error: "original worker failure" };
+    _setRemoveWorktreeHookForTesting((destination) =>
+      destination === one!.cwd ? false : undefined,
+    );
+
+    const [result] = await batch!.reconcile([failed]);
+
+    expect(result!.error).toBe("original worker failure");
+    expect(result!.integration?.status).toBe("apply_failed");
+    expect(result!.integration?.worktreePath).toBe(one!.cwd);
+    expect(fs.existsSync(one!.cwd)).toBe(true);
   });
 
   test("terminates worker-rooted processes before classifying failed tasks", async () => {
@@ -538,6 +589,19 @@ describe("Git-native isolated workspace", () => {
 
     expect(result!.integration?.status).toBe("no_changes");
     expect(privateRefs(repo)).toEqual([]);
+  });
+
+  test("surfaces pristine cleanup failure with a retained recovery path", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    _setRemoveWorktreeHookForTesting((destination) =>
+      path.basename(destination) === "pristine" ? false : undefined,
+    );
+
+    const [result] = await batch!.reconcile([success()]);
+
+    expect(result!.integration?.status).toBe("apply_failed");
+    expect(result!.integration?.worktreePath).toEndWith("/pristine");
+    expect(fs.existsSync(result!.integration!.worktreePath!)).toBe(true);
   });
 
   test("removes an earlier baseline ref when batch preparation fails", async () => {
@@ -580,6 +644,32 @@ describe("Git-native isolated workspace", () => {
     expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
       "baseline\n",
     );
+  });
+
+  test("queues safety-confirmed worker cleanup until group reconciliation completes", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    const removalOrder: string[] = [];
+    _setRemoveWorktreeHookForTesting((destination) => {
+      removalOrder.push(path.basename(destination));
+      return undefined;
+    });
+    const abandoned = markSessionQuarantined(success(), {
+      safe: Promise.resolve(),
+    });
+
+    await batch!.reconcile([abandoned]);
+    for (
+      let attempt = 0;
+      attempt < 100 &&
+      (!removalOrder.includes("worker-0") || fs.existsSync(one!.cwd));
+      attempt++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(removalOrder).toEqual(["pristine", "worker-0"]);
+    expect(fs.existsSync(one!.cwd)).toBe(false);
   });
 
   test("terminates a background process before snapshotting", async () => {

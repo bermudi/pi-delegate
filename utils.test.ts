@@ -42,6 +42,11 @@ describe("terminal text sanitization", () => {
     expect(sanitizeTerminalText(input)).toBe("head column\nline\ntail");
   });
 
+  test("standalone ESC-backslash ST preserves a word boundary", () => {
+    expect(stripAnsi("left\x1b\\right")).toBe("left right");
+    expect(sanitizeTerminalLine("left\x1b\\right")).toBe("left right");
+  });
+
   test("malformed generic ESC does not split or remove Unicode text", () => {
     expect(stripAnsi("a\x1b😀b")).toBe("a😀b");
   });

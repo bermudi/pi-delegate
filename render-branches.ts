@@ -285,9 +285,12 @@ function hasUserCancellationMarker(
   progress: TaskProgress,
   result: TaskResult | { error: string } | undefined,
 ): boolean {
-  if (progress.error === "Aborted") return true;
-  if (result && "error" in result && result.error === "Aborted") return true;
-  return false;
+  if (progress.failureKind === "cancelled") return true;
+  return (
+    result !== undefined &&
+    "failureKind" in result &&
+    result.failureKind === "cancelled"
+  );
 }
 
 /** Final (or async-ticket poll) view — static status glyphs, output previews,
@@ -328,8 +331,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     ticketStatus === "running" ||
     ticketStatus === "cancelling";
   // Terminal tickets render stale running/pending rows with a terminal glyph.
-  // A caller-aborted task retains the explicit `Aborted` progress/result marker
-  // after settling; count it as cancelled rather than as a generic failure.
+  // A caller-aborted task retains a structured cancellation marker after
+  // settling; count it as cancelled rather than as a generic failure. Provider
+  // failures whose human-facing text happens to be "Aborted" remain failures.
   const terminalUnfinished = ticketIsLive ? 0 : running + pending;
   const terminalFinalized = finalized + terminalUnfinished;
   const terminalCancelled =

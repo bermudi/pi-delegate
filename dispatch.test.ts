@@ -121,6 +121,7 @@ describe("dispatch-time shared-write gate", () => {
         agentName: "coder",
       } as ResolvedTask,
       { safe },
+      undefined,
     );
 
     const model = { provider: "test", id: "model" } as any;
@@ -175,6 +176,7 @@ describe("dispatch-time shared-write gate", () => {
           agentName: "scout",
         } as ResolvedTask,
         { safe: new Promise<void>(() => {}) },
+        undefined,
       );
       const model = { provider: "test", id: "model" } as any;
       const result = await dispatchDelegate({

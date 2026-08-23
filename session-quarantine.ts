@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { ResolvedTask } from "./types.ts";
 import { canonicalPath } from "./trusted-paths.ts";
 import { resolveCwd } from "./utils.ts";
@@ -22,10 +23,21 @@ export type WithSessionQuarantine = {
 interface QuarantineReservation {
   task: ResolvedTask;
   quarantine: SessionQuarantine;
-  /** Physical transcript identity captured while the abandoned task still
-   * owns it. This prevents a symlink or lexical alias from bypassing the
-   * quarantine with a second `resumeFrom`. */
+  /** Physical transcript identity used to acquire the abandoned session.
+   * This is passed through from acquisition and must never be re-resolved at
+   * publication time: a symlink may have changed while the task was running. */
   resumeFromIdentity?: string;
+}
+
+/** Identity snapshot supplied while a resume transcript lock is held. */
+export interface LockedResumeTranscript {
+  /** Stable absolute spelling used even when the transcript does not exist. */
+  lexicalPath: string;
+  /** Physical target captured once for this acquisition. */
+  canonicalPath?: string;
+  /** The captured physical target still existed after this call acquired all
+   * applicable lexical/physical locks. */
+  exists: boolean;
 }
 
 /** Process-local admission reservations for abandoned tasks. A reservation is
@@ -37,10 +49,9 @@ const quarantineReservations = new Map<symbol, QuarantineReservation>();
  * tasks (which have no sessionId and therefore do not use the pool lock). */
 const resumeFromLocks = new Map<string, Promise<void>>();
 
-/** Resolve an existing resume transcript to the physical path used as its
- * process-local identity. Invalid or missing paths are left to normal
- * resumeFrom validation and cannot match a reservation created from an
- * existing transcript. */
+/** Resolve an existing resume transcript to its current physical identity.
+ * Admission-time callers use this as a best-effort early rejection only; the
+ * lifecycle lock captures and carries the authoritative acquisition identity. */
 export function canonicalResumeFromIdentity(
   resumeFrom: string | undefined,
 ): string | undefined {
@@ -95,17 +106,18 @@ export function observeQuarantineSafety(
 }
 
 /** Reserve the task's shared-write capability and logical session identities
- * until safe. Transcript identity is canonicalized at publication time while
- * the path is known to belong to the abandoned acquisition/session. */
+ * until safe. `resumeFromIdentity` must be the exact canonical path passed to
+ * acquisition; publication deliberately performs no mutable-path lookup. */
 export function reserveSessionQuarantine(
   task: ResolvedTask,
   quarantine: SessionQuarantine,
+  resumeFromIdentity: string | undefined,
 ): void {
   const key = Symbol("quarantined-task");
   quarantineReservations.set(key, {
     task,
     quarantine,
-    resumeFromIdentity: canonicalResumeFromIdentity(task.resumeFrom),
+    resumeFromIdentity,
   });
   observeQuarantineSafety(
     quarantine,
@@ -130,39 +142,89 @@ export function isSessionIdQuarantined(sessionId: string): boolean {
   return false;
 }
 
-export function isResumeFromQuarantined(resumeFrom: string): boolean {
-  const identity = canonicalResumeFromIdentity(resumeFrom);
-  if (!identity) return false;
+export function isResumeFromIdentityQuarantined(identity: string): boolean {
   for (const reservation of quarantineReservations.values()) {
     if (reservation.resumeFromIdentity === identity) return true;
   }
   return false;
 }
 
-/** Serialize uses of one physical resume transcript so a queued call rechecks
- * quarantine after the preceding owner publishes an abandonment reservation. */
-export async function withResumeFromLock<T>(
-  resumeFrom: string | undefined,
+export function isResumeFromQuarantined(resumeFrom: string): boolean {
+  const identity = canonicalResumeFromIdentity(resumeFrom);
+  return identity ? isResumeFromIdentityQuarantined(identity) : false;
+}
+
+async function withResumeLockKeys<T>(
+  identities: string[],
   fn: () => Promise<T>,
 ): Promise<T> {
-  const identity = canonicalResumeFromIdentity(resumeFrom);
-  if (!identity) return fn();
-
-  const previous = resumeFromLocks.get(identity);
+  const keys = [...new Set(identities)].sort();
+  const previous = keys
+    .map((identity) => resumeFromLocks.get(identity))
+    .filter((pending): pending is Promise<void> => pending !== undefined);
   let release!: () => void;
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
-  resumeFromLocks.set(identity, current);
+  // Publish every claim before waiting. A later caller sharing any lexical or
+  // physical identity therefore queues behind this owner rather than racing a
+  // different key in the set.
+  for (const identity of keys) resumeFromLocks.set(identity, current);
   try {
-    if (previous) await previous;
+    await Promise.all(previous);
     return await fn();
   } finally {
     release();
-    if (resumeFromLocks.get(identity) === current) {
-      resumeFromLocks.delete(identity);
+    for (const identity of keys) {
+      if (resumeFromLocks.get(identity) === current) {
+        resumeFromLocks.delete(identity);
+      }
     }
   }
+}
+
+/** Serialize transcript acquisition without trusting a mutable path twice.
+ *
+ * Every call claims its stable absolute lexical spelling, so missing and
+ * unresolvable paths never fail open. Existing targets additionally claim the
+ * pre-wait canonical snapshot, which serializes symlink aliases and pins a
+ * queued call to the target it named when it entered. If a formerly missing
+ * path becomes resolvable while waiting, its new physical key is claimed
+ * before the callback runs. Existence is then checked under all applicable
+ * locks and the same canonical path is passed through to acquisition. */
+export async function withResumeTranscriptLock<T>(
+  resumeFrom: string | undefined,
+  fn: (transcript: LockedResumeTranscript | undefined) => Promise<T>,
+): Promise<T> {
+  if (!resumeFrom) return fn(undefined);
+
+  const lexicalPath = resolveCwd(resumeFrom);
+  const preWaitCanonicalPath = canonicalPath(lexicalPath);
+  const initialKeys = preWaitCanonicalPath
+    ? [lexicalPath, preWaitCanonicalPath]
+    : [lexicalPath];
+
+  return withResumeLockKeys(initialKeys, async () => {
+    // Preserve an existing target captured before waiting. Only retry
+    // canonicalization when there was no target to capture at call entry.
+    const canonicalPathOnce =
+      preWaitCanonicalPath ?? canonicalPath(lexicalPath);
+    const invoke = async (): Promise<T> =>
+      fn({
+        lexicalPath,
+        canonicalPath: canonicalPathOnce,
+        exists:
+          canonicalPathOnce !== undefined && existsSync(canonicalPathOnce),
+      });
+
+    // A missing/broken symlink can become a physical alias while queued. Claim
+    // that identity before validation/acquisition so it cannot race an owner
+    // that entered through the physical path or another alias.
+    if (canonicalPathOnce && !initialKeys.includes(canonicalPathOnce)) {
+      return withResumeLockKeys([canonicalPathOnce], invoke);
+    }
+    return invoke();
+  });
 }
 
 /** @internal Test-only reset. Existing safety observers are token-scoped, so a

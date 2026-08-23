@@ -27,6 +27,7 @@ import {
   inFlightActivity,
   latestActivity,
   formatActivityLabel,
+  formatToolCallShort,
   compactActivity,
   taskMetaBase,
   waitingLabel,
@@ -2078,11 +2079,12 @@ describe("formatFailedTask", () => {
     expect(formatFailedTask(r)).toEqual(["[FAILED: unknown error]"]);
   });
 
-  test("labels aborts as ABORTED and surfaces touched files + partial output", () => {
+  test("labels structured cancellations as ABORTED and surfaces touched files + partial output", () => {
     const r: ResultLike = {
       agent: "scout",
       output: "partial output here",
       error: "Aborted",
+      failureKind: "cancelled",
       durationMs: 1000,
       tokens: 42,
       touchedFiles: ["/home/daniel/build/pi-delegate/src/foo.ts"],
@@ -2091,6 +2093,18 @@ describe("formatFailedTask", () => {
     expect(lines[0]).toContain("[ABORTED: Aborted");
     expect(lines[0]).toContain("touched (best-effort): src/foo.ts");
     expect(lines.some((l) => l.includes("partial output here"))).toBe(true);
+  });
+
+  test("does not infer cancellation from provider error text", () => {
+    const r: ResultLike = {
+      agent: "scout",
+      output: "",
+      error: "Aborted",
+      durationMs: 1000,
+      tokens: 0,
+      touchedFiles: [],
+    };
+    expect(formatFailedTask(r)).toEqual(["[FAILED: Aborted]"]);
   });
 
   test("model_error failure → hint names the model field for resume-on-different-model", () => {
@@ -4160,6 +4174,14 @@ describe("delegate renderers", () => {
     expect(expandedText).toContain("1.ts");
     expect(expandedText).toContain("2.ts");
     expect(expandedText).toContain("3.ts");
+  });
+
+  test("formatToolCallShort tolerates JSON.stringify returning undefined", () => {
+    expect(
+      formatToolCallShort("custom", {
+        toJSON: () => undefined,
+      }),
+    ).toBe("custom");
   });
 
   test("formatToolCallShort: various tool types render correctly", async () => {

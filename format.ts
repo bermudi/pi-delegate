@@ -310,7 +310,9 @@ export function formatToolCallShort(
         }
       }
       try {
-        const serialized = sanitizeTerminalLine(JSON.stringify(args));
+        const json = JSON.stringify(args);
+        if (json === undefined) return safeName;
+        const serialized = sanitizeTerminalLine(json);
         const preview = serialized.slice(0, 50);
         return `${safeName} ${preview}${serialized.length > 50 ? "…" : ""}`;
       } catch {
@@ -389,7 +391,7 @@ export function formatFailedTask(
   if (r.incomplete === "quiescence_abandoned") {
     parts.push(INCOMPLETE_QUIESCENCE_WARNING);
   }
-  const isAbort = r.error === "Aborted";
+  const isAbort = r.failureKind === "cancelled";
   // Empty string is falsy but not nullish — `||` covers both undefined and "".
   const failParts = [r.error || "unknown error"];
   if (r.sessionFile) failParts.push(`session: ${shortenPath(r.sessionFile)}`);

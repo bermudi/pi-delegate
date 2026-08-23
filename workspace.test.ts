@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -780,6 +780,64 @@ describe("scratch workspace", () => {
         });
         await workspace.cleanup();
       } finally {
+        cleanTestDir(parent);
+      }
+    },
+  );
+
+  scratchTest(
+    "retains lexical source evidence across readlink races and logs unexpected failures",
+    async () => {
+      if (process.platform === "win32") return;
+      const parent = testParent();
+      const repo = path.join(parent, "repo");
+      fs.mkdirSync(repo);
+      fs.writeFileSync(path.join(repo, "target.txt"), "target");
+      fs.symlinkSync("target.txt", path.join(repo, "link.txt"));
+      execFileSync("git", ["init", "--quiet"], { cwd: repo });
+      const log = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const workspace = await createScratchWorkspace(repo);
+        const scratchLink = path.join(workspace.cwd, "link.txt");
+        const sourceLink = path.join(repo, "link.txt");
+        const original = fs.promises.readlink;
+        let failureCode = "ENOENT";
+        const readlink = spyOn(fs.promises, "readlink").mockImplementation(
+          async (candidate, options) => {
+            if (path.resolve(String(candidate)) === scratchLink) {
+              throw Object.assign(new Error("simulated readlink race"), {
+                code: failureCode,
+              });
+            }
+            return original(candidate, options as never) as Promise<string>;
+          },
+        );
+        const attribution = {
+          lexicalPath: scratchLink,
+          preExecutionPhysicalPath: path.join(workspace.cwd, "target.txt"),
+          provenance: "write" as const,
+          uncertain: false,
+        };
+        try {
+          expect(
+            await workspace.resolveAttributedLexicalTouch?.(attribution),
+          ).toBe(sourceLink);
+          expect(log).not.toHaveBeenCalled();
+
+          failureCode = "EACCES";
+          expect(
+            await workspace.resolveAttributedLexicalTouch?.(attribution),
+          ).toBe(sourceLink);
+          expect(String(log.mock.calls.at(-1)?.[0])).toContain(
+            "scratch attribution readlink failed",
+          );
+          expect(String(log.mock.calls.at(-1)?.[0])).toContain("errno=EACCES");
+        } finally {
+          readlink.mockRestore();
+          await workspace.cleanup();
+        }
+      } finally {
+        log.mockRestore();
         cleanTestDir(parent);
       }
     },

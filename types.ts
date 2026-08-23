@@ -161,6 +161,19 @@ export interface ResolvedTask {
   providerExtensionSources?: string;
 }
 
+export interface FileAttributionPathSignature {
+  /** Absolute component inspected while resolving the pre-execution target. */
+  path: string;
+  /** Filesystem identity. Strings avoid precision loss on platforms whose
+   * inode/device values exceed JavaScript's safe integer range. */
+  dev: string;
+  ino: string;
+  birthtimeMs: number;
+  kind: "directory" | "symlink" | "other";
+  /** Exact link text, present only for symlinks. */
+  symlinkTarget?: string;
+}
+
 export interface FileAttribution {
   /** Absolute path spelled by the tool call. This remains associated with the
    * physical snapshot so a later symlink cannot change what the call targeted. */
@@ -168,10 +181,15 @@ export interface FileAttribution {
   /** Physical target captured synchronously at tool_execution_start. Consumers
    * must not resolve this path again against the mutable post-execution tree. */
   preExecutionPhysicalPath?: string;
+  /** Identity/signature chain used to obtain the physical snapshot. It covers
+   * resolved ancestors and every followed symlink, but excludes a non-symlink
+   * leaf because edit/write is expected to mutate that leaf. */
+  preExecutionPathSignatures?: FileAttributionPathSignature[];
   /** Which explicit native tool supplied this evidence. */
   provenance: "edit" | "write";
-  /** Canonicalization was incomplete or ambiguous. Such evidence is retained
-   * conservatively even when its lexical path is in a disposable workspace. */
+  /** Canonicalization was incomplete, ambiguous, or its signature chain changed
+   * after execution. Such evidence is retained conservatively even when its
+   * lexical path is in a disposable workspace. */
   uncertain: boolean;
 }
 
@@ -192,6 +210,8 @@ export interface ToolActivity {
 }
 
 /** Stable machine-readable reason for a task failure.
+ *  - `cancelled`: the caller or async-ticket controller requested cancellation.
+ *    This must not be inferred from provider error text such as "Aborted".
  *  - `stalled`: inactivity watchdog fired; the prompt was cooperatively aborted.
  *  - `model_error`: the failure is attributable to the resolved model/provider
  *    (account usage limit, quota exhausted, auth lost) — not transient for that
@@ -200,7 +220,8 @@ export interface ToolActivity {
  *  - `deadline_exceeded`: the task's `deadlineMs` wall-clock budget expired
  *    (measured from when the task left the concurrency queue). The prompt was
  *    cooperatively aborted; completed side effects are not rolled back. */
-export type TaskFailureKind = "stalled" | "model_error" | "deadline_exceeded";
+export type TaskFailureKind =
+  "cancelled" | "stalled" | "model_error" | "deadline_exceeded";
 
 export interface TaskProgress {
   id?: string;

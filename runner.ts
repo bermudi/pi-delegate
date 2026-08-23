@@ -61,6 +61,7 @@ function unionGitEvidence(
 function cancellationFailureKind(
   source: CancellationSource | undefined,
 ): TaskFailureKind | undefined {
+  if (source === "parent-aborted") return "cancelled";
   if (source === "deadline") return "deadline_exceeded";
   if (source === "stalled") return "stalled";
   return undefined;
@@ -74,7 +75,7 @@ function resolveRunFailure(
   stallError: () => string,
 ): { error: string | undefined; failureKind: TaskFailureKind | undefined } {
   if (source === "parent-aborted") {
-    return { error: "Aborted", failureKind: undefined };
+    return { error: "Aborted", failureKind: "cancelled" };
   }
   if (source === "deadline") {
     return { error: deadlineError(), failureKind: "deadline_exceeded" };
@@ -810,6 +811,7 @@ export async function runAgentSession(
       touchedFiles: [],
       attributedFiles: [],
       fileAttributions: [],
+      failureKind: "cancelled" as const,
       prompted: false,
     });
   }
@@ -844,6 +846,7 @@ export async function runAgentSession(
         touchedFiles: [],
         attributedFiles: [],
         fileAttributions: [],
+        failureKind: "cancelled" as const,
         prompted: false,
       });
     }

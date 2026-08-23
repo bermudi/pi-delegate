@@ -104,6 +104,7 @@ describe("validateTasks", () => {
         tools: ["read"],
       } as ResolvedTask,
       { safe },
+      undefined,
     );
     const tasks = [{ prompt: "continue", sessionId: "abandoned-session" }];
 
@@ -138,6 +139,7 @@ describe("validateTasks", () => {
         tools: ["read"],
       } as ResolvedTask,
       { safe },
+      transcript,
     );
 
     try {

@@ -695,7 +695,7 @@ export interface TaskSpanInput {
 
 function outcomeFromResult(result: TaskResult): string {
   if (result.error) {
-    return result.error === "Aborted" ? "cancelled" : "failed";
+    return result.failureKind === "cancelled" ? "cancelled" : "failed";
   }
   return "success";
 }

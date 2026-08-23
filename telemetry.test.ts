@@ -337,11 +337,14 @@ describe("telemetry", () => {
     expect(row.failure_kind).toBeUndefined();
   });
 
-  test("outcome is failed for errors and cancelled for abort", () => {
+  test("outcome uses structured cancellation rather than provider error text", () => {
     const { tasks, recorder } = makeRecorder();
     _setTelemetryForTesting(recorder);
 
-    function run(error?: string): TaskRecord {
+    function run(
+      error?: string,
+      failureKind?: TaskResult["failureKind"],
+    ): TaskRecord {
       recordTask({
         callId: "call-2",
         async: true,
@@ -371,6 +374,7 @@ describe("telemetry", () => {
           agent: "a",
           output: "",
           error,
+          failureKind,
           durationMs: 0,
           tokens: 0,
           usage: {
@@ -395,7 +399,8 @@ describe("telemetry", () => {
     }
 
     expect(run("something went wrong").outcome).toBe("failed");
-    expect(run("Aborted").outcome).toBe("cancelled");
+    expect(run("Aborted").outcome).toBe("failed");
+    expect(run("Aborted", "cancelled").outcome).toBe("cancelled");
     expect(run(undefined).outcome).toBe("success");
   });
 

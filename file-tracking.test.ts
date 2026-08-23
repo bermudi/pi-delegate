@@ -8,6 +8,7 @@ import { findTouchedOverlaps } from "./format.ts";
 import {
   extractTouchedFromActivities,
   getGitChangedFiles,
+  revalidateFileAttribution,
   snapshotPhysicalToolTarget,
 } from "./file-tracking.ts";
 
@@ -64,31 +65,97 @@ describe("snapshotPhysicalToolTarget", () => {
   test("marks EACCES canonicalization uncertain and logs candidate plus errno", () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "delegate-attribution-"));
     const candidate = path.join(cwd, "blocked.txt");
-    const original = fs.realpathSync.native;
-    const realpath = spyOn(fs.realpathSync, "native").mockImplementation(((
+    const original = fs.lstatSync;
+    const lstat = spyOn(fs, "lstatSync").mockImplementation(((
       value: fs.PathLike,
+      options?: Parameters<typeof fs.lstatSync>[1],
     ) => {
       if (path.resolve(String(value)) === candidate) {
         throw Object.assign(new Error("permission denied"), { code: "EACCES" });
       }
-      return original(value);
-    }) as typeof fs.realpathSync.native);
+      return original(value, options as never);
+    }) as typeof fs.lstatSync);
     const log = spyOn(console, "error").mockImplementation(() => {});
     try {
       const attribution = snapshotPhysicalToolTarget(
         { name: "write", args: { path: candidate } },
         cwd,
       );
-      expect(attribution).toEqual({
-        lexicalPath: candidate,
-        preExecutionPhysicalPath: undefined,
-        provenance: "write",
-        uncertain: true,
-      });
+      expect(attribution?.lexicalPath).toBe(candidate);
+      expect(attribution?.preExecutionPhysicalPath).toBeUndefined();
+      expect(attribution?.uncertain).toBe(true);
       expect(String(log.mock.calls[0]?.[0])).toContain(candidate);
       expect(String(log.mock.calls[0]?.[0])).toContain("errno=EACCES");
     } finally {
-      realpath.mockRestore();
+      lstat.mockRestore();
+      log.mockRestore();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("revalidates every pre-execution symlink-chain identity", () => {
+    if (process.platform === "win32") return;
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "delegate-attribution-"));
+    const first = path.join(cwd, "first");
+    const second = path.join(cwd, "second");
+    fs.mkdirSync(first);
+    fs.mkdirSync(second);
+    fs.writeFileSync(path.join(first, "target.txt"), "first");
+    fs.writeFileSync(path.join(second, "target.txt"), "second");
+    const alias = path.join(cwd, "alias");
+    fs.symlinkSync(first, alias);
+    try {
+      const attribution = snapshotPhysicalToolTarget(
+        { name: "edit", args: { path: path.join(alias, "target.txt") } },
+        cwd,
+      )!;
+      expect(attribution.preExecutionPhysicalPath).toBe(
+        path.join(first, "target.txt"),
+      );
+      expect(
+        attribution.preExecutionPathSignatures?.some(
+          (signature) => signature.path === alias,
+        ),
+      ).toBe(true);
+      expect(attribution.uncertain).toBe(false);
+
+      fs.unlinkSync(alias);
+      fs.symlinkSync(second, alias);
+      const revalidated = revalidateFileAttribution(attribution);
+      expect(revalidated.preExecutionPhysicalPath).toBe(
+        path.join(first, "target.txt"),
+      );
+      expect(revalidated.uncertain).toBe(true);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("JSON-escapes model-supplied candidates in canonicalization logs", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "delegate-attribution-"));
+    const candidate = path.join(cwd, "bad\n\u001b[31m.txt");
+    const original = fs.lstatSync;
+    const lstat = spyOn(fs, "lstatSync").mockImplementation(((
+      value: fs.PathLike,
+      options?: Parameters<typeof fs.lstatSync>[1],
+    ) => {
+      if (path.resolve(String(value)) === candidate) {
+        throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      }
+      return original(value, options as never);
+    }) as typeof fs.lstatSync);
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      snapshotPhysicalToolTarget(
+        { name: "write", args: { path: candidate } },
+        cwd,
+      );
+      const message = String(log.mock.calls[0]?.[0]);
+      expect(message).toContain("bad\\n\\u001b[31m.txt");
+      expect(message).not.toContain("bad\n");
+      expect(message).not.toContain("\u001b");
+    } finally {
+      lstat.mockRestore();
       log.mockRestore();
       rmSync(cwd, { recursive: true, force: true });
     }

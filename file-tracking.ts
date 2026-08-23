@@ -1,7 +1,11 @@
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { FileAttribution, ToolActivity } from "./types.ts";
+import type {
+  FileAttribution,
+  FileAttributionPathSignature,
+  ToolActivity,
+} from "./types.ts";
 
 function activityPath(
   activity: Pick<ToolActivity, "args">,
@@ -18,15 +22,158 @@ function errnoOf(error: unknown): string {
     : "UNKNOWN";
 }
 
+function safePathForLog(candidate: string): string {
+  const limit = 1_024;
+  const sanitized =
+    candidate.length > limit
+      ? `${candidate.slice(0, limit)}…[truncated ${candidate.length - limit} chars]`
+      : candidate;
+  // JSON escaping keeps model-supplied control characters out of the terminal.
+  return JSON.stringify(sanitized)
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
 function logCanonicalizationFailure(candidate: string, error: unknown): void {
   console.error(
-    `[delegate] could not canonicalize edit/write target '${candidate}' (errno=${errnoOf(error)}); retaining uncertain lexical attribution`,
+    `[delegate] could not canonicalize edit/write target ${safePathForLog(candidate)} (errno=${errnoOf(error)}); retaining uncertain lexical attribution`,
+  );
+}
+
+function statKind(stat: fs.Stats): FileAttributionPathSignature["kind"] {
+  if (stat.isDirectory()) return "directory";
+  if (stat.isSymbolicLink()) return "symlink";
+  return "other";
+}
+
+function signatureOf(
+  candidate: string,
+  stat: fs.Stats,
+  symlinkTarget?: string,
+): FileAttributionPathSignature {
+  return {
+    path: candidate,
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    birthtimeMs: stat.birthtimeMs,
+    kind: statKind(stat),
+    ...(symlinkTarget === undefined ? {} : { symlinkTarget }),
+  };
+}
+
+function sameSignature(
+  left: FileAttributionPathSignature,
+  right: FileAttributionPathSignature,
+): boolean {
+  return (
+    left.path === right.path &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.birthtimeMs === right.birthtimeMs &&
+    left.kind === right.kind &&
+    left.symlinkTarget === right.symlinkTarget
   );
 }
 
 interface PhysicalSnapshot {
   path?: string;
   uncertain: boolean;
+  signatures: FileAttributionPathSignature[];
+}
+
+function pathParts(value: string): { root: string; parts: string[] } {
+  const absolute = path.resolve(value);
+  const root = path.parse(absolute).root;
+  return {
+    root,
+    parts: absolute.slice(root.length).split(path.sep).filter(Boolean),
+  };
+}
+
+/** Resolve one component at a time so the physical snapshot carries the exact
+ * ancestor/symlink identities that justified it. */
+function resolvePhysicalSnapshot(
+  value: string,
+  logCandidate: string,
+): PhysicalSnapshot {
+  let { root, parts } = pathParts(value);
+  let cursor = root;
+  let uncertain = false;
+  const signatures: FileAttributionPathSignature[] = [];
+  const followed = new Set<string>();
+  let followedSymlink = false;
+
+  for (let traversals = 0; parts.length; traversals++) {
+    if (traversals > 256) {
+      logCanonicalizationFailure(
+        logCandidate,
+        Object.assign(new Error("too many symbolic links"), { code: "ELOOP" }),
+      );
+      return { uncertain: true, signatures };
+    }
+    const component = parts.shift()!;
+    const candidate = path.join(cursor, component);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(candidate);
+    } catch (error) {
+      const code = errnoOf(error);
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return {
+          path: path.resolve(candidate, ...parts),
+          uncertain: uncertain || followedSymlink,
+          signatures,
+        };
+      }
+      logCanonicalizationFailure(logCandidate, error);
+      return { uncertain: true, signatures };
+    }
+
+    if (stat.isSymbolicLink()) {
+      let target: string;
+      try {
+        target = fs.readlinkSync(candidate);
+        const afterRead = fs.lstatSync(candidate);
+        const before = signatureOf(candidate, stat, target);
+        const after = signatureOf(candidate, afterRead, target);
+        signatures.push(before);
+        if (!sameSignature(before, after) || !afterRead.isSymbolicLink()) {
+          uncertain = true;
+        }
+      } catch (error) {
+        const code = errnoOf(error);
+        if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EINVAL") {
+          logCanonicalizationFailure(logCandidate, error);
+        }
+        return { path: candidate, uncertain: true, signatures };
+      }
+      const cycleKey = `${candidate}\0${target}`;
+      if (followed.has(cycleKey)) {
+        logCanonicalizationFailure(
+          logCandidate,
+          Object.assign(new Error("symbolic link cycle"), { code: "ELOOP" }),
+        );
+        return { uncertain: true, signatures };
+      }
+      followed.add(cycleKey);
+      followedSymlink = true;
+      const targetPath = path.isAbsolute(target)
+        ? target
+        : path.resolve(path.dirname(candidate), target);
+      const targetParts = pathParts(targetPath);
+      root = targetParts.root;
+      cursor = root;
+      parts = [...targetParts.parts, ...parts];
+      continue;
+    }
+
+    // The leaf is expected to change. Ancestors are identity guards: replacing
+    // any of them can redirect the physical target after this snapshot.
+    if (parts.length) signatures.push(signatureOf(candidate, stat));
+    cursor = candidate;
+  }
+
+  return { path: cursor, uncertain, signatures };
 }
 
 /**
@@ -47,59 +194,47 @@ export function snapshotPhysicalToolTarget(
   const candidate = activityPath(activity, cwd);
   if (!candidate) return undefined;
 
-  const resolvePhysical = (
-    value: string,
-    seen: Set<string>,
-  ): PhysicalSnapshot => {
-    const absolute = path.resolve(value);
-    if (seen.has(absolute)) return { uncertain: true };
-    seen.add(absolute);
-
-    try {
-      return { path: fs.realpathSync.native(absolute), uncertain: false };
-    } catch (error) {
-      const code = errnoOf(error);
-      if (code !== "ENOENT" && code !== "ENOTDIR") {
-        logCanonicalizationFailure(candidate, error);
-        return { uncertain: true };
-      }
-    }
-
-    try {
-      if (fs.lstatSync(absolute).isSymbolicLink()) {
-        const target = fs.readlinkSync(absolute);
-        const resolved = resolvePhysical(
-          path.resolve(path.dirname(absolute), target),
-          seen,
-        );
-        return { ...resolved, uncertain: true };
-      }
-    } catch (error) {
-      const code = errnoOf(error);
-      if (code !== "ENOENT" && code !== "ENOTDIR") {
-        logCanonicalizationFailure(candidate, error);
-        return { uncertain: true };
-      }
-    }
-
-    const parent = path.dirname(absolute);
-    if (parent === absolute) return { uncertain: true };
-    const physicalParent = resolvePhysical(parent, seen);
-    return {
-      path: physicalParent.path
-        ? path.resolve(physicalParent.path, path.basename(absolute))
-        : undefined,
-      uncertain: physicalParent.uncertain,
-    };
-  };
-
-  const snapshot = resolvePhysical(candidate, new Set<string>());
-  return {
+  const snapshot = resolvePhysicalSnapshot(candidate, candidate);
+  const attribution: FileAttribution = {
     lexicalPath: candidate,
     preExecutionPhysicalPath: snapshot.path,
+    preExecutionPathSignatures: snapshot.signatures,
     provenance: activity.name,
     uncertain: snapshot.uncertain,
   };
+  // Close lstat/readlink and component-walk races before execution starts. A
+  // later terminal revalidation performs the same check after execution.
+  return revalidateFileAttribution(attribution);
+}
+
+/** Revalidate the identities used by a pre-execution physical snapshot without
+ * re-resolving that snapshot through the mutable final tree. */
+export function revalidateFileAttribution(
+  attribution: FileAttribution,
+): FileAttribution {
+  if (
+    attribution.uncertain ||
+    !attribution.preExecutionPathSignatures?.length
+  ) {
+    return attribution;
+  }
+  for (const expected of attribution.preExecutionPathSignatures) {
+    try {
+      const stat = fs.lstatSync(expected.path);
+      let target: string | undefined;
+      if (stat.isSymbolicLink()) target = fs.readlinkSync(expected.path);
+      if (!sameSignature(expected, signatureOf(expected.path, stat, target))) {
+        return { ...attribution, uncertain: true };
+      }
+    } catch (error) {
+      const code = errnoOf(error);
+      if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EINVAL") {
+        logCanonicalizationFailure(attribution.lexicalPath, error);
+      }
+      return { ...attribution, uncertain: true };
+    }
+  }
+  return attribution;
 }
 
 /** Stable string projection used for overlap reporting. */
@@ -200,8 +335,9 @@ export function extractAttributedFromActivities(
           }
         : undefined);
     if (!attribution) continue;
-    const key = `${attribution.provenance}\0${attribution.lexicalPath}\0${attribution.preExecutionPhysicalPath ?? ""}\0${attribution.uncertain}`;
-    files.set(key, attribution);
+    const revalidated = revalidateFileAttribution(attribution);
+    const key = `${revalidated.provenance}\0${revalidated.lexicalPath}\0${revalidated.preExecutionPhysicalPath ?? ""}\0${revalidated.uncertain}`;
+    files.set(key, revalidated);
   }
   return [...files.values()];
 }

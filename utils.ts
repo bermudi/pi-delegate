@@ -79,6 +79,13 @@ export function stripAnsi(text: string): string {
         index = skipCsi(text, index + 2);
         continue;
       }
+      if (next === 0x5c) {
+        // Preserve a boundary for a standalone 7-bit ST just as for C1 ST,
+        // so removing it cannot concatenate attacker-controlled words.
+        clean += " ";
+        index += 2;
+        continue;
+      }
 
       // Generic ESC sequence: intermediates followed by one final byte.
       index++;

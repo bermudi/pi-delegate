@@ -140,6 +140,7 @@ describe("runAgentSession abort re-check", () => {
     );
 
     expect(result.error).toBe("Aborted");
+    expect(result.failureKind).toBe("cancelled");
     expect(prompted()).toBe(false);
   });
 
@@ -1400,6 +1401,7 @@ describe("runAgentSession abort re-check", () => {
     );
 
     expect(result.error).toBe("Aborted");
+    expect(result.failureKind).toBeUndefined();
     expect(result.output).toContain("partial output before abort");
     expect(result.tokens).toBe(42);
     expect(result.usage.totalTokens).toBe(42);
@@ -2539,12 +2541,16 @@ describe("touched-file tracking", () => {
 
       expect(result.attributedFiles).toContain(oldTarget);
       expect(result.attributedFiles).not.toContain(newTarget);
-      expect(result.fileAttributions).toContainEqual({
-        lexicalPath: link,
-        preExecutionPhysicalPath: oldTarget,
-        provenance: "write",
-        uncertain: false,
-      });
+      expect(result.fileAttributions).toContainEqual(
+        expect.objectContaining({
+          lexicalPath: link,
+          preExecutionPhysicalPath: oldTarget,
+          provenance: "write",
+          // Retargeting the symlink invalidates the captured chain identity;
+          // consumers retain the old physical evidence conservatively.
+          uncertain: true,
+        }),
+      );
       expect(result.touchedFiles).toContain(link);
       expect(result.touchedFiles).toContain(oldTarget);
     } finally {
@@ -3049,7 +3055,7 @@ describe("runAgentSession deadline", () => {
     const result = await running;
 
     expect(result.error).toBe("Aborted");
-    expect(result.failureKind).toBeUndefined();
+    expect(result.failureKind).toBe("cancelled");
     expect(result.prompted).toBe(true);
   });
 
@@ -3200,7 +3206,7 @@ describe("runAgentSession deadline", () => {
     expect(promptCalls).toBe(0);
     expect(compactionDone).toBe(true);
     expect(result.error).toBe("Aborted");
-    expect(result.failureKind).toBeUndefined();
+    expect(result.failureKind).toBe("cancelled");
     expect(result.output).toBe("");
     expect(result.prompted).toBe(false);
   });

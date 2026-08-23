@@ -12,7 +12,15 @@
  * - This means the sub-agent's streamFn calls our mock instead of hitting a real API.
  */
 
-import { describe, expect, test, mock, afterEach, beforeEach } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -52,6 +60,7 @@ import {
   markSessionQuarantined,
   quarantinedTasks,
   sessionQuarantineOf,
+  withResumeTranscriptLock,
 } from "./session-quarantine.ts";
 import {
   _resetTelemetryForTesting,
@@ -63,6 +72,7 @@ import type {
   TaskRunEnv,
   TaskProgress,
   AgentProgressUpdate,
+  FileAttribution,
 } from "./types.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
@@ -2380,6 +2390,78 @@ describe("task telemetry boundary", () => {
     }
   });
 
+  test("scratch settles path projections independently and preserves failed external evidence", async () => {
+    _setCreateScratchWorkspaceForTesting(
+      async () =>
+        ({
+          cwd: "/scratch/project",
+          mapPathToSource: (file: string) =>
+            file.replace("/scratch/project", "/source/project"),
+          resolveReportedPath: async (file: string) => {
+            if (file.startsWith("/host/")) throw new Error("race");
+            return file.replace("/scratch/project", "/source/project");
+          },
+          resolveAttributedPath: async (file: string) => file,
+          resolveFileAttribution: async (entry: FileAttribution) => {
+            if (entry.lexicalPath.startsWith("/host/")) {
+              throw new Error("external projection failed");
+            }
+            return undefined;
+          },
+          cleanup: async () => {},
+        }) as never,
+    );
+    _setRunAgentSessionForTesting(
+      async () =>
+        ({
+          output: "paid-for output",
+          durationMs: 5,
+          tokens: 4,
+          usage: { ...emptyUsage(), totalTokens: 4 },
+          touchedFiles: ["/scratch/project/internal.txt", "/host/external.txt"],
+          attributedFiles: ["/host/external.txt"],
+          fileAttributions: [
+            {
+              lexicalPath: "/scratch/project/internal.txt",
+              preExecutionPhysicalPath: "/scratch/project/internal.txt",
+              provenance: "write",
+              uncertain: false,
+            },
+            {
+              lexicalPath: "/host/external.txt",
+              preExecutionPhysicalPath: "/host/external.txt",
+              provenance: "edit",
+              uncertain: false,
+            },
+          ],
+        }) as never,
+    );
+    const log = spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const result = await runResolvedTask(
+        mkEnv(),
+        mkTask({ workspace: "scratch" }),
+        mkProgressRow(),
+        0,
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.output).toBe("paid-for output");
+      expect(result.attributedFiles).toEqual(["/host/external.txt"]);
+      expect(result.fileAttributions).toHaveLength(1);
+      expect(result.fileAttributions?.[0]?.uncertain).toBe(true);
+      expect(result.touchedFiles).toContain("/host/external.txt");
+      expect(String(log.mock.calls[0]?.[0])).toContain(
+        "scratch attribution projection failed",
+      );
+    } finally {
+      log.mockRestore();
+      _setRunAgentSessionForTesting(undefined);
+      _setCreateScratchWorkspaceForTesting(undefined);
+    }
+  });
+
   test("scratch correction records one final failed row after cleanup failure and retry", async () => {
     _setWholeTaskRetryForTesting({ maxRetries: 1, baseDelayMs: 0 });
     const taskRows: TaskRecord[] = [];
@@ -2393,6 +2475,8 @@ describe("task telemetry boundary", () => {
       async () =>
         ({
           cwd: "/scratch/project",
+          mapPathToSource: (file: string) =>
+            file.replace("/scratch/project", "/source/project"),
           resolveReportedPath: async () => {
             throw new Error("could not map scratch path");
           },
@@ -2444,10 +2528,11 @@ describe("task telemetry boundary", () => {
       );
 
       expect(runCalls).toBe(2);
-      expect(result.error).toContain("could not map scratch path");
+      expect(result.error).not.toContain("could not map scratch path");
       expect(result.error).toContain(
         "Scratch workspace cleanup failed: lease remains",
       );
+      expect(result.touchedFiles).toContain("/source/project/result.txt");
       expect(cleanupCalls).toBe(1);
       // Retry start, core completion, and scratch correction all notify; none
       // may escape this throwing observer or prevent the final telemetry row.
@@ -3574,8 +3659,9 @@ describe("delegate pre-prompt deadline and pool", () => {
           usage: emptyUsage(),
           touchedFiles: [],
           attributedFiles: [],
-          // Parent abort is not a deadline: no failureKind, but the prompt was
-          // invoked and may have mutated the conversation.
+          // Parent abort is structured separately from provider error text;
+          // the prompt was invoked and may have mutated the conversation.
+          failureKind: "cancelled",
           prompted: true,
         }) as never,
     );
@@ -3611,7 +3697,7 @@ describe("delegate pre-prompt deadline and pool", () => {
 
       const result = await runResolvedTask(env, task, progress as never, 0);
       expect(result.error).toBe("Aborted");
-      expect(result.failureKind).toBeUndefined();
+      expect(result.failureKind).toBe("cancelled");
       expect(disposed).toBe(true);
       expect(configFor("parent-abort-pool")).toBeUndefined();
       expect(
@@ -3798,7 +3884,7 @@ describe("lifecycle-level deadline and abort races", () => {
 
       expect(runAttempts).toBe(1);
       expect(result.error).toBe("Aborted");
-      expect(result.failureKind).toBeUndefined();
+      expect(result.failureKind).toBe("cancelled");
       expect(result.tokens).toBe(5);
       expect(result.durationMs).toBeLessThan(200);
     } finally {
@@ -3842,7 +3928,7 @@ describe("lifecycle-level deadline and abort races", () => {
       const result = await runResolvedTask(env, task, progress as never, 0);
       expect(runAttempts).toBe(0);
       expect(result.error).toBe("Aborted");
-      expect(result.failureKind).toBeUndefined();
+      expect(result.failureKind).toBe("cancelled");
     } finally {
       _setRunAgentSessionForTesting(undefined);
     }
@@ -3885,7 +3971,7 @@ describe("lifecycle-level deadline and abort races", () => {
 
       expect(runAttempts).toBe(1);
       expect(result.error).toBe("Aborted");
-      expect(result.failureKind).toBeUndefined();
+      expect(result.failureKind).toBe("cancelled");
       expect(result.tokens).toBe(5);
       expect(result.durationMs).toBeLessThan(300);
     } finally {
@@ -4164,21 +4250,65 @@ describe("quiescence-abandoned session ownership", () => {
     }
   });
 
-  test("canonical resumeFrom lock rejects a queued alias after abandonment", async () => {
+  test("missing resume transcript keeps its lexical lock if created by a queued caller", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "delegate-quarantine-resume-missing-"),
+    );
+    const transcript = path.join(root, "later.jsonl");
+    const firstGate = deferred();
+    let firstEntered = false;
+    let secondEntered = false;
+
+    try {
+      const first = withResumeTranscriptLock(transcript, async (identity) => {
+        firstEntered = true;
+        expect(identity?.lexicalPath).toBe(transcript);
+        expect(identity?.canonicalPath).toBeUndefined();
+        expect(identity?.exists).toBe(false);
+        await firstGate.promise;
+        return "missing";
+      });
+      while (!firstEntered) await Promise.resolve();
+
+      fs.writeFileSync(transcript, "{}\n");
+      const second = withResumeTranscriptLock(transcript, async (identity) => {
+        secondEntered = true;
+        expect(identity?.canonicalPath).toBe(transcript);
+        expect(identity?.exists).toBe(true);
+        return "created";
+      });
+      await Promise.resolve();
+      expect(secondEntered).toBe(false);
+
+      firstGate.resolve();
+      expect(await first).toBe("missing");
+      expect(await second).toBe("created");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("retargeted resume aliases keep one acquisition and quarantine identity", async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "delegate-quarantine-resume-lock-"),
     );
     const transcript = path.join(root, "session.jsonl");
-    const alias = path.join(root, "alias.jsonl");
+    const runningRetarget = path.join(root, "running-retarget.jsonl");
+    const waitingRetarget = path.join(root, "waiting-retarget.jsonl");
+    const runningAlias = path.join(root, "running-alias.jsonl");
+    const waitingAlias = path.join(root, "waiting-alias.jsonl");
     fs.writeFileSync(transcript, "{}\n");
-    fs.symlinkSync(transcript, alias);
+    fs.writeFileSync(runningRetarget, "{}\n");
+    fs.writeFileSync(waitingRetarget, "{}\n");
+    fs.symlinkSync(transcript, runningAlias);
+    fs.symlinkSync(transcript, waitingAlias);
     const safety = deferred();
     const runGate = deferred();
     let runs = 0;
-    let acquisitions = 0;
+    const acquiredPaths: Array<string | undefined> = [];
     let disposed = 0;
-    _setAcquireAgentSessionForTesting(async () => {
-      acquisitions++;
+    _setAcquireAgentSessionForTesting(async (_env, acquiredTask) => {
+      acquiredPaths.push(acquiredTask.resumeFrom);
       return {
         session: { dispose: () => disposed++ } as unknown as AgentSession,
         sessionManager: undefined,
@@ -4193,11 +4323,11 @@ describe("quiescence-abandoned session ownership", () => {
     });
     const firstTask = makeBaseTask({
       workspace: "shared",
-      resumeFrom: transcript,
+      resumeFrom: runningAlias,
     });
     const queuedAliasTask = makeBaseTask({
       workspace: "shared",
-      resumeFrom: alias,
+      resumeFrom: waitingAlias,
     });
 
     try {
@@ -4217,7 +4347,12 @@ describe("quiescence-abandoned session ownership", () => {
         0,
       );
       await Promise.resolve();
-      expect(acquisitions).toBe(1);
+      expect(acquiredPaths).toEqual([transcript]);
+
+      fs.unlinkSync(runningAlias);
+      fs.symlinkSync(runningRetarget, runningAlias);
+      fs.unlinkSync(waitingAlias);
+      fs.symlinkSync(waitingRetarget, waitingAlias);
 
       runGate.resolve();
       const firstResult = await first;
@@ -4225,7 +4360,7 @@ describe("quiescence-abandoned session ownership", () => {
       expect(sessionQuarantineOf(firstResult)).toBeDefined();
       expect(queuedResult.error).toContain("resumeFrom transcript");
       expect(queuedResult.error).toContain("is quarantined");
-      expect(acquisitions).toBe(1);
+      expect(acquiredPaths).toEqual([transcript]);
 
       safety.resolve();
       await safety.promise;
@@ -4238,7 +4373,7 @@ describe("quiescence-abandoned session ownership", () => {
     }
   });
 
-  test("scratch path projection failure preserves quarantine and defers cleanup", async () => {
+  test("scratch path projection failure preserves evidence, quarantine, and deferred cleanup", async () => {
     const safety = deferred();
     let disposed = 0;
     let cleaned = 0;
@@ -4282,7 +4417,9 @@ describe("quiescence-abandoned session ownership", () => {
         progress(task),
         0,
       );
-      expect(result.error).toContain("projection failed");
+      expect(result.error).toContain("quiescence");
+      expect(result.error).not.toContain("projection failed");
+      expect(result.touchedFiles).toContain("/scratch/result.txt");
       expect(result.incomplete).toBe("quiescence_abandoned");
       expect(sessionQuarantineOf(result)?.safe).toBe(safety.promise);
       expect(disposed).toBe(0);
