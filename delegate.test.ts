@@ -2289,6 +2289,23 @@ describe("formatCompletedTask", () => {
     expect(lines).toHaveLength(2);
   });
 
+  test("header shows ↻ revival marker for a named-agent resume", () => {
+    const lines = formatCompletedTask(
+      makeTask(),
+      makeResult({ resumedFrom: "01a01df4" }),
+    );
+    expect(lines[0]).toBe("=== scout ↻01a01df4: do the thing ===");
+  });
+
+  test("header omits ↻ when the agent identity already carries it", () => {
+    const lines = formatCompletedTask(
+      makeTask({ agentName: "resume:01a01df4" }),
+      makeResult({ agent: "resume:01a01df4", resumedFrom: "01a01df4" }),
+    );
+    expect(lines[0]).toBe("=== resume:01a01df4: do the thing ===");
+    expect(lines[0]).not.toContain("↻");
+  });
+
   test("marks abandoned accounting and evidence as incomplete lower bounds", () => {
     const result = makeResult({
       error: "Stalled: cancellation could not prove quiescence",
@@ -7255,6 +7272,51 @@ describe("async delegate integration", () => {
       "PENDING — result not available",
     );
     expect(result.content[0]!.text).toContain("PENDING — result not available");
+  });
+
+  test("formatCompletedTicket marks pending named-agent resume header with ↻", () => {
+    const ticket: AsyncTicket = {
+      id: "pending-resume",
+      created: Date.now() - 1000,
+      completedAt: Date.now(),
+      tasks: [{ prompt: "continue the fixes", resumeFrom: "/tmp/sess.jsonl" }],
+      resolved: [
+        {
+          id: "task-1",
+          prompt: "continue the fixes",
+          resumeFrom: "/tmp/sess.jsonl",
+          model: {} as any,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "coder",
+          warnings: [],
+        },
+      ],
+      status: "failed",
+      results: [undefined],
+      progress: [
+        {
+          index: 0,
+          id: "task-1",
+          agent: "coder",
+          resumedFrom: "sess",
+          task: "continue the fixes",
+          status: "pending",
+          durationMs: 0,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      controller: new AbortController(),
+      parentModelId: "m",
+    };
+    const result = formatCompletedTicket(ticket);
+    expect(result.content[0]!.text).toContain(
+      "=== coder ↻sess #task-1: continue the fixes ===",
+    );
   });
 
   test("formatCompletedTicket does not memoize a shutdown snapshot before late workers settle", () => {

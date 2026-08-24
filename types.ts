@@ -228,6 +228,9 @@ export interface TaskProgress {
   id?: string;
   index: number;
   agent: string;
+  /** Short tag (via `formatResumeTag`) of the transcript this task continued
+   *  via `resumeFrom`, if any. Lets renderers mark the row as a revival. */
+  resumedFrom?: string;
   task: string;
   status: "pending" | "running" | "done" | "failed";
   durationMs: number;
@@ -267,6 +270,10 @@ export interface DelegateDetails {
 export interface TaskResult {
   id?: string;
   agent: string;
+  /** Short tag (via `formatResumeTag`) of the transcript this task continued
+   *  via `resumeFrom`, if any. Lets settled-result renderers mark the row as
+   *  a revival — mirrors `TaskProgress.resumedFrom`. */
+  resumedFrom?: string;
   output: string;
   error?: string;
   /** Stable machine-readable failure reason; error remains human-facing. */

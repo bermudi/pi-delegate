@@ -18,6 +18,7 @@ import {
   isSessionIdQuarantined,
 } from "./session-quarantine.ts";
 import { BUILTIN_AGENT_CONFIGS, buildSubagentSystemPrompt } from "./agents.ts";
+import { formatResumeTag } from "./format.ts";
 import { buildParentTranscript } from "./parent-context.ts";
 import { findAvailableAlternative, resolveModelRequest } from "./model.ts";
 import {
@@ -604,8 +605,12 @@ export function resolveTasks(
       // display code treats "" and absent alike (`t.prompt || …`).
       prompt: prompt ?? "",
       // Keep the built-in selector visible in progress/results. Omitted-agent
-      // inline tasks retain the established `ad-hoc` label and config namespace.
-      agentName: agent?.name ?? "ad-hoc",
+      // inline tasks retain the established `ad-hoc` label and config namespace
+      // — except resumes: a continued transcript is not a fresh ad-hoc spawn,
+      // so it carries the resumed-transcript identity instead.
+      agentName:
+        agent?.name ??
+        (t.resumeFrom ? `resume:${formatResumeTag(t.resumeFrom)}` : "ad-hoc"),
       warnings,
       reuseIntent: {
         model: requestedModel,

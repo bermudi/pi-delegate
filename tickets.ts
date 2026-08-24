@@ -10,7 +10,9 @@ import { ASYNC_TICKET_TTL_MS } from "./constants.ts";
 import {
   fmtDuration,
   formatCompletedTask,
+  formatResumeTag,
   formatTaskId,
+  resumeMarker,
   trunc,
   findTouchedOverlaps,
   formatTouchedOverlapWarning,
@@ -268,7 +270,7 @@ export function formatCompletedTicket(
     const t = ticket.resolved[i]!;
     if (!r) {
       parts.push(
-        `=== ${t.agentName}${formatTaskId(t.id)}: ${trunc(t.prompt || "", 80)} ===`,
+        `=== ${t.agentName}${resumeMarker(ticket.progress[i]!)}${formatTaskId(t.id)}: ${trunc(t.prompt || "", 80)} ===`,
       );
       parts.push(`[${pendingLabelFor(i)}]`);
       continue;
@@ -323,6 +325,7 @@ function pendingResultPlaceholder(task: ResolvedTask | undefined): TaskResult {
   return {
     id: task?.id,
     agent: task?.agentName ?? "unknown",
+    resumedFrom: task?.resumeFrom ? formatResumeTag(task.resumeFrom) : undefined,
     output: "",
     durationMs: 0,
     tokens: 0,

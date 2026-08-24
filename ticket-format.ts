@@ -10,6 +10,7 @@ import {
   relativeTouchedSummary,
   findTouchedOverlaps,
   formatTouchedOverlapWarning,
+  resumeMarker,
 } from "./format.ts";
 import { renderOutputForPoll } from "./spill.ts";
 import { getOutputSpillTail, getOutputSpillThreshold } from "./config.ts";
@@ -93,12 +94,12 @@ export function formatInFlightTaskLine(p: TaskProgress): string {
   if (p.tokens > 0) parts.push(`${fmtTokens(p.tokens)} tokens`);
   const age = getActivityAge(p.lastActivityAt);
   if (age) parts.push(age);
-  return `⏳ ${p.agent}${formatTaskId(p.id)} · ${parts.join(" · ")}`;
+  return `⏳ ${p.agent}${resumeMarker(p)}${formatTaskId(p.id)} · ${parts.join(" · ")}`;
 }
 
 /** Queued-task line shared by poll snapshots and cancel previews. */
 export function formatQueuedTaskLine(p: TaskProgress): string {
-  return `○ ${p.agent}${formatTaskId(p.id)} · waiting…`;
+  return `○ ${p.agent}${resumeMarker(p)}${formatTaskId(p.id)} · waiting…`;
 }
 
 function appendTouchedMeta(
@@ -123,7 +124,7 @@ function formatSettledPollLines(
   const thresholdChars = getOutputSpillThreshold(ticket.config);
   if (!failed) {
     const lines = [
-      `✓ ${result.agent}${formatTaskId(result.id)} · ${meta.join(" · ")}`,
+      `✓ ${result.agent}${resumeMarker(result)}${formatTaskId(result.id)} · ${meta.join(" · ")}`,
     ];
     if (result.output && result.output !== "(no output)") {
       lines.push(
@@ -134,7 +135,7 @@ function formatSettledPollLines(
   }
   const errorText = result.error ?? "unknown error";
   const lines = [
-    `✗ ${result.agent}${formatTaskId(result.id)} · ${errorText} · ${meta.join(" · ")}`,
+    `✗ ${result.agent}${resumeMarker(result)}${formatTaskId(result.id)} · ${errorText} · ${meta.join(" · ")}`,
   ];
   if (result.sessionFile)
     lines.push(`  session: ${shortenPath(result.sessionFile)}`);
@@ -273,9 +274,9 @@ export function formatCancelPreview(ticket: AsyncTicket): string {
 
   for (const p of ticket.progress) {
     if (p.status === "done") {
-      lines.push(`✓ ${p.agent}${formatTaskId(p.id)} · completed`);
+      lines.push(`✓ ${p.agent}${resumeMarker(p)}${formatTaskId(p.id)} · completed`);
     } else if (p.status === "failed") {
-      lines.push(`✗ ${p.agent}${formatTaskId(p.id)} · ${p.error ?? "failed"}`);
+      lines.push(`✗ ${p.agent}${resumeMarker(p)}${formatTaskId(p.id)} · ${p.error ?? "failed"}`);
     } else if (p.status === "running") {
       lines.push(formatInFlightTaskLine(p));
     } else {

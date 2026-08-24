@@ -14,6 +14,7 @@ import {
   previewOutputLine,
   taskTokenLabel,
   waitingLabel,
+  resumeMarker,
 } from "./format.ts";
 import {
   resolveCarriageReturn,
@@ -128,6 +129,11 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const task = sanitizeTerminalLine(p.task);
     const taskId = formatTaskId(p.id);
     const taskIdTag = taskId ? theme.fg("accent", taskId) : "";
+    // Revival marker: a resumed row must never read as a fresh spawn. Empty
+    // when the identity already carries the resume label (omitted-agent
+    // resumes resolve to `resume:<tag>` at task resolution).
+    const resumeMarkRaw = resumeMarker(p);
+    const resumeMark = resumeMarkRaw ? theme.fg("warning", resumeMarkRaw) : "";
     const runParts: string[] = [];
     if (p.toolUses > 0)
       runParts.push(`${p.toolUses} tool${p.toolUses > 1 ? "s" : ""}`);
@@ -137,7 +143,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       case "done":
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(agent)}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? `${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)])}` : ""}`,
+            `${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(agent)}${resumeMark}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? `${modelLabel(p)}${statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)])}` : ""}`,
             w,
           ),
         );
@@ -158,7 +164,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
       case "failed":
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(agent)}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? modelLabel(p) : ""}${p.error ? theme.fg("error", ` · ${sanitizeTerminalLine(p.error)}`) : ""}`,
+            `${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(agent)}${resumeMark}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? modelLabel(p) : ""}${p.error ? theme.fg("error", ` · ${sanitizeTerminalLine(p.error)}`) : ""}`,
             w,
           ),
         );
@@ -192,7 +198,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
           const glyph = theme.fg("warning", spinnerFrame());
           lines.push(
             truncLine(
-              `${tree(i, total)} ${glyph} ${theme.bold(agent)}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? `${modelLabel(p)}${statJoin(runParts)}` : ""}${issueTag}${theme.fg("dim", ageTag)}`,
+              `${tree(i, total)} ${glyph} ${theme.bold(agent)}${resumeMark}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? `${modelLabel(p)}${statJoin(runParts)}` : ""}${issueTag}${theme.fg("dim", ageTag)}`,
               w,
             ),
           );
@@ -271,7 +277,7 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
         );
         lines.push(
           truncLine(
-            `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(agent)}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? modelLabel(p) : ""}${queuedTag}`,
+            `${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(agent)}${resumeMark}${taskIdTag}${theme.fg("muted", ` — ${task}`)}${expanded ? modelLabel(p) : ""}${queuedTag}`,
             w,
           ),
         );
@@ -431,6 +437,11 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const taskId = formatTaskId(p.id);
     const taskIdTag = taskId ? theme.fg("accent", taskId) : "";
     const taskIdWidth = taskId.length;
+    // Revival marker: a resumed row must never read as a fresh spawn. Empty
+    // when the identity already carries the resume label (omitted-agent
+    // resumes resolve to `resume:<tag>` at task resolution).
+    const resumeMarkRaw = resumeMarker(p);
+    const resumeMark = resumeMarkRaw ? theme.fg("warning", resumeMarkRaw) : "";
     const previewBudget = Math.max(1, w - 30 - taskIdWidth);
     const taskPreview = theme.fg("muted", ` — ${trunc(task, previewBudget)}`);
     const isLive =
@@ -445,7 +456,7 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       : "";
     lines.push(
       truncLine(
-        `${tree(i, total)} ${icon} ${theme.bold(agent)}${taskIdTag}${taskPreview}${expanded ? modelLabel(p) : ""}${isLive ? liveTail : cancelledTail || (expanded ? statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)]) : "")}`,
+        `${tree(i, total)} ${icon} ${theme.bold(agent)}${resumeMark}${taskIdTag}${taskPreview}${expanded ? modelLabel(p) : ""}${isLive ? liveTail : cancelledTail || (expanded ? statJoin([fmtDuration(p.durationMs), taskTokenLabel(p)]) : "")}`,
         w,
       ),
     );

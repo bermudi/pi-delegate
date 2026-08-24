@@ -485,6 +485,33 @@ describe("built-in agent profiles", () => {
     ]);
   });
 
+  test("an omitted-agent resume takes the resumed-transcript identity, not ad-hoc", () => {
+    const transcript =
+      "/tmp/sessions/2026-08-20T06-56-16-677Z_01a01df4-c925-7d92-a125-79eaacdfe2a9.jsonl";
+
+    const [resumed] = resolveTasks(
+      [{ prompt: "continue the fixes", resumeFrom: transcript }] as any,
+      makeCtx(),
+      builtins,
+      { thinking: "high", tools: ["read", "write", "edit", "bash"] },
+    );
+    expect(resumed.agentName).toBe("resume:01a01df4");
+
+    const [namedResume] = resolveTasks(
+      [
+        {
+          agent: "coder",
+          prompt: "continue the fixes",
+          resumeFrom: transcript,
+        },
+      ] as any,
+      makeCtx(),
+      builtins,
+      { thinking: "high", tools: ["read", "write", "edit", "bash"] },
+    );
+    expect(namedResume.agentName).toBe("coder");
+  });
+
   test("default keeps the live parent thinking on pooled reuse", () => {
     expect(
       commit("default-thinking", {

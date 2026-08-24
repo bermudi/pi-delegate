@@ -15,7 +15,7 @@ import {
   liveTicketGuidance,
   ticketStatusIcon,
 } from "./ticket-format.ts";
-import type { AsyncTicket, TaskProgress } from "./types.ts";
+import type { AsyncTicket, TaskProgress, TaskResult } from "./types.ts";
 
 function mkProgress(
   overrides: Partial<TaskProgress> & Pick<TaskProgress, "agent" | "status">,
@@ -255,5 +255,119 @@ describe("live ticket poll formatting", () => {
     expect(preview).toContain(
       'delegate({ ticketAction: "cancel", ticket: "abc12345", force: true })',
     );
+  });
+
+  test("formatCancelPreview marks settled named-agent resumes with ↻", () => {
+    const preview = formatCancelPreview(
+      mkTicket({
+        progress: [
+          mkProgress({ agent: "coder", status: "done", resumedFrom: "01a01df4" }),
+          mkProgress({
+            agent: "coder",
+            status: "failed",
+            resumedFrom: "01a01df4",
+            error: "boom",
+          }),
+          mkProgress({ agent: "scout", status: "running" }),
+        ],
+      }),
+    );
+    expect(preview).toContain("✓ coder ↻01a01df4 · completed");
+    expect(preview).toContain("✗ coder ↻01a01df4 · boom");
+  });
+
+  test("formatCancelPreview omits ↻ for omitted-agent resumes (identity carries it)", () => {
+    const preview = formatCancelPreview(
+      mkTicket({
+        progress: [
+          mkProgress({
+            agent: "resume:01a01df4",
+            status: "done",
+            resumedFrom: "01a01df4",
+          }),
+        ],
+      }),
+    );
+    expect(preview).toContain("✓ resume:01a01df4 · completed");
+    expect(preview).not.toContain("↻");
+  });
+
+  test("formatLiveTicketPoll marks settled named-agent resumes with ↻", () => {
+    const result: TaskResult = {
+      agent: "coder",
+      resumedFrom: "01a01df4",
+      output: "done",
+      durationMs: 100,
+      tokens: 10,
+      usage: emptyUsage(),
+      touchedFiles: [],
+      attributedFiles: [],
+    };
+    const ticket = mkTicket({
+      resolved: [
+        {
+          prompt: "continue",
+          model: {} as never,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "coder",
+          warnings: [],
+        },
+      ],
+      results: [result],
+      progress: [
+        mkProgress({
+          agent: "coder",
+          status: "done",
+          resumedFrom: "01a01df4",
+          tokens: 10,
+        }),
+      ],
+    });
+    const snapshot = formatLiveTicketPoll(ticket, ticket.created + 100);
+    expect(snapshot.text).toContain("✓ coder ↻01a01df4 ·");
+    expect(snapshot.text).not.toContain("✓ coder ·");
+  });
+
+  test("formatLiveTicketPoll marks failed named-agent resumes with ↻", () => {
+    const result: TaskResult = {
+      agent: "coder",
+      resumedFrom: "01a01df4",
+      output: "",
+      error: "auth expired",
+      durationMs: 100,
+      tokens: 10,
+      usage: emptyUsage(),
+      touchedFiles: [],
+      attributedFiles: [],
+    };
+    const ticket = mkTicket({
+      resolved: [
+        {
+          prompt: "continue",
+          model: {} as never,
+          tools: [],
+          thinking: "off",
+          systemPrompt: "",
+          cwd: "/tmp",
+          agentName: "coder",
+          warnings: [],
+        },
+      ],
+      results: [result],
+      progress: [
+        mkProgress({
+          agent: "coder",
+          status: "failed",
+          resumedFrom: "01a01df4",
+          error: "auth expired",
+          tokens: 10,
+        }),
+      ],
+    });
+    const snapshot = formatLiveTicketPoll(ticket, ticket.created + 100);
+    expect(snapshot.text).toContain("✗ coder ↻01a01df4 · auth expired");
   });
 });

@@ -23,6 +23,7 @@ import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
 import {
   fmtDuration,
   formatCompletedTask,
+  formatResumeTag,
   trunc,
   findTouchedOverlaps,
   formatTouchedOverlapWarning,
@@ -112,6 +113,7 @@ export function initProgress(resolved: ResolvedTask[]): TaskProgress[] {
     id: t.id,
     index: i,
     agent: t.agentName,
+    resumedFrom: t.resumeFrom ? formatResumeTag(t.resumeFrom) : undefined,
     task: trunc(sanitizeTerminalLine(t.prompt || t.sessionAction || ""), 50),
     status: "pending" as const,
     durationMs: 0,

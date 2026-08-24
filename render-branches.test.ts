@@ -232,6 +232,80 @@ describe("render-branches compatibility fallback", () => {
     expect(ctxWithout.lines.some((line) => line.includes("agent"))).toBe(true);
   });
 
+  test("a resumed task renders as a revival, not a fresh ad-hoc spawn", async () => {
+    const { renderFinalBranch } = await import("./render-branches.ts");
+
+    const theme = {
+      fg: (_: string, text: string) => text,
+      bold: (text: string) => text,
+    } as never;
+    const helpers = {
+      statJoin: () => "",
+      modelLabel: () => "",
+      compactActivity: () => "thinking…",
+      pushWarnings: () => undefined,
+    };
+    const makeResult = (agent: string) => ({
+      agent,
+      output: "",
+      error: "Provided authentication token is expired.",
+      durationMs: 10,
+      tokens: 0,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      touchedFiles: [],
+    });
+
+    // Omitted-agent resume: identity is `resume:<tag>` — no "ad-hoc", and no
+    // duplicate ↻ marker on top of the resume identity.
+    const resumed = {
+      progress: [
+        {
+          index: 0,
+          agent: "resume:01a01df4",
+          resumedFrom: "01a01df4",
+          task: "continue the fixes",
+          status: "failed" as const,
+          durationMs: 10,
+          tokens: 0,
+          toolUses: 0,
+          activities: [],
+        },
+      ],
+      taskResults: [makeResult("resume:01a01df4")],
+      total: 1,
+      w: 120,
+      expanded: false,
+      state: {},
+      theme,
+      lines: [] as string[],
+    };
+    renderFinalBranch(resumed, helpers);
+    expect(
+      resumed.lines.some((line) => line.includes("resume:01a01df4")),
+    ).toBe(true);
+    expect(resumed.lines.some((line) => line.includes("ad-hoc"))).toBe(false);
+    expect(resumed.lines.some((line) => line.includes("↻"))).toBe(false);
+
+    // Named-agent resume: keeps the name and gains the ↻ revival marker.
+    const named = {
+      ...resumed,
+      progress: [{ ...resumed.progress[0]!, agent: "coder" }],
+      taskResults: [makeResult("coder")],
+      lines: [] as string[],
+    };
+    renderFinalBranch(named, helpers);
+    expect(named.lines.some((line) => line.includes("coder ↻01a01df4"))).toBe(
+      true,
+    );
+  });
+
   test("clamps the task preview width for very long ids", async () => {
     const { renderFinalBranch } = await import("./render-branches.ts");
 

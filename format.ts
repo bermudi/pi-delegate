@@ -201,6 +201,33 @@ export function formatTaskId(id: string | undefined): string {
 }
 
 /**
+ * Short identity tag for a resumed transcript, derived from its session file
+ * path (pi names sessions `<timestamp>_<uuid>.jsonl`, so the UUID prefix is
+ * the stable part). Best-effort display identity only — never parsed back.
+ */
+export function formatResumeTag(resumeFrom: string): string {
+  const stem = sanitizeTerminalLine(resumeFrom).replace(/\.jsonl$/i, "");
+  const base = stem.split("/").pop() ?? stem;
+  const unique = base.includes("_") ? (base.split("_").pop() ?? base) : base;
+  return (unique.slice(0, 8) || "resumed").trim();
+}
+
+/**
+ * Plain-text revival marker for a progress row that continued an earlier
+ * transcript. Empty when the row is not a resume, or when the agent name
+ * already carries the resume identity (`resume:<tag>`, set at task resolution
+ * for omitted-agent resumes) — the marker must not duplicate it.
+ */
+export function resumeMarker(p: {
+  agent: string;
+  resumedFrom?: string;
+}): string {
+  return p.resumedFrom && p.agent !== `resume:${p.resumedFrom}`
+    ? ` ↻${p.resumedFrom}`
+    : "";
+}
+
+/**
  * Extract a single-line preview of agent output for collapsed final display.
  *
  * Collapsed mode can't afford the full markdown render (and the render cache is
@@ -463,7 +490,7 @@ export function formatCompletedTask(
   // `|| task.sessionAction` covers action-only tasks (close/list/...) where prompt is
   // empty. Async prompt tasks always set prompt, so this is a no-op there.
   parts.push(
-    `=== ${result.agent}${formatTaskId(result.id ?? task.id)}: ${trunc(task.prompt || task.sessionAction || "", 80)} ===`,
+    `=== ${result.agent}${resumeMarker(result)}${formatTaskId(result.id ?? task.id)}: ${trunc(task.prompt || task.sessionAction || "", 80)} ===`,
   );
   if (task.warnings?.length) {
     for (const w of task.warnings) parts.push(`[WARNING: ${w}]`);
