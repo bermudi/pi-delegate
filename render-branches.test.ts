@@ -287,9 +287,9 @@ describe("render-branches compatibility fallback", () => {
       lines: [] as string[],
     };
     renderFinalBranch(resumed, helpers);
-    expect(
-      resumed.lines.some((line) => line.includes("resume:01a01df4")),
-    ).toBe(true);
+    expect(resumed.lines.some((line) => line.includes("resume:01a01df4"))).toBe(
+      true,
+    );
     expect(resumed.lines.some((line) => line.includes("ad-hoc"))).toBe(false);
     expect(resumed.lines.some((line) => line.includes("↻"))).toBe(false);
 

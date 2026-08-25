@@ -261,7 +261,11 @@ describe("live ticket poll formatting", () => {
     const preview = formatCancelPreview(
       mkTicket({
         progress: [
-          mkProgress({ agent: "coder", status: "done", resumedFrom: "01a01df4" }),
+          mkProgress({
+            agent: "coder",
+            status: "done",
+            resumedFrom: "01a01df4",
+          }),
           mkProgress({
             agent: "coder",
             status: "failed",

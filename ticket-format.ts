@@ -274,9 +274,13 @@ export function formatCancelPreview(ticket: AsyncTicket): string {
 
   for (const p of ticket.progress) {
     if (p.status === "done") {
-      lines.push(`✓ ${p.agent}${resumeMarker(p)}${formatTaskId(p.id)} · completed`);
+      lines.push(
+        `✓ ${p.agent}${resumeMarker(p)}${formatTaskId(p.id)} · completed`,
+      );
     } else if (p.status === "failed") {
-      lines.push(`✗ ${p.agent}${resumeMarker(p)}${formatTaskId(p.id)} · ${p.error ?? "failed"}`);
+      lines.push(
+        `✗ ${p.agent}${resumeMarker(p)}${formatTaskId(p.id)} · ${p.error ?? "failed"}`,
+      );
     } else if (p.status === "running") {
       lines.push(formatInFlightTaskLine(p));
     } else {
