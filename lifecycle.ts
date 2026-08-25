@@ -21,7 +21,6 @@ import {
   persistSessionHeader,
 } from "./sessions.ts";
 import { runAgentSession, formatDeadlineExceededError } from "./runner.ts";
-import { formatResumeTag } from "./format.ts";
 import {
   getGitChangedFiles,
   projectedAttributionPath,
@@ -119,7 +118,7 @@ function failTask(
   return {
     id: task.id,
     agent: task.agentName,
-    resumedFrom: task.resumeFrom ? formatResumeTag(task.resumeFrom) : undefined,
+    resumedFrom: task.resumeFromDisplay,
     output: "",
     error,
     failureKind,
@@ -202,7 +201,7 @@ function completeSessionAction(
   return {
     id: task.id,
     agent: task.agentName,
-    resumedFrom: task.resumeFrom ? formatResumeTag(task.resumeFrom) : undefined,
+    resumedFrom: task.resumeFromDisplay,
     output,
     durationMs: elapsedMs ?? 0,
     tokens: 0,
@@ -1240,7 +1239,7 @@ function deadlineExceededResult(
   return {
     id: task.id,
     agent: task.agentName,
-    resumedFrom: task.resumeFrom ? formatResumeTag(task.resumeFrom) : undefined,
+    resumedFrom: task.resumeFromDisplay,
     output: prior?.output ?? "",
     error: formatDeadlineExceededError(budgetMs),
     failureKind: "deadline_exceeded",
@@ -1570,7 +1569,7 @@ async function runTaskAttempt(
     return propagateSessionQuarantine(r, {
       id: task.id,
       agent: task.agentName,
-      resumedFrom: task.resumeFrom ? formatResumeTag(task.resumeFrom) : undefined,
+      resumedFrom: task.resumeFromDisplay,
       output: r.output,
       error: r.error,
       // Classify the failure: the runner sets `stalled` for the

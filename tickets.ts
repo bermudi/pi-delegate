@@ -10,7 +10,6 @@ import { ASYNC_TICKET_TTL_MS } from "./constants.ts";
 import {
   fmtDuration,
   formatCompletedTask,
-  formatResumeTag,
   formatTaskId,
   resumeMarker,
   trunc,
@@ -325,7 +324,7 @@ function pendingResultPlaceholder(task: ResolvedTask | undefined): TaskResult {
   return {
     id: task?.id,
     agent: task?.agentName ?? "unknown",
-    resumedFrom: task?.resumeFrom ? formatResumeTag(task.resumeFrom) : undefined,
+    resumedFrom: task?.resumeFromDisplay,
     output: "",
     durationMs: 0,
     tokens: 0,

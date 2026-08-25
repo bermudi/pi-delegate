@@ -74,6 +74,7 @@ import type {
   AgentProgressUpdate,
   FileAttribution,
 } from "./types.ts";
+import { formatResumeTag, resumeMarker } from "./format.ts";
 
 const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
 
@@ -179,9 +180,11 @@ function getExecContext(ts: TestSession) {
   return runner.createContext();
 }
 
-/** Minimal ResolvedTask factory for direct runResolvedTask tests. */
+/** Minimal ResolvedTask factory for direct runResolvedTask tests. Tests
+ *  bypass `resolveTasks`, so mirror its invariant: when `resumeFrom` is set,
+ *  freeze `resumeFromDisplay` from it unless the override provided one. */
 function makeBaseTask(overrides: Partial<ResolvedTask> = {}): ResolvedTask {
-  return {
+  const base: ResolvedTask = {
     id: undefined,
     prompt: "test prompt",
     agent: undefined,
@@ -194,6 +197,10 @@ function makeBaseTask(overrides: Partial<ResolvedTask> = {}): ResolvedTask {
     warnings: [],
     ...overrides,
   };
+  if (base.resumeFrom && base.resumeFromDisplay === undefined) {
+    base.resumeFromDisplay = formatResumeTag(base.resumeFrom);
+  }
+  return base;
 }
 
 /** Minimal TaskRunEnv for direct runResolvedTask tests. */
@@ -1410,6 +1417,125 @@ describe("delegate task lifecycle integration", () => {
     expect(details.results[0]?.sessionFile).toContain("resume-test.jsonl");
   });
 
+  test("resumeFrom display tag stays bound to the caller's alias after canonicalization", async () => {
+    // Regression: lifecycle replaces `resumeFrom` with the canonical transcript
+    // path for locking/acquisition. A symlink whose basename differs from its
+    // target used to leak the canonical basename into the settled row's
+    // `resumedFrom`, disagreeing with the live progress row and `agentName`
+    // (both derived from the caller's alias) and defeating `resumeMarker`'s
+    // no-duplication rule. The display tag must follow the caller's alias.
+    const stream = installStreamMock("Resumed via alias.");
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts, stream);
+
+    const target = path.resolve(ts.cwd, "real-transcript.jsonl");
+    const alias = path.resolve(ts.cwd, "alias-link.jsonl");
+    const sessionId = "019ebcfc-0000-7000-8000-000000000002";
+    const lines = [
+      JSON.stringify({
+        type: "session",
+        version: 3,
+        id: sessionId,
+        timestamp: new Date().toISOString(),
+        cwd: ts.cwd,
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "msg-1",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "Previous task" }],
+          timestamp: Date.now(),
+        },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "msg-2",
+        parentId: "msg-1",
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Previous response." }],
+          api: "openai-responses",
+          provider: "test",
+          model: "mock",
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          },
+          stopReason: "stop",
+          timestamp: Date.now(),
+        },
+      }),
+    ];
+    fs.writeFileSync(target, lines.join("\n") + "\n");
+    fs.symlinkSync(target, alias);
+
+    try {
+      const toolDef = getDelegateTool(ts);
+      const ctx = getExecContext(ts);
+
+      const result = await toolDef.execute(
+        "tc-resume-alias",
+        {
+          tasks: [
+            {
+              prompt: "continue from where you left off",
+              resumeFrom: alias,
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx,
+      );
+
+      const details = (result as any).details as {
+        results: Array<{
+          output?: string;
+          error?: string;
+          agent?: string;
+          resumedFrom?: string;
+          sessionFile?: string;
+        }>;
+        progress: Array<{ agent: string; resumedFrom?: string }>;
+      };
+
+      expect(details.results[0]?.error).toBeUndefined();
+      const aliasTag = formatResumeTag(alias);
+      // The settled row keeps the caller's alias tag, not the canonical target.
+      expect(details.results[0]?.resumedFrom).toBe(aliasTag);
+      expect(details.results[0]?.agent).toBe(`resume:${aliasTag}`);
+      // The live progress row and the settled row share one display tag, so
+      // `resumeMarker` does not double-mark the revival.
+      expect(details.progress[0]?.resumedFrom).toBe(aliasTag);
+      expect(details.progress[0]?.agent).toBe(`resume:${aliasTag}`);
+      expect(
+        resumeMarker({
+          agent: details.results[0]!.agent!,
+          resumedFrom: details.results[0]!.resumedFrom,
+        }),
+      ).toBe("");
+      // Acquisition still used the canonical target path.
+      expect(details.results[0]?.sessionFile).toBe(target);
+    } finally {
+      fs.rmSync(alias, { force: true });
+    }
+  });
+
   test("resumeFrom with nonexistent file returns error", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
 
@@ -2213,8 +2339,8 @@ describe("task telemetry boundary", () => {
   // provisionally inside the scratch wrapper (which used to force a second
   // correction write). These tests pin that invariant with an injected
   // recorder.
-  const mkTask = (overrides: Partial<ResolvedTask> = {}) =>
-    ({
+  const mkTask = (overrides: Partial<ResolvedTask> = {}) => {
+    const base = {
       prompt: "do work",
       model: { id: "m", provider: "p", api: "openai-responses" } as never,
       tools: ["read"],
@@ -2224,7 +2350,12 @@ describe("task telemetry boundary", () => {
       agentName: "inline",
       warnings: [],
       ...overrides,
-    }) as never;
+    } as ResolvedTask;
+    if (base.resumeFrom && base.resumeFromDisplay === undefined) {
+      base.resumeFromDisplay = formatResumeTag(base.resumeFrom);
+    }
+    return base as never;
+  };
 
   const mkProgressRow = () =>
     ({

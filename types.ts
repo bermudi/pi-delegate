@@ -148,6 +148,14 @@ export interface ResolvedTask {
   sessionId?: string;
   sessionAction?: SessionAction;
   resumeFrom?: string;
+  /** Display tag (`formatResumeTag`) of the *caller's* `resumeFrom` path, frozen
+   *  once at task resolution. `resumeFrom` itself is later replaced by the
+   *  canonical transcript path for locking/acquisition/quarantine, which can
+   *  have a different basename (symlink alias vs target). Settled-result and
+   *  progress `resumedFrom` tags must read this field — never re-derive from the
+   *  now-canonical `resumeFrom` — so the live and settled rows agree and
+   *  `resumeMarker`'s no-duplication rule holds. */
+  resumeFromDisplay?: string;
   /** Hard wall-clock budget in milliseconds, measured from task start. */
   deadlineMs?: number;
   agentName: string;

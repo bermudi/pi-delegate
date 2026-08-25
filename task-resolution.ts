@@ -592,6 +592,14 @@ export function resolveTasks(
       requestedSystemPrompt = systemPrompt;
     }
 
+    // Freeze the display tag from the caller's path *before* lifecycle
+    // canonicalizes `resumeFrom` for locking/acquisition. A symlink whose
+    // basename differs from its target would otherwise make the settled row's
+    // `resumedFrom` disagree with the live progress row and `agentName`,
+    // defeating `resumeMarker`'s no-duplication rule.
+    const resumeFromDisplay = t.resumeFrom
+      ? formatResumeTag(t.resumeFrom)
+      : undefined;
     return {
       ...t,
       id: t.id,
@@ -610,7 +618,8 @@ export function resolveTasks(
       // so it carries the resumed-transcript identity instead.
       agentName:
         agent?.name ??
-        (t.resumeFrom ? `resume:${formatResumeTag(t.resumeFrom)}` : "ad-hoc"),
+        (resumeFromDisplay ? `resume:${resumeFromDisplay}` : "ad-hoc"),
+      resumeFromDisplay,
       warnings,
       reuseIntent: {
         model: requestedModel,
