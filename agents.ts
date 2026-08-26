@@ -120,7 +120,7 @@ export const BUILTIN_AGENT_CONFIGS: Readonly<Record<string, AgentConfig>> = {
   [DEFAULT_AGENT_NAME]: {
     name: DEFAULT_AGENT_NAME,
     description:
-      "Mirror the live parent model, thinking level, native tools, and base prompt.",
+      "General-purpose subagent mirroring the live parent model, thinking level, native tools, and base prompt. Prefer it for general work; pick a specialist only when its role, tool limits, or scratch workspace genuinely fit.",
     tools: DEFAULT_TOOLS,
     systemPrompt: "",
     builtin: true,

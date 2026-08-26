@@ -3107,10 +3107,10 @@ describe("delegate extension integration", () => {
     expect(toolDef!.description).toContain("tasks:[]=full manual");
     expect(schema.properties.ticket.description).toContain("polling all");
     expect(tasksArraySchema.items.properties.agent.description).toContain(
-      "default, scout, coder, reviewer",
+      "Prefer default — it mirrors the parent",
     );
     expect(tasksArraySchema.items.properties.agent.description).toContain(
-      "Built-ins: default, scout, coder, reviewer",
+      "Specialists: scout, coder, reviewer",
     );
     expect(tasksArraySchema.items.properties.prompt.description).toContain(
       "cannot see this chat",

@@ -42,7 +42,7 @@ export const delegateTaskSchema = Type.Object({
   agent: Type.Optional(
     Type.String({
       description:
-        "Agent profile name. Built-ins: default, scout, coder, reviewer. Omit for ad-hoc.",
+        "Agent profile. Prefer default — it mirrors the parent. Specialists: scout, coder, reviewer. Omit for ad-hoc.",
     }),
   ),
   cwd: Type.Optional(
