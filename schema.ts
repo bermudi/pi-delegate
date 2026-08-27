@@ -262,6 +262,22 @@ export function validateDelegateOperation(
     }
   }
 
+  // Session-control entries (`close`/`list`) are RPC, not work: they must not
+  // ride in a batch alongside real tasks (a "task" that isn't a task), and
+  // they are synchronous — an async ticket for a close/list would claim its
+  // sessionId in the busy index for the ticket's lifetime while delivering
+  // nothing a synchronous call wouldn't. All-control batches stay legal.
+  const isControlEntry = (task: (typeof tasks)[number]) =>
+    task.sessionAction === "close" || task.sessionAction === "list";
+  const controlCount = tasks.filter(isControlEntry).length;
+  if (controlCount > 0 && controlCount < tasks.length) {
+    const index = tasks.findIndex(isControlEntry);
+    return `task ${index + 1}: sessionAction '${tasks[index].sessionAction}' is session control, not a work task. Run session-control tasks in a separate delegate call without work tasks.`;
+  }
+  if (controlCount > 0 && params.async === true) {
+    return "async cannot be combined with session-control tasks ('close'/'list'); session actions are synchronous.";
+  }
+
   for (const [index, task] of tasks.entries()) {
     const rawTask = task as Record<string, unknown>;
     const sessionAction = task.sessionAction;

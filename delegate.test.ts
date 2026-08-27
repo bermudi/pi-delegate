@@ -3207,6 +3207,10 @@ describe("delegate extension integration", () => {
       { force: true, tasks: [{ prompt: "stray" }] },
       { tasks: [{ sessionAction: "list", prompt: "stray" }] },
       { tasks: [{ sessionAction: "close", sessionId: "s1", prompt: "stray" }] },
+      {
+        tasks: [{ prompt: "work" }, { sessionAction: "close", sessionId: "s1" }],
+      },
+      { async: true, tasks: [{ sessionAction: "list" }] },
       { tasks: [{ prompt: "x", deadlineMs: 0 }] },
       { tasks: [{ prompt: "x", deadlineMs: -5 }] },
     ];

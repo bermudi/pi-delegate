@@ -369,6 +369,63 @@ describe("validateDelegateOperation task-field whitelist", () => {
     expect(err).toBeUndefined();
   });
 
+  test("rejects a work task mixed with a session-control task", () => {
+    const err = validateDelegateOperation({
+      tasks: [
+        { prompt: "do work" },
+        { sessionAction: "close", sessionId: "s1" },
+      ],
+    });
+    expect(err).toContain("task 2");
+    expect(err).toContain("session control, not a work task");
+  });
+
+  test("rejects a list action mixed with work tasks", () => {
+    const err = validateDelegateOperation({
+      tasks: [{ prompt: "a" }, { sessionAction: "list" }, { prompt: "b" }],
+    });
+    expect(err).toContain("session control, not a work task");
+  });
+
+  test("allows an all-control batch (multiple closes, close+list)", () => {
+    expect(
+      validateDelegateOperation({
+        tasks: [
+          { sessionAction: "close", sessionId: "s1" },
+          { sessionAction: "close", sessionId: "s2" },
+          { sessionAction: "list" },
+        ],
+      }),
+    ).toBeUndefined();
+  });
+
+  test("rejects async combined with session-control tasks", () => {
+    expect(
+      validateDelegateOperation({
+        async: true,
+        tasks: [{ sessionAction: "list" }],
+      }),
+    ).toContain("async cannot be combined with session-control");
+
+    expect(
+      validateDelegateOperation({
+        async: true,
+        tasks: [
+          { sessionAction: "close", sessionId: "s1" },
+          { sessionAction: "close", sessionId: "s2" },
+        ],
+      }),
+    ).toContain("async cannot be combined with session-control");
+  });
+
+  test("sessionAction 'prompt' is a work entry, not control", () => {
+    expect(
+      validateDelegateOperation({
+        tasks: [{ prompt: "x", sessionAction: "prompt", sessionId: "s1" }],
+      }),
+    ).toBeUndefined();
+  });
+
   test("ticket-control calls skip task checks", () => {
     expect(validateDelegateOperation({ ticketAction: "poll" })).toBeUndefined();
   });
