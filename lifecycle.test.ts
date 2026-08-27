@@ -940,7 +940,7 @@ describe("delegate task lifecycle integration", () => {
     // Verify pool state via the list action (goes through the extension's own pool)
     const listResult = await toolDef.execute(
       "tc-pool-create-1-list",
-      { tasks: [{ sessionAction: "list" }] },
+      { sessionAction: "list" },
       undefined,
       undefined,
       ctx,
@@ -1000,7 +1000,7 @@ describe("delegate task lifecycle integration", () => {
     // Verify the pool shows the session with 2 prompts via list action
     const listResult = await toolDef.execute(
       "tc-pool-reuse-2-list",
-      { tasks: [{ sessionAction: "list" }] },
+      { sessionAction: "list" },
       undefined,
       undefined,
       ctx,
@@ -1047,7 +1047,7 @@ describe("delegate task lifecycle integration", () => {
 
     const listed = await toolDef.execute(
       "tc-pool-failed-use-list",
-      { tasks: [{ sessionAction: "list" }] },
+      { sessionAction: "list" },
       undefined,
       undefined,
       ctx,
@@ -1081,7 +1081,7 @@ describe("delegate task lifecycle integration", () => {
 
     const listed = await toolDef.execute(
       "tc-pool-failed-miss-list",
-      { tasks: [{ sessionAction: "list" }] },
+      { sessionAction: "list" },
       undefined,
       undefined,
       ctx,
@@ -1112,7 +1112,7 @@ describe("delegate task lifecycle integration", () => {
     // Verify it's there
     const listBefore = await toolDef.execute(
       "tc-close-1-list",
-      { tasks: [{ sessionAction: "list" }] },
+      { sessionAction: "list" },
       undefined,
       undefined,
       ctx,
@@ -1124,7 +1124,7 @@ describe("delegate task lifecycle integration", () => {
     // Close
     const result = await toolDef.execute(
       "tc-close-2",
-      { tasks: [{ sessionAction: "close", sessionId: "close-me" }] },
+      { sessionAction: "close", sessionId: "close-me" },
       undefined,
       undefined,
       ctx,
@@ -1139,7 +1139,7 @@ describe("delegate task lifecycle integration", () => {
     // Verify it's gone
     const listAfter = await toolDef.execute(
       "tc-close-2-list",
-      { tasks: [{ sessionAction: "list" }] },
+      { sessionAction: "list" },
       undefined,
       undefined,
       ctx,
@@ -1170,7 +1170,7 @@ describe("delegate task lifecycle integration", () => {
     // List
     const result = await toolDef.execute(
       "tc-list-2",
-      { tasks: [{ sessionAction: "list" }] },
+      { sessionAction: "list" },
       undefined,
       undefined,
       ctx,
@@ -2320,7 +2320,7 @@ describe("delegate pool-miss with resumeFrom and sessionId", () => {
     // Verify the session is in the pool with 2 prompts.
     const listResult = await toolDef.execute(
       "tc-pool-resume-list",
-      { tasks: [{ sessionAction: "list" }] },
+      { sessionAction: "list" },
       undefined,
       undefined,
       ctx,

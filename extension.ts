@@ -44,13 +44,28 @@ import {
   prepareTelemetryForSession,
   sealTelemetryWrites,
 } from "./telemetry.ts";
-import type { DelegateArguments, DelegateDetails } from "./types.ts";
+import type {
+  DelegateArguments,
+  DelegateDetails,
+  DispatchableTask,
+} from "./types.ts";
 
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
 let shutdownDrainTimeoutMs = DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS;
 
 type ShutdownDrainResult =
   { drained: true; failures: unknown[] } | { drained: false; failures: [] };
+
+/** Bridge the promoted top-level session RPC (`sessionAction` + `sessionId`)
+ * to the internal single-entry batch the runner executes. Internal only — the
+ * public task schema has no `sessionAction`; validation guarantees close
+ * carries a sessionId by this point. */
+function bridgeSessionControlTask(params: DelegateArguments): DispatchableTask {
+  return {
+    ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+    sessionAction: params.sessionAction,
+  };
+}
 
 /** Wait for shutdown workers without allowing a stuck provider/tool to hold
  * Pi's reload or exit hostage. The allSettled promise is intentionally left
@@ -160,6 +175,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       let mode: string;
       if (params.ticketAction) {
         mode = params.ticketAction;
+      } else if (params.sessionAction) {
+        // Session RPC is its own mode, not a task shape — label it before the
+        // tasks-based branches so close/list spans stop misreporting as
+        // "sync" with a zero task count.
+        mode = "session";
       } else if (tasks.length === 0) {
         mode = "manual";
       } else if (params.async) {
@@ -245,6 +265,35 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // named agents exist. Changing this would let a task's throwaway cwd
       // silently swap the agent roster.
       const agents = discoverAgents(ctx.cwd);
+
+      // ── Session RPC (top-level sessionAction, #32 promotion) ─────────
+      // Session control is no longer spelled as a task, but it still runs
+      // through the one runner: bridge it to an internal single-entry batch so
+      // busy-index validation, per-session locking (lifecycle's literal
+      // per-action branches), progress rows, and result formatting all keep
+      // their existing behavior. Never async — validation rejects that.
+      // Must precede the help short-circuit: session RPC carries no tasks and
+      // must not be mistaken for an empty help request.
+      if (params.sessionAction) {
+        invalidateHostDepsCache();
+        // Keep the footer-status pipeline in step exactly as a normal
+        // dispatch would (deduped no-op when nothing is running).
+        syncDelegateStatus(ctx);
+        return await dispatchDelegate({
+          pi,
+          params: { ...params, tasks: [bridgeSessionControlTask(params)] },
+          ctx,
+          agents,
+          parentModelId,
+          parentDefaults: {
+            thinking: pi.getThinkingLevel(),
+            tools: pi.getActiveTools(),
+          },
+          signal,
+          onUpdate,
+          callSpan,
+        });
+      }
 
       // ── Help mode ─────────────────────────────────────────────────
       if (!tasks.length) {

@@ -3114,10 +3114,15 @@ describe("delegate extension integration", () => {
     expect(toolDef!.description).toContain("tasks:[]=full manual");
     expect(schema.properties.ticket.description).toContain("polling all");
     expect(tasksArraySchema.items.properties.agent.description).toContain(
-      "Prefer default — it mirrors the parent",
+      "default mirrors the parent's tools",
     );
     expect(tasksArraySchema.items.properties.agent.description).toContain(
-      "Specialists: scout, coder, reviewer",
+      "scout/coder/reviewer specialists",
+    );
+    // The ad-hoc divergence is stated plainly (issue #40 decision pending) —
+    // never as a deliberate design choice.
+    expect(tasksArraySchema.items.properties.agent.description).toContain(
+      "even when the parent is narrower",
     );
     expect(tasksArraySchema.items.properties.prompt.description).toContain(
       "cannot see this chat",
@@ -3134,9 +3139,6 @@ describe("delegate extension integration", () => {
     expect(tasksArraySchema.items.properties.tools.description).toContain(
       "read-only",
     );
-    expect(
-      tasksArraySchema.items.properties.sessionAction.description,
-    ).toContain("list shows active pooled sessions");
     expect(tasksArraySchema.items.properties.resumeFrom.description).toContain(
       "never a ticket ID",
     );
@@ -3146,7 +3148,10 @@ describe("delegate extension integration", () => {
       "isolated",
     ]);
     expect(tasksArraySchema.items.properties.workspace.description).toContain(
-      "not security isolation",
+      "none confine access",
+    );
+    expect(tasksArraySchema.items.properties.workspace.description).not.toContain(
+      "Reviewer",
     );
     expect(tasksArraySchema.items.properties.id.description).toContain(
       "correlation",
@@ -3175,18 +3180,17 @@ describe("delegate extension integration", () => {
     expect(schema.properties.force.description).toContain(
       "writes/commands remain",
     );
-    expect(tasksArraySchema.items.properties.sessionAction.enum).toEqual([
-      "prompt",
-      "close",
-      "list",
-    ]);
+    // #32 promotion: the task-level enum is gone; session RPC is spelled at
+    // the top level with exactly close/list.
+    expect(tasksArraySchema.items.properties.sessionAction).toBeUndefined();
+    expect(schema.properties.sessionAction.enum).toEqual(["close", "list"]);
 
     // Descriptions are a tokenizer-independent proxy for the repeated provider
     // tool-definition payload. Keep truthful model-facing guidance compact but
-    // informative — the budget fits the current copy with ~50 chars of headroom.
-    // Raise it only when new model-visible semantics justify their repeated
-    // provider payload; do not mutilate useful copy merely to preserve a stale
-    // number.
+    // informative. The per-field cap is a readability guard (raised 110 -> 130
+    // in #32 so the most semantic fields stop writing telegraphese); the TOTAL
+    // is the actual payload proxy and must never be raised — do not mutilate
+    // useful copy merely to preserve a stale number either.
     const descriptions = [
       toolDef!.description!,
       ...topProperties.map(([, prop]) => prop.description as string),
@@ -3194,7 +3198,7 @@ describe("delegate extension integration", () => {
     ];
     expect(
       Math.max(...descriptions.map((description) => description.length)),
-    ).toBeLessThanOrEqual(110);
+    ).toBeLessThanOrEqual(130);
     expect(
       descriptions.reduce(
         (total, description) => total + description.length,
@@ -3306,15 +3310,16 @@ describe("delegate extension integration", () => {
       "cwd",
       "context",
       "sessionId",
-      "sessionAction",
       "deadlineMs",
     ];
     for (const field of optionalFields) {
       expect(taskSchema.properties[field]).toBeDefined();
     }
     expect(taskSchema.properties.deadlineMs).toBeDefined();
-    // `action` is not a schema field — the canonical `ticketAction` /
-    // `sessionAction` split is the only surface models see.
+    // `action` is not a schema field — the canonical selectors are the
+    // top-level `ticketAction` / `sessionAction` fields.
+    // Task-level sessionAction left the schema with the #32 promotion; only
+    // the top-level field remains.
     expect(taskSchema.properties.action).toBeUndefined();
     expect((toolDef!.parameters as any).properties.action).toBeUndefined();
     // No required fields at the TypeBox level; runtime validation enforces constraints.
@@ -3413,7 +3418,7 @@ describe("delegate extension integration", () => {
 
     const result = await toolDef!.execute(
       "tc-parent-inherit",
-      { tasks: [{ prompt: "hello", sessionAction: "prompt" }] },
+      { tasks: [{ prompt: "hello" }] },
       undefined,
       undefined,
       // Custom ctx: composite-id parent + trap registry. No explicit task model.
@@ -5152,14 +5157,14 @@ describe("delegate pool", () => {
     ts = undefined;
   });
 
-  test("prompt is optional for close and list actions", async () => {
+  test("prompt is optional for session RPC actions", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
 
-    // list without prompt should work
+    // list without prompt should work (top-level session RPC since #32)
     const listResult = await toolDef!.execute(
       "tc-pool-1",
-      { tasks: [{ sessionAction: "list" }] },
+      { sessionAction: "list" },
       undefined,
       undefined,
       ts.session.extensionRunner as any,
@@ -5169,9 +5174,7 @@ describe("delegate pool", () => {
     // close without prompt should work (even if session doesn't exist)
     const closeResult = await toolDef!.execute(
       "tc-pool-2",
-      {
-        tasks: [{ sessionAction: "close", sessionId: "nonexistent" }],
-      },
+      { sessionAction: "close", sessionId: "nonexistent" },
       undefined,
       undefined,
       ts.session.extensionRunner as any,
@@ -5200,7 +5203,9 @@ describe("delegate pool", () => {
 
     const result = await toolDef!.execute(
       "tc-pool-4",
-      { tasks: [{ sessionAction: "close", systemPrompt: "test" }] },
+      // Deliberately keeps a stray field beside `close`: the mode validator
+      // must demand sessionId BEFORE flagging foreign fields.
+      { sessionAction: "close", systemPrompt: "test" },
       undefined,
       undefined,
       ts.session.extensionRunner as any,
@@ -7734,15 +7739,19 @@ describe("async delegate integration", () => {
     expect(text).toContain("150 tokens");
   });
 
-  test("per-task sessionAction enum does not advertise poll or cancel", async () => {
+  test("session RPC is top-level only and does not advertise poll, cancel, or prompt", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
-    const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
-    const taskSchema = tasksArraySchema.items;
-    const sessionActionEnum = taskSchema.properties.sessionAction.enum;
+    const schema = toolDef!.parameters as any;
+    const tasksArraySchema = getTasksArraySchema(schema as any);
+    // Flipped consciously for #32: task-level sessionAction is gone; the
+    // selector moved to the top level with exactly close/list.
+    expect(tasksArraySchema.items.properties.sessionAction).toBeUndefined();
+    const sessionActionEnum = schema.properties.sessionAction.enum;
     expect(sessionActionEnum).not.toContain("poll");
     expect(sessionActionEnum).not.toContain("cancel");
-    expect(sessionActionEnum).toEqual(["prompt", "close", "list"]);
+    expect(sessionActionEnum).not.toContain("prompt");
+    expect(sessionActionEnum).toEqual(["close", "list"]);
   });
 
   test("top-level ticketAction enum includes wait", async () => {

@@ -3,7 +3,7 @@ import {
   VALID_THINKING_LEVELS,
   isSessionControlAction,
 } from "./constants.ts";
-import type { DelegateArguments } from "./types.ts";
+import type { DelegateArguments, DispatchableTask } from "./types.ts";
 
 // JSON Schema string enum that keeps the literal union in `Static<>`.
 // `Type.String({ enum })` validates identically but widens to `string`;
@@ -33,19 +33,19 @@ export const delegateTaskSchema = Type.Object({
       minLength: 1,
       maxLength: 64,
       description:
-        "Optional task correlation key; 1-64 chars; A-Z a-z 0-9 . _ - only; duplicate ids rejected. Omit for index.",
+        "Optional correlation key; duplicates rejected; omit for index.",
     }),
   ),
   prompt: Type.Optional(
     Type.String({
       description:
-        "Self-contained task prompt; fresh context cannot see this chat. Omit only for close, list, or resumeFrom.",
+        "Self-contained task prompt; fresh context cannot see this chat. Omit only for resumeFrom.",
     }),
   ),
   agent: Type.Optional(
     Type.String({
       description:
-        "Agent profile. Prefer default — it mirrors the parent. Specialists: scout, coder, reviewer. Omit for ad-hoc.",
+        "default mirrors the parent's tools; scout/coder/reviewer specialists. Ad-hoc tasks get * tools even when the parent is narrower.",
     }),
   ),
   cwd: Type.Optional(
@@ -89,13 +89,6 @@ export const delegateTaskSchema = Type.Object({
         "Live pool key for multi-turn reuse; omit for one-shot tasks.",
     }),
   ),
-  sessionAction: Type.Optional(
-    StringEnum(["prompt", "close", "list"], {
-      description:
-        "Session action; close needs sessionId; list shows active pooled sessions.",
-      default: "prompt",
-    }),
-  ),
   resumeFrom: Type.Optional(
     Type.String({
       description:
@@ -111,7 +104,7 @@ export const delegateTaskSchema = Type.Object({
   workspace: Type.Optional(
     StringEnum(["shared", "scratch", "isolated"], {
       description:
-        "shared; scratch discarded; isolated=sync one-shot Git apply; not security isolation. Reviewer=scratch.",
+        "shared edits source; scratch discards; isolated orders Git worktree proposals; none confine access.",
     }),
   ),
 });
@@ -125,6 +118,18 @@ export const delegateArgumentsSchema = Type.Object(
       StringEnum(["poll", "cancel", "wait"], {
         description:
           "Ticket control: poll=snapshot; wait=block until settled; cancel=abort. Prefer wait; never cancel for time.",
+      }),
+    ),
+    sessionAction: Type.Optional(
+      StringEnum(["close", "list"], {
+        description:
+          '"close" ends the named pooled session; "list" lists active ones. Runs instead of tasks.',
+      }),
+    ),
+    sessionId: Type.Optional(
+      Type.String({
+        description:
+          'With "close": the pooled session to end. Alone, a sessionId folds into a task as reuse.',
       }),
     ),
     async: Type.Optional(
@@ -165,7 +170,10 @@ export const delegateArgumentsSchema = Type.Object(
 );
 
 /** Fields that belong to a task entry. Models sometimes place these at the top
- * level of the arguments; the shim folds them back into a single task. */
+ * level of the arguments; the shim folds them back into a single task.
+ * `sessionAction` is NOT here: it was promoted to a top-level field (#32), so
+ * top-level presence means session-RPC intent, not task intent — the classifier
+ * and its mode validators own it now. */
 const TASK_FIELD_NAMES = [
   "id",
   "prompt",
@@ -177,7 +185,6 @@ const TASK_FIELD_NAMES = [
   "tools",
   "thinking",
   "sessionId",
-  "sessionAction",
   "resumeFrom",
   "deadlineMs",
   "workspace",
@@ -190,7 +197,19 @@ const TASK_FIELD_NAMES = [
  * the work while the call in fact ran synchronously). */
 const VALID_TASK_KEYS = new Set<string>(TASK_FIELD_NAMES);
 
-/** Validate the three operation modes after compatibility reshaping. */
+/** Task fields that are known spellings of top-level fields — rejected inside
+ * task entries with a corrective hint pointing at their real home. */
+const TOP_LEVEL_TASK_KEY_HINTS = new Set(["async", "sessionAction"]);
+
+/** Validate the four operation modes after compatibility reshaping.
+ *
+ * One classifier with fixed precedence runs first: `ticketAction` → ticket
+ * RPC; `sessionAction` → session RPC; non-empty `tasks` → dispatch; otherwise
+ * help. Each mode gets a small total validator that rejects foreign fields
+ * generically (naming the offending field and the fix), so ordering is no
+ * longer load-bearing across checks and a new field costs one schema entry
+ * plus one mode check. Legacy task-level session-control shapes reaching this
+ * point (the shim only transforms safe solo entries) hit the fence below. */
 export function validateDelegateOperation(
   params: DelegateArguments,
 ): string | undefined {
@@ -198,37 +217,88 @@ export function validateDelegateOperation(
   if ("action" in rawParams) {
     return (
       "unsupported field 'action'; use 'ticketAction' for poll/cancel/wait " +
-      "or 'sessionAction' for prompt/close/list."
+      "or 'sessionAction' for close/list."
     );
   }
-  const tasks = params.tasks ?? [];
 
+  // Mode classification — precedence by selector presence.
+  if (params.ticketAction !== undefined) {
+    return validateTicketMode(params);
+  }
+  if (params.sessionAction !== undefined) {
+    return validateSessionMode(params);
+  }
+  return validateDispatchOrHelpMode(params);
+}
+
+/** Fields recognized at the top level in session mode: the selector itself
+ * plus its target. Anything else (ticket fields, async, tasks, stray task
+ * fields) is foreign to session RPC. */
+const SESSION_MODE_FIELDS = new Set(["sessionAction", "sessionId"]);
+
+/** Session RPC: one close/list action per call against one pooled session. */
+function validateSessionMode(params: DelegateArguments): string | undefined {
+  const rawParams = params as Record<string, unknown>;
+  const { sessionAction } = params;
+  // The normalizer strips task-level/top-level "prompt" (a no-op default);
+  // anything else unrecognizable fails closed rather than misclassifying.
+  if (!isSessionControlAction(sessionAction)) {
+    return `sessionAction '${String(sessionAction)}' is not a session control action; use 'close' or 'list'.`;
+  }
+  if (sessionAction === "close" && !params.sessionId) {
+    return "sessionAction 'close' requires sessionId.";
+  }
+  const foreign = Object.keys(rawParams).filter(
+    (key) => !SESSION_MODE_FIELDS.has(key),
+  );
+  if (foreign.length) {
+    return `sessionAction '${sessionAction}' cannot be combined with ${foreign
+      .map((field) => `'${field}'`)
+      .join(", ")}; run it alone — a session action takes only 'sessionAction' (plus 'sessionId' for 'close').`;
+  }
+  return undefined;
+}
+
+/** Ticket RPC: `ticketAction` owns the call; every other field family is
+ * foreign. Note `sessionAction` must be listed explicitly: it left
+ * `TASK_FIELD_NAMES` when it was promoted to top level, and without owning it
+ * here the old task-level exclusion would silently evaporate. */
+function validateTicketMode(params: DelegateArguments): string | undefined {
+  const rawParams = params as Record<string, unknown>;
   const ticketAction = params.ticketAction;
-  const isTicketControl = ticketAction !== undefined;
-
-  if (isTicketControl) {
-    const taskIntentFields = ([...TASK_FIELD_NAMES, "tasks"] as const).filter(
-      (field) => rawParams[field] !== undefined,
-    );
-    if (taskIntentFields.length) {
-      return `ticket control cannot be combined with task-intent field(s) ${taskIntentFields
-        .map((field) => `'${field}'`)
-        .join(", ")}; call it separately.`;
-    }
-    if (params.async === true) {
-      return "ticket control cannot include async; call it separately.";
-    }
-    if (ticketAction !== "poll" && !params.ticket) {
-      return `ticketAction '${ticketAction}' requires ticket.`;
-    }
-    if (ticketAction !== "cancel" && params.force === true) {
-      return "force is valid only with ticketAction 'cancel'.";
-    }
-    if (ticketAction !== "wait" && params.timeoutMs !== undefined) {
-      return "timeoutMs is valid only with ticketAction 'wait'.";
-    }
-    return undefined;
+  const incompatibleFields = (
+    [...TASK_FIELD_NAMES, "tasks", "sessionAction"] as const
+  ).filter((field) => rawParams[field] !== undefined);
+  if (incompatibleFields.length) {
+    return `ticket control cannot be combined with field(s) ${incompatibleFields
+      .map((field) => `'${field}'`)
+      .join(", ")}; call it separately.`;
   }
+  if (params.async === true) {
+    return "ticket control cannot include async; call it separately.";
+  }
+  if (ticketAction !== "poll" && !params.ticket) {
+    return `ticketAction '${ticketAction}' requires ticket.`;
+  }
+  if (ticketAction !== "cancel" && params.force === true) {
+    return "force is valid only with ticketAction 'cancel'.";
+  }
+  if (ticketAction !== "wait" && params.timeoutMs !== undefined) {
+    return "timeoutMs is valid only with ticketAction 'wait'.";
+  }
+  return undefined;
+}
+
+/** Dispatch (non-empty `tasks`) or help (empty/absent). Stray ticket- and
+ * session-mode selectors are foreign here and rejected generically. */
+function validateDispatchOrHelpMode(
+  params: DelegateArguments,
+): string | undefined {
+  const rawParams = params as Record<string, unknown>;
+  // Widened view: internally bridged session-control tasks carry an extra
+  // `sessionAction` field, and un-hoisted legacy shapes can reach this
+  // validator before being rejected by the fence below.
+  const tasks = (params.tasks ?? []) as DispatchableTask[];
 
   if (params.ticket !== undefined) {
     return "ticket requires ticketAction 'poll', 'cancel', or 'wait'.";
@@ -252,46 +322,50 @@ export function validateDelegateOperation(
   // nonempty tasks array. The normalize shim only wraps flat fields when
   // there is no tasks array, so a mixed call silently lets tasks win —
   // a model mistake that should fail loudly.
-  if (tasks.length > 0) {
-    const flatTaskFields = TASK_FIELD_NAMES.filter(
-      (field) => rawParams[field] !== undefined,
-    );
-    if (flatTaskFields.length) {
-      return `cannot mix top-level task field(s) ${flatTaskFields
-        .map((field) => `'${field}'`)
-        .join(
-          ", ",
-        )} with an explicit tasks array; move them into a task entry or remove tasks.`;
-    }
+  const flatTaskFields = TASK_FIELD_NAMES.filter(
+    (field) => rawParams[field] !== undefined,
+  );
+  if (flatTaskFields.length) {
+    return `cannot mix top-level task field(s) ${flatTaskFields
+      .map((field) => `'${field}'`)
+      .join(
+        ", ",
+      )} with an explicit tasks array; move them into a task entry or remove tasks.`;
   }
 
-  // Session-control entries (`close`/`list`) are RPC, not work: they must not
-  // ride in a batch alongside real tasks (a "task" that isn't a task), and
-  // they are synchronous — an async ticket for a close/list would claim its
-  // sessionId in the busy index for the ticket's lifetime while delivering
-  // nothing a synchronous call wouldn't. All-control batches stay legal.
+  // Session-control entries (`close`/`list`) are RPC, not work. The shim only
+  // hoists safe SOLO control entries; anything else reaching the dispatcher
+  // (a mixed batch, an async batch, more than one entry) is rejected loudly:
+  // mixed batches would execute a close the caller meant separately, async
+  // would hold the sessionId in the busy index for the ticket's lifetime
+  // while delivering nothing synchronous wouldn't, and multiple actions are
+  // no longer expressible (one session action per call since #32).
   const isControlEntry = (task: (typeof tasks)[number]) =>
     isSessionControlAction(task.sessionAction);
   const controlCount = tasks.filter(isControlEntry).length;
   if (controlCount > 0 && controlCount < tasks.length) {
     const index = tasks.findIndex(isControlEntry);
-    return `task ${index + 1}: sessionAction '${tasks[index].sessionAction}' is session control, not a work task. Run session-control tasks in a separate delegate call without work tasks.`;
+    return `task ${index + 1}: sessionAction '${tasks[index].sessionAction}' is session control, not a work task. Use the top-level 'sessionAction' field — session control cannot share a call with work tasks.`;
+  }
+  if (controlCount > 1) {
+    return `${controlCount} session-control tasks found; session RPC runs one sessionAction per call. Use the top-level 'sessionAction' field once per delegate call.`;
   }
   if (controlCount > 0 && params.async === true) {
-    return "async cannot be combined with session-control tasks ('close'/'list'); session actions are synchronous.";
+    return "async cannot be combined with session control ('close'/'list'); session actions are synchronous via the top-level 'sessionAction' field.";
   }
 
   for (const [index, task] of tasks.entries()) {
     const rawTask = task as Record<string, unknown>;
-    const sessionAction = task.sessionAction;
 
     const unknownKeys = Object.keys(rawTask).filter(
       (key) => !VALID_TASK_KEYS.has(key),
     );
     if (unknownKeys.length) {
-      const misplacedTopLevel = unknownKeys.filter((key) => key === "async");
+      const misplacedTopLevel = unknownKeys.filter((key) =>
+        TOP_LEVEL_TASK_KEY_HINTS.has(key),
+      );
       const topLevelHint = misplacedTopLevel.length
-        ? ` ${misplacedTopLevel.map((key) => `'${key}'`).join(" and ")} ${misplacedTopLevel.length === 1 ? "is a" : "are"} top-level flag${misplacedTopLevel.length === 1 ? "" : "s"}; move ${misplacedTopLevel.length === 1 ? "it" : "them"} out of the task entry.`
+        ? ` ${misplacedTopLevel.map((key) => `'${key}'`).join(" and ")} ${misplacedTopLevel.length === 1 ? "is a" : "are"} top-level field${misplacedTopLevel.length === 1 ? "" : "s"}; move ${misplacedTopLevel.length === 1 ? "it" : "them"} out of the task entry.`
         : "";
       return (
         `task ${index + 1}: unknown field(s) ${unknownKeys
@@ -310,28 +384,9 @@ export function validateDelegateOperation(
     }
     if (
       (task.workspace === "scratch" || task.workspace === "isolated") &&
-      (task.sessionId || task.resumeFrom || sessionAction !== undefined)
+      (task.sessionId || task.resumeFrom)
     ) {
-      return `task ${index + 1}: workspace '${task.workspace}' is one-shot and cannot be combined with sessionId, resumeFrom, or sessionAction. Set workspace: "shared" to use a persistent agent.`;
-    }
-    if (sessionAction === "close") {
-      if (!task.sessionId) {
-        return `task ${index + 1}: sessionAction 'close' requires sessionId.`;
-      }
-      const extras = Object.keys(rawTask).filter(
-        (key) => key !== "sessionAction" && key !== "sessionId" && key !== "id",
-      );
-      if (extras.length) {
-        return `task ${index + 1}: sessionAction 'close' accepts only sessionAction and sessionId.`;
-      }
-    }
-    if (sessionAction === "list") {
-      const extras = Object.keys(rawTask).filter(
-        (key) => key !== "sessionAction" && key !== "id",
-      );
-      if (extras.length) {
-        return `task ${index + 1}: sessionAction 'list' accepts only sessionAction.`;
-      }
+      return `task ${index + 1}: workspace '${task.workspace}' is one-shot and cannot be combined with sessionId or resumeFrom. Set workspace: "shared" to use a persistent agent.`;
     }
   }
 
@@ -369,13 +424,30 @@ function hasTicketControlIntent(record: Record<string, unknown>): boolean {
   );
 }
 
+/** True when `record` carries top-level session-RPC intent: an explicit
+ * close/list `sessionAction`. A bare top-level `sessionId` is deliberately
+ * NOT session intent — it stays task-intent and wraps into a task as reuse.
+ * Only `sessionAction` presence (after the legacy hoist below) selects the
+ * session mode. */
+function hasSessionControlIntent(record: Record<string, unknown>): boolean {
+  return isSessionControlAction(record.sessionAction);
+}
+
 /** Fold top-level task fields into a single `tasks` entry. Only fires when
- * there is no usable tasks array and no ticket-control intent — those calls
- * are legitimately taskless. `sessionAction` is part of `TASK_FIELD_NAMES`,
- * so a top-level `sessionAction` rides along into the wrapped task. */
+ * there is no usable tasks array and neither ticket-control intent nor
+ * session-control intent makes those calls legitimately taskless.
+ * `sessionAction` is not part of `TASK_FIELD_NAMES`: a top-level close/list
+ * means session RPC and must reach the classifier unwrapped — wrapping first
+ * would swallow stray fields into a task instead of rejecting them. */
 function wrapFlatTaskFields(record: Record<string, unknown>): void {
   const hasTasks = Array.isArray(record.tasks) && record.tasks.length > 0;
-  if (hasTasks || hasTicketControlIntent(record)) return;
+  if (
+    hasTasks ||
+    hasTicketControlIntent(record) ||
+    hasSessionControlIntent(record)
+  ) {
+    return;
+  }
   const task: Record<string, unknown> = {};
   for (const key of TASK_FIELD_NAMES) {
     if (record[key] !== undefined) {
@@ -409,9 +481,13 @@ function normalizeTaskEntry(entry: unknown): unknown {
  * models then misread as "the tool is broken"):
  * - `tasks` as a JSON string instead of an array;
  * - task fields (`prompt`, `systemPrompt`, `tools`, ...) placed at the top
- *   level instead of inside a `tasks` entry — wrapped into a single task;
+ *   level instead of inside a `tasks` entry — wrapped into a single task,
+ *   unless ticket- or session-control intent makes the call legitimately
+ *   taskless (see `hasTicketControlIntent` / `hasSessionControlIntent`);
  * - `tools` as a JSON string (or bare token) inside a task entry;
- * - `agent: ""` inside a task entry — treated as omitted (ad-hoc).
+ * - `agent: ""` inside a task entry — treated as omitted (ad-hoc);
+ * - legacy task-level `sessionAction` (#32 promotion window): "prompt"
+ *   stripped, safe solo close/list entries hoisted to the top level.
  * All other invalid input is left for normal schema validation to reject
  * loudly.
  *
@@ -430,6 +506,9 @@ export function normalizeDelegateArguments(args: unknown): DelegateArguments {
     if (parsed) record.tasks = parsed;
   }
 
+  // Legacy task-level session control → strip/hoist/reject (#32 promotion).
+  recoverLegacySessionActions(record);
+
   // Flat task fields at the top level → wrap into a single task.
   wrapFlatTaskFields(record);
 
@@ -439,4 +518,51 @@ export function normalizeDelegateArguments(args: unknown): DelegateArguments {
   }
 
   return record as DelegateArguments;
+}
+
+/** Migration shim for the #32 promotion of session control from task entries
+ * to the top level. Legacy shapes are silently transformed wherever the
+ * transformation is provably what the caller meant; everything ambiguous
+ * keeps its shape so validateDelegateOperation rejects it loudly with copy
+ * pointing at the top-level 'sessionAction' field:
+ * - `sessionAction: "prompt"` was a no-op default — stripped everywhere.
+ * - A safe SOLO close/list entry is hoisted to the top level before intent
+ *   detection and flat-field wrapping run (entry `id` dropped — cosmetic,
+ *   ids carry no meaning across calls).
+ * - Mixed work/control batches, async control batches, and multi-entry
+ *   control batches stay untouched for the fence's corrective rejection.
+ * When this shim sunsets next release, legacy task-level spellings become
+ * plain unknown-field errors naming 'sessionAction' as a top-level field. */
+function recoverLegacySessionActions(record: Record<string, unknown>): void {
+  // Top-level spellings of the dead "prompt" value strip cleanly even when
+  // they arrive beside ticket fields.
+  if (record.sessionAction === "prompt") delete record.sessionAction;
+
+  if (!Array.isArray(record.tasks)) return;
+  const entries = record.tasks as Record<string, unknown>[];
+  if (!entries.every((entry) => entry && typeof entry === "object")) return;
+
+  for (const entry of entries) {
+    if (entry.sessionAction === "prompt") delete entry.sessionAction;
+  }
+
+  const controls = entries.filter((entry) =>
+    isSessionControlAction(entry.sessionAction),
+  );
+  if (controls.length === 0) return;
+
+  // Hoist ONLY a safe solo control entry: one entry total, synchronous. Every
+  // other legacy shape stays put for loud rejection (hoisting a mixed batch
+  // would execute a close the model placed in a batch alongside real work).
+  const isSafeSoloShape =
+    entries.length === 1 && controls.length === 1 && record.async !== true;
+  if (!isSafeSoloShape) return;
+
+  const [entry] = entries;
+  const { id: _droppedCosmeticId, ...rest } = entry;
+  const action = rest.sessionAction;
+  delete rest.sessionAction;
+  delete record.tasks;
+  Object.assign(record, rest);
+  record.sessionAction = action;
 }

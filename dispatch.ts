@@ -48,6 +48,7 @@ import type {
   DelegateToolResult,
   ParentAgentDefaults,
   ResolvedTask,
+  DispatchableTask,
   TaskDef,
   TaskProgress,
   TaskResult,
@@ -58,7 +59,7 @@ const UNSAFE_SHARED_WRITES_WARNING =
   "UNSAFE SHARED WRITES ENABLED: shared-write admission is bypassed. Delegate provides no isolation or rollback.";
 
 interface ActiveSyncDispatch {
-  tasks: TaskDef[];
+  tasks: DispatchableTask[];
   resolved: ResolvedTask[];
 }
 
@@ -157,7 +158,7 @@ export function makeFireUpdater(
 export interface AsyncDispatchInput {
   pi: ExtensionAPI;
   ctx: DelegateToolCtx;
-  tasks: TaskDef[];
+  tasks: DispatchableTask[];
   resolved: ResolvedTask[];
   progress: TaskProgress[];
   parentModelId: string | undefined;
@@ -169,7 +170,7 @@ export interface AsyncDispatchInput {
 /** Inputs needed by the sync (blocking) dispatch path. */
 export interface SyncDispatchInput {
   ctx: DelegateToolCtx;
-  tasks: TaskDef[];
+  tasks: DispatchableTask[];
   resolved: ResolvedTask[];
   progress: TaskProgress[];
   parentModelId: string | undefined;
@@ -193,7 +194,7 @@ export interface DelegateDispatchInput {
   callSpan?: CallSpan;
 }
 
-function taskReference(task: TaskDef, index: number): string {
+function taskReference(task: DispatchableTask, index: number): string {
   return `Task ${index + 1}${task.id ? `#${task.id}` : ""}`;
 }
 
@@ -207,7 +208,7 @@ function asAdmissionWriter(task: ResolvedTask): ResolvedTask {
 }
 
 function sharedWriteRejection(
-  tasks: TaskDef[],
+  tasks: DispatchableTask[],
   parentModelId: string | undefined,
   conflicts: SharedWriteConflict[],
   references: readonly string[] = tasks.map(taskReference),
@@ -236,7 +237,7 @@ function sharedWriteRejection(
 }
 
 function sharedWriteSafetyFailure(
-  tasks: TaskDef[],
+  tasks: DispatchableTask[],
   parentModelId: string | undefined,
   error: unknown,
 ): DelegateToolResult {

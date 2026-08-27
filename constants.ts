@@ -60,10 +60,13 @@ export const VALID_THINKING_LEVELS = [
  *  task-resolution.ts and agents.ts stay ergonomic under strict typing. */
 export const VALID_THINKING: Set<string> = new Set(VALID_THINKING_LEVELS);
 
-/** Session-control actions: RPC against the session pool, not work. They may
- *  only appear in all-control batches and never combine with `async` (see the
- *  fence in schema.ts). Per-action behavior lives at the branch sites; this
- *  predicate is the one shared spelling of the control set. */
+/** Session-control actions: RPC against the session pool, not work. Callers
+ *  spell them at the TOP level (`sessionAction`, one action per call — #32);
+ *  legacy task-level spellings are transformed or rejected by the normalizer
+ *  shim and classifier in schema.ts. This predicate remains the one shared
+ *  spelling of the control set for the shim, the classifier fence, and the
+ *  pipeline guards over internally bridged tasks. Per-action behavior lives
+ *  at the branch sites (e.g. lifecycle applySessionAction). */
 export function isSessionControlAction(action: unknown): boolean {
   return action === "close" || action === "list";
 }

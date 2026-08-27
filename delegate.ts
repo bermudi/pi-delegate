@@ -3,6 +3,7 @@ export { default } from "./extension.ts";
 export type {
   AgentConfig,
   SessionAction,
+  DispatchableTask,
   WorkspaceMode,
   TicketAction,
   DelegateArguments,

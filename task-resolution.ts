@@ -38,7 +38,7 @@ import type {
   ParentAgentDefaults,
   ResolvedTask,
   ResolveTasksResult,
-  TaskDef,
+  DispatchableTask,
 } from "./types.ts";
 
 const PROJECT_CONTEXT_START =
@@ -94,7 +94,7 @@ export function stripInheritedProjectContext(
 /** Build a tool result for an error/notice with no task progress. */
 function noticeResult(
   text: string,
-  tasks: TaskDef[],
+  tasks: DispatchableTask[],
   parentModel: string | undefined,
 ): DelegateToolResult {
   return {
@@ -112,7 +112,7 @@ function formatTaskRef(index: number, id: string | undefined): string {
  *  ticket, and unknown agent names. Returns an error result to short-circuit
  *  the call, or null when all checks pass. */
 export function validateTasks(
-  tasks: TaskDef[],
+  tasks: DispatchableTask[],
   agents: Map<string, AgentConfig>,
   parentModelId: string | undefined,
 ): DelegateToolResult | null {
@@ -154,7 +154,7 @@ export function validateTasks(
           : `uses workspace \`${workspace}\``;
       const persistentAgent = task.agent ?? "agent";
       return noticeResult(
-        `${formatTaskRef(index, task.id)}: Agent \`${persistentAgent}\` ${defaultText}, which is one-shot and cannot use \`sessionId\`, \`resumeFrom\`, or session actions. Set \`workspace: "shared"\` to use a persistent ${persistentAgent}.`,
+        `${formatTaskRef(index, task.id)}: Agent \`${persistentAgent}\` ${defaultText}, which is one-shot and cannot use \`sessionId\` or \`resumeFrom\`. Set \`workspace: "shared"\` to use a persistent ${persistentAgent}.`,
         tasks,
         parentModelId,
       );
@@ -242,7 +242,7 @@ export function validateTasks(
  *  resolved model's provider. Throws on unrecoverable misconfiguration
  *  (missing prompt, unavailable explicit model, no model at all). */
 export function resolveTasks(
-  tasks: TaskDef[],
+  tasks: DispatchableTask[],
   ctx: DelegateToolCtx,
   agents: Map<string, AgentConfig>,
   parentDefaults: ParentAgentDefaults,
@@ -274,7 +274,7 @@ export function resolveTasks(
   const overridesByParentModel = getAgentOverridesByParentModel(dispatchConfig);
 
   const resolveTask = (
-    t: TaskDef,
+    t: DispatchableTask,
     i: number,
   ): ResolvedTask | { error: string } => {
     const isDefaultAgent = t.agent === DEFAULT_AGENT_NAME;

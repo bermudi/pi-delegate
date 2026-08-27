@@ -53,12 +53,21 @@ type CanonicalTaskDef = NonNullable<
 export type TicketAction = NonNullable<
   CanonicalDelegateArguments["ticketAction"]
 >;
-/** Per-task session action: "prompt" | "close" | "list". */
-export type SessionAction = NonNullable<CanonicalTaskDef["sessionAction"]>;
+/** Top-level session RPC action: "close" | "list" (#32 promotion). */
+export type SessionAction = NonNullable<
+  CanonicalDelegateArguments["sessionAction"]
+>;
 /** Filesystem mode: shared source tree or an ephemeral CoW scratch copy. */
 export type WorkspaceMode = NonNullable<CanonicalTaskDef["workspace"]>;
 
 export type TaskDef = CanonicalTaskDef;
+
+/** Pipeline-wide task type: caller-provided TaskDefs plus the internal
+ * session-RPC bridge task built by extension.ts from the promoted top-level
+ * `sessionAction`/`sessionId` fields. `sessionAction` left the public task
+ * schema in #32 (it became top-level); the runner still executes the bridged
+ * operation through ResolvedTask, so the dispatch pipeline accepts both. */
+export type DispatchableTask = TaskDef & { sessionAction?: SessionAction };
 
 export type DelegateArguments = CanonicalDelegateArguments;
 
