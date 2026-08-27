@@ -349,6 +349,77 @@ describe("dispatch-time shared-write gate", () => {
     },
   );
 
+  test.each([
+    ["sync", false],
+    ["async", true],
+  ])(
+    "one task with an unknown tool name rejects the whole %s call before any dispatch",
+    async (_mode, asyncMode) => {
+      const model = { provider: "test", id: "model" } as any;
+      let ran = 0;
+      _setRunAgentSessionForTesting(async () => {
+        ran += 1;
+        return {
+          output: "done",
+          durationMs: 1,
+          tokens: 0,
+          toolUses: 0,
+          files: [],
+          usage: emptyUsage(),
+        } as any;
+      });
+
+      const finishes: Array<Record<string, unknown>> = [];
+      const result = await dispatchDelegate({
+        pi: {} as any,
+        params: {
+          async: asyncMode,
+          tasks: [
+            { id: "ok", prompt: "one", cwd: tmpDir, tools: ["read"] },
+            { id: "typo", prompt: "two", cwd: tmpDir, tools: ["read", "fnd"] },
+          ],
+        },
+        ctx: {
+          cwd: tmpDir,
+          model,
+          modelRegistry: {
+            getAvailable: () => [model],
+            find: () => model,
+            hasConfiguredAuth: () => true,
+          },
+          getSystemPrompt: () => "parent",
+        } as any,
+        agents: new Map(),
+        parentModelId: model.id,
+        parentDefaults: { thinking: "off", tools: ["read"] },
+        signal: undefined,
+        onUpdate: undefined,
+        callSpan: {
+          startedAt: Date.now(),
+          finish: (record: Record<string, unknown>) => finishes.push(record),
+        } as any,
+      });
+
+      expect(result.content[0]?.text).toContain(
+        "Task 2#typo: unknown tool(s): fnd",
+      );
+      expect(result.content[0]?.text).toContain(
+        "Available: read, write, edit, bash, grep, find, ls",
+      );
+      expect(result.details.results).toEqual([]);
+      expect(result.details.progress).toEqual([]);
+      expect(ran).toBe(0);
+      expect(ticketRegistry.size).toBe(0);
+      expect(finishes).toHaveLength(1);
+      expect(finishes[0]).toMatchObject({
+        status: "failed",
+        totalTokens: 0,
+        totalCost: 0,
+      });
+      _setRunAgentSessionForTesting(undefined);
+    },
+  );
+
   test("an operator config flag authorizes unsafe shared writers with a visible warning", async () => {
     _setDelegateConfigForTesting({ allowUnsafeSharedWrites: true });
     const model = { provider: "test", id: "model" } as any;

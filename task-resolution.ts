@@ -37,6 +37,7 @@ import type {
   DelegateToolResult,
   ParentAgentDefaults,
   ResolvedTask,
+  ResolveTasksResult,
   TaskDef,
 } from "./types.ts";
 
@@ -236,15 +237,17 @@ export function validateTasks(
 
 /** Resolve every task into a fully-specified `ResolvedTask`: cwd, system
  *  prompt, model, tools, thinking, and prompt (with optional parent-transcript
- *  injection). Throws on unrecoverable misconfiguration (missing prompt,
- *  unavailable explicit model, no model at all). */
+ *  injection). Returns `{ error }` — rejecting the whole batch before any
+ *  dispatch — when any task names a tool outside the closed valid set for its
+ *  resolved model's provider. Throws on unrecoverable misconfiguration
+ *  (missing prompt, unavailable explicit model, no model at all). */
 export function resolveTasks(
   tasks: TaskDef[],
   ctx: DelegateToolCtx,
   agents: Map<string, AgentConfig>,
   parentDefaults: ParentAgentDefaults,
   dispatchConfig: DelegateConfig = getDelegateConfigSnapshot(),
-): ResolvedTask[] {
+): ResolveTasksResult {
   // Build parent transcript lazily — only computed once if any task uses with-parent-transcript
   let parentTranscript: string | null = null;
   const needsParentContext = tasks.some(
@@ -270,7 +273,10 @@ export function resolveTasks(
   const agentOverrides = getAgentOverrides(dispatchConfig);
   const overridesByParentModel = getAgentOverridesByParentModel(dispatchConfig);
 
-  return tasks.map((t, i) => {
+  const resolveTask = (
+    t: TaskDef,
+    i: number,
+  ): ResolvedTask | { error: string } => {
     const isDefaultAgent = t.agent === DEFAULT_AGENT_NAME;
     const agent = t.agent
       ? (agents.get(t.agent) ?? BUILTIN_AGENT_CONFIGS[t.agent])
@@ -328,7 +334,8 @@ export function resolveTasks(
       );
     }
 
-    // Resolve tools — warn about unknown tool names.
+    // Resolve tools — unknown names reject the whole batch (checked below,
+    // post-model-resolution, because the provider decides the valid set).
     // For active pooled sessions, fall back to the frozen pooled config so
     // "continue with only sessionId" works without re-supplying tools.
     // Explicit overrides that don't match get rejected by acquireAgentSession.
@@ -568,15 +575,20 @@ export function resolveTasks(
       dispatchConfig,
     );
 
+    // The valid tool set is closed: core TOOL_FACTORIES plus the static
+    // per-provider list. Unknown names hard-reject the whole batch (mirroring
+    // unknown agent names) instead of warn-dropping a silently weakened
+    // subagent. Frozen pooled configs are known-good: they were filtered
+    // against this same static set when first resolved, so bare
+    // "continue with only sessionId" resumes never trip this check.
     const availableTools = availableToolNames(model?.provider);
     const availableToolSet = new Set(availableTools);
     const unknownTools = tools.filter((name) => !availableToolSet.has(name));
     if (unknownTools.length) {
-      warnings.push(
-        `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${availableTools.join(", ")}`,
-      );
+      return {
+        error: `${formatTaskRef(i, t.id)}: unknown tool(s): ${unknownTools.join(", ")}. Available: ${availableTools.join(", ")}. Fix the tool names or remove the tools field to inherit defaults.`,
+      };
     }
-    tools = tools.filter((name) => availableToolSet.has(name));
     systemPrompt = buildSubagentSystemPrompt({
       taskSystemPrompt: t.systemPrompt,
       agentSystemPrompt: agent?.systemPrompt,
@@ -627,5 +639,13 @@ export function resolveTasks(
       },
       providerExtensionSources,
     };
-  });
+  };
+
+  const resolved: ResolvedTask[] = [];
+  for (const [i, task] of tasks.entries()) {
+    const result = resolveTask(task, i);
+    if ("error" in result) return { error: result.error };
+    resolved.push(result);
+  }
+  return { tasks: resolved };
 }

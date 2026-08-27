@@ -1252,7 +1252,7 @@ describe("resolveModel", () => {
           thinking: "high",
           tools: ["read", "grep", "delegate", "extension-tool"],
         },
-      );
+      ).tasks!;
 
       expect(task!.agentName).toBe("default");
       expect(task!.model).toBe(parent);
@@ -1296,7 +1296,7 @@ describe("resolveModel", () => {
       } as any,
       new Map(),
       { thinking: "off", tools: DEFAULT_TOOLS },
-    );
+    ).tasks!;
 
     expect(task!.model).toBe(selectedModel);
     // No `thinking` field set, so the `:max` suffix is honored as the
@@ -1319,7 +1319,7 @@ describe("resolveModel", () => {
       } as any,
       new Map(),
       { thinking: "off", tools: DEFAULT_TOOLS },
-    );
+    ).tasks!;
 
     expect(task!.cwd).toBe("/repo/apps/web");
   });
@@ -1347,7 +1347,7 @@ describe("resolveModel", () => {
       } as any,
       new Map(),
       { thinking: "off", tools: DEFAULT_TOOLS },
-    );
+    ).tasks!;
 
     // The explicit field wins; the suffix had no effect → warn (not silently).
     expect(task!.thinking).toBe("high");
@@ -4802,7 +4802,9 @@ describe("delegate renderers", () => {
             tokens: 0,
             toolUses: 0,
             activities: [],
-            warnings: ["Unknown tool(s) ignored: frobnicate"],
+            warnings: [
+              "Scratch workspace: relative file changes run in a disposable CoW copy and are discarded.",
+            ],
           },
         ],
       },
@@ -4817,7 +4819,9 @@ describe("delegate renderers", () => {
       ) as any
     ).getText();
     expect(finalText).toContain("⚠");
-    expect(finalText).toContain("Unknown tool(s) ignored: frobnicate");
+    expect(finalText).toContain(
+      "Scratch workspace: relative file changes run in a disposable CoW copy and are discarded.",
+    );
 
     // Also visible while running.
     const partialText = (

@@ -169,6 +169,14 @@ export interface ResolvedTask {
   providerExtensionSources?: string;
 }
 
+/** Result of `resolveTasks`: either every task resolved, or a batch-wide
+ *  rejection (e.g. an unknown tool name) with no tasks to dispatch. The
+ *  optional-`error` discriminant keeps `.tasks` accessible on the whole union
+ *  so success-path callers can narrow with a single `error !== undefined` check. */
+export type ResolveTasksResult =
+  | { tasks: ResolvedTask[]; error?: undefined }
+  | { tasks?: undefined; error: string };
+
 export interface FileAttributionPathSignature {
   /** Absolute component inspected while resolving the pre-execution target. */
   path: string;

@@ -289,13 +289,26 @@ export async function dispatchDelegate(
     return validationError;
   }
 
-  const resolved = resolveTasks(
+  const resolveResult = resolveTasks(
     tasks,
     ctx,
     agents,
     parentDefaults,
     dispatchConfig,
   );
+  if (resolveResult.error !== undefined) {
+    callSpan?.finish({
+      status: "failed",
+      totalTokens: 0,
+      totalCost: 0,
+      wallMs: Date.now() - callSpan.startedAt,
+    });
+    return {
+      content: [{ type: "text", text: resolveResult.error }],
+      details: { tasks, results: [], progress: [], parentModel: parentModelId },
+    };
+  }
+  const resolved = resolveResult.tasks;
   if (params.async && resolved.some((task) => task.workspace === "isolated")) {
     callSpan?.finish({
       status: "failed",

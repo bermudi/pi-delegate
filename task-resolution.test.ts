@@ -394,18 +394,19 @@ describe("resolveTasks tool resolution", () => {
     _resetPoolForTesting();
   });
 
-  test("removes unknown tool names and warns about them", () => {
-    const resolved = resolveTasks(
+  test("rejects unknown tool names before any dispatch", () => {
+    const result = resolveTasks(
       [{ prompt: "do it", tools: ["read", "WebSearch", "bash"] }] as any,
       makeCtx(),
       new Map(),
       { thinking: "off", tools: ["read"] } as any,
     );
-    expect(resolved).toHaveLength(1);
-    expect(resolved[0].tools).toEqual(["read", "bash"]);
-    expect(resolved[0].warnings).toEqual([
-      "Unknown tool(s) ignored: WebSearch. Available: read, write, edit, bash, grep, find, ls",
-    ]);
+    expect(result.tasks).toBeUndefined();
+    expect(result.error).toContain("Task 1: unknown tool(s): WebSearch");
+    expect(result.error).toContain(
+      "Available: read, write, edit, bash, grep, find, ls",
+    );
+    expect(result.error).toContain("Fix the tool names");
   });
 
   test("allows web_search only for openai-codex models", () => {
@@ -415,10 +416,24 @@ describe("resolveTasks tool resolution", () => {
       makeCtx(codexModel),
       new Map(),
       { thinking: "off", tools: ["read"] } as any,
-    );
+    ).tasks!;
 
     expect(resolved[0].tools).toEqual(["read", "web_search"]);
     expect(resolved[0].warnings).toEqual([]);
+  });
+
+  test("rejects web_search for providers without the extension tool", () => {
+    const result = resolveTasks(
+      [{ prompt: "research it", tools: ["read", "web_search"] }] as any,
+      makeCtx(), // anthropic parent — web_search is openai-codex-only
+      new Map(),
+      { thinking: "off", tools: ["read"] } as any,
+    );
+    expect(result.tasks).toBeUndefined();
+    expect(result.error).toContain("Task 1: unknown tool(s): web_search");
+    expect(result.error).toContain(
+      "Available: read, write, edit, bash, grep, find, ls",
+    );
   });
 });
 
@@ -469,7 +484,7 @@ describe("built-in agent profiles", () => {
       makeCtx(),
       builtins,
       { thinking: "high", tools: ["read", "write", "edit", "bash"] },
-    );
+    ).tasks!;
 
     expect(resolved.map((task) => task.model)).toEqual([
       parentModel,
@@ -494,7 +509,7 @@ describe("built-in agent profiles", () => {
       makeCtx(),
       builtins,
       { thinking: "high", tools: ["read", "write", "edit", "bash"] },
-    );
+    ).tasks!;
     expect(resumed.agentName).toBe("resume:01a01df4");
 
     const [namedResume] = resolveTasks(
@@ -508,7 +523,7 @@ describe("built-in agent profiles", () => {
       makeCtx(),
       builtins,
       { thinking: "high", tools: ["read", "write", "edit", "bash"] },
-    );
+    ).tasks!;
     expect(namedResume.agentName).toBe("coder");
   });
 
@@ -534,7 +549,7 @@ describe("built-in agent profiles", () => {
       makeCtx(),
       builtins,
       { thinking: "high", tools: ["read", "write", "edit", "bash"] },
-    );
+    ).tasks!;
 
     expect(task?.thinking).toBe("high");
   });
@@ -558,7 +573,7 @@ describe("built-in agent profiles", () => {
       makeCtx(),
       builtins,
       { thinking: "off", tools: ["read"] },
-    );
+    ).tasks!;
 
     expect(resolved.map((task) => task.model)).toEqual([
       parentModel,
@@ -578,7 +593,7 @@ describe("built-in agent profiles", () => {
       makeCtx(),
       builtins,
       { thinking: "off", tools: ["read"] },
-    );
+    ).tasks!;
 
     expect(resolved[0]?.tools).toEqual(["read", "grep", "find", "ls"]);
     expect(resolved[1]?.tools).toEqual(["read", "write", "edit", "bash"]);
@@ -655,7 +670,7 @@ describe("built-in agent profiles", () => {
       makeCtx(parentModel, [selected]),
       builtins,
       { thinking: "medium", tools: ["read"] },
-    );
+    ).tasks!;
 
     expect(task?.model).toBe(selected);
     expect(task?.thinking).toBe("low");
@@ -715,7 +730,7 @@ describe("resolveTasks: prompt-only built-in overrides preserve privileges", () 
       makeCtx(parentModel),
       agents,
       { thinking: "high", tools: ["read", "write", "edit", "bash"] },
-    );
+    ).tasks!;
     expect(task.tools).toEqual(["read", "grep", "find", "ls"]);
     expect(task.workspace).toBe("shared");
     expect(task.model).toBe(parentModel);
@@ -744,7 +759,7 @@ describe("resolveTasks: prompt-only built-in overrides preserve privileges", () 
       makeCtx(parentModel),
       agents,
       { thinking: "low", tools: ["read"] },
-    );
+    ).tasks!;
     expect(task.tools).toEqual(["read", "bash"]);
     expect(task.workspace).toBe("scratch");
     expect(task.thinking).toBe("low");
@@ -779,7 +794,7 @@ describe("resolveTasks: prompt-only built-in overrides preserve privileges", () 
       } as any,
       agents,
       { thinking: "medium", tools: ["read", "grep"] },
-    );
+    ).tasks!;
     expect(task.tools).toEqual(["read", "grep"]);
     expect(task.model).toBe(parent);
     expect(task.thinking).toBe("medium");
@@ -819,7 +834,7 @@ describe("resolveTasks: prompt-only built-in overrides preserve privileges", () 
         } as any,
         agents,
         { thinking: "high", tools: ["read"] },
-      );
+      ).tasks!;
       expect(scoutTask.tools).toEqual(["read", "grep", "find", "ls"]);
       expect(scoutTask.systemPrompt).toBe("Custom scout body.");
     } finally {
@@ -880,7 +895,7 @@ describe("resolveTasks: explicit Markdown tools/model/thinking", () => {
       makeCtx(parentModel, [explicitModel]),
       agents,
       { thinking: "low", tools: ["read", "write"] },
-    );
+    ).tasks!;
     expect(task.tools).toEqual(["read"]);
     expect(task.model).toBe(explicitModel);
     expect(task.thinking).toBe("high");
@@ -910,7 +925,7 @@ describe("resolveTasks: explicit Markdown tools/model/thinking", () => {
       makeCtx(parentModel, [explicitModel]),
       agents,
       { thinking: "low", tools: ["read"] },
-    );
+    ).tasks!;
     expect(task.tools).toEqual(["read", "bash"]);
     expect(task.model).toBe(explicitModel);
     expect(task.thinking).toBe("max");
@@ -948,7 +963,7 @@ describe("resolveTasks: explicit Markdown tools/model/thinking", () => {
       makeCtx(parentModel, [overrideModel]),
       agents,
       { thinking: "off", tools: ["read"] },
-    );
+    ).tasks!;
     expect(task.tools).toEqual(["read", "bash"]);
     expect(task.thinking).toBe("low");
     expect(task.model).toBe(overrideModel);
@@ -1015,7 +1030,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
       } as any,
       agents,
       { thinking: "off", tools: DEFAULT_TOOLS },
-    );
+    ).tasks!;
     expect(task.model).toBe(overrideModel);
     expect(task.thinking).toBe("max");
     expect(task.tools).toEqual(["read", "bash"]);
@@ -1042,7 +1057,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
       } as any,
       agents,
       { thinking: "off", tools: DEFAULT_TOOLS },
-    );
+    ).tasks!;
     expect(codexTask.model).toBe(overrideModel);
     expect(codexTask.thinking).toBe("high");
     const [otherTask] = resolveTasks(
@@ -1056,7 +1071,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
       } as any,
       agents,
       { thinking: "medium", tools: DEFAULT_TOOLS },
-    );
+    ).tasks!;
     expect(otherTask.model).toBe(otherParent);
     expect(otherTask.thinking).toBe("medium");
   });
@@ -1087,7 +1102,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
       } as any,
       agents,
       { thinking: "off", tools: DEFAULT_TOOLS },
-    );
+    ).tasks!;
     expect(task.thinking).toBe("high");
   });
 
@@ -1124,7 +1139,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
       } as any,
       agents,
       { thinking: "low", tools: ["read"] },
-    );
+    ).tasks!;
     expect(explicitTask.model).toBe(markdownModel);
     expect(explicitTask.thinking).toBe("high");
     expect(explicitTask.tools).toEqual(["read", "bash"]);
@@ -1147,7 +1162,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
       } as any,
       agents2,
       { thinking: "medium", tools: ["read", "grep", "find", "ls"] },
-    );
+    ).tasks!;
     expect(inheritedTask.model).toBe(parentModel);
     expect(inheritedTask.thinking).toBe("medium");
     expect(inheritedTask.tools).toEqual(["read", "grep", "find", "ls"]);
@@ -1183,7 +1198,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
       } as any,
       agents,
       { thinking: "off", tools: DEFAULT_TOOLS },
-    );
+    ).tasks!;
     expect(task.model).toBe(override);
     expect(task.thinking).toBe("low");
     expect(task.tools).toEqual(["read", "bash"]);
@@ -1230,7 +1245,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
         } as any,
         agents,
         { thinking: "off", tools: DEFAULT_TOOLS },
-      )[0];
+      ).tasks![0];
 
     const fromTask = resolve({ model: "openai/task-model", thinking: "max" });
     expect(fromTask.model).toBe(taskModel);
@@ -1280,7 +1295,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
       } as any,
       new Map(Object.entries(BUILTIN_AGENT_CONFIGS)),
       { thinking: "medium", tools: DEFAULT_TOOLS },
-    );
+    ).tasks!;
 
     expect(task.model).toBe(parentModel);
     expect(task.thinking).toBe("medium");
@@ -1332,7 +1347,7 @@ describe("resolveTasks: Claude deny-only overrides", () => {
       } as any,
       agents,
       { thinking: "off", tools: ["read", "write", "edit", "bash"] },
-    );
+    ).tasks!;
     expect(fullParentTask.tools).toEqual(["read", "bash"]);
     const [readOnlyTask] = resolveTasks(
       [{ agent: "default", prompt: "go" }] as any,
@@ -1345,7 +1360,7 @@ describe("resolveTasks: Claude deny-only overrides", () => {
       } as any,
       agents,
       { thinking: "off", tools: ["read", "grep", "find", "ls"] },
-    );
+    ).tasks!;
     expect(readOnlyTask.tools).toEqual(["read", "grep", "find", "ls"]);
     const [missingWriteTask] = resolveTasks(
       [{ agent: "default", prompt: "go" }] as any,
@@ -1358,7 +1373,7 @@ describe("resolveTasks: Claude deny-only overrides", () => {
       } as any,
       agents,
       { thinking: "off", tools: ["read", "write"] },
-    );
+    ).tasks!;
     expect(missingWriteTask.tools).toEqual(["read"]);
   });
   test("deny-only default discovered from Claude file filters parent at runtime", () => {
@@ -1389,7 +1404,7 @@ describe("resolveTasks: Claude deny-only overrides", () => {
         } as any,
         agents,
         { thinking: "off", tools: ["read", "write", "edit", "bash", "grep"] },
-      );
+      ).tasks!;
       expect(task.tools).toEqual(["read", "bash", "grep"]);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -1428,7 +1443,7 @@ describe("resolveTasks: Claude deny-only overrides", () => {
           thinking: "off",
           tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
         },
-      );
+      ).tasks!;
       expect(task.tools).toEqual(["read", "grep", "find", "ls"]);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -1496,7 +1511,7 @@ describe("resolveTasks: pooled-session behavior", () => {
       makeCtx(parentModel),
       builtins,
       { thinking: "high", tools: ["read"] },
-    );
+    ).tasks!;
     expect(scoutTask.thinking).toBe("low");
     expect(scoutTask.model).toBe(parentModel);
     const [defaultTask] = resolveTasks(
@@ -1506,7 +1521,7 @@ describe("resolveTasks: pooled-session behavior", () => {
       makeCtx(parentModel),
       builtins,
       { thinking: "high", tools: ["read"] },
-    );
+    ).tasks!;
     expect(defaultTask.thinking).toBe("high");
   });
   test("pooled task reuses frozen tools/model when task omits them", () => {
@@ -1529,7 +1544,7 @@ describe("resolveTasks: pooled-session behavior", () => {
       makeCtx(parentModel),
       agents,
       { thinking: "off", tools: ["read", "write", "edit", "bash"] },
-    );
+    ).tasks!;
     expect(task.tools).toEqual(["read", "bash"]);
     expect(task.model).toBe(parentModel);
     expect(task.systemPrompt).toBe("frozen");
@@ -1556,7 +1571,7 @@ describe("resolveTasks: pooled-session behavior", () => {
       makeCtx(parentModel),
       new Map(),
       { thinking: "off", tools: ["read"] },
-    );
+    ).tasks!;
     expect(task.tools).toEqual(["read", "write"]);
     const result = checkout("pool-2", {
       cwd: task.cwd,
@@ -1596,7 +1611,7 @@ describe("resolveTasks: pooled-session behavior", () => {
       makeCtx(parentModel, [otherModel]),
       new Map(Object.entries(BUILTIN_AGENT_CONFIGS)),
       { thinking: "off", tools: ["read"] },
-    );
+    ).tasks!;
     expect(task.reuseIntent?.model).toBe(otherModel);
     expect(task.model).toBe(parentModel);
   });
