@@ -24,6 +24,11 @@ import {
   _setDelegateConfigForTesting,
 } from "./config.ts";
 import {
+  _resetTelemetryForTesting,
+  _setTelemetryForTesting,
+  type CallRecord,
+} from "./telemetry.ts";
+import {
   inFlightActivity,
   latestActivity,
   formatActivityLabel,
@@ -5161,25 +5166,51 @@ describe("delegate pool", () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "delegate");
 
-    // list without prompt should work (top-level session RPC since #32)
-    const listResult = await toolDef!.execute(
-      "tc-pool-1",
-      { sessionAction: "list" },
-      undefined,
-      undefined,
-      ts.session.extensionRunner as any,
-    );
-    expect(listResult.content[0].text).toContain("Active sessions");
+    // Redirect delegate.json discovery so execute's reload sees defaults
+    // (telemetry on) instead of whatever the developer's home config says.
+    const tmpDir = makeTempDir();
+    mock.module("node:os", () => ({ ...os, homedir: () => tmpDir }));
 
-    // close without prompt should work (even if session doesn't exist)
-    const closeResult = await toolDef!.execute(
-      "tc-pool-2",
-      { sessionAction: "close", sessionId: "nonexistent" },
-      undefined,
-      undefined,
-      ts.session.extensionRunner as any,
-    );
-    expect(closeResult.content[0].text).toContain("not found");
+    // Pin #32: session RPC spans must carry mode:"session" with task_count 0,
+    // not mislabel as a zero-task "sync" call.
+    const callRows: CallRecord[] = [];
+    _setTelemetryForTesting({
+      recordCall: (row) => callRows.push(row),
+      recordTask: () => {},
+    });
+
+    try {
+      // list without prompt should work (top-level session RPC since #32)
+      const listResult = await toolDef!.execute(
+        "tc-pool-1",
+        { sessionAction: "list" },
+        undefined,
+        undefined,
+        ts.session.extensionRunner as any,
+      );
+      expect(listResult.content[0].text).toContain("Active sessions");
+
+      // close without prompt should work (even if session doesn't exist)
+      const closeResult = await toolDef!.execute(
+        "tc-pool-2",
+        { sessionAction: "close", sessionId: "nonexistent" },
+        undefined,
+        undefined,
+        ts.session.extensionRunner as any,
+      );
+      expect(closeResult.content[0].text).toContain("not found");
+    } finally {
+      _resetTelemetryForTesting();
+      mock.module("node:os", () => os);
+      cleanup(tmpDir);
+    }
+
+    expect(callRows).toHaveLength(2);
+    for (const row of callRows) {
+      expect(row.mode).toBe("session");
+      expect(row.task_count).toBe(0);
+      expect(row.status).toBe("success");
+    }
   });
 
   test("missing prompt throws for non-close/list actions", async () => {
