@@ -5,6 +5,7 @@ import {
   DEFAULT_AGENT_NAME,
   DEFAULT_TOOLS,
   VALID_THINKING,
+  isSessionControlAction,
 } from "./constants.ts";
 import {
   TOOL_FACTORIES,
@@ -318,8 +319,7 @@ export function resolveTasks(
 
     // Prompt is required for fresh tasks. ResumeFrom provides context already.
     if (
-      t.sessionAction !== "close" &&
-      t.sessionAction !== "list" &&
+      !isSessionControlAction(t.sessionAction) &&
       !t.resumeFrom &&
       !t.prompt?.trim()
     ) {
@@ -332,7 +332,7 @@ export function resolveTasks(
     // For active pooled sessions, fall back to the frozen pooled config so
     // "continue with only sessionId" works without re-supplying tools.
     // Explicit overrides that don't match get rejected by acquireAgentSession.
-    if (t.sessionAction !== "close" && t.sessionAction !== "list") {
+    if (!isSessionControlAction(t.sessionAction)) {
       // For `default` a deny-only override (no explicit allowlist) is not
       // materialized at discovery; apply its denylist to the parent's actual
       // tools here so a read-only parent stays read-only.
@@ -428,7 +428,7 @@ export function resolveTasks(
     let modelSuffix: ThinkingLevel | undefined;
     let thinking: ThinkingLevel = "off";
 
-    if (t.sessionAction !== "close" && t.sessionAction !== "list") {
+    if (!isSessionControlAction(t.sessionAction)) {
       const agentType = t.agent ?? "inline";
       // The built-in `default` profile bypasses delegate.json model overrides.
       // The other built-ins accept task and modern agent overrides, but

@@ -1,5 +1,8 @@
 import { Type, type SchemaOptions } from "@sinclair/typebox";
-import { VALID_THINKING_LEVELS } from "./constants.ts";
+import {
+  VALID_THINKING_LEVELS,
+  isSessionControlAction,
+} from "./constants.ts";
 import type { DelegateArguments } from "./types.ts";
 
 // JSON Schema string enum that keeps the literal union in `Static<>`.
@@ -268,7 +271,7 @@ export function validateDelegateOperation(
   // sessionId in the busy index for the ticket's lifetime while delivering
   // nothing a synchronous call wouldn't. All-control batches stay legal.
   const isControlEntry = (task: (typeof tasks)[number]) =>
-    task.sessionAction === "close" || task.sessionAction === "list";
+    isSessionControlAction(task.sessionAction);
   const controlCount = tasks.filter(isControlEntry).length;
   if (controlCount > 0 && controlCount < tasks.length) {
     const index = tasks.findIndex(isControlEntry);

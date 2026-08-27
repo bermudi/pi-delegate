@@ -426,6 +426,24 @@ describe("validateDelegateOperation task-field whitelist", () => {
     ).toBeUndefined();
   });
 
+  test("flat top-level control shape normalizes to a legal all-control batch", () => {
+    // wrapFlatTaskFields folds top-level sessionAction into a single task —
+    // the seam the #32 promotion will cut across. Pin it so the migration
+    // cannot silently degrade {sessionAction: "list"} to the help manual.
+    expect(
+      validateDelegateOperation(
+        normalizeDelegateArguments({ sessionAction: "list" }),
+      ),
+    ).toBeUndefined();
+  });
+
+  test("flat top-level prompt+list folds into one entry and hits the extras rule", () => {
+    const err = validateDelegateOperation(
+      normalizeDelegateArguments({ prompt: "x", sessionAction: "list" }),
+    );
+    expect(err).toContain("accepts only sessionAction");
+  });
+
   test("ticket-control calls skip task checks", () => {
     expect(validateDelegateOperation({ ticketAction: "poll" })).toBeUndefined();
   });

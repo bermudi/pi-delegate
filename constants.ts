@@ -59,3 +59,11 @@ export const VALID_THINKING_LEVELS = [
  *  `Set<VALID_THINKING_LEVELS[number]>`) so the `.has(string)` call sites in
  *  task-resolution.ts and agents.ts stay ergonomic under strict typing. */
 export const VALID_THINKING: Set<string> = new Set(VALID_THINKING_LEVELS);
+
+/** Session-control actions: RPC against the session pool, not work. They may
+ *  only appear in all-control batches and never combine with `async` (see the
+ *  fence in schema.ts). Per-action behavior lives at the branch sites; this
+ *  predicate is the one shared spelling of the control set. */
+export function isSessionControlAction(action: unknown): boolean {
+  return action === "close" || action === "list";
+}
