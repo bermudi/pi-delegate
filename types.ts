@@ -259,8 +259,9 @@ export interface TaskProgress {
   model?: string;
   lastActivityAt?: number;
   activities: ToolActivity[];
-  /** Human-facing notices (e.g. unknown tools ignored). Surfaced in the TUI
-   *  under the task; the LLM gets the same text in `content` already. */
+  /** Human-facing notices (e.g. scratch/isolated workspace notices, an
+   *  ignored model `:level` suffix). Surfaced in the TUI under the task; the
+   *  LLM gets the same text in `content` already. */
   warnings?: string[];
 }
 

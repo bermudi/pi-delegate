@@ -470,7 +470,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       );
     }
 
-    // Warnings (e.g. unknown tools ignored) — muted line under the task.
+    // Warnings (e.g. scratch-workspace notices, ignored model suffix) — muted
+    // line under the task.
     pushWarnings(p, ind);
 
     // Tool activities: compact summary only in expanded mode, terminal tasks only.

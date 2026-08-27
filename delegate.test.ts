@@ -2324,11 +2324,18 @@ describe("formatCompletedTask", () => {
 
   test("emits a [WARNING:] line per task warning, before the body", () => {
     const lines = formatCompletedTask(
-      makeTask({ warnings: ["unknown tool: foo", "model fallback"] }),
+      makeTask({
+        warnings: [
+          "Scratch workspace: relative file changes run in a disposable CoW copy and are discarded.",
+          "model fallback",
+        ],
+      }),
       makeResult(),
     );
     expect(lines[0]).toBe("=== scout: do the thing ===");
-    expect(lines[1]).toBe("[WARNING: unknown tool: foo]");
+    expect(lines[1]).toBe(
+      "[WARNING: Scratch workspace: relative file changes run in a disposable CoW copy and are discarded.]",
+    );
     expect(lines[2]).toBe("[WARNING: model fallback]");
     expect(lines[3]).toBe(
       `[OK | ${fmtDuration(1500)} | ${fmtTokens(42)} tokens]\n\nall done`,

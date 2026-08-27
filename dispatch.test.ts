@@ -1,8 +1,15 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { discoverAgents } from "./agents.ts";
 import {
   _setGlobalConcurrencyLimitForTesting,
   _resetGlobalConcurrencyForTesting,
@@ -390,6 +397,84 @@ describe("dispatch-time shared-write gate", () => {
           getSystemPrompt: () => "parent",
         } as any,
         agents: new Map(),
+        parentModelId: model.id,
+        parentDefaults: { thinking: "off", tools: ["read"] },
+        signal: undefined,
+        onUpdate: undefined,
+        callSpan: {
+          startedAt: Date.now(),
+          finish: (record: Record<string, unknown>) => finishes.push(record),
+        } as any,
+      });
+
+      expect(result.content[0]?.text).toContain(
+        "Task 2#typo: unknown tool(s): fnd",
+      );
+      expect(result.content[0]?.text).toContain(
+        "Available: read, write, edit, bash, grep, find, ls",
+      );
+      expect(result.details.results).toEqual([]);
+      expect(result.details.progress).toEqual([]);
+      expect(ran).toBe(0);
+      expect(ticketRegistry.size).toBe(0);
+      expect(finishes).toHaveLength(1);
+      expect(finishes[0]).toMatchObject({
+        status: "failed",
+        totalTokens: 0,
+        totalCost: 0,
+      });
+      _setRunAgentSessionForTesting(undefined);
+    },
+  );
+
+  test.each([
+    ["sync", false],
+    ["async", true],
+  ])(
+    "unknown tools from a custom agent's frontmatter reject the whole %s call before any dispatch",
+    async (_mode, asyncMode) => {
+      // The unknown name lives in the agent profile, not the task: the task
+      // carries no tools override, so resolution picks up the frontmatter list.
+      mkdirSync(path.join(tmpDir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        path.join(tmpDir, ".pi", "agents", "typo-agent.md"),
+        `---\nname: typo-agent\ndescription: Agent with a typo'd tool\ntools: read, fnd\n---\nBody.\n`,
+      );
+      const model = { provider: "test", id: "model" } as any;
+      let ran = 0;
+      _setRunAgentSessionForTesting(async () => {
+        ran += 1;
+        return {
+          output: "done",
+          durationMs: 1,
+          tokens: 0,
+          toolUses: 0,
+          files: [],
+          usage: emptyUsage(),
+        } as any;
+      });
+
+      const finishes: Array<Record<string, unknown>> = [];
+      const result = await dispatchDelegate({
+        pi: {} as any,
+        params: {
+          async: asyncMode,
+          tasks: [
+            { id: "ok", prompt: "one", cwd: tmpDir, tools: ["read"] },
+            { id: "typo", prompt: "two", cwd: tmpDir, agent: "typo-agent" },
+          ],
+        },
+        ctx: {
+          cwd: tmpDir,
+          model,
+          modelRegistry: {
+            getAvailable: () => [model],
+            find: () => model,
+            hasConfiguredAuth: () => true,
+          },
+          getSystemPrompt: () => "parent",
+        } as any,
+        agents: discoverAgents(tmpDir),
         parentModelId: model.id,
         parentDefaults: { thinking: "off", tools: ["read"] },
         signal: undefined,

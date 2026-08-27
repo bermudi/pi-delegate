@@ -406,7 +406,9 @@ describe("resolveTasks tool resolution", () => {
     expect(result.error).toContain(
       "Available: read, write, edit, bash, grep, find, ls",
     );
-    expect(result.error).toContain("Fix the tool names");
+    expect(result.error).toContain(
+      "Fix the tool names in the task's tools list or the agent profile's tools",
+    );
   });
 
   test("allows web_search only for openai-codex models", () => {

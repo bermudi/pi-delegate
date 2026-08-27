@@ -586,7 +586,7 @@ export function resolveTasks(
     const unknownTools = tools.filter((name) => !availableToolSet.has(name));
     if (unknownTools.length) {
       return {
-        error: `${formatTaskRef(i, t.id)}: unknown tool(s): ${unknownTools.join(", ")}. Available: ${availableTools.join(", ")}. Fix the tool names or remove the tools field to inherit defaults.`,
+        error: `${formatTaskRef(i, t.id)}: unknown tool(s): ${unknownTools.join(", ")}. Available: ${availableTools.join(", ")}. Fix the tool names in the task's tools list or the agent profile's tools.`,
       };
     }
     systemPrompt = buildSubagentSystemPrompt({
