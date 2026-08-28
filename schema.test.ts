@@ -344,39 +344,39 @@ describe("validateDelegateOperation task-field whitelist", () => {
     ).toContain("deadlineMs must be a positive number");
   });
 
-  test("stray fields beside a legacy hoisted close/list are rejected generically", () => {
-    // The old per-action extras checks were deleted with the promotion; the
-    // session-mode validator owns foreign-field rejection now.
-    expect(
-      validateDelegateOperation(
-        normalizeDelegateArguments({
-          tasks: [{ sessionAction: "close", sessionId: "s1", deadlineMs: 100 }],
-        }) as DelegateArguments,
-      ),
-    ).toContain("'deadlineMs'");
-    expect(
-      validateDelegateOperation(
-        normalizeDelegateArguments({
-          tasks: [{ sessionAction: "list", deadlineMs: 100 }],
-        }) as DelegateArguments,
-      ),
-    ).toContain("'deadlineMs'");
+  test("a task-level close/list entry rejects as an unknown field with the top-level hint", () => {
+    // Post-#42 end-state: no hoist — the entry reaches the dispatch
+    // validator's whitelist. `sessionId` and `deadlineMs` are valid task
+    // fields, so the only unknown key is 'sessionAction', named as a
+    // top-level field.
+    for (const entry of [
+      { sessionAction: "close", sessionId: "s1", deadlineMs: 100 },
+      { sessionAction: "list", deadlineMs: 100 },
+    ]) {
+      const err = validateDelegateOperation(
+        normalizeDelegateArguments({ tasks: [entry] }) as DelegateArguments,
+      );
+      expect(err).toContain("unknown field(s) 'sessionAction'");
+      expect(err).toContain("'sessionAction' is a top-level field");
+    }
   });
 
-  test("a legacy solo hoisted entry carries unknown keys to the mode validator", () => {
-    // Flipped consciously from 'an unknown key on close reports the key': a
-    // safe solo entry is hoisted whole, so every stray key — known or not —
-    // is rejected by the session-mode foreign-field check.
+  test("a task-level close entry with stray keys rejects both unknown fields together", () => {
+    // Flipped consciously from the #32 shim window (solo entries hoisted
+    // whole, session mode owning stray keys): no hoist remains — the
+    // whitelist rejects 'sessionAction' and 'bogus' in one message, with the
+    // top-level hint.
     const err = validateDelegateOperation(
       normalizeDelegateArguments({
         tasks: [{ sessionAction: "close", sessionId: "s1", bogus: 1 }],
       }) as DelegateArguments,
     );
     expect(err).toContain("'bogus'");
-    expect(err).toContain("run it alone");
+    expect(err).toContain("unknown field(s) 'sessionAction', 'bogus'");
+    expect(err).toContain("'sessionAction' is a top-level field");
   });
 
-  test("rejects a work task mixed with a session-control task", () => {
+  test("rejects a work task mixed with a task-level session-control entry", () => {
     const err = validateDelegateOperation({
       tasks: [
         { prompt: "do work" },
@@ -384,84 +384,97 @@ describe("validateDelegateOperation task-field whitelist", () => {
       ],
     });
     expect(err).toContain("task 2");
-    expect(err).toContain("session control, not a work task");
+    expect(err).toContain("unknown field(s) 'sessionAction'");
+    expect(err).toContain("'sessionAction' is a top-level field");
   });
 
-  test("rejects a list action mixed with work tasks", () => {
+  test("rejects a task-level list entry mixed with work tasks", () => {
     const err = validateDelegateOperation({
       tasks: [{ prompt: "a" }, { sessionAction: "list" }, { prompt: "b" }],
     });
-    expect(err).toContain("session control, not a work task");
+    expect(err).toContain("task 2");
+    expect(err).toContain("unknown field(s) 'sessionAction'");
+    expect(err).toContain("'sessionAction' is a top-level field");
   });
 
-  test("rejects multi-entry control batches (one session action per call)", () => {
-    // Flipped consciously: #32 promoted one sessionAction per call, so the
-    // Phase-1 legal all-control batch is no longer expressible. The shim
-    // leaves it untouched and the fence rejects it loudly.
+  test("rejects multi-entry task-level control batches as unknown fields", () => {
+    // Flipped consciously: #32 promoted one sessionAction per call, and #42
+    // removed the shim/fence that corrected legacy batches — each entry now
+    // fails the whitelist naming 'sessionAction' as a top-level field.
     const err = validateDelegateOperation({
       tasks: [
         { sessionAction: "close", sessionId: "s1" },
         { sessionAction: "list" },
       ],
     });
-    expect(err).toContain("one sessionAction per call");
-    expect(err).toContain("top-level 'sessionAction'");
+    expect(err).toContain("task 1");
+    expect(err).toContain("unknown field(s) 'sessionAction'");
+    expect(err).toContain("'sessionAction' is a top-level field");
   });
 
-  test("rejects async combined with session-control tasks", () => {
-    expect(
-      validateDelegateOperation({
+  test("rejects async calls with task-level session-control entries", () => {
+    for (const tasks of [
+      [{ sessionAction: "list" }],
+      [
+        { sessionAction: "close", sessionId: "s1" },
+        { sessionAction: "close", sessionId: "s2" },
+      ],
+    ]) {
+      const err = validateDelegateOperation({
         async: true,
-        tasks: [{ sessionAction: "list" }],
-      }),
-    ).toContain("async cannot be combined with session control");
-
-    expect(
-      validateDelegateOperation({
-        async: true,
-        tasks: [
-          { sessionAction: "close", sessionId: "s1" },
-          { sessionAction: "close", sessionId: "s2" },
-        ],
-      }),
-    ).toContain("top-level 'sessionAction'");
+        tasks,
+      } as unknown as DelegateArguments);
+      expect(err).toContain("unknown field(s) 'sessionAction'");
+      expect(err).toContain("'sessionAction' is a top-level field");
+    }
   });
 
-  test("task-level sessionAction 'prompt' strips silently (case 9)", () => {
-    // With and without a prompt present — the value was a verified no-op
-    // default and dies with the promotion.
+  test("task-level sessionAction 'prompt' no longer strips; entries reject (case 9)", () => {
+    // Flipped consciously from the shim window's silent strip (#42): the
+    // normalizer leaves the shape intact and the whitelist rejects
+    // 'sessionAction' with the top-level hint.
     for (const entry of [
       { prompt: "x", sessionAction: "prompt", sessionId: "s1" },
       { sessionAction: "prompt" },
     ]) {
       const result = normalizeDelegateArguments({ tasks: [entry] });
-      expect(result.tasks).toEqual([
-        entry.prompt === undefined ? {} : { prompt: "x", sessionId: "s1" },
-      ]);
-      expect(
-        validateDelegateOperation(result as DelegateArguments),
-      ).toBeUndefined();
+      expect(result.tasks).toEqual([entry]);
+      const err = validateDelegateOperation(result as DelegateArguments);
+      expect(err).toContain("unknown field(s) 'sessionAction'");
+      expect(err).toContain("'sessionAction' is a top-level field");
     }
   });
 
-  test("flat top-level sessionAction 'prompt' strips before intent detection", () => {
+  test("flat top-level sessionAction 'prompt' stays; session mode rejects the value", () => {
+    // Flipped consciously from the silent strip (#42): 'prompt' is not
+    // session intent, so the flat `prompt` still wraps into a task — but
+    // `sessionAction` is not a task field, so it stays top-level, and
+    // classifier precedence hands the call to session mode, which fails
+    // closed on the dead value.
     const result = normalizeDelegateArguments({
       prompt: "x",
       sessionAction: "prompt",
     });
-    expect(result.tasks).toEqual([{ prompt: "x" }]);
-    expect("sessionAction" in result).toBe(false);
+    expect(result).toEqual({
+      sessionAction: "prompt",
+      tasks: [{ prompt: "x" }],
+    });
+    expect(validateDelegateOperation(result as DelegateArguments)).toContain(
+      "sessionAction 'prompt' is not a session control action",
+    );
   });
 
-  test("ticket+legacy-prompt strips cleanly instead of poisoning ticket mode", () => {
+  test("ticketAction precedence lists stray sessionAction as incompatible", () => {
+    // Flipped consciously: no shim strips the dead 'prompt' value anymore —
+    // ticket mode owns the rejection and names 'sessionAction' as foreign.
     const result = normalizeDelegateArguments({
       ticketAction: "poll",
       sessionAction: "prompt",
     });
-    expect(result.sessionAction).toBeUndefined();
-    expect(
-      validateDelegateOperation(result as DelegateArguments),
-    ).toBeUndefined();
+    expect(result.sessionAction).toBe("prompt");
+    expect(validateDelegateOperation(result as DelegateArguments)).toContain(
+      "ticket control cannot be combined with field(s) 'sessionAction'",
+    );
   });
 
   test("flat top-level control shape reaches session mode unwrapped", () => {
@@ -649,7 +662,8 @@ describe("validateDelegateOperation task-field whitelist", () => {
 
 // The #32 promotion's test contract: every case from the approved
 // normalizer matrix, pinned in one place. Cases 1-4 exercise intent
-// detection; 5-7 the migration shim; 8-10 classifier precedence.
+// detection; 5-7 and 9 the removed migration shim's legacy shapes, which
+// since #42 reject as plain unknown fields; 8-10 classifier precedence.
 describe("#32 normalizer case matrix", () => {
   const validate = (args: unknown) =>
     validateDelegateOperation(
@@ -688,55 +702,59 @@ describe("#32 normalizer case matrix", () => {
     ).toContain("'prompt'");
   });
 
-  test("case 5: solo legacy control entry hoists to top level; entry id dropped", () => {
-    const result = normalizeDelegateArguments({
-      tasks: [{ id: "cleanup", sessionAction: "close", sessionId: "s1" }],
-    });
-    expect(result.sessionAction).toBe("close");
-    expect(result.sessionId).toBe("s1");
-    expect(result.tasks).toBeUndefined();
-    expect("id" in result).toBe(false);
-    expect(
-      validate({
-        tasks: [{ id: "cleanup", sessionAction: "close", sessionId: "s1" }],
-      }),
-    ).toBeUndefined();
+  test("case 5: solo legacy control entry stays in tasks; whitelist rejects it", () => {
+    // Flipped consciously from the hoist (#42 removed it): no solo entry is
+    // lifted to the top level anymore — the entry travels intact (id and
+    // all) and 'sessionAction' fails as an unknown task field with the
+    // top-level hint.
+    const entry = { id: "cleanup", sessionAction: "close", sessionId: "s1" };
+    const result = normalizeDelegateArguments({ tasks: [entry] });
+    expect(result.sessionAction).toBeUndefined();
+    expect(result.tasks).toEqual([entry]);
+    const err = validate({ tasks: [entry] });
+    expect(err).toContain("unknown field(s) 'sessionAction'");
+    expect(err).toContain("'sessionAction' is a top-level field");
   });
 
-  test("case 6: task-level control inside a mixed batch is rejected, never hoisted", () => {
+  test("case 6: task-level control inside a mixed batch is rejected as unknown", () => {
     const err = validateDelegateOperation({
       async: false,
       tasks: [{ prompt: "do work" }, { sessionAction: "list" }],
     });
-    expect(err).toContain("session control, not a work task");
-    expect(err).toContain("top-level 'sessionAction'");
+    expect(err).toContain("task 2");
+    expect(err).toContain("unknown field(s) 'sessionAction'");
+    expect(err).toContain("'sessionAction' is a top-level field");
   });
 
-  test("case 7: task-level control alongside async is rejected before hoisting", () => {
-    // Through the real prepareArguments path: async must force rejection via
-    // the fence, never a silent solo hoist into session mode.
-    const result = normalizeDelegateArguments({
-      async: true,
-      tasks: [{ sessionAction: "close", sessionId: "s1" }],
-    });
-    expect(result.tasks).toEqual([{ sessionAction: "close", sessionId: "s1" }]);
-    expect(
-      validate({
-        async: true,
-        tasks: [{ sessionAction: "close", sessionId: "s1" }],
-      }),
-    ).toContain("async cannot be combined with session control");
+  test("case 7: task-level control alongside async is rejected as unknown", () => {
+    // The normalizer leaves the entry intact (shape pin held over from the
+    // shim window); the whitelist owns the rejection — no async-specific
+    // session copy anymore.
+    const entry = { sessionAction: "close", sessionId: "s1" };
+    const result = normalizeDelegateArguments({ async: true, tasks: [entry] });
+    expect(result.tasks).toEqual([entry]);
+    const err = validate({ async: true, tasks: [entry] });
+    expect(err).toContain("unknown field(s) 'sessionAction'");
+    expect(err).toContain("'sessionAction' is a top-level field");
   });
 
-  test("case 9: task-level 'prompt' strips silently with and without a prompt", () => {
+  test("case 9: task-level 'prompt' no longer strips; entries reject as unknown", () => {
+    // Flipped consciously from the silent strip (#42): the dead default
+    // value survives normalization and fails the whitelist with the hint.
     expect(
       normalizeDelegateArguments({
         tasks: [{ sessionAction: "prompt", prompt: "x" }],
       }),
-    ).toEqual({ tasks: [{ prompt: "x" }] });
+    ).toEqual({ tasks: [{ sessionAction: "prompt", prompt: "x" }] });
+    expect(
+      validate({ tasks: [{ sessionAction: "prompt", prompt: "x" }] }),
+    ).toContain("unknown field(s) 'sessionAction'");
     expect(
       normalizeDelegateArguments({ tasks: [{ sessionAction: "prompt" }] }),
-    ).toEqual({ tasks: [{}] });
+    ).toEqual({ tasks: [{ sessionAction: "prompt" }] });
+    expect(validate({ tasks: [{ sessionAction: "prompt" }] })).toContain(
+      "'sessionAction' is a top-level field",
+    );
   });
 });
 

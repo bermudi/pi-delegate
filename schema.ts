@@ -3,7 +3,7 @@ import {
   VALID_THINKING_LEVELS,
   isSessionControlAction,
 } from "./constants.ts";
-import type { DelegateArguments, DispatchableTask } from "./types.ts";
+import type { DelegateArguments } from "./types.ts";
 
 // JSON Schema string enum that keeps the literal union in `Static<>`.
 // `Type.String({ enum })` validates identically but widens to `string`;
@@ -170,7 +170,7 @@ export const delegateArgumentsSchema = Type.Object(
 );
 
 /** Fields that belong to a task entry. Models sometimes place these at the top
- * level of the arguments; the shim folds them back into a single task.
+ * level of the arguments; the normalizer folds them back into a single task.
  * `sessionAction` is NOT here: it was promoted to a top-level field (#32), so
  * top-level presence means session-RPC intent, not task intent — the classifier
  * and its mode validators own it now. */
@@ -208,8 +208,7 @@ const TOP_LEVEL_TASK_KEY_HINTS = new Set(["async", "sessionAction"]);
  * help. Each mode gets a small total validator that rejects foreign fields
  * generically (naming the offending field and the fix), so ordering is no
  * longer load-bearing across checks and a new field costs one schema entry
- * plus one mode check. Legacy task-level session-control shapes reaching this
- * point (the shim only transforms safe solo entries) hit the fence below. */
+ * plus one mode check. */
 export function validateDelegateOperation(
   params: DelegateArguments,
 ): string | undefined {
@@ -240,8 +239,8 @@ const SESSION_MODE_FIELDS = new Set(["sessionAction", "sessionId"]);
 function validateSessionMode(params: DelegateArguments): string | undefined {
   const rawParams = params as Record<string, unknown>;
   const { sessionAction } = params;
-  // The normalizer strips task-level/top-level "prompt" (a no-op default);
-  // anything else unrecognizable fails closed rather than misclassifying.
+  // Nothing strips or defaults anymore; any value besides 'close'/'list'
+  // fails closed below rather than misclassifying.
   if (!isSessionControlAction(sessionAction)) {
     return `sessionAction '${String(sessionAction)}' is not a session control action; use 'close' or 'list'.`;
   }
@@ -295,10 +294,7 @@ function validateDispatchOrHelpMode(
   params: DelegateArguments,
 ): string | undefined {
   const rawParams = params as Record<string, unknown>;
-  // Widened view: internally bridged session-control tasks carry an extra
-  // `sessionAction` field, and un-hoisted legacy shapes can reach this
-  // validator before being rejected by the fence below.
-  const tasks = (params.tasks ?? []) as DispatchableTask[];
+  const tasks = params.tasks ?? [];
 
   if (params.ticket !== undefined) {
     return "ticket requires ticketAction 'poll', 'cancel', or 'wait'.";
@@ -331,27 +327,6 @@ function validateDispatchOrHelpMode(
       .join(
         ", ",
       )} with an explicit tasks array; move them into a task entry or remove tasks.`;
-  }
-
-  // Session-control entries (`close`/`list`) are RPC, not work. The shim only
-  // hoists safe SOLO control entries; anything else reaching the dispatcher
-  // (a mixed batch, an async batch, more than one entry) is rejected loudly:
-  // mixed batches would execute a close the caller meant separately, async
-  // would hold the sessionId in the busy index for the ticket's lifetime
-  // while delivering nothing synchronous wouldn't, and multiple actions are
-  // no longer expressible (one session action per call since #32).
-  const isControlEntry = (task: (typeof tasks)[number]) =>
-    isSessionControlAction(task.sessionAction);
-  const controlCount = tasks.filter(isControlEntry).length;
-  if (controlCount > 0 && controlCount < tasks.length) {
-    const index = tasks.findIndex(isControlEntry);
-    return `task ${index + 1}: sessionAction '${tasks[index].sessionAction}' is session control, not a work task. Use the top-level 'sessionAction' field — session control cannot share a call with work tasks.`;
-  }
-  if (controlCount > 1) {
-    return `${controlCount} session-control tasks found; session RPC runs one sessionAction per call. Use the top-level 'sessionAction' field once per delegate call.`;
-  }
-  if (controlCount > 0 && params.async === true) {
-    return "async cannot be combined with session control ('close'/'list'); session actions are synchronous via the top-level 'sessionAction' field.";
   }
 
   for (const [index, task] of tasks.entries()) {
@@ -427,8 +402,7 @@ function hasTicketControlIntent(record: Record<string, unknown>): boolean {
 /** True when `record` carries top-level session-RPC intent: an explicit
  * close/list `sessionAction`. A bare top-level `sessionId` is deliberately
  * NOT session intent — it stays task-intent and wraps into a task as reuse.
- * Only `sessionAction` presence (after the legacy hoist below) selects the
- * session mode. */
+ * Only `sessionAction` presence selects the session mode. */
 function hasSessionControlIntent(record: Record<string, unknown>): boolean {
   return isSessionControlAction(record.sessionAction);
 }
@@ -486,8 +460,6 @@ function normalizeTaskEntry(entry: unknown): unknown {
  *   taskless (see `hasTicketControlIntent` / `hasSessionControlIntent`);
  * - `tools` as a JSON string (or bare token) inside a task entry;
  * - `agent: ""` inside a task entry — treated as omitted (ad-hoc);
- * - legacy task-level `sessionAction` (#32 promotion window): "prompt"
- *   stripped, safe solo close/list entries hoisted to the top level.
  * All other invalid input is left for normal schema validation to reject
  * loudly.
  *
@@ -506,9 +478,6 @@ export function normalizeDelegateArguments(args: unknown): DelegateArguments {
     if (parsed) record.tasks = parsed;
   }
 
-  // Legacy task-level session control → strip/hoist/reject (#32 promotion).
-  recoverLegacySessionActions(record);
-
   // Flat task fields at the top level → wrap into a single task.
   wrapFlatTaskFields(record);
 
@@ -518,51 +487,4 @@ export function normalizeDelegateArguments(args: unknown): DelegateArguments {
   }
 
   return record as DelegateArguments;
-}
-
-/** Migration shim for the #32 promotion of session control from task entries
- * to the top level. Legacy shapes are silently transformed wherever the
- * transformation is provably what the caller meant; everything ambiguous
- * keeps its shape so validateDelegateOperation rejects it loudly with copy
- * pointing at the top-level 'sessionAction' field:
- * - `sessionAction: "prompt"` was a no-op default — stripped everywhere.
- * - A safe SOLO close/list entry is hoisted to the top level before intent
- *   detection and flat-field wrapping run (entry `id` dropped — cosmetic,
- *   ids carry no meaning across calls).
- * - Mixed work/control batches, async control batches, and multi-entry
- *   control batches stay untouched for the fence's corrective rejection.
- * When this shim sunsets next release, legacy task-level spellings become
- * plain unknown-field errors naming 'sessionAction' as a top-level field. */
-function recoverLegacySessionActions(record: Record<string, unknown>): void {
-  // Top-level spellings of the dead "prompt" value strip cleanly even when
-  // they arrive beside ticket fields.
-  if (record.sessionAction === "prompt") delete record.sessionAction;
-
-  if (!Array.isArray(record.tasks)) return;
-  const entries = record.tasks as Record<string, unknown>[];
-  if (!entries.every((entry) => entry && typeof entry === "object")) return;
-
-  for (const entry of entries) {
-    if (entry.sessionAction === "prompt") delete entry.sessionAction;
-  }
-
-  const controls = entries.filter((entry) =>
-    isSessionControlAction(entry.sessionAction),
-  );
-  if (controls.length === 0) return;
-
-  // Hoist ONLY a safe solo control entry: one entry total, synchronous. Every
-  // other legacy shape stays put for loud rejection (hoisting a mixed batch
-  // would execute a close the model placed in a batch alongside real work).
-  const isSafeSoloShape =
-    entries.length === 1 && controls.length === 1 && record.async !== true;
-  if (!isSafeSoloShape) return;
-
-  const [entry] = entries;
-  const { id: _droppedCosmeticId, ...rest } = entry;
-  const action = rest.sessionAction;
-  delete rest.sessionAction;
-  delete record.tasks;
-  Object.assign(record, rest);
-  record.sessionAction = action;
 }
