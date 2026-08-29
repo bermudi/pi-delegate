@@ -499,6 +499,54 @@ describe("validateDelegateOperation task-field whitelist", () => {
     expect(err).toContain("run it alone");
   });
 
+  test("session mode tolerates default-valued fields (async:false, force:false, tasks:[])", () => {
+    // A caller (or a schema validator that materialises defaults) may spell
+    // out the default value of an optional field. These are no-ops and must
+    // not be treated as foreign to session RPC.
+    expect(
+      validateDelegateOperation({
+        sessionAction: "list",
+        async: false,
+      } as unknown as DelegateArguments),
+    ).toBeUndefined();
+    expect(
+      validateDelegateOperation({
+        sessionAction: "close",
+        sessionId: "s1",
+        force: false,
+      } as unknown as DelegateArguments),
+    ).toBeUndefined();
+    expect(
+      validateDelegateOperation({
+        sessionAction: "list",
+        tasks: [],
+      } as unknown as DelegateArguments),
+    ).toBeUndefined();
+  });
+
+  test("session mode still rejects meaningful foreign values", () => {
+    // Default-valued fields are tolerated, but a real value on a foreign
+    // field is still rejected — session RPC runs alone.
+    expect(
+      validateDelegateOperation({
+        sessionAction: "list",
+        async: true,
+      } as unknown as DelegateArguments),
+    ).toContain("'async'");
+    expect(
+      validateDelegateOperation({
+        sessionAction: "list",
+        tasks: [{ prompt: "work" }],
+      } as unknown as DelegateArguments),
+    ).toContain("'tasks'");
+    expect(
+      validateDelegateOperation({
+        sessionAction: "list",
+        force: true,
+      } as unknown as DelegateArguments),
+    ).toContain("'force'");
+  });
+
   test("ticket-control calls skip task checks", () => {
     expect(validateDelegateOperation({ ticketAction: "poll" })).toBeUndefined();
   });

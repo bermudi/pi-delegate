@@ -1183,6 +1183,62 @@ describe("delegate task lifecycle integration", () => {
     expect(details.results[0]?.output).toContain("list-me");
   });
 
+  test("list with a stray sessionId succeeds even when that session is busy", async () => {
+    // A list call should never attach sessionId to the internal bridge task:
+    // validateTasks would treat it as a real session key and fail with
+    // "Session(s) already in use" if that session is claimed by a running
+    // async ticket. Use a hanging stream so the async task stays running.
+    const stream = mockPiAiStream((orig) => ({
+      ...orig,
+      streamSimple: () => {
+        const s = createAssistantMessageEventStream();
+        // Never push done — keeps the async worker running and the session busy.
+        return s;
+      },
+    }));
+
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    patchAuth(ts, stream);
+
+    const toolDef = getDelegateTool(ts);
+    const ctx = getExecContext(ts);
+
+    // Start an async task with a named session — this makes "busy-list"
+    // busy in the ticket busy-index.
+    const dispatch = await toolDef.execute(
+      "tc-busy-list-1",
+      {
+        async: true,
+        tasks: [
+          { prompt: "long work", sessionId: "busy-list", tools: ["read"] },
+        ],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const ticketId = (dispatch.details as any).ticketId;
+    expect(ticketId).toBeDefined();
+
+    // list with the same sessionId must succeed — list does not target a
+    // specific session, so the sessionId is a no-op caller mistake.
+    const listResult = await toolDef.execute(
+      "tc-busy-list-2",
+      { sessionAction: "list", sessionId: "busy-list" },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const listText = (listResult as any).content[0]?.text as string;
+    // A busy-session rejection would surface as a notice here — the fix
+    // ensures list never attaches sessionId to the bridge task.
+    expect(listText).not.toContain("already in use");
+    expect(listText).not.toContain("quarantined");
+    // The list call completed normally (the session is still running, so
+    // it is not in the pool yet — "no active sessions" is correct).
+    expect(listText).toContain("Active sessions");
+  });
+
   test("async read-only tasks avoid overlapping-writer rejection and remain pollable", async () => {
     const stream = installStreamMock("Async task done.");
 

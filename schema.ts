@@ -1,8 +1,5 @@
 import { Type, type SchemaOptions } from "@sinclair/typebox";
-import {
-  VALID_THINKING_LEVELS,
-  isSessionControlAction,
-} from "./constants.ts";
+import { VALID_THINKING_LEVELS, isSessionControlAction } from "./constants.ts";
 import type { DelegateArguments } from "./types.ts";
 
 // JSON Schema string enum that keeps the literal union in `Static<>`.
@@ -247,13 +244,24 @@ function validateSessionMode(params: DelegateArguments): string | undefined {
   if (sessionAction === "close" && !params.sessionId) {
     return "sessionAction 'close' requires sessionId.";
   }
+  // Skip keys that carry only a default/no-op value: a caller (or a schema
+  // validator that materialises defaults) may spell out `async: false`,
+  // `force: false`, or `tasks: []` explicitly. These are indistinguishable
+  // from omitting the field and must not be treated as foreign. A real value
+  // (`async: true`, `tasks: [{...}]`, `prompt: "x"`) is still rejected.
   const foreign = Object.keys(rawParams).filter(
-    (key) => !SESSION_MODE_FIELDS.has(key),
+    (key) =>
+      !SESSION_MODE_FIELDS.has(key) &&
+      rawParams[key] !== undefined &&
+      rawParams[key] !== false &&
+      !(Array.isArray(rawParams[key]) && rawParams[key].length === 0),
   );
   if (foreign.length) {
     return `sessionAction '${sessionAction}' cannot be combined with ${foreign
       .map((field) => `'${field}'`)
-      .join(", ")}; run it alone — a session action takes only 'sessionAction' (plus 'sessionId' for 'close').`;
+      .join(
+        ", ",
+      )}; run it alone — a session action takes only 'sessionAction' (plus 'sessionId' for 'close').`;
   }
   return undefined;
 }

@@ -59,10 +59,14 @@ type ShutdownDrainResult =
 /** Bridge the promoted top-level session RPC (`sessionAction` + `sessionId`)
  * to the internal single-entry batch the runner executes. Internal only — the
  * public task schema has no `sessionAction`; validation guarantees close
- * carries a sessionId by this point. */
+ * carries a sessionId by this point. `list` never carries a sessionId: it does
+ * not target a specific session, and attaching one would make validateTasks
+ * run busy/quarantine checks that can fail the list call. */
 function bridgeSessionControlTask(params: DelegateArguments): DispatchableTask {
   return {
-    ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+    ...(params.sessionAction === "close" && params.sessionId
+      ? { sessionId: params.sessionId }
+      : {}),
     sessionAction: params.sessionAction,
   };
 }
