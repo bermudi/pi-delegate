@@ -1220,9 +1220,10 @@ describe("delegate task lifecycle integration", () => {
     const ticketId = (dispatch.details as any).ticketId;
     expect(ticketId).toBeDefined();
     const ticket = ticketRegistry.get(ticketId);
-    if (!ticket?.completion) throw new Error("async ticket has no completion");
 
     try {
+      if (!ticket?.completion) throw new Error("async ticket has no completion");
+
       // list with the same sessionId must succeed — list does not target a
       // specific session, so the sessionId is a no-op caller mistake.
       const listResult = await toolDef.execute(
@@ -1239,8 +1240,10 @@ describe("delegate task lifecycle integration", () => {
       expect(listText).not.toContain("quarantined");
       expect(listText).toContain("Active sessions");
     } finally {
-      cancelTicketForShutdown(ticket);
-      await ticket.completion;
+      if (ticket) {
+        cancelTicketForShutdown(ticket);
+        await ticket.completion;
+      }
     }
   });
 
