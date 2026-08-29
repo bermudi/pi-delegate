@@ -931,9 +931,170 @@ describe("scratch workspace", () => {
       execFileSync("git", ["init", "--quiet"], { cwd: repo });
       try {
         await expect(createScratchWorkspace(repo)).rejects.toThrow(
-          "points outside the project",
+          "resolves outside the disposable copy",
         );
       } finally {
+        cleanTestDir(parent);
+      }
+    },
+  );
+
+  scratchTest(
+    "retargets in-project absolute symlinks at their copied counterparts",
+    async () => {
+      const parent = testParent();
+      const repo = path.join(parent, "repo");
+      const nested = path.join(repo, "packages", "consumer");
+      fs.mkdirSync(nested, { recursive: true });
+      fs.writeFileSync(path.join(repo, "target.txt"), "target");
+      fs.mkdirSync(path.join(repo, "packages", "provider"));
+      fs.writeFileSync(
+        path.join(repo, "packages", "provider", "index.ts"),
+        "provider",
+      );
+      // The shape bun/pnpm local package installs leave behind: link text is
+      // absolute and inside the repository.
+      fs.symlinkSync(path.join(repo, "target.txt"), path.join(repo, "abs.txt"));
+      fs.symlinkSync(
+        path.join(repo, "packages", "provider", "index.ts"),
+        path.join(nested, "index.ts"),
+      );
+      // A symlinked directory is never traversed as a directory, so it must be
+      // retargeted as a link; the project root itself projects onto ".".
+      fs.symlinkSync(
+        path.join(repo, "packages", "provider"),
+        path.join(repo, "provider-link"),
+      );
+      fs.symlinkSync(repo, path.join(repo, "self"));
+      execFileSync("git", ["init", "--quiet"], { cwd: repo });
+      try {
+        const workspace = await createScratchWorkspace(repo);
+        const copiedRootLink = path.join(workspace.scratchRoot, "abs.txt");
+        const copiedNestedLink = path.join(
+          workspace.scratchRoot,
+          "packages",
+          "consumer",
+          "index.ts",
+        );
+
+        expect(fs.readlinkSync(copiedRootLink)).toBe("target.txt");
+        expect(fs.readlinkSync(copiedNestedLink)).toBe(
+          path.join("..", "provider", "index.ts"),
+        );
+        expect(fs.realpathSync(copiedRootLink)).toBe(
+          path.join(workspace.scratchRoot, "target.txt"),
+        );
+        expect(fs.readFileSync(copiedNestedLink, "utf8")).toBe("provider");
+        expect(
+          fs.readlinkSync(path.join(workspace.scratchRoot, "provider-link")),
+        ).toBe(path.join("packages", "provider"));
+        expect(fs.readlinkSync(path.join(workspace.scratchRoot, "self"))).toBe(
+          ".",
+        );
+
+        // A retargeted link is still an unchanged copied node, so reading
+        // through it must not be reported as a touched source path.
+        const touchArguments = {
+          lexicalPath: copiedRootLink,
+          preExecutionPhysicalPath: path.join(
+            workspace.scratchRoot,
+            "target.txt",
+          ),
+          provenance: "edit" as const,
+          uncertain: false,
+        };
+        expect(
+          await workspace.resolveAttributedLexicalTouch?.(touchArguments),
+        ).toBeUndefined();
+
+        // Replacing the retargeted link is a change to the node itself, so its
+        // source path must still be reported.
+        fs.unlinkSync(copiedRootLink);
+        fs.symlinkSync("other.txt", copiedRootLink);
+        expect(
+          await workspace.resolveAttributedLexicalTouch?.(touchArguments),
+        ).toBe(path.join(repo, "abs.txt"));
+        await workspace.cleanup();
+      } finally {
+        cleanTestDir(parent);
+      }
+    },
+  );
+
+  scratchTest(
+    "rejects absolute symlinks whose targets are outside the project",
+    async () => {
+      const parent = testParent();
+      const repo = path.join(parent, "repo");
+      const outside = path.join(parent, "shared");
+      fs.mkdirSync(repo);
+      fs.mkdirSync(outside);
+      fs.writeFileSync(path.join(outside, "file.txt"), "host");
+      fs.symlinkSync(
+        path.join(outside, "file.txt"),
+        path.join(repo, "host.txt"),
+      );
+      execFileSync("git", ["init", "--quiet"], { cwd: repo });
+      try {
+        await expect(createScratchWorkspace(repo)).rejects.toThrow(
+          "resolves outside the disposable copy",
+        );
+      } finally {
+        cleanTestDir(parent);
+      }
+    },
+  );
+
+  scratchTest(
+    "rejects absolute symlinks into a directory sharing the project prefix",
+    async () => {
+      const parent = testParent();
+      const repo = path.join(parent, "repo");
+      // 'repo-other' shares the source root's string prefix without being a
+      // descendant: retargeting it would project a host path into the copy.
+      const sibling = path.join(parent, "repo-other");
+      fs.mkdirSync(repo);
+      fs.mkdirSync(sibling);
+      fs.writeFileSync(path.join(sibling, "file.txt"), "host");
+      fs.symlinkSync(
+        path.join(sibling, "file.txt"),
+        path.join(repo, "sibling.txt"),
+      );
+      execFileSync("git", ["init", "--quiet"], { cwd: repo });
+      try {
+        await expect(createScratchWorkspace(repo)).rejects.toThrow(
+          "resolves outside the disposable copy",
+        );
+      } finally {
+        cleanTestDir(parent);
+      }
+    },
+  );
+
+  scratchTest(
+    "fails closed when a retarget cannot be written into the copy",
+    async () => {
+      if (process.getuid?.() === 0) return;
+      const parent = testParent();
+      const repo = path.join(parent, "repo");
+      const locked = path.join(repo, "locked");
+      fs.mkdirSync(locked, { recursive: true });
+      fs.writeFileSync(path.join(repo, "target.txt"), "target");
+      fs.symlinkSync(path.join(repo, "target.txt"), path.join(locked, "link"));
+      execFileSync("git", ["init", "--quiet"], { cwd: repo });
+      // --archive reproduces the source mode, so the copied directory refuses
+      // the staging entry the retarget needs.
+      fs.chmodSync(locked, 0o500);
+      try {
+        await expect(createScratchWorkspace(repo)).rejects.toThrow(
+          "could not retarget in-project symlink",
+        );
+        // The read-only copied directory must not leave a lease behind.
+        expect(
+          fs.readdirSync(path.join(parent, _testHooks.SCRATCH_CONTAINER_NAME)),
+        ).toEqual([]);
+      } finally {
+        fs.chmodSync(locked, 0o700);
         cleanTestDir(parent);
       }
     },

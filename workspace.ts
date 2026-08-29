@@ -142,9 +142,61 @@ function throwIfSetupCancelled(
   );
 }
 
+/** Project an absolute source-tree symlink target onto its counterpart inside
+ * the copy, as a relative target so the copy stays self-contained. Returns
+ * undefined when the target is not lexically inside the source root, which is
+ * the only case that can be rewritten without following it. */
+function relinkTargetIntoCopy(
+  linkPath: string,
+  target: string,
+  root: string,
+  sourceRoot: string,
+): string | undefined {
+  if (!path.isAbsolute(target) || !isWithin(sourceRoot, target)) {
+    return undefined;
+  }
+  const projected = path.join(root, path.relative(sourceRoot, target));
+  if (!isWithin(root, projected)) return undefined;
+  const relative = path.relative(path.dirname(linkPath), projected);
+  return relative === "" ? "." : relative;
+}
+
+/** Restore owner traversal/write bits so a partial copy can be removed.
+ * `cp --archive` reproduces read-only source directories, and their copies
+ * would otherwise leak a lease directory behind a failed setup. */
+async function makeTreeRemovable(root: string): Promise<void> {
+  let entries: fs.Dirent[];
+  try {
+    await fs.promises.chmod(root, 0o700);
+    entries = await fs.promises.readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      await makeTreeRemovable(path.join(root, entry.name));
+    }
+  }
+}
+
+async function replaceSymlink(linkPath: string, target: string): Promise<void> {
+  const staging = path.join(
+    path.dirname(linkPath),
+    `.pi-delegate-relink-${process.pid.toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+  );
+  await fs.promises.symlink(target, staging);
+  try {
+    await fs.promises.rename(staging, linkPath);
+  } catch (error) {
+    await fs.promises.rm(staging, { force: true });
+    throw error;
+  }
+}
+
 /** Validate the completed copy before any subagent receives its path. */
 async function validateCopiedTree(
   root: string,
+  sourceRoot: string,
   signal: AbortSignal,
   parentSignal: AbortSignal | undefined,
 ): Promise<void> {
@@ -179,10 +231,31 @@ async function validateCopiedTree(
       }
       if (!entry.isSymbolicLink()) continue;
       const target = await fs.promises.readlink(candidate);
+      // `cp --archive` copies link text verbatim, so an absolute in-project
+      // link (bun/pnpm-style local package installs) still resolves to the
+      // real tree from inside the copy. Retarget it at its copied counterpart
+      // instead of failing: the link keeps working and stays disposable.
+      const relinked = relinkTargetIntoCopy(
+        candidate,
+        target,
+        root,
+        sourceRoot,
+      );
+      if (relinked !== undefined) {
+        try {
+          await replaceSymlink(candidate, relinked);
+        } catch (error) {
+          throw new ScratchSetupError(
+            `Scratch workspace could not retarget in-project symlink '${path.relative(root, candidate)}' at its copied counterpart.`,
+            { cause: error },
+          );
+        }
+        continue;
+      }
       const resolvedTarget = path.resolve(path.dirname(candidate), target);
       if (path.isAbsolute(target) || !isWithin(root, resolvedTarget)) {
         throw new ScratchSetupError(
-          `Scratch workspace cannot safely copy symlink '${path.relative(root, candidate)}' because it points outside the project.`,
+          `Scratch workspace cannot safely copy symlink '${path.relative(root, candidate)}' -> '${target}': it resolves outside the disposable copy, so relative writes through it would reach the host. Remove the link, or run this task with workspace "shared" (read-only tools) or "isolated".`,
         );
       }
     }
@@ -704,7 +777,12 @@ export async function createScratchWorkspace(
     // GNU cp --archive applies the source root's mode to the destination.
     // Restore the private boundary after it has finished copying metadata.
     await fs.promises.chmod(scratchRoot, 0o700);
-    await validateCopiedTree(scratchRoot, controller.signal, signal);
+    await validateCopiedTree(
+      scratchRoot,
+      sourceRoot,
+      controller.signal,
+      signal,
+    );
     if (
       await fs.promises.stat(path.join(scratchRoot, ".git")).then(
         (stat) => stat.isDirectory(),
@@ -766,7 +844,7 @@ export async function createScratchWorkspace(
   } catch (error) {
     if (leaseRoot) {
       try {
-        await fs.promises.chmod(leaseRoot, 0o700);
+        await makeTreeRemovable(leaseRoot);
         await fs.promises.rm(leaseRoot, { recursive: true, force: true });
       } catch (cleanupError) {
         console.error(
@@ -913,13 +991,18 @@ export async function createScratchWorkspace(
         readStableLink(source, sourceStat),
       ]);
       // A readlink or identity race is not evidence that the nodes matched.
-      // Keep the lexical source path rather than dropping it.
-      if (
-        scratchTarget !== undefined &&
-        sourceTarget !== undefined &&
-        scratchTarget === sourceTarget
-      ) {
-        return undefined;
+      // Keep the lexical source path rather than dropping it. An in-project
+      // absolute source link was deliberately retargeted at setup, so its
+      // copied form matches that projection rather than the source text.
+      if (scratchTarget !== undefined && sourceTarget !== undefined) {
+        const expected =
+          relinkTargetIntoCopy(
+            lexical,
+            sourceTarget,
+            completedRoot,
+            sourceRoot!,
+          ) ?? sourceTarget;
+        if (scratchTarget === expected) return undefined;
       }
     }
     // This is evidence about the lexical node, not its current target.
