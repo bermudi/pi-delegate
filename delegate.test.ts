@@ -3155,9 +3155,9 @@ describe("delegate extension integration", () => {
     expect(tasksArraySchema.items.properties.workspace.description).toContain(
       "none confine access",
     );
-    expect(tasksArraySchema.items.properties.workspace.description).not.toContain(
-      "Reviewer",
-    );
+    expect(
+      tasksArraySchema.items.properties.workspace.description,
+    ).not.toContain("Reviewer");
     expect(tasksArraySchema.items.properties.id.description).toContain(
       "correlation",
     );
@@ -3224,7 +3224,10 @@ describe("delegate extension integration", () => {
       { tasks: [{ sessionAction: "list", prompt: "stray" }] },
       { tasks: [{ sessionAction: "close", sessionId: "s1", prompt: "stray" }] },
       {
-        tasks: [{ prompt: "work" }, { sessionAction: "close", sessionId: "s1" }],
+        tasks: [
+          { prompt: "work" },
+          { sessionAction: "close", sessionId: "s1" },
+        ],
       },
       { async: true, tasks: [{ sessionAction: "list" }] },
       { tasks: [{ prompt: "x", deadlineMs: 0 }] },

@@ -1222,7 +1222,8 @@ describe("delegate task lifecycle integration", () => {
     const ticket = ticketRegistry.get(ticketId);
 
     try {
-      if (!ticket?.completion) throw new Error("async ticket has no completion");
+      if (!ticket?.completion)
+        throw new Error("async ticket has no completion");
 
       // list with the same sessionId must succeed — list does not target a
       // specific session, so the sessionId is a no-op caller mistake.
