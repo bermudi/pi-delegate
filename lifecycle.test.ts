@@ -34,7 +34,7 @@ import { createTestSession } from "@marcfargas/pi-test-harness";
 // session is visible to execute()'s list action; the retry-base override reaches
 // the extension's createAgentSession). We clear them in afterEach to avoid
 // leaking between runs.
-import { ticketRegistry } from "./delegate.ts";
+import { cancelTicketForShutdown, ticketRegistry } from "./delegate.ts";
 import {
   _setHostRetryBaseMsForTesting,
   _setModelRuntimeFactoryForTesting,
@@ -1219,24 +1219,29 @@ describe("delegate task lifecycle integration", () => {
     );
     const ticketId = (dispatch.details as any).ticketId;
     expect(ticketId).toBeDefined();
+    const ticket = ticketRegistry.get(ticketId);
+    if (!ticket?.completion) throw new Error("async ticket has no completion");
 
-    // list with the same sessionId must succeed — list does not target a
-    // specific session, so the sessionId is a no-op caller mistake.
-    const listResult = await toolDef.execute(
-      "tc-busy-list-2",
-      { sessionAction: "list", sessionId: "busy-list" },
-      undefined,
-      undefined,
-      ctx,
-    );
-    const listText = (listResult as any).content[0]?.text as string;
-    // A busy-session rejection would surface as a notice here — the fix
-    // ensures list never attaches sessionId to the bridge task.
-    expect(listText).not.toContain("already in use");
-    expect(listText).not.toContain("quarantined");
-    // The list call completed normally (the session is still running, so
-    // it is not in the pool yet — "no active sessions" is correct).
-    expect(listText).toContain("Active sessions");
+    try {
+      // list with the same sessionId must succeed — list does not target a
+      // specific session, so the sessionId is a no-op caller mistake.
+      const listResult = await toolDef.execute(
+        "tc-busy-list-2",
+        { sessionAction: "list", sessionId: "busy-list" },
+        undefined,
+        undefined,
+        ctx,
+      );
+      const listText = (listResult as any).content[0]?.text as string;
+      // A busy-session rejection would surface as a notice here — the fix
+      // ensures list never attaches sessionId to the bridge task.
+      expect(listText).not.toContain("already in use");
+      expect(listText).not.toContain("quarantined");
+      expect(listText).toContain("Active sessions");
+    } finally {
+      cancelTicketForShutdown(ticket);
+      await ticket.completion;
+    }
   });
 
   test("async read-only tasks avoid overlapping-writer rejection and remain pollable", async () => {

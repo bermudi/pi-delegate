@@ -244,18 +244,27 @@ function validateSessionMode(params: DelegateArguments): string | undefined {
   if (sessionAction === "close" && !params.sessionId) {
     return "sessionAction 'close' requires sessionId.";
   }
-  // Skip keys that carry only a default/no-op value: a caller (or a schema
-  // validator that materialises defaults) may spell out `async: false`,
-  // `force: false`, or `tasks: []` explicitly. These are indistinguishable
-  // from omitting the field and must not be treated as foreign. A real value
-  // (`async: true`, `tasks: [{...}]`, `prompt: "x"`) is still rejected.
-  const foreign = Object.keys(rawParams).filter(
-    (key) =>
-      !SESSION_MODE_FIELDS.has(key) &&
-      rawParams[key] !== undefined &&
-      rawParams[key] !== false &&
-      !(Array.isArray(rawParams[key]) && rawParams[key].length === 0),
-  );
+  // Skip only fields carrying their documented default/no-op value: a caller
+  // (or a schema validator that materialises defaults) may spell out
+  // `async: false`, `force: false`, or `tasks: []` explicitly. Other false or
+  // empty-array values remain foreign so future fields cannot bypass this mode
+  // boundary merely by sharing the same value shape.
+  const foreign = Object.keys(rawParams).filter((key) => {
+    if (SESSION_MODE_FIELDS.has(key) || rawParams[key] === undefined) {
+      return false;
+    }
+    if ((key === "async" || key === "force") && rawParams[key] === false) {
+      return false;
+    }
+    if (
+      key === "tasks" &&
+      Array.isArray(rawParams[key]) &&
+      rawParams[key].length === 0
+    ) {
+      return false;
+    }
+    return true;
+  });
   if (foreign.length) {
     return `sessionAction '${sessionAction}' cannot be combined with ${foreign
       .map((field) => `'${field}'`)

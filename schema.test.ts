@@ -547,6 +547,21 @@ describe("validateDelegateOperation task-field whitelist", () => {
     ).toContain("'force'");
   });
 
+  test("session mode does not suppress false or empty arrays for other fields", () => {
+    expect(
+      validateDelegateOperation({
+        sessionAction: "list",
+        prompt: false,
+      } as unknown as DelegateArguments),
+    ).toContain("'prompt'");
+    expect(
+      validateDelegateOperation({
+        sessionAction: "list",
+        tools: [],
+      } as unknown as DelegateArguments),
+    ).toContain("'tools'");
+  });
+
   test("ticket-control calls skip task checks", () => {
     expect(validateDelegateOperation({ ticketAction: "poll" })).toBeUndefined();
   });
