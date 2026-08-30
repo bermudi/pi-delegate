@@ -342,9 +342,9 @@ function initSchema(db: DatabaseSync): void {
     // Backfill legacy rows that predate the workspace column. New rows store
     // 'shared' explicitly, but ALTER TABLE leaves existing rows as NULL. Without
     // this, GROUP BY workspace splits NULL vs 'shared' for the same semantics.
-    // Reviewer defaults to scratch, so preserve that heuristic for historical
-    // rows; everything else was shared by default. This is idempotent and runs
-    // inside the same transaction as the schema changes so a crash before COMMIT
+    // Reviewer defaulted to scratch when these rows were recorded, so preserve
+    // that heuristic for historical rows; everything else was shared by
+    // default. This is idempotent and runs inside the same transaction as the schema changes so a crash before COMMIT
     // retries cleanly.
     try {
       db.exec(

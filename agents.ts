@@ -151,7 +151,7 @@ export const BUILTIN_AGENT_CONFIGS: Readonly<Record<string, AgentConfig>> = {
     systemPrompt:
       "Review the current snapshot for correctness, regressions, security problems, and missing tests. Do not modify the source project. Run focused checks when useful. Report actionable findings ordered by severity, with concrete paths and locations. If there are no material findings, say so plainly; do not invent issues or merely summarize the implementation.",
     builtin: true,
-    workspace: "scratch",
+    workspace: "shared",
   },
 };
 

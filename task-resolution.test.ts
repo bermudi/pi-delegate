@@ -584,7 +584,7 @@ describe("built-in agent profiles", () => {
     ]);
   });
 
-  test("built-ins resolve their fixed tools and reviewer defaults to scratch", () => {
+  test("built-ins resolve their fixed tools and reviewer defaults to shared", () => {
     const resolved = resolveTasks(
       [
         { agent: "scout", prompt: "inspect" },
@@ -600,14 +600,30 @@ describe("built-in agent profiles", () => {
     expect(resolved[0]?.tools).toEqual(["read", "grep", "find", "ls"]);
     expect(resolved[1]?.tools).toEqual(["read", "write", "edit", "bash"]);
     expect(resolved[2]?.tools).toEqual(["read", "bash"]);
-    expect(resolved[2]?.workspace).toBe("scratch");
+    expect(resolved[2]?.workspace).toBe("shared");
     expect(resolved[3]?.workspace).toBe("shared");
   });
 
-  test("reviewer sessionId gets a corrective shared-workspace error", () => {
+  test("reviewer sessionId is valid now that reviewer defaults to shared", () => {
+    expect(
+      validateTasks(
+        [{ agent: "reviewer", sessionId: "review-1", prompt: "review" }],
+        builtins,
+        "parent",
+      ),
+    ).toBeNull();
+  });
+
+  test("an agent defaulting to scratch gets a corrective shared-workspace error", () => {
+    // Simulates a user reviewer.md restoring the pre-flip scratch default.
+    const agents = new Map(builtins);
+    agents.set("reviewer", {
+      ...builtins.get("reviewer")!,
+      workspace: "scratch",
+    });
     const result = validateTasks(
       [{ agent: "reviewer", sessionId: "review-1", prompt: "review" }],
-      builtins,
+      agents,
       "parent",
     );
     expect(result?.content[0]?.text).toContain(
@@ -623,7 +639,7 @@ describe("built-in agent profiles", () => {
             prompt: "review",
           },
         ],
-        builtins,
+        agents,
         "parent",
       ),
     ).toBeNull();
@@ -739,7 +755,7 @@ describe("resolveTasks: prompt-only built-in overrides preserve privileges", () 
     expect(task.thinking).toBe("high");
     expect(task.systemPrompt).toBe("Custom scout body.");
   });
-  test("prompt-only reviewer keeps scratch workspace and read+bash tools", () => {
+  test("reviewer Markdown override with explicit scratch keeps scratch workspace and read+bash tools", () => {
     const agents = new Map<string, AgentConfig>([
       [
         "reviewer",
@@ -824,7 +840,7 @@ describe("resolveTasks: prompt-only built-in overrides preserve privileges", () 
         "ls",
       ]);
       expect(agents.get("scout")?.explicitTools).toBe(false);
-      expect(agents.get("reviewer")?.workspace).toBe("scratch");
+      expect(agents.get("reviewer")?.workspace).toBe("shared");
       const [scoutTask] = resolveTasks(
         [{ agent: "scout", prompt: "go" }] as any,
         {

@@ -806,7 +806,9 @@ description: My custom scout
 Custom scout body.
 `,
     );
-    // No workspace field — reviewer should keep its scratch workspace.
+    // No workspace field — reviewer inherits the built-in default (shared
+    // since the scratch flip; a reviewer.md with workspace: scratch restores
+    // the old behavior).
     writeAgent(
       path.join(projectDir, ".pi", "agents"),
       "reviewer.md",
@@ -823,7 +825,7 @@ Custom reviewer body.
     expect(scout.tools).toEqual(["read", "grep", "find", "ls"]);
     expect(scout.systemPrompt).toBe("Custom scout body.");
     const reviewer = agents.get("reviewer")!;
-    expect(reviewer.workspace).toBe("scratch");
+    expect(reviewer.workspace).toBe("shared");
     expect(reviewer.tools).toEqual(["read", "bash"]);
   });
 
