@@ -209,6 +209,7 @@ describe("resolveTasks error messages", () => {
   function makeRegistry(models: any[] = []) {
     return {
       getAvailable: () => models,
+      getAll: () => models,
       find: (provider: string, id: string) =>
         models.find((m) => m.provider === provider && m.id === id) ?? null,
       hasConfiguredAuth: () => true,
@@ -369,6 +370,7 @@ describe("resolveTasks tool resolution", () => {
   function makeRegistry(models: any[] = []) {
     return {
       getAvailable: () => models,
+      getAll: () => models,
       find: (provider: string, id: string) =>
         models.find((m) => m.provider === provider && m.id === id) ?? null,
       hasConfiguredAuth: () => true,
@@ -448,6 +450,7 @@ describe("built-in agent profiles", () => {
   function makeRegistry(models: any[] = []) {
     return {
       getAvailable: () => models,
+      getAll: () => models,
       find: (provider: string, id: string) =>
         models.find((m) => m.provider === provider && m.id === id) ?? null,
       hasConfiguredAuth: () => true,
@@ -703,6 +706,7 @@ describe("resolveTasks: prompt-only built-in overrides preserve privileges", () 
   function makeRegistry(models: any[] = []) {
     return {
       getAvailable: () => models,
+      getAll: () => models,
       find: (provider: string, id: string) =>
         models.find((m) => m.provider === provider && m.id === id) ?? null,
       hasConfiguredAuth: () => true,
@@ -867,6 +871,7 @@ describe("resolveTasks: explicit Markdown tools/model/thinking", () => {
   function makeRegistry(models: any[] = []) {
     return {
       getAvailable: () => models,
+      getAll: () => models,
       find: (provider: string, id: string) =>
         models.find((m) => m.provider === provider && m.id === id) ?? null,
       hasConfiguredAuth: () => true,
@@ -995,6 +1000,7 @@ describe("resolveTasks: delegate.json agent override precedence", () => {
   function makeRegistry(models: any[]) {
     return {
       getAvailable: () => models,
+      getAll: () => models,
       find: (provider: string, id: string) =>
         models.find((m) => m.provider === provider && m.id === id) ?? null,
       hasConfiguredAuth: () => true,
@@ -1327,6 +1333,7 @@ describe("resolveTasks: Claude deny-only overrides", () => {
   function makeRegistry() {
     return {
       getAvailable: () => [],
+      getAll: () => [],
       find: () => null,
       hasConfiguredAuth: () => true,
     } as any;
@@ -1475,6 +1482,7 @@ describe("resolveTasks: pooled-session behavior", () => {
   function makeRegistry(models: any[] = []) {
     return {
       getAvailable: () => models,
+      getAll: () => models,
       find: (provider: string, id: string) =>
         models.find((m) => m.provider === provider && m.id === id) ?? null,
       hasConfiguredAuth: () => true,

@@ -1153,6 +1153,7 @@ describe("resolveModel", () => {
   function makeRegistry(models: Array<{ provider: string; id: string }>) {
     return {
       getAvailable: () => models,
+      getAll: () => models,
       find: (provider: string, id: string) =>
         models.find((m) => m.provider === provider && m.id === id) ?? null,
     } as any;
@@ -1177,6 +1178,63 @@ describe("resolveModel", () => {
     const registry = makeRegistry([{ provider: "openai", id: "gpt-5" }]);
     const result = resolveModel("openai/gpt-5", registry, parentModel);
     expect(result).toEqual({ provider: "openai", id: "gpt-5" });
+  });
+
+  test("resolves a provider/id spec whose case differs from the registry (pi grammar is case-insensitive)", () => {
+    // Regression: `pi --model modal/zai-org/glm-5.3-flash:max` resolves
+    // case-insensitively to canonical id `zai-org/GLM-5.3-Flash`, and models
+    // echo that lowercase spelling into task `model` fields. The reference
+    // must not fail when only the case differs.
+    const registry = makeRegistry([
+      { provider: "modal", id: "zai-org/GLM-5.3-Flash" },
+    ]);
+    expect(
+      resolveModel("modal/zai-org/glm-5.3-flash", registry, parentModel),
+    ).toEqual({ provider: "modal", id: "zai-org/GLM-5.3-Flash" });
+    expect(
+      resolveModel("MODAL/ZAI-ORG/GLM-5.3-FLASH", registry, parentModel),
+    ).toEqual({ provider: "modal", id: "zai-org/GLM-5.3-Flash" });
+  });
+
+  test("resolves a namespaced id referenced with the wrong case (id contains a slash)", () => {
+    // `zai-org/GLM-5.3-Flash` is an id with a namespace, under provider
+    // `modal`. A spec of `zai-org/glm-5.3-flash` splits on the first slash
+    // into a non-existent provider, so the whole-spec id fallback must catch
+    // it — pi's own grammar does (resolveCliModel's raw-id fallback).
+    const registry = makeRegistry([
+      { provider: "modal", id: "zai-org/GLM-5.3-Flash" },
+    ]);
+    expect(
+      resolveModel("zai-org/glm-5.3-flash", registry, parentModel),
+    ).toEqual({ provider: "modal", id: "zai-org/GLM-5.3-Flash" });
+  });
+
+  test("tolerates a thinking suffix on a case-mismatched reference", () => {
+    const registry = makeRegistry([
+      { provider: "modal", id: "zai-org/GLM-5.3-Flash" },
+    ]);
+    const result = resolveModelRequest(
+      "modal/zai-org/glm-5.3-flash:max",
+      registry,
+      parentModel,
+    );
+    expect(result.model).toEqual({
+      provider: "modal",
+      id: "zai-org/GLM-5.3-Flash",
+    });
+    expect(result.strippedSuffix).toBe("max");
+  });
+
+  test("still rejects a genuinely different model id (no fuzzy matching)", () => {
+    const registry = makeRegistry([
+      { provider: "modal", id: "zai-org/GLM-5.3-Flash" },
+    ]);
+    expect(
+      resolveModel("modal/zai-org/glm-5.3-flashx", registry, parentModel),
+    ).toBeUndefined();
+    expect(
+      resolveModel("modal/zai-org/glm-5.3", registry, parentModel),
+    ).toBeUndefined();
   });
 
   test("returns undefined when bare id not found", () => {
@@ -1250,6 +1308,7 @@ describe("resolveModel", () => {
           modelRegistry: {
             hasConfiguredAuth: () => true,
             getAvailable: () => [],
+            getAll: () => [],
           },
           sessionManager: undefined,
           getSystemPrompt: () => "live parent base prompt",
@@ -1321,6 +1380,7 @@ describe("resolveModel", () => {
         modelRegistry: {
           hasConfiguredAuth: () => true,
           getAvailable: () => [],
+          getAll: () => [],
         },
         sessionManager: undefined,
       } as any,
@@ -1373,6 +1433,7 @@ describe("findAvailableAlternative", () => {
       hasConfiguredAuth: (m: any) =>
         authMap.get(`${m.provider}/${m.id}`) ?? false,
       getAvailable: () => available,
+      getAll: () => available,
     } as any;
   }
 
@@ -3414,6 +3475,7 @@ describe("delegate extension integration", () => {
     } as any;
     const mockRegistry = {
       getAvailable: () => [deepseekVariant],
+      getAll: () => [deepseekVariant],
       find: (provider: string, id: string) =>
         provider === "deepseek" && id === "deepseek-v4-flash"
           ? deepseekVariant
