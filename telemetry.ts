@@ -100,6 +100,25 @@ function defaultDbPath(): string {
   return path.join(os.homedir(), ".pi", "agent", "delegate-usage.db");
 }
 
+/**
+ * Telemetry database path resolution: explicit config wins, then the
+ * DELEGATE_TELEMETRY_DB environment variable, then the default user path.
+ * The env var exists so test runs can redirect the default destination away
+ * from the production database without touching user config — the pi test
+ * harness builds real sessions in-process, so process.env is the extension's
+ * environment (see test-preload.ts). Config beats env on purpose: telemetry
+ * tests drive backends through explicit config dbPath values, including
+ * spawned Node children that inherit this variable.
+ */
+function resolveTelemetryDbPath(
+  config: import("./config.ts").TelemetryConfig,
+): string {
+  if (config.dbPath) return config.dbPath;
+  const fromEnv = process.env.DELEGATE_TELEMETRY_DB;
+  if (fromEnv) return fromEnv;
+  return defaultDbPath();
+}
+
 function findPackageJson(startFile: string): string | undefined {
   const candidates = [
     path.join(path.dirname(startFile), "package.json"),
@@ -482,7 +501,7 @@ function backendIdentity(
   config: import("./config.ts").TelemetryConfig,
 ): string | undefined {
   if (config.enabled === false) return undefined;
-  return config.dbPath ?? defaultDbPath();
+  return resolveTelemetryDbPath(config);
 }
 
 function disableActiveBackend(
@@ -524,7 +543,7 @@ function openSqliteBackend(
   if (config.enabled === false || telemetryClosed) return undefined;
   if (!DatabaseSyncCtor) return undefined;
 
-  const dbPath = config.dbPath ?? defaultDbPath();
+  const dbPath = resolveTelemetryDbPath(config);
   let db: DatabaseSync | undefined;
   try {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });

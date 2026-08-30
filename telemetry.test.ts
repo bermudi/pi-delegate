@@ -58,13 +58,14 @@ const telemetryModule = pathToFileURL(
 function runNodeScript(
   source: string,
   dbPath: string,
+  extraEnv: Record<string, string> = {},
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.env.PI_DELEGATE_NODE_BINARY ?? "node",
       ["--experimental-strip-types", "--input-type=module", "-e", source],
       {
-        env: { ...process.env, PI_DELEGATE_TEST_DB: dbPath },
+        env: { ...process.env, PI_DELEGATE_TEST_DB: dbPath, ...extraEnv },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -683,6 +684,64 @@ describe("telemetry", () => {
           journalMode: "wal",
           piVersion: piCodingAgent.VERSION,
         });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
+    "DELEGATE_TELEMETRY_DB redirects the default database path",
+    { timeout: 15_000 },
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-env-"),
+      );
+      const envDbPath = path.join(dir, "usage.db");
+      try {
+        // No config dbPath: the env var (injected into the child's
+        // environment, as the bunfig test preload does for the suite) decides
+        // where the default destination lands.
+        await runNodeScript(
+          `
+          import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
+          import { _resetTelemetryForTesting, beginCall } from ${JSON.stringify(telemetryModule)};
+          if (!process.env.DELEGATE_TELEMETRY_DB) throw new Error("missing DELEGATE_TELEMETRY_DB");
+          _setDelegateConfigForTesting({ telemetry: { enabled: true } });
+          _resetTelemetryForTesting();
+          const span = beginCall({ mode: "sync", taskCount: 1 });
+          span.spawn();
+          span.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+        `,
+          "unused",
+          { DELEGATE_TELEMETRY_DB: envDbPath },
+        );
+        await expect(readNodeDatabase(envDbPath)).resolves.toMatchObject({
+          calls: 1,
+        });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
+    "explicit config dbPath wins over DELEGATE_TELEMETRY_DB",
+    { timeout: 15_000 },
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-precedence-"),
+      );
+      const configDbPath = path.join(dir, "config.db");
+      const envDbPath = path.join(dir, "env.db");
+      try {
+        await runNodeScript(telemetryWorkerSource(), configDbPath, {
+          DELEGATE_TELEMETRY_DB: envDbPath,
+        });
+        await expect(readNodeDatabase(configDbPath)).resolves.toMatchObject({
+          calls: 1,
+        });
+        expect(fs.existsSync(envDbPath)).toBe(false);
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
