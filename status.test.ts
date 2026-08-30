@@ -460,6 +460,7 @@ describe("session teardown", () => {
         total_tokens: 0,
         total_cost: 0,
         parent_session_file: undefined,
+        parent_cwd: "/parent/cwd",
       },
       results: [
         {
@@ -492,6 +493,9 @@ describe("session teardown", () => {
     expect(calls[0]!.status).toBe("cancelled");
     expect(calls[0]!.total_tokens).toBe(12);
     expect(calls[0]!.total_cost).toBe(0.12);
+    // The dispatch-time call-record snapshot carries parent_cwd through the
+    // async settle write.
+    expect(calls[0]!.parent_cwd).toBe("/parent/cwd");
   });
 
   test("cancelTicketForShutdown flips running → cancelled, never via cancelling", () => {

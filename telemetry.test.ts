@@ -225,12 +225,150 @@ describe("telemetry", () => {
       parentModel: "m",
       mode: "async",
       taskCount: 1,
+      parentCwd: "/parent/dir",
     });
     const base = span.baseRecord();
     expect(base.status).toBe("running");
     expect(base.wall_ms).toBe(0);
     expect(base.mode).toBe("async");
+    expect(base.parent_cwd).toBe("/parent/dir");
   });
+
+  test("recordTask derives a collapsed, capped error snippet", () => {
+    const { tasks, recorder } = makeRecorder();
+    _setTelemetryForTesting(recorder);
+
+    const longError = Array.from(
+      { length: 40 },
+      (_, i) => `  line ${i}: something went wrong  \n`,
+    ).join("");
+    recordTask({
+      callId: "c",
+      async: false,
+      taskIndex: 0,
+      task: {
+        agentName: "scout",
+        tools: ["read"],
+        thinking: "off",
+        prompt: "work",
+      } as ResolvedTask,
+      progress: { toolUses: 0 } as TaskProgress,
+      result: {
+        agent: "scout",
+        output: "",
+        durationMs: 1,
+        tokens: 0,
+        error: longError,
+        usage: { cost: { total: 0 } },
+      } as TaskResult,
+      retries: 0,
+    });
+    const snippet = tasks[0]!.error_snippet!;
+    expect(snippet.length).toBeLessThanOrEqual(200);
+    expect(snippet).not.toContain("\n");
+    expect(snippet.startsWith("line 0:")).toBe(true);
+    expect(snippet.endsWith("…")).toBe(true);
+
+    recordTask({
+      callId: "c",
+      async: false,
+      taskIndex: 1,
+      task: {
+        agentName: "scout",
+        tools: ["read"],
+        thinking: "off",
+        prompt: "work",
+      } as ResolvedTask,
+      progress: { toolUses: 0 } as TaskProgress,
+      result: {
+        agent: "scout",
+        output: "done",
+        durationMs: 1,
+        tokens: 0,
+        usage: { cost: { total: 0 } },
+      } as TaskResult,
+      retries: 0,
+    });
+    expect(tasks[1]!.error_snippet).toBeUndefined();
+  });
+
+  test(
+    "v2 schema migrates to v3 keeping legacy rows NULL for new columns",
+    { timeout: 15_000 },
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "delegate-telemetry-v2v3-"),
+      );
+      const dbPath = path.join(dir, "usage.db");
+      try {
+        await runNodeScript(
+          `
+          import { DatabaseSync } from "node:sqlite";
+          const db = new DatabaseSync(process.env.PI_DELEGATE_TEST_DB, { timeout: 5000 });
+          db.exec(\`
+            CREATE TABLE calls(
+              id TEXT PRIMARY KEY, ts INTEGER, version TEXT, pi_version TEXT,
+              mode TEXT, parent_model TEXT, task_count INTEGER, wall_ms INTEGER,
+              status TEXT, total_tokens INTEGER, total_cost REAL,
+              parent_session_file TEXT
+            );
+            CREATE TABLE tasks(
+              id TEXT PRIMARY KEY, call_id TEXT, ts INTEGER, version TEXT,
+              pi_version TEXT, idx INTEGER, agent TEXT, model TEXT, thinking TEXT,
+              tools TEXT, workspace TEXT, outcome TEXT, failure_kind TEXT,
+              duration_ms INTEGER, tokens INTEGER, cost REAL, tool_uses INTEGER,
+              retries INTEGER, prompt_chars INTEGER, output_chars INTEGER,
+              session_file TEXT, async INTEGER
+            );
+            INSERT INTO calls(id, mode, status, task_count) VALUES ('legacy-call', 'sync', 'success', 1);
+            INSERT INTO tasks(id, call_id, agent, outcome, async) VALUES ('legacy-task', 'legacy-call', 'reviewer', 'failed', 0);
+            PRAGMA user_version = 2;
+          \`);
+          db.close();
+        `,
+          dbPath,
+        );
+        await runNodeScript(
+          `
+          import { _setDelegateConfigForTesting } from ${JSON.stringify(configModule)};
+          import { _resetTelemetryForTesting, beginCall } from ${JSON.stringify(telemetryModule)};
+          const dbPath = process.env.PI_DELEGATE_TEST_DB;
+          if (!dbPath) throw new Error("missing test database path");
+          _setDelegateConfigForTesting({ telemetry: { enabled: true, dbPath } });
+          _resetTelemetryForTesting();
+          const span = beginCall({ mode: "sync", taskCount: 1, parentCwd: "/parent/project" });
+          span.spawn();
+          span.finish({ status: "success", totalTokens: 1, totalCost: 0, wallMs: 1 });
+        `,
+          dbPath,
+        );
+        const result = await runNodeScript(
+          `
+          import { DatabaseSync } from "node:sqlite";
+          const db = new DatabaseSync(process.env.PI_DELEGATE_TEST_DB);
+          const one = (sql) => db.prepare(sql).get();
+          const all = (sql) => db.prepare(sql).all();
+          console.log(JSON.stringify({
+            userVersion: one("PRAGMA user_version").user_version,
+            legacyCallCwd: one("SELECT parent_cwd FROM calls WHERE id = 'legacy-call'").parent_cwd,
+            newCallCwd: one("SELECT parent_cwd FROM calls WHERE id != 'legacy-call'").parent_cwd,
+            legacyTaskSnippet: one("SELECT error_snippet FROM tasks WHERE id = 'legacy-task'").error_snippet,
+          }));
+          db.close();
+        `,
+          dbPath,
+        );
+        expect(JSON.parse(result.stdout.trim())).toEqual({
+          userVersion: 3,
+          legacyCallCwd: null,
+          newCallCwd: "/parent/project",
+          legacyTaskSnippet: null,
+        });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("recordTask captures per-task fields and outcome", () => {
     const { tasks, recorder } = makeRecorder();
@@ -680,7 +818,7 @@ describe("telemetry", () => {
         await expect(readNodeDatabase(dbPath)).resolves.toEqual({
           calls: 1,
           tasks: 0,
-          userVersion: 2,
+          userVersion: 3,
           journalMode: "wal",
           piVersion: piCodingAgent.VERSION,
         });
@@ -765,7 +903,7 @@ describe("telemetry", () => {
         await expect(readNodeDatabase(dbPath)).resolves.toEqual({
           calls: 8,
           tasks: 0,
-          userVersion: 2,
+          userVersion: 3,
           journalMode: "wal",
           piVersion: piCodingAgent.VERSION,
         });

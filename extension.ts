@@ -197,6 +197,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         mode,
         taskCount,
         parentSessionFile,
+        parentCwd: ctx.cwd,
       });
 
       function failCall(): void {

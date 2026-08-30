@@ -27,6 +27,7 @@ export interface CallRecord {
   total_tokens: number;
   total_cost: number;
   parent_session_file: string | undefined;
+  parent_cwd: string | undefined;
 }
 
 export interface TaskRecord {
@@ -52,6 +53,7 @@ export interface TaskRecord {
   output_chars: number;
   session_file: string | undefined;
   async: number;
+  error_snippet: string | undefined;
 }
 
 export interface TelemetryRecorder {
@@ -93,7 +95,7 @@ let telemetryGeneration = 0;
 let telemetryClosed = false;
 let testingRecorder: TelemetryRecorder | undefined;
 
-const TELEMETRY_SCHEMA_VERSION = 2;
+const TELEMETRY_SCHEMA_VERSION = 3;
 const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 function defaultDbPath(): string {
@@ -200,6 +202,7 @@ const TELEMETRY_TABLES: readonly TelemetryTable[] = [
       ["total_tokens", "INTEGER"],
       ["total_cost", "REAL"],
       ["parent_session_file", "TEXT"],
+      ["parent_cwd", "TEXT"],
     ],
     createSql: `
       CREATE TABLE IF NOT EXISTS calls(
@@ -214,7 +217,8 @@ const TELEMETRY_TABLES: readonly TelemetryTable[] = [
         status TEXT,
         total_tokens INTEGER,
         total_cost REAL,
-        parent_session_file TEXT
+        parent_session_file TEXT,
+        parent_cwd TEXT
       );
     `,
   },
@@ -243,6 +247,7 @@ const TELEMETRY_TABLES: readonly TelemetryTable[] = [
       ["output_chars", "INTEGER"],
       ["session_file", "TEXT"],
       ["async", "INTEGER"],
+      ["error_snippet", "TEXT"],
     ],
     createSql: `
       CREATE TABLE IF NOT EXISTS tasks(
@@ -267,7 +272,8 @@ const TELEMETRY_TABLES: readonly TelemetryTable[] = [
         prompt_chars INTEGER,
         output_chars INTEGER,
         session_file TEXT,
-        async INTEGER
+        async INTEGER,
+        error_snippet TEXT
       );
     `,
   },
@@ -393,15 +399,16 @@ class SqliteTelemetryBackend implements TelemetryBackend {
     this.insertCall = db.prepare(
       `INSERT OR REPLACE INTO calls(
         id, ts, version, pi_version, mode, parent_model, task_count,
-        wall_ms, status, total_tokens, total_cost, parent_session_file
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        wall_ms, status, total_tokens, total_cost, parent_session_file,
+        parent_cwd
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.insertTask = db.prepare(
       `INSERT OR REPLACE INTO tasks(
         id, call_id, ts, version, pi_version, idx, agent, model, thinking,
         tools, workspace, outcome, failure_kind, duration_ms, tokens, cost, tool_uses,
-        retries, prompt_chars, output_chars, session_file, async
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        retries, prompt_chars, output_chars, session_file, async, error_snippet
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -420,6 +427,7 @@ class SqliteTelemetryBackend implements TelemetryBackend {
         record.total_tokens,
         record.total_cost,
         record.parent_session_file ?? null,
+        record.parent_cwd ?? null,
       );
     } catch (error) {
       this.onFailure("recordCall", error);
@@ -451,6 +459,7 @@ class SqliteTelemetryBackend implements TelemetryBackend {
         record.output_chars,
         record.session_file ?? null,
         record.async,
+        record.error_snippet ?? null,
       );
     } catch (error) {
       this.onFailure("recordTask", error);
@@ -635,6 +644,8 @@ export interface CallSpanInput {
   mode: string;
   taskCount: number;
   parentSessionFile?: string;
+  /** Parent working directory at dispatch — one dispatch, one cwd. */
+  parentCwd?: string;
 }
 
 export interface CallSpanFinish {
@@ -685,6 +696,7 @@ class CallSpanImpl implements CallSpan {
       total_tokens: 0,
       total_cost: 0,
       parent_session_file: this.input.parentSessionFile,
+      parent_cwd: this.input.parentCwd,
     };
   }
 
@@ -748,6 +760,19 @@ function outcomeFromResult(result: TaskResult): string {
   return "success";
 }
 
+/** Error text only — never prompt or output content — whitespace-collapsed
+ * and capped, so failure classification becomes a query instead of
+ * duration-based guessing. */
+const ERROR_SNIPPET_MAX_CHARS = 200;
+
+function errorSnippetOf(result: TaskResult): string | undefined {
+  if (!result.error) return undefined;
+  const collapsed = result.error.replace(/\s+/g, " ").trim();
+  if (collapsed.length === 0) return undefined;
+  if (collapsed.length <= ERROR_SNIPPET_MAX_CHARS) return collapsed;
+  return `${collapsed.slice(0, ERROR_SNIPPET_MAX_CHARS - 1)}…`;
+}
+
 export function recordTask(input: TaskSpanInput): string | undefined {
   const b = input.telemetryConfig
     ? getBackendForConfig(
@@ -783,6 +808,7 @@ export function recordTask(input: TaskSpanInput): string | undefined {
     output_chars: result.output?.length ?? 0,
     session_file: result.sessionFile,
     async: async ? 1 : 0,
+    error_snippet: errorSnippetOf(result),
   };
   b.recordTask(record);
   return record.id;
