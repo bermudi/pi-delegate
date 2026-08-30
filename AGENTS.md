@@ -100,7 +100,7 @@ Unit tests stub the host-deps / `modelRuntime` path, so they can't catch a regre
 ```bash
 e2e_dir=$(mktemp -d /tmp/pi-delegate-e2e-XXXXXX)
 herdr pane split --current --direction right --no-focus  # capture result.pane.pane_id
-herdr pane run <pane> "cd '$e2e_dir' && pi --model 'opencode/deepseek-v4-flash-free'"
+herdr pane run <pane> "cd '$e2e_dir' && pi"
 herdr agent wait <pane> --until idle --timeout 30000
 herdr agent prompt <pane> "Use delegate to spawn one task with tools read/write/edit/bash and prompt: Reply with exactly CONNECTIVITY OK. Report the output verbatim."
 herdr agent wait <pane> --until idle --until done --until blocked --timeout 180000
@@ -109,7 +109,7 @@ herdr pane close <pane>
 trash "$e2e_dir"
 ```
 
-Green = `1/1 completed · … · ✓ ad-hoc … ⎿ CONNECTIVITY OK`. Run from an isolated temp directory: loading the repository context distracts the parent model from the connectivity task and unnecessarily exposes the worktree to a full-capability subagent. The subagent inherits the parent model, so the parent `pi --model` must be authenticated. Run this against a fresh Pi process and the installed package; do not rebuild a bundle that a running Pi is using.
+Green = `1/1 completed · … · ✓ ad-hoc … ⎿ CONNECTIVITY OK`. Run from an isolated temp directory: loading the repository context distracts the parent model from the connectivity task and unnecessarily exposes the worktree to a full-capability subagent. The subagent inherits the parent model, so the parent model must be authenticated — run pi with no `--model` flag so it uses the configured default (a hardcoded e2e model rots: `opencode/deepseek-v4-flash-free` died and the pane burned five retries on "Model is unavailable" before anyone noticed). Run this against a fresh Pi process and the installed package; do not rebuild a bundle that a running Pi is using.
 
 ## Stable Reference Facts
 
