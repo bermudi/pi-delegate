@@ -1285,9 +1285,9 @@ describe("scratch workspace", () => {
         );
         // The pre-check runs before the container/lease machinery, so a
         // rejected tree leaves nothing behind next to the source.
-        expect(
-          fs.existsSync(path.join(parent, ".pi-delegate-scratch")),
-        ).toBe(false);
+        expect(fs.existsSync(path.join(parent, ".pi-delegate-scratch"))).toBe(
+          false,
+        );
       } finally {
         cleanTestDir(parent);
       }

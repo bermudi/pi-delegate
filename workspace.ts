@@ -280,9 +280,10 @@ async function assertGitMetadataContained(
   root: string,
   signal: AbortSignal,
 ): Promise<void> {
-  const hasGitDir = await fs.promises
-    .stat(path.join(root, ".git"))
-    .then((stat) => stat.isDirectory(), () => false);
+  const hasGitDir = await fs.promises.stat(path.join(root, ".git")).then(
+    (stat) => stat.isDirectory(),
+    () => false,
+  );
   if (!hasGitDir) return;
   const effectiveWorktree = path.resolve(
     (
