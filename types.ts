@@ -342,6 +342,7 @@ export interface TaskResult {
 export type TaskIntegrationStatus =
   | "applied_unverified"
   | "no_changes"
+  | "retained"
   | "conflict"
   | "discarded"
   | "apply_failed";
@@ -380,6 +381,15 @@ export type TaskIntegration =
       /** Reporting-only issues encountered while classifying a failed task's
        * paths. They do not turn the discarded proposal into an apply failure. */
       classificationIssues?: Array<{ path: string; reason: string }>;
+    })
+  | (TaskIntegrationFiles & {
+      status: "retained";
+      reason: string;
+      baselineRef: string;
+      proposalRef: string;
+      patchPath: string;
+      worktreePath?: string;
+      conflicts?: never;
     })
   | (TaskIntegrationFiles & {
       status: "conflict";

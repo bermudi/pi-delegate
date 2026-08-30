@@ -43,9 +43,8 @@ The other built-ins are:
 - `scout` — read-only investigation with `read`, `grep`, `find`, and `ls`.
 - `coder` — implementation and verification with `read`, `write`, `edit`, and
   `bash` in the shared workspace.
-- `reviewer` — review with `read` and `bash`, using a disposable scratch copy by
-  default. Set `workspace: "shared"` when a reviewer needs a persistent
-  `sessionId`.
+- `reviewer` — review with `read` and `bash` in the shared workspace by default.
+  Set `workspace: "scratch"` when its project changes should be discarded.
 
 ### Shared-write safety
 
@@ -64,7 +63,7 @@ visible batch-level warning while it is active.
 A same-named Markdown file can override any built-in (first definition wins
 across `.pi/agents/`, `~/.pi/agent/agents/`, `~/.agents/`, `.claude/agents/`,
 `~/.claude/agents/`). A prompt-only override keeps the built-in's tools and
-workspace — `scout` stays read-only and `reviewer` stays scratch unless the
+workspace — `scout` stays read-only and `reviewer` stays shared unless the
 file explicitly sets `tools` or `workspace`. Fresh built-ins inherit the
 parent's exact model object and thinking level; an explicit `model`/`thinking`
 in the Markdown file replaces that inheritance. Task fields always win. For
@@ -106,7 +105,7 @@ host filesystem.
 
 ### Git-native isolated writers
 
-Use `workspace: "isolated"` for synchronous, one-shot coding tasks that should
+Use `workspace: "isolated"` for sync or async one-shot coding tasks that should
 run in parallel without sharing a working tree:
 
 ```ts
@@ -128,10 +127,12 @@ still matches the baseline.
 
 A clean reconciliation reports `applied_unverified`: textual merging does not
 prove the code builds or tests pass, so the result includes a suggested
-verification call. Isolated mode currently requires Git, rejects async and
-session reuse, disables whole-task retries, and rejects repositories with
-submodules. It is separation, not confinement: absolute-path writes can still
-reach the host.
+verification call. Async isolated tasks prepare after returning their ticket and
+settle only after reconciliation. Cancellation never applies unfinished work; a
+completed proposal cancelled before source application is retained as a private
+ref and full patch. Isolated mode requires Git, rejects session reuse, disables
+whole-task retries, and rejects repositories with submodules. It is separation,
+not confinement: absolute-path writes can still reach the host.
 
 ### Token accounting
 

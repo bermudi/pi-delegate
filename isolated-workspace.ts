@@ -25,6 +25,7 @@ let removeWorktreeHookForTesting:
       destination: string,
     ) => boolean | undefined | Promise<boolean | undefined>)
   | undefined;
+let beforeSourceApplyHookForTesting: (() => void | Promise<void>) | undefined;
 
 /** @internal Keep tests out of the developer's real ~/.pi directory. */
 export function _setIsolatedArtifactRootForTesting(
@@ -42,6 +43,12 @@ export function _setRemoveWorktreeHookForTesting(
     | undefined,
 ): void {
   removeWorktreeHookForTesting = hook;
+}
+
+export function _setBeforeSourceApplyHookForTesting(
+  hook: (() => void | Promise<void>) | undefined,
+): void {
+  beforeSourceApplyHookForTesting = hook;
 }
 
 interface CommandResult {
@@ -698,9 +705,18 @@ interface IsolatedWorker {
   patchPath: string;
 }
 
+export interface IsolatedReconcileOptions {
+  shouldApplySource?: () => boolean;
+  retainedReason?: string;
+  signal?: AbortSignal;
+}
+
 export interface PreparedIsolatedBatch {
   resolved: ResolvedTask[];
-  reconcile(results: TaskResult[]): Promise<TaskResult[]>;
+  reconcile(
+    results: TaskResult[],
+    options?: IsolatedReconcileOptions,
+  ): Promise<TaskResult[]>;
 }
 
 async function restoreAfterFailedApply(
@@ -732,10 +748,45 @@ async function restoreAfterFailedApply(
   }
 }
 
+async function retainAcceptedProposals(
+  group: IsolatedGroup,
+  workers: Map<number, IsolatedWorker>,
+  results: TaskResult[],
+  accepted: Map<number, string[]>,
+  pristineRoot: string,
+  reason: string,
+): Promise<void> {
+  let cleanupIssue:
+    { status: "failed"; reason: string; recoveryPath: string } | undefined;
+  try {
+    await requireWorktreeRemoved(group.sourceRoot, pristineRoot);
+  } catch (error) {
+    cleanupIssue = {
+      status: "failed",
+      reason: error instanceof Error ? error.message : String(error),
+      recoveryPath: pristineRoot,
+    };
+  }
+  for (const [taskIndex, proposedFiles] of accepted) {
+    const worker = workers.get(taskIndex)!;
+    results[taskIndex]!.integration = {
+      status: "retained",
+      reason,
+      proposedFiles,
+      appliedFiles: [],
+      baselineRef: group.baselineRef,
+      proposalRef: worker.proposalRef,
+      patchPath: worker.patchPath,
+      ...(cleanupIssue ? { cleanupIssue } : {}),
+    };
+  }
+}
+
 async function reconcileGroup(
   group: IsolatedGroup,
   workers: Map<number, IsolatedWorker>,
   results: TaskResult[],
+  options: IsolatedReconcileOptions,
 ): Promise<void> {
   let integratedCommit = group.baselineCommit;
   const accepted = new Map<number, string[]>();
@@ -948,6 +999,17 @@ async function reconcileGroup(
     await requireWorktreeRemoved(group.sourceRoot, pristineRoot);
     return;
   }
+  if (options.shouldApplySource && !options.shouldApplySource()) {
+    await retainAcceptedProposals(
+      group,
+      workers,
+      results,
+      accepted,
+      pristineRoot,
+      options.retainedReason ?? "Source application was cancelled.",
+    );
+    return;
+  }
 
   const currentTree = await snapshotTree(
     group.sourceRoot,
@@ -995,6 +1057,18 @@ async function reconcileGroup(
     group.baselineCommit,
     integratedCommit,
   );
+  await beforeSourceApplyHookForTesting?.();
+  if (options.shouldApplySource && !options.shouldApplySource()) {
+    await retainAcceptedProposals(
+      group,
+      workers,
+      results,
+      accepted,
+      pristineRoot,
+      options.retainedReason ?? "Source application was cancelled.",
+    );
+    return;
+  }
   const applyIndex = path.join(group.artifactRoot, "apply.index");
   await fs.promises.rm(applyIndex, { force: true });
   const env = {
@@ -1010,12 +1084,25 @@ async function reconcileGroup(
       cwd: group.sourceRoot,
       env,
     });
+    if (options.shouldApplySource && !options.shouldApplySource()) {
+      await retainAcceptedProposals(
+        group,
+        workers,
+        results,
+        accepted,
+        pristineRoot,
+        options.retainedReason ?? "Source application was cancelled.",
+      );
+      return;
+    }
     await git(["apply", "--binary", "--index", finalPatch], {
       cwd: group.sourceRoot,
       env,
+      signal: options.signal,
     });
   } catch (error) {
     const recoveryRoot = path.join(group.artifactRoot, "failed-apply-files");
+    let rollbackSucceeded = true;
     try {
       await restoreAfterFailedApply(
         group.sourceRoot,
@@ -1024,10 +1111,22 @@ async function reconcileGroup(
         recoveryRoot,
       );
     } catch (rollbackError) {
+      rollbackSucceeded = false;
       console.error(
         "[delegate] isolated apply rollback failed; recovery artifacts retained",
         rollbackError,
       );
+    }
+    if (options.signal?.aborted && rollbackSucceeded) {
+      await retainAcceptedProposals(
+        group,
+        workers,
+        results,
+        accepted,
+        pristineRoot,
+        options.retainedReason ?? "Source application was cancelled.",
+      );
+      return;
     }
     for (const [taskIndex] of accepted) {
       const integration = results[taskIndex]!.integration!;
@@ -1145,24 +1244,35 @@ async function cleanupCompletedGroupRefs(
   group: IsolatedGroup,
   workers: Map<number, IsolatedWorker>,
   results: readonly TaskResult[],
-): Promise<void> {
+): Promise<boolean> {
   const disposableProposalRefs: string[] = [];
   let retainsRecoveryArtifacts = false;
+  let retainsPrivateRefs = false;
 
   for (const taskIndex of group.taskIndexes) {
-    const status = results[taskIndex]?.integration?.status;
-    if (status === "conflict" || status === "apply_failed") {
+    const integration = results[taskIndex]?.integration;
+    const status = integration?.status;
+    if (!integration) {
       retainsRecoveryArtifacts = true;
+      retainsPrivateRefs = true;
+    } else if (
+      status === "retained" ||
+      status === "conflict" ||
+      status === "apply_failed"
+    ) {
+      retainsRecoveryArtifacts = true;
+      retainsPrivateRefs = true;
     } else if (
       status === "applied_unverified" ||
       status === "no_changes" ||
       status === "discarded"
     ) {
+      if (integration.cleanupIssue) retainsRecoveryArtifacts = true;
       disposableProposalRefs.push(workers.get(taskIndex)!.proposalRef);
     }
   }
 
-  const refs = retainsRecoveryArtifacts
+  const refs = retainsPrivateRefs
     ? disposableProposalRefs
     : [...disposableProposalRefs, group.baselineRef];
   try {
@@ -1172,6 +1282,7 @@ async function cleanupCompletedGroupRefs(
     // turn a successfully applied source change into a reported failure.
     console.error("[delegate] failed to clean completed isolated refs", error);
   }
+  return retainsRecoveryArtifacts;
 }
 
 /** Prepare detached worktrees from one synthetic commit per Git root. The
@@ -1315,11 +1426,14 @@ export async function prepareIsolatedBatch(
 
   return {
     resolved: translated,
-    async reconcile(results: TaskResult[]): Promise<TaskResult[]> {
+    async reconcile(
+      results: TaskResult[],
+      options: IsolatedReconcileOptions = {},
+    ): Promise<TaskResult[]> {
       for (const group of groupsByRoot.values()) {
         try {
           try {
-            await reconcileGroup(group, workers, results);
+            await reconcileGroup(group, workers, results, options);
           } catch (error) {
             console.error(
               "[delegate] isolated group reconciliation failed",
@@ -1332,11 +1446,43 @@ export async function prepareIsolatedBatch(
               error,
             );
           }
-          await cleanupCompletedGroupRefs(group, workers, results);
+          const retainsRecoveryArtifacts = await cleanupCompletedGroupRefs(
+            group,
+            workers,
+            results,
+          );
+          if (!retainsRecoveryArtifacts) {
+            try {
+              await fs.promises.rm(group.artifactRoot, {
+                recursive: true,
+                force: true,
+              });
+            } catch (error) {
+              console.error(
+                `[delegate] failed to remove completed isolated artifacts '${group.artifactRoot}'`,
+                error,
+              );
+            }
+          }
         } finally {
           // Unblocks and serializes any safety-confirmed quarantine cleanups
           // only after all candidate/source/ref work for this group is done.
           group.finishReconciliation();
+        }
+      }
+      try {
+        await fs.promises.rmdir(batchArtifactRoot);
+      } catch (error) {
+        if (!(
+          error instanceof Error &&
+          "code" in error &&
+          ((error as NodeJS.ErrnoException).code === "ENOENT" ||
+            (error as NodeJS.ErrnoException).code === "ENOTEMPTY")
+        )) {
+          console.error(
+            `[delegate] failed to remove isolated batch directory '${batchArtifactRoot}'`,
+            error,
+          );
         }
       }
       return results;

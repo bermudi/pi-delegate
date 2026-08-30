@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  _setBeforeSourceApplyHookForTesting,
   _setIsolatedArtifactRootForTesting,
   _setRemoveWorktreeHookForTesting,
   prepareIsolatedBatch,
@@ -73,6 +74,7 @@ describe("Git-native isolated workspace", () => {
   });
 
   afterEach(() => {
+    _setBeforeSourceApplyHookForTesting(undefined);
     _setIsolatedArtifactRootForTesting(undefined);
     _setRemoveWorktreeHookForTesting(undefined);
     fs.rmSync(root, { recursive: true, force: true });
@@ -115,6 +117,57 @@ describe("Git-native isolated workspace", () => {
       "applied_unverified",
     ]);
     expect(privateRefs(repo)).toEqual([]);
+    expect(fs.readdirSync(path.join(root, "artifacts"))).toEqual([]);
+  });
+
+  test("retains completed proposals without applying when source application is cancelled", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    fs.writeFileSync(path.join(one!.cwd, "shared.txt"), "proposal\n");
+
+    const [result] = await batch!.reconcile([success()], {
+      shouldApplySource: () => false,
+      retainedReason: "ticket cancelled",
+    });
+
+    expect(result!.integration?.status).toBe("retained");
+    expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
+      "baseline\n",
+    );
+    if (result!.integration?.status !== "retained") {
+      throw new Error("proposal was not retained");
+    }
+    expect(result!.integration.reason).toBe("ticket cancelled");
+    expect(fs.existsSync(result!.integration.patchPath)).toBe(true);
+    expect(
+      git(repo, [
+        "rev-parse",
+        "--verify",
+        `${result!.integration.proposalRef}^{commit}`,
+      ]),
+    ).toBeTruthy();
+    expect(privateRefs(repo)).toEqual([
+      result!.integration.baselineRef,
+      result!.integration.proposalRef,
+    ]);
+  });
+
+  test("an aborted source apply rolls back and retains the proposal", async () => {
+    const batch = await prepareIsolatedBatch([task(repo, "one")]);
+    const [one] = batch!.resolved;
+    fs.writeFileSync(path.join(one!.cwd, "shared.txt"), "proposal\n");
+    const controller = new AbortController();
+    controller.abort();
+
+    const [result] = await batch!.reconcile([success()], {
+      signal: controller.signal,
+      retainedReason: "ticket cancelled",
+    });
+
+    expect(result!.integration?.status).toBe("retained");
+    expect(fs.readFileSync(path.join(repo, "shared.txt"), "utf8")).toBe(
+      "baseline\n",
+    );
   });
 
   test("keeps a conflicting proposal as a ref, full patch, and worktree", async () => {

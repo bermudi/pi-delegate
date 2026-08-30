@@ -523,7 +523,8 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
       const integration = r.integration;
       const tone =
         integration.status === "applied_unverified" ||
-        integration.status === "no_changes"
+        integration.status === "no_changes" ||
+        integration.status === "retained"
           ? "warning"
           : "error";
       lines.push(

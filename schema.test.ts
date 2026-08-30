@@ -298,13 +298,13 @@ describe("validateDelegateOperation task-field whitelist", () => {
     expect(err).toContain("'sessionAction' is a top-level field");
   });
 
-  test("rejects async or persistent isolated workspaces", () => {
+  test("allows async isolated workspaces but rejects persistent ones", () => {
     expect(
       validateDelegateOperation({
         async: true,
         tasks: [{ prompt: "x", workspace: "isolated" }],
       }),
-    ).toContain('workspace "isolated" is synchronous');
+    ).toBeUndefined();
     expect(
       validateDelegateOperation({
         tasks: [
@@ -922,9 +922,9 @@ describe("getSubagentManualMarkdown", () => {
     );
   });
 
-  test("documents that isolated workspaces are synchronous and one-shot", () => {
+  test("documents that isolated workspaces support async one-shot tasks", () => {
     const manual = getSubagentManualMarkdown(new Map());
-    expect(manual).toContain('synchronous one-shot `workspace: "isolated"`');
+    expect(manual).toContain('sync or async one-shot `workspace: "isolated"`');
     expect(delegateTaskSchema.properties.workspace.description).toContain(
       "orders Git worktree proposals",
     );

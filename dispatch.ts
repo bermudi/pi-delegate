@@ -10,7 +10,7 @@ import {
 import type { DelegateConfig } from "./config.ts";
 import { getCurrentLeafId } from "./leaf.ts";
 import { getModelKey, mapConcurrentByModel } from "./concurrency.ts";
-import { aggregateTaskResults, sumUsage } from "./usage.ts";
+import { aggregateTaskResults, emptyUsage, sumUsage } from "./usage.ts";
 import { runResolvedTask, updateProgressFromRun } from "./lifecycle.ts";
 import {
   fmtDuration,
@@ -28,7 +28,11 @@ import {
   type SharedWriteConflict,
 } from "./shared-write-safety.ts";
 import type { CallSpan } from "./telemetry.ts";
-import { prepareIsolatedBatch } from "./isolated-workspace.ts";
+import {
+  prepareIsolatedBatch,
+  type IsolatedReconcileOptions,
+  type PreparedIsolatedBatch,
+} from "./isolated-workspace.ts";
 import { sanitizeTerminalLine } from "./utils.ts";
 import { quarantinedTasks } from "./session-quarantine.ts";
 import type {
@@ -307,28 +311,6 @@ export async function dispatchDelegate(
     };
   }
   const resolved = resolveResult.tasks;
-  if (params.async && resolved.some((task) => task.workspace === "isolated")) {
-    callSpan?.finish({
-      status: "failed",
-      totalTokens: 0,
-      totalCost: 0,
-      wallMs: Date.now() - callSpan.startedAt,
-    });
-    return {
-      content: [
-        {
-          type: "text",
-          text: 'Invalid delegate call: workspace "isolated" is synchronous; remove async.',
-        },
-      ],
-      details: {
-        tasks,
-        results: [],
-        progress: [],
-        parentModel: parentModelId,
-      },
-    };
-  }
 
   const dispatchWarning = dispatchConfig.allowUnsafeSharedWrites
     ? UNSAFE_SHARED_WRITES_WARNING
@@ -544,6 +526,88 @@ function settleAsyncCall(
   callSpan.finish({ status, totalTokens, totalCost, wallMs });
 }
 
+function taskCompletedSuccessfully(result: TaskResult): boolean {
+  return (
+    !result.error &&
+    result.integration?.status !== "retained" &&
+    result.integration?.status !== "conflict" &&
+    result.integration?.status !== "apply_failed"
+  );
+}
+
+function completeUnexpectedResults(
+  resolved: readonly ResolvedTask[],
+  progress: TaskProgress[],
+  current: readonly (TaskResult | undefined)[],
+  error: unknown,
+): TaskResult[] {
+  const reason = error instanceof Error ? error.message : String(error);
+  return resolved.map((task, index) => {
+    const result = current[index];
+    if (result) return result;
+    const p = progress[index]!;
+    p.status = "failed";
+    p.error = reason;
+    return {
+      id: task.id,
+      agent: task.agentName,
+      resumedFrom: task.resumeFromDisplay,
+      output: "",
+      error: reason,
+      durationMs: p.durationMs,
+      tokens: 0,
+      usage: emptyUsage(),
+      workspace: task.workspace,
+      touchedFiles: [],
+      attributedFiles: [],
+    };
+  });
+}
+
+async function reconcileIsolatedResults(
+  batch: PreparedIsolatedBatch,
+  resolved: readonly ResolvedTask[],
+  results: TaskResult[],
+  options?: IsolatedReconcileOptions,
+): Promise<TaskResult[]> {
+  try {
+    return await batch.reconcile(results, options);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("[delegate] isolated reconciliation failed", error);
+    for (let index = 0; index < results.length; index++) {
+      if (resolved[index]?.workspace !== "isolated") continue;
+      const existing = results[index]?.integration;
+      results[index] = {
+        ...results[index]!,
+        integration: {
+          status: "apply_failed",
+          proposedFiles: existing?.proposedFiles ?? [],
+          appliedFiles: [],
+          conflicts: [
+            ...(existing?.conflicts ?? []),
+            { path: "(batch)", reason: detail },
+          ],
+          ...(existing?.baselineRef
+            ? { baselineRef: existing.baselineRef }
+            : {}),
+          ...(existing?.proposalRef
+            ? { proposalRef: existing.proposalRef }
+            : {}),
+          ...(existing?.patchPath ? { patchPath: existing.patchPath } : {}),
+          ...(existing?.worktreePath
+            ? { worktreePath: existing.worktreePath }
+            : {}),
+          ...(existing?.cleanupIssue
+            ? { cleanupIssue: existing.cleanupIssue }
+            : {}),
+        },
+      };
+    }
+    return results;
+  }
+}
+
 /** Fire-and-forget background execution. Registers an `AsyncTicket`, kicks off
  *  the concurrent run, and returns the ticket acknowledgment immediately.
  *  Results are delivered via `deliverTicketResults` when all tasks settle. */
@@ -662,22 +726,81 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     finishTicketDelivery(pi, t, runtime);
   };
 
-  const completion = mapConcurrentByModel(
-    resolved,
-    (t) => getModelKey(t.model),
-    (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
-    async (t, i) => {
-      const result = await runResolvedTask(asyncEnv, t, ticket.progress[i]!, i);
-      ticket.results[i] = result;
-      return result;
-    },
-    ticketSignal,
-  )
-    .then(() => {
-      // mapConcurrentByModel is the worker-settled barrier. Publish that before
-      // terminal formatting/delivery so the final spill projection is safely
-      // memoized; shutdown may already have formatted an intentionally uncached
-      // partial snapshot while this flag was false.
+  const completion = (async () => {
+    try {
+      let executionResolved = resolved;
+      let isolatedBatch: PreparedIsolatedBatch | undefined;
+      try {
+        isolatedBatch = await prepareIsolatedBatch(resolved, ticketSignal);
+        if (isolatedBatch) executionResolved = isolatedBatch.resolved;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Isolated workspace setup failed; no subagents were started. ${detail}`,
+          { cause: error },
+        );
+      }
+
+      let results: TaskResult[];
+      try {
+        results = await mapConcurrentByModel(
+          executionResolved,
+          (t) => getModelKey(t.model),
+          (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
+          async (t, i) => {
+            const result = await runResolvedTask(
+              asyncEnv,
+              t,
+              ticket.progress[i]!,
+              i,
+            );
+            ticket.results[i] = result;
+            return result;
+          },
+          ticketSignal,
+        );
+      } catch (error) {
+        results = completeUnexpectedResults(
+          resolved,
+          ticket.progress,
+          ticket.results,
+          error,
+        );
+        if (isolatedBatch) {
+          results = await reconcileIsolatedResults(
+            isolatedBatch,
+            resolved,
+            results,
+            {
+              shouldApplySource: () => false,
+              retainedReason:
+                "Batch execution failed before source application; completed proposals were retained for recovery.",
+            },
+          );
+        }
+        ticket.results = [...results];
+        throw error;
+      }
+      if (isolatedBatch) {
+        results = await reconcileIsolatedResults(
+          isolatedBatch,
+          resolved,
+          results,
+          {
+            shouldApplySource: () =>
+              ticket.status === "running" && !ticketSignal.aborted,
+            signal: ticketSignal,
+            retainedReason:
+              "The async ticket was cancelled before source application; the proposal was retained for recovery.",
+          },
+        );
+        ticket.results = [...results];
+      }
+
+      // Worker execution and isolated reconciliation are complete. Publish that
+      // before terminal formatting/delivery so the final spill projection is
+      // safely memoized; shutdown may already have formatted an intentionally
+      // uncached partial snapshot while this flag was false.
       ticket.workersSettled = true;
       // Shutdown marks the ticket terminal before cooperative worker aborts
       // have finished. Still write one final aggregate after every result has
@@ -687,16 +810,9 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         settleAsyncCall(ticket, callSpan);
         return;
       }
-      // All tasks settled — determine final ticket status.
-      // Use progress (set by runResolvedTask) for settled-ness so the
-      // status reflects work completion, not just result-array density.
-      // A partial ticket (not all settled, e.g. aborted mid-flight) must
-      // NOT be marked "done" — that would mask incomplete work as
-      // complete. resolveFinalTicketStatus returns "failed" for that
-      // case and for any case with a failed task.
-      // A "cancelling" ticket that outlived its workers settles as
-      // "cancelled": the per-task results record what actually happened;
-      // the ticket state reports that the batch was aborted by the caller.
+      // Use progress (set by runResolvedTask) for settled-ness so a partial
+      // ticket can never be marked done. A cancelling ticket reports cancelled
+      // even when some workers completed before the abort.
       runtime.tickets.settleTicket(ticket, {
         status:
           ticket.status === "running"
@@ -704,26 +820,26 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
             : "cancelled",
       });
       finishLiveSettlement(ticket);
-    })
-    .catch((err) => {
-      // mapConcurrentByModel waits for all sibling workers before rejecting.
+    } catch (err) {
+      // Preparation and reconciliation join the same terminal path as workers:
+      // any unexpected rejection must leave the ticket pollable and settled.
       ticket.workersSettled = true;
-      // Defense-in-depth — should not happen if individual tasks catch properly.
-      // Even an unexpected worker rejection must leave the shutdown aggregate
-      // with every result that did settle, without touching the stale UI.
       if (ticket.status === "cancelled") {
         settleAsyncCall(ticket, callSpan);
         return;
       }
+      const cancelling = ticket.status === "cancelling";
       runtime.tickets.settleTicket(ticket, {
-        status: ticket.status === "cancelling" ? "cancelled" : "failed",
-        error: err instanceof Error ? err.message : String(err),
+        status: cancelling ? "cancelled" : "failed",
+        ...(cancelling
+          ? {}
+          : { error: err instanceof Error ? err.message : String(err) }),
       });
       finishLiveSettlement(ticket);
-    })
-    .finally(() => {
+    } finally {
       ticket.workersSettled = true;
-    });
+    }
+  })();
   ticket.completion = completion;
 
   return {
@@ -821,32 +937,45 @@ export async function dispatchSync(
     onStatusChange: () => fire(),
   };
 
-  let results = await mapConcurrentByModel(
-    executionResolved,
-    (t) => getModelKey(t.model),
-    (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
-    async (t, i) => runResolvedTask(syncEnv, t, progress[i]!, i),
-    signal,
+  const partialResults: (TaskResult | undefined)[] = new Array(
+    executionResolved.length,
   );
-  if (isolatedBatch) {
-    try {
-      results = await isolatedBatch.reconcile(results);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      console.error("[delegate] isolated reconciliation failed", error);
-      for (let index = 0; index < results.length; index++) {
-        if (resolved[index]?.workspace !== "isolated") continue;
-        results[index] = {
-          ...results[index]!,
-          integration: {
-            status: "apply_failed",
-            proposedFiles: [],
-            appliedFiles: [],
-            conflicts: [{ path: "(batch)", reason: detail }],
-          },
-        };
-      }
-    }
+  let results: TaskResult[];
+  let isolatedReconciled = false;
+  try {
+    results = await mapConcurrentByModel(
+      executionResolved,
+      (t) => getModelKey(t.model),
+      (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
+      async (t, i) => {
+        const result = await runResolvedTask(syncEnv, t, progress[i]!, i);
+        partialResults[i] = result;
+        return result;
+      },
+      signal,
+    );
+  } catch (error) {
+    if (!isolatedBatch) throw error;
+    results = completeUnexpectedResults(
+      resolved,
+      progress,
+      partialResults,
+      error,
+    );
+    results = await reconcileIsolatedResults(isolatedBatch, resolved, results, {
+      shouldApplySource: () => false,
+      retainedReason:
+        "Batch execution failed before source application; completed proposals were retained for recovery.",
+    });
+    isolatedReconciled = true;
+  }
+  if (isolatedBatch && !isolatedReconciled) {
+    results = await reconcileIsolatedResults(isolatedBatch, resolved, results, {
+      shouldApplySource: () => !signal?.aborted,
+      signal,
+      retainedReason:
+        "The parent cancelled before source application; the proposal was retained for recovery.",
+    });
   }
 
   // ── Format for LLM ────────────────────────────────────────────
@@ -854,7 +983,7 @@ export async function dispatchSync(
   const elapsedTotal = Date.now() - startedAt;
 
   const parts: string[] = [];
-  const succeeded = finalResults.filter((r) => !r.error).length;
+  const succeeded = finalResults.filter(taskCompletedSuccessfully).length;
   parts.push(
     `${succeeded}/${finalResults.length} tasks completed successfully · ${fmtDuration(elapsedTotal)} wall time\n`,
   );
@@ -870,14 +999,9 @@ export async function dispatchSync(
   );
   if (overlapWarning) parts.push("", overlapWarning);
 
-  const status = finalResults.some(
-    (r) =>
-      r.error ||
-      r.integration?.status === "conflict" ||
-      r.integration?.status === "apply_failed",
-  )
-    ? "failed"
-    : "success";
+  const status = finalResults.every(taskCompletedSuccessfully)
+    ? "success"
+    : "failed";
   const totalTokens = finalResults.reduce((sum, r) => sum + r.tokens, 0);
   const totalCost = finalResults.reduce(
     (sum, r) => sum + r.usage.cost.total,

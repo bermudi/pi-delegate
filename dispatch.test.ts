@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -26,13 +27,20 @@ import {
   dispatchSync,
   initProgress,
 } from "./dispatch.ts";
-import { _setIsolatedArtifactRootForTesting } from "./isolated-workspace.ts";
+import {
+  _setBeforeSourceApplyHookForTesting,
+  _setIsolatedArtifactRootForTesting,
+} from "./isolated-workspace.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import {
   _resetDelegateStatusForTesting,
   syncDelegateStatus,
 } from "./status.ts";
-import { cancelTicketForShutdown, ticketRegistry } from "./tickets.ts";
+import {
+  cancelTicketForShutdown,
+  requestTicketCancel,
+  ticketRegistry,
+} from "./tickets.ts";
 import {
   _resetTelemetryForTesting,
   _setTelemetryForTesting,
@@ -74,6 +82,60 @@ describe("progress preview sanitization", () => {
   });
 });
 
+function commitFiles(cwd: string, files: Record<string, string>): void {
+  for (const [name, content] of Object.entries(files)) {
+    writeFileSync(path.join(cwd, name), content);
+  }
+  execFileSync("git", ["add", "."], { cwd });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.com",
+      "commit",
+      "--quiet",
+      "-m",
+      "initial",
+    ],
+    { cwd },
+  );
+}
+
+function asyncIsolatedInput(
+  cwd: string,
+  prompts: string[],
+  pi: unknown = { sendMessage: () => {} },
+): Parameters<typeof dispatchDelegate>[0] {
+  const model = { provider: "test", id: "model" } as never;
+  return {
+    pi: pi as never,
+    params: {
+      async: true,
+      tasks: prompts.map((prompt) => ({ prompt, cwd, workspace: "isolated" })),
+    },
+    ctx: {
+      cwd,
+      model,
+      modelRegistry: {
+        getAvailable: () => [model],
+        find: () => model,
+        hasConfiguredAuth: () => true,
+      },
+      getSystemPrompt: () => "parent",
+    } as never,
+    agents: new Map(),
+    parentModelId: "model",
+    parentDefaults: {
+      thinking: "off",
+      tools: ["read", "write", "edit", "bash"],
+    },
+    signal: undefined,
+    onUpdate: undefined,
+  };
+}
+
 interface FakeSession {
   touchedFiles: string[];
   attributedFiles: string[];
@@ -109,6 +171,7 @@ describe("dispatch-time shared-write gate", () => {
   });
 
   afterEach(() => {
+    _setBeforeSourceApplyHookForTesting(undefined);
     _resetQuarantineRegistryForTesting();
     ticketRegistry.clear();
     _resetDelegateConfigForTesting();
@@ -635,6 +698,285 @@ describe("dispatch-time shared-write gate", () => {
       ).toEqual([[path.join(tmpDir, "0.txt")], [path.join(tmpDir, "1.txt")]]);
       expect(readFileSync(path.join(tmpDir, "0.txt"), "utf8")).toBe("task 0\n");
       expect(readFileSync(path.join(tmpDir, "1.txt"), "utf8")).toBe("task 1\n");
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setIsolatedArtifactRootForTesting(undefined);
+      rmSync(artifactRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("sync parent cancellation retains a completed proposal before source apply", async () => {
+    commitFiles(tmpDir, { "base.txt": "base\n" });
+    _setRunAgentSessionForTesting(async (_session, _prompt, config) => {
+      writeFileSync(path.join(config.cwd, "base.txt"), "proposal\n");
+      return {
+        output: "done",
+        durationMs: 1,
+        tokens: 0,
+        toolUses: 0,
+        touchedFiles: [path.join(config.cwd, "base.txt")],
+        attributedFiles: [path.join(config.cwd, "base.txt")],
+        fileAttributions: [],
+        usage: emptyUsage(),
+        prompted: true,
+      };
+    });
+    const controller = new AbortController();
+    _setBeforeSourceApplyHookForTesting(() => controller.abort());
+    const artifactRoot = `${tmpDir}-sync-cancel-artifacts`;
+    _setIsolatedArtifactRootForTesting(artifactRoot);
+
+    try {
+      const input = asyncIsolatedInput(tmpDir, ["one"]);
+      input.params.async = false;
+      input.signal = controller.signal;
+      const result = await dispatchDelegate(input);
+
+      expect(firstText(result)).toContain("INTEGRATION: retained");
+      expect(firstText(result)).toContain("0/1 tasks completed successfully");
+      expect(readFileSync(path.join(tmpDir, "base.txt"), "utf8")).toBe(
+        "base\n",
+      );
+      expect(taskResultAt(result.details.results, 0).integration?.status).toBe(
+        "retained",
+      );
+    } finally {
+      _setBeforeSourceApplyHookForTesting(undefined);
+      _setRunAgentSessionForTesting(undefined);
+      _setIsolatedArtifactRootForTesting(undefined);
+      rmSync(artifactRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("async isolated writers reconcile before the ticket settles", async () => {
+    commitFiles(tmpDir, { "base.txt": "base\n" });
+    _setRunAgentSessionForTesting(async (_session, prompt, config) => {
+      const fileName = `${prompt}.txt`;
+      writeFileSync(path.join(config.cwd, fileName), `${prompt}\n`);
+      return {
+        output: "done",
+        durationMs: 1,
+        tokens: 0,
+        toolUses: 0,
+        touchedFiles: [path.join(config.cwd, fileName)],
+        attributedFiles: [path.join(config.cwd, fileName)],
+        fileAttributions: [],
+        usage: emptyUsage(),
+        prompted: true,
+      };
+    });
+    const artifactRoot = `${tmpDir}-async-artifacts`;
+    _setIsolatedArtifactRootForTesting(artifactRoot);
+
+    try {
+      const result = await dispatchDelegate(
+        asyncIsolatedInput(tmpDir, ["one", "two"]),
+      );
+
+      expect(firstText(result)).toContain("Async ticket:");
+      const ticket = ticketRegistry.get(result.details.ticketId!);
+      expect(ticket).toBeDefined();
+      await ticket!.completion;
+
+      expect(ticket!.status).toBe("done");
+      expect(ticket!.workersSettled).toBe(true);
+      expect(
+        ticket!.results.map((entry) => entry?.integration?.status),
+      ).toEqual(["applied_unverified", "applied_unverified"]);
+      expect(readFileSync(path.join(tmpDir, "one.txt"), "utf8")).toBe("one\n");
+      expect(readFileSync(path.join(tmpDir, "two.txt"), "utf8")).toBe("two\n");
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setIsolatedArtifactRootForTesting(undefined);
+      rmSync(artifactRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("user cancellation retains a completed async proposal before source apply", async () => {
+    commitFiles(tmpDir, { "base.txt": "base\n" });
+    _setRunAgentSessionForTesting(async (_session, _prompt, config) => {
+      writeFileSync(path.join(config.cwd, "base.txt"), "proposal\n");
+      return {
+        output: "done",
+        durationMs: 1,
+        tokens: 0,
+        toolUses: 0,
+        touchedFiles: [path.join(config.cwd, "base.txt")],
+        attributedFiles: [path.join(config.cwd, "base.txt")],
+        fileAttributions: [],
+        usage: emptyUsage(),
+        prompted: true,
+      };
+    });
+    let sourceApplyReached!: () => void;
+    let releaseSourceApply!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      sourceApplyReached = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseSourceApply = resolve;
+    });
+    _setBeforeSourceApplyHookForTesting(async () => {
+      sourceApplyReached();
+      await release;
+    });
+    const artifactRoot = `${tmpDir}-cancel-artifacts`;
+    _setIsolatedArtifactRootForTesting(artifactRoot);
+
+    try {
+      const result = await dispatchDelegate(
+        asyncIsolatedInput(tmpDir, ["one"]),
+      );
+      const ticket = ticketRegistry.get(result.details.ticketId!);
+      expect(ticket).toBeDefined();
+      await reached;
+      requestTicketCancel(ticket!);
+      releaseSourceApply();
+      await ticket!.completion;
+
+      expect(ticket!.status).toBe("cancelled");
+      expect(readFileSync(path.join(tmpDir, "base.txt"), "utf8")).toBe(
+        "base\n",
+      );
+      expect(ticket!.results[0]?.integration?.status).toBe("retained");
+      if (ticket!.results[0]?.integration?.status !== "retained") {
+        throw new Error("proposal was not retained");
+      }
+      expect(existsSync(ticket!.results[0].integration!.patchPath)).toBe(true);
+    } finally {
+      _setBeforeSourceApplyHookForTesting(undefined);
+      _setRunAgentSessionForTesting(undefined);
+      _setIsolatedArtifactRootForTesting(undefined);
+      rmSync(artifactRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("async isolated reconciliation conflicts fail the ticket after applying earlier proposals", async () => {
+    commitFiles(tmpDir, { "base.txt": "base\n" });
+    _setRunAgentSessionForTesting(async (_session, prompt, config) => {
+      writeFileSync(path.join(config.cwd, "base.txt"), `${prompt}\n`);
+      return {
+        output: "done",
+        durationMs: 1,
+        tokens: 0,
+        toolUses: 0,
+        touchedFiles: [path.join(config.cwd, "base.txt")],
+        attributedFiles: [path.join(config.cwd, "base.txt")],
+        fileAttributions: [],
+        usage: emptyUsage(),
+        prompted: true,
+      };
+    });
+    const artifactRoot = `${tmpDir}-conflict-artifacts`;
+    _setIsolatedArtifactRootForTesting(artifactRoot);
+
+    try {
+      const result = await dispatchDelegate(
+        asyncIsolatedInput(tmpDir, ["one", "two"]),
+      );
+      const ticket = ticketRegistry.get(result.details.ticketId!);
+      expect(ticket).toBeDefined();
+      await ticket!.completion;
+
+      expect(ticket!.status).toBe("failed");
+      expect(
+        ticket!.results.map((entry) => entry?.integration?.status),
+      ).toEqual(["applied_unverified", "conflict"]);
+      expect(readFileSync(path.join(tmpDir, "base.txt"), "utf8")).toBe("one\n");
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+      _setIsolatedArtifactRootForTesting(undefined);
+      rmSync(artifactRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("async isolated setup failure settles the ticket without starting workers", async () => {
+    commitFiles(tmpDir, {
+      "base.txt": "base\n",
+      ".gitmodules": '[submodule "x"]\n',
+    });
+    let ran = 0;
+    const delivered: string[] = [];
+    _setRunAgentSessionForTesting(async () => {
+      ran += 1;
+      throw new Error("worker should not start");
+    });
+    try {
+      const result = await dispatchDelegate(
+        asyncIsolatedInput(tmpDir, ["one"], {
+          sendMessage: (message: { content?: string }) =>
+            delivered.push(message.content ?? ""),
+        }),
+      );
+
+      const ticket = ticketRegistry.get(result.details.ticketId!);
+      expect(ticket).toBeDefined();
+      await ticket!.completion;
+
+      expect(ran).toBe(0);
+      expect(ticket!.status).toBe("failed");
+      expect(ticket!.error).toContain(
+        "does not yet support repositories with submodules",
+      );
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toContain("Isolated workspace setup failed");
+      expect(delivered[0]).toContain("no subagents were started");
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+    }
+  });
+
+  test("shutdown cancellation does not apply an async isolated worker", async () => {
+    commitFiles(tmpDir, { "base.txt": "base\n" });
+    let workerEntered!: () => void;
+    let releaseWorker!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      workerEntered = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    _setRunAgentSessionForTesting(async (_session, _prompt, config) => {
+      writeFileSync(path.join(config.cwd, "base.txt"), "proposal\n");
+      workerEntered();
+      await release;
+      return {
+        output: "done",
+        durationMs: 1,
+        tokens: 0,
+        toolUses: 0,
+        touchedFiles: [path.join(config.cwd, "base.txt")],
+        attributedFiles: [path.join(config.cwd, "base.txt")],
+        fileAttributions: [],
+        usage: emptyUsage(),
+        prompted: true,
+      };
+    });
+    const artifactRoot = `${tmpDir}-shutdown-artifacts`;
+    _setIsolatedArtifactRootForTesting(artifactRoot);
+    let deliveries = 0;
+
+    try {
+      const result = await dispatchDelegate(
+        asyncIsolatedInput(tmpDir, ["one"], {
+          sendMessage: () => {
+            deliveries += 1;
+          },
+        }),
+      );
+      const ticket = ticketRegistry.get(result.details.ticketId!);
+      expect(ticket).toBeDefined();
+      await entered;
+      cancelTicketForShutdown(ticket!);
+      releaseWorker();
+      await ticket!.completion;
+
+      expect(ticket!.status).toBe("cancelled");
+      expect(readFileSync(path.join(tmpDir, "base.txt"), "utf8")).toBe(
+        "base\n",
+      );
+      expect(ticket!.results[0]?.integration?.status).toBe("discarded");
+      expect(deliveries).toBe(0);
     } finally {
       _setRunAgentSessionForTesting(undefined);
       _setIsolatedArtifactRootForTesting(undefined);

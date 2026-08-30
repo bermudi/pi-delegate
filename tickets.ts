@@ -178,6 +178,16 @@ function cleanWaiters(ticket: AsyncTicket): void {
   ticket.waiters = active.length ? active : undefined;
 }
 
+function resultSucceeded(result: TaskResult | undefined): boolean {
+  return Boolean(
+    result &&
+    !result.error &&
+    result.integration?.status !== "retained" &&
+    result.integration?.status !== "conflict" &&
+    result.integration?.status !== "apply_failed",
+  );
+}
+
 /**
  * Determine the final status for a ticket whose task batch has settled.
  *
@@ -193,7 +203,9 @@ function cleanWaiters(ticket: AsyncTicket): void {
  * only calls this for a still-"running" ticket.
  */
 function resolveFinalTicketStatusImpl(ticket: AsyncTicket): "done" | "failed" {
-  const anyFailed = ticket.results.some((r) => r && "error" in r && r.error);
+  const anyFailed = ticket.results.some((result) =>
+    result ? !resultSucceeded(result) : false,
+  );
   const allSettled = ticket.progress.every(
     (p) => p.status === "done" || p.status === "failed",
   );
@@ -378,9 +390,7 @@ export class TicketRegistry extends Map<string, AsyncTicket> {
     if (canMemoize && ticket.formattedResult) return ticket.formattedResult;
 
     const parts: string[] = [];
-    const succeeded = ticket.results.filter(
-      (r) => r && !("error" in r && r.error),
-    ).length;
+    const succeeded = ticket.results.filter(resultSucceeded).length;
     const elapsedTotal = (ticket.completedAt ?? Date.now()) - ticket.created;
     // Surface the overall ticket status so a failed/cancelled batch is not
     // mistaken for success. "done" tickets keep the original header; others
@@ -397,6 +407,7 @@ export class TicketRegistry extends Map<string, AsyncTicket> {
     if (ticket.dispatchWarning) {
       parts.push(`WARNING: ${ticket.dispatchWarning}`);
     }
+    if (ticket.error) parts.push(`[BATCH FAILED: ${ticket.error}]`);
 
     const pendingLabelFor = (index: number): string => {
       if (ticket.status !== "cancelled") {

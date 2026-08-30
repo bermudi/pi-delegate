@@ -327,10 +327,6 @@ function validateDispatchOrHelpMode(
       : undefined; // Intentional help request.
   }
 
-  if (params.async && tasks.some((task) => task.workspace === "isolated")) {
-    return 'workspace "isolated" is synchronous; remove async.';
-  }
-
   // Reject mixed shapes: flat task fields at the top level alongside a
   // nonempty tasks array. The normalize shim only wraps flat fields when
   // there is no tasks array, so a mixed call silently lets tasks win —

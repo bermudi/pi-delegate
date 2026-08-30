@@ -530,7 +530,10 @@ export function formatCompletedTask(
     if (integration.patchPath)
       parts.push(`full patch: ${integration.patchPath}`);
     if (integration.worktreePath)
-      parts.push(`conflict worktree: ${integration.worktreePath}`);
+      parts.push(`recovery worktree: ${integration.worktreePath}`);
+    if (integration.status === "retained") {
+      parts.push(`not applied: ${integration.reason}`);
+    }
     for (const conflict of integration.conflicts ?? []) {
       parts.push(`conflict: ${conflict.path}: ${conflict.reason}`);
     }
