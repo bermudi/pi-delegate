@@ -48,6 +48,7 @@ import {
   isModelAttributableError,
   runResolvedTask,
 } from "./lifecycle.ts";
+import { ScratchDeadlineError, ScratchSetupError } from "./workspace.ts";
 import {
   _resetPoolForTesting,
   commit,
@@ -4816,5 +4817,98 @@ describe("isModelAttributableError", () => {
   test("empty / undefined → false", () => {
     expect(isModelAttributableError(undefined)).toBe(false);
     expect(isModelAttributableError("")).toBe(false);
+  });
+});
+
+describe("scratch setup failure remedy", () => {
+  const mkTask = (overrides: Partial<ResolvedTask> = {}) =>
+    ({
+      prompt: "review",
+      model: { id: "m", provider: "p", api: "openai-responses" } as never,
+      tools: ["read"],
+      thinking: "default",
+      systemPrompt: "",
+      cwd: process.cwd(),
+      agentName: "reviewer",
+      warnings: [],
+      workspace: "scratch",
+      ...overrides,
+    }) as never;
+
+  const mkProgressRow = () =>
+    ({
+      index: 0,
+      agent: "reviewer",
+      task: "review",
+      status: "pending" as const,
+      durationMs: 0,
+      tokens: 0,
+      toolUses: 0,
+      activities: [],
+    }) as never;
+
+  const mkEnv = () =>
+    ({
+      signal: undefined,
+      modelRegistry: {} as never,
+      delegateStartedAt: Date.now(),
+      onProgress: () => {},
+    }) as never;
+
+  afterEach(() => {
+    _setCreateScratchWorkspaceForTesting(undefined);
+  });
+
+  test("appends the shared-workspace remedy to a generic setup failure", async () => {
+    _setCreateScratchWorkspaceForTesting(async () => {
+      throw new Error(
+        "Could not create a CoW scratch workspace. The project and scratch directory must be on a reflink-capable filesystem (for example Btrfs).",
+      );
+    });
+    const result = await runResolvedTask(mkEnv(), mkTask(), mkProgressRow(), 0);
+    expect(result.error).toContain("reflink-capable filesystem");
+    expect(result.error).toContain(
+      '— to retry without scratch containment, use workspace: "shared".',
+    );
+  });
+
+  test("appends the remedy to deadline failures", async () => {
+    _setCreateScratchWorkspaceForTesting(async () => {
+      throw new ScratchDeadlineError(
+        "Scratch workspace creation exceeded the task deadline.",
+      );
+    });
+    const result = await runResolvedTask(mkEnv(), mkTask(), mkProgressRow(), 0);
+    expect(result.failureKind).toBe("deadline_exceeded");
+    expect(result.error).toContain(
+      '— to retry without scratch containment, use workspace: "shared".',
+    );
+  });
+
+  test("does not duplicate the remedy when the message already names it", async () => {
+    _setCreateScratchWorkspaceForTesting(async () => {
+      throw new ScratchSetupError(
+        `Scratch workspace cannot safely copy symlink 'shared' -> '../shared': it resolves outside the disposable copy, so relative writes through it would reach the host. Remove the link, or run this task with workspace "shared" (read-only tools) or "isolated".`,
+      );
+    });
+    const result = await runResolvedTask(mkEnv(), mkTask(), mkProgressRow(), 0);
+    expect(result.error).toContain('workspace "shared"');
+    expect(result.error?.match(/workspace "shared"/g)).toHaveLength(1);
+  });
+
+  test("aborted setup stays a clean cancellation without remedy", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    _setCreateScratchWorkspaceForTesting(async () => {
+      throw new Error("Scratch workspace creation was aborted.");
+    });
+    const result = await runResolvedTask(
+      { ...mkEnv(), signal: controller.signal } as never,
+      mkTask(),
+      mkProgressRow(),
+      0,
+    );
+    expect(result.error).toBe("Aborted");
+    expect(result.failureKind).toBe("cancelled");
   });
 });

@@ -57,6 +57,7 @@ class CommandError extends Error {
   constructor(
     message: string,
     readonly stderr: string,
+    readonly file: string,
     options: ErrorOptions,
   ) {
     super(message, options);
@@ -85,6 +86,7 @@ function runFile(
             new CommandError(
               detail ? `${file}: ${detail}` : `${file}: ${error.message}`,
               detail,
+              file,
               { cause: error },
             ),
           );
@@ -193,10 +195,16 @@ async function replaceSymlink(linkPath: string, target: string): Promise<void> {
   }
 }
 
-/** Validate the completed copy before any subagent receives its path. */
-async function validateCopiedTree(
+/** Validate a scratch candidate tree — the source before copying (read-only
+ * fast-fail) or the completed copy before any subagent receives its path
+ * (authority, with the symlink-retarget side effect). One rule, two timings:
+ * the blockers are identical, so the pre-check cannot drift from the copy
+ * check, and the copy check remains authoritative for trees that change
+ * mid-copy. */
+async function validateScratchTree(
   root: string,
   sourceRoot: string,
+  retargetLinks: boolean,
   signal: AbortSignal,
   parentSignal: AbortSignal | undefined,
 ): Promise<void> {
@@ -234,7 +242,8 @@ async function validateCopiedTree(
       // `cp --archive` copies link text verbatim, so an absolute in-project
       // link (bun/pnpm-style local package installs) still resolves to the
       // real tree from inside the copy. Retarget it at its copied counterpart
-      // instead of failing: the link keeps working and stays disposable.
+      // instead of failing: the link keeps working and stays disposable. The
+      // pre-check runs the same rule read-only against the source.
       const relinked = relinkTargetIntoCopy(
         candidate,
         target,
@@ -242,6 +251,7 @@ async function validateCopiedTree(
         sourceRoot,
       );
       if (relinked !== undefined) {
+        if (!retargetLinks) continue;
         try {
           await replaceSymlink(candidate, relinked);
         } catch (error) {
@@ -259,6 +269,58 @@ async function validateCopiedTree(
         );
       }
     }
+  }
+}
+
+/** Reject Git metadata that redirects the worktree or git dirs outside `root`
+ * (core.worktree, commondir pointers, gitdir redirects). Runs against the
+ * source before copying and against the copy afterwards — a source that is
+ * self-consistent can still copy into a copy that points back at the source. */
+async function assertGitMetadataContained(
+  root: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const hasGitDir = await fs.promises
+    .stat(path.join(root, ".git"))
+    .then((stat) => stat.isDirectory(), () => false);
+  if (!hasGitDir) return;
+  const effectiveWorktree = path.resolve(
+    (
+      await runFile("git", ["rev-parse", "--show-toplevel"], {
+        cwd: root,
+        signal,
+        timeout: 5000,
+      })
+    ).trim(),
+  );
+  const effectiveGitDir = path.resolve(
+    root,
+    (
+      await runFile("git", ["rev-parse", "--absolute-git-dir"], {
+        cwd: root,
+        signal,
+        timeout: 5000,
+      })
+    ).trim(),
+  );
+  const effectiveCommonDir = path.resolve(
+    effectiveGitDir,
+    (
+      await runFile("git", ["rev-parse", "--git-common-dir"], {
+        cwd: root,
+        signal,
+        timeout: 5000,
+      })
+    ).trim(),
+  );
+  if (
+    effectiveWorktree !== root ||
+    !isWithin(root, effectiveGitDir) ||
+    !isWithin(root, effectiveCommonDir)
+  ) {
+    throw new ScratchSetupError(
+      "Scratch workspace Git configuration redirects its worktree or metadata outside the copied project.",
+    );
   }
 }
 
@@ -739,6 +801,20 @@ export async function createScratchWorkspace(
       );
     }
 
+    // Fast-fail on blockers that are knowable before anything is created:
+    // the same rule the copy validation enforces, run read-only against the
+    // source. A rejection here costs milliseconds instead of a doomed
+    // reflink copy, and no lease/container is left behind. The post-copy
+    // validation below stays the authority — the tree can change mid-copy.
+    await validateScratchTree(
+      sourceRoot,
+      sourceRoot,
+      false,
+      controller.signal,
+      signal,
+    );
+    await assertGitMetadataContained(sourceRoot, controller.signal);
+
     containerDir = path.join(path.dirname(sourceRoot), SCRATCH_CONTAINER_NAME);
     const uid = process.getuid?.();
     await ensureScratchContainer(containerDir, uid);
@@ -777,57 +853,14 @@ export async function createScratchWorkspace(
     // GNU cp --archive applies the source root's mode to the destination.
     // Restore the private boundary after it has finished copying metadata.
     await fs.promises.chmod(scratchRoot, 0o700);
-    await validateCopiedTree(
+    await validateScratchTree(
       scratchRoot,
       sourceRoot,
+      true,
       controller.signal,
       signal,
     );
-    if (
-      await fs.promises.stat(path.join(scratchRoot, ".git")).then(
-        (stat) => stat.isDirectory(),
-        () => false,
-      )
-    ) {
-      const effectiveWorktree = path.resolve(
-        (
-          await runFile("git", ["rev-parse", "--show-toplevel"], {
-            cwd: scratchRoot,
-            signal: controller.signal,
-            timeout: 5000,
-          })
-        ).trim(),
-      );
-      const effectiveGitDir = path.resolve(
-        scratchRoot,
-        (
-          await runFile("git", ["rev-parse", "--absolute-git-dir"], {
-            cwd: scratchRoot,
-            signal: controller.signal,
-            timeout: 5000,
-          })
-        ).trim(),
-      );
-      const effectiveCommonDir = path.resolve(
-        effectiveGitDir,
-        (
-          await runFile("git", ["rev-parse", "--git-common-dir"], {
-            cwd: scratchRoot,
-            signal: controller.signal,
-            timeout: 5000,
-          })
-        ).trim(),
-      );
-      if (
-        effectiveWorktree !== scratchRoot ||
-        !isWithin(scratchRoot, effectiveGitDir) ||
-        !isWithin(scratchRoot, effectiveCommonDir)
-      ) {
-        throw new ScratchSetupError(
-          "Scratch workspace Git configuration redirects its worktree or metadata outside the copied project.",
-        );
-      }
-    }
+    await assertGitMetadataContained(scratchRoot, controller.signal);
     throwIfSetupCancelled(controller.signal, signal);
     // Keep the copied project writable, but make its private parent immutable
     // to ordinary task commands. `mv "$PWD" …` then cannot unlink the project
@@ -865,8 +898,17 @@ export async function createScratchWorkspace(
       );
     }
     if (error instanceof ScratchSetupError) throw error;
+    // Surface the failed command's own stderr: the generic message's
+    // reflink guidance is a guess, and the real cp failure (or a btrfs
+    // project failing for an unrelated reason) is only visible in stderr.
+    let commandDetail = "";
+    if (error instanceof CommandError) {
+      const line = error.stderr.split("\n", 1)[0]?.trim();
+      if (line) commandDetail = ` ${error.file} failed: ${line}`;
+    }
     throw new Error(
-      "Could not create a CoW scratch workspace. The project and scratch directory must be on a reflink-capable filesystem (for example Btrfs).",
+      "Could not create a CoW scratch workspace. The project and scratch directory must be on a reflink-capable filesystem (for example Btrfs)." +
+        commandDetail,
       { cause: error },
     );
   } finally {

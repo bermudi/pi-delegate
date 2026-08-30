@@ -1263,4 +1263,55 @@ describe("scratch workspace", () => {
       }
     },
   );
+
+  scratchTest(
+    "pre-check rejects a blocked tree before creating any container or lease",
+    async () => {
+      const parent = testParent();
+      const repo = path.join(parent, "repo");
+      const outside = path.join(parent, "shared");
+      fs.mkdirSync(repo);
+      fs.mkdirSync(outside);
+      fs.symlinkSync("../shared", path.join(repo, "shared"));
+      execFileSync("git", ["init", "--quiet"], { cwd: repo });
+      try {
+        await expect(createScratchWorkspace(repo)).rejects.toThrow(
+          "resolves outside the disposable copy",
+        );
+        // The pre-check runs before the container/lease machinery, so a
+        // rejected tree leaves nothing behind next to the source.
+        expect(
+          fs.existsSync(path.join(parent, ".pi-delegate-scratch")),
+        ).toBe(false);
+      } finally {
+        cleanTestDir(parent);
+      }
+    },
+  );
+
+  scratchTest(
+    "surfaces the real cp stderr when the reflink copy fails",
+    async () => {
+      const parent = testParent();
+      const repo = path.join(parent, "repo");
+      fs.mkdirSync(repo);
+      fs.writeFileSync(path.join(repo, "secret.txt"), "secret");
+      // Unreadable regular file: invisible to the tree walk (which only
+      // classifies dirent types) but fatal to cp, which must open the source.
+      fs.chmodSync(path.join(repo, "secret.txt"), 0o000);
+      execFileSync("git", ["init", "--quiet"], { cwd: repo });
+      try {
+        const error = await createScratchWorkspace(repo).then(
+          () => {
+            throw new Error("expected createScratchWorkspace to reject");
+          },
+          (e: unknown) => e as Error,
+        );
+        expect(error.message).toContain("reflink-capable filesystem");
+        expect(error.message).toMatch(/cp failed: cp: /);
+      } finally {
+        cleanTestDir(parent);
+      }
+    },
+  );
 });

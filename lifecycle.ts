@@ -142,9 +142,18 @@ function scratchSetupFailureResult(
   if (signalAborted) {
     message = "Aborted";
     failureKind = "cancelled";
-  } else if (error instanceof ScratchDeadlineError) {
-    message = formatDeadlineExceededError(task.deadlineMs ?? 0);
-    failureKind = "deadline_exceeded";
+  } else {
+    if (error instanceof ScratchDeadlineError) {
+      message = formatDeadlineExceededError(task.deadlineMs ?? 0);
+      failureKind = "deadline_exceeded";
+    }
+    // Every non-aborted setup failure names its remedy in one place, so the
+    // paths (platform guard, pre-check, reflink, worktree, deadline) cannot
+    // drift. The symlink message already carries remedy text naming
+    // workspace "shared" — skip the append there to avoid saying it twice.
+    if (!message.includes('workspace "shared"')) {
+      message = `${message} — to retry without scratch containment, use workspace: "shared".`;
+    }
   }
   return {
     ...failTask(task, message, undefined, failureKind),
