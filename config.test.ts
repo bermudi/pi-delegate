@@ -225,7 +225,7 @@ describe("getSubagentProviderExtensionsForProvider", () => {
   test("normalizes an explicitly injected config too", () => {
     const config = {
       providerExtensions: { "  Custom-Provider  ": ["npm:x"] },
-    } as DelegateConfig;
+    } as unknown as DelegateConfig;
     expect(
       getSubagentProviderExtensionsForProvider("CUSTOM-PROVIDER", config),
     ).toEqual(["npm:x"]);
@@ -300,7 +300,7 @@ describe("getSubagentProviderExtensionSourcesForProvider", () => {
   test("normalizes an explicitly injected, unnormalized config", () => {
     const config = {
       providerExtensions: { "  Custom-Provider  ": ["npm:x"] },
-    } as DelegateConfig;
+    } as unknown as DelegateConfig;
     expect(
       getSubagentProviderExtensionSourcesForProvider("custom-provider", config),
     ).toEqual([{ source: "npm:x", required: true }]);

@@ -40,7 +40,7 @@ function fakeFrozenConfig() {
   return {
     systemPrompt: "test",
     model: fakeModel(),
-    thinking: "normal" as const,
+    thinking: "medium" as const,
     tools: ["bash"],
     cwd: "/tmp",
     providerExtensions: "",
@@ -60,9 +60,10 @@ function fakeTicket(id: string, sessionId: string | undefined): AsyncTicket {
             prompt: "p",
             cwd: "/tmp",
             tools: ["bash"],
-            thinking: "normal" as const,
+            thinking: "medium" as const,
             model: fakeModel(),
             systemPrompt: "s",
+            warnings: [],
           } as ResolvedTask,
         ]
       : [],
@@ -215,7 +216,7 @@ function makeFakePi(): {
     },
     registerMessageRenderer() {},
     getThinkingLevel() {
-      return "normal";
+      return "medium";
     },
     getActiveTools() {
       return ["bash"];

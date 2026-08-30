@@ -290,7 +290,7 @@ describe("createQuiescenceBarrier", () => {
       };
       timers.add(handle);
       return handle as never;
-    }) as typeof setTimeout;
+    }) as unknown as typeof setTimeout;
     globalThis.clearTimeout = ((handle: object) => {
       timers.delete(handle);
     }) as typeof clearTimeout;

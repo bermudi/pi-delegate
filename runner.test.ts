@@ -239,7 +239,7 @@ describe("runAgentSession abort re-check", () => {
           usage: { totalTokens: 5 },
         },
       ],
-      prompt: () => {
+      prompt: async () => {
         resolved = true;
       },
     });
@@ -2300,7 +2300,7 @@ describe("runAgentSession abort re-check", () => {
           usage: { totalTokens: 5 },
         },
       ],
-      prompt: () => {},
+      prompt: async () => {},
     });
 
     const origSubscribe = session.subscribe.bind(session);

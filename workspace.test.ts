@@ -835,14 +835,17 @@ describe("scratch workspace", () => {
         const original = fs.promises.readlink;
         let failureCode = "ENOENT";
         const readlink = spyOn(fs.promises, "readlink").mockImplementation(
-          async (candidate, options) => {
+          (async (
+            candidate: Parameters<typeof fs.promises.readlink>[0],
+            options: Parameters<typeof fs.promises.readlink>[1],
+          ) => {
             if (path.resolve(String(candidate)) === scratchLink) {
               throw Object.assign(new Error("simulated readlink race"), {
                 code: failureCode,
               });
             }
             return original(candidate, options as never) as Promise<string>;
-          },
+          }) as unknown as typeof fs.promises.readlink,
         );
         const attribution = {
           lexicalPath: scratchLink,
@@ -892,7 +895,10 @@ describe("scratch workspace", () => {
         const original = fs.promises.readlink;
         let replaced = false;
         const readlink = spyOn(fs.promises, "readlink").mockImplementation(
-          async (candidate, options) => {
+          (async (
+            candidate: Parameters<typeof fs.promises.readlink>[0],
+            options: Parameters<typeof fs.promises.readlink>[1],
+          ) => {
             const target = (await original(
               candidate,
               options as never,
@@ -903,7 +909,7 @@ describe("scratch workspace", () => {
               fs.writeFileSync(scratchLink, "replacement");
             }
             return target;
-          },
+          }) as unknown as typeof fs.promises.readlink,
         );
         try {
           expect(

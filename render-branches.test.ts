@@ -1,5 +1,6 @@
 import { describe, expect, test, mock } from "bun:test";
 import { renderDelegateResult } from "./render-result.ts";
+import type { BranchCtx } from "./render-branches.ts";
 import { toolExpandHint } from "./key-hints.ts";
 import type { Usage } from "@earendil-works/pi-ai";
 import type {
@@ -25,18 +26,18 @@ import type {
  */
 describe("render-branches compatibility fallback", () => {
   test("falls back to plain text when getMarkdownTheme is unavailable", async () => {
-    mock.module("@earendil-works/pi-coding-agent", (original) => {
+    mock.module("@earendil-works/pi-coding-agent", ((original: unknown) => {
       const ns = original as Record<string, unknown>;
       return {
         ...ns,
         getMarkdownTheme: undefined,
       } as never;
-    });
+    }) as never);
 
     try {
       const { renderFinalBranch } = await import("./render-branches.ts");
 
-      const ctx = {
+      const ctx: BranchCtx = {
         progress: [
           {
             index: 0,
@@ -82,7 +83,7 @@ describe("render-branches compatibility fallback", () => {
           fg: (_: string, text: string) => text,
           bold: (text: string) => text,
         } as never,
-        lines: [],
+        lines: [] as string[],
       };
 
       renderFinalBranch(ctx, {
@@ -121,14 +122,15 @@ describe("render-branches compatibility fallback", () => {
       bold: (text: string) => text,
     } as never;
 
-    const makeCtx = (progress: typeof progressWithId) => ({
+    const makeCtx = (progress: TaskProgress): BranchCtx => ({
       progress: [progress],
+      taskResults: [],
       total: 1,
       w: 80,
       expanded: false,
       state: { startedAt: Date.now() },
       theme,
-      lines: [],
+      lines: [] as string[],
     });
 
     const ctxWith = makeCtx(progressWithId);
@@ -207,7 +209,7 @@ describe("render-branches compatibility fallback", () => {
       expanded: false,
       state: {},
       theme,
-      lines: [],
+      lines: [] as string[],
     };
     renderFinalBranch(ctxWith, {
       statJoin: () => "",
@@ -219,7 +221,11 @@ describe("render-branches compatibility fallback", () => {
       true,
     );
 
-    const ctxWithout = { ...ctxWith, progress: [progressWithoutId], lines: [] };
+    const ctxWithout = {
+      ...ctxWith,
+      progress: [progressWithoutId],
+      lines: [] as string[],
+    };
     renderFinalBranch(ctxWithout, {
       statJoin: () => "",
       modelLabel: () => "",
@@ -356,7 +362,7 @@ describe("render-branches compatibility fallback", () => {
       expanded: false,
       state: {},
       theme,
-      lines: [],
+      lines: [] as string[],
     };
 
     expect(() =>
@@ -406,7 +412,7 @@ describe("render-branches compatibility fallback", () => {
           expanded: true,
           state: {},
           theme,
-          lines: [],
+          lines: [] as string[],
           ticketId: "ticket-1",
           ticketStatus,
         };
@@ -583,7 +589,7 @@ describe("render-branches compatibility fallback", () => {
         expanded: false,
         state: {},
         theme,
-        lines: [],
+        lines: [] as string[],
         ticketId: "ticket-1",
         ticketStatus,
         elapsedMs: 10,
@@ -614,7 +620,7 @@ describe("render-branches compatibility fallback", () => {
         fg: (_: string, text: string) => text,
         bold: (text: string) => text,
       } as never,
-      lines: [],
+      lines: [] as string[],
     };
 
     renderFinalBranch(ctx, {
@@ -660,7 +666,7 @@ describe("render-branches compatibility fallback", () => {
         fg: (_: string, text: string) => text,
         bold: (text: string) => text,
       } as never,
-      lines: [],
+      lines: [] as string[],
     };
 
     renderPartialBranch(ctx, {

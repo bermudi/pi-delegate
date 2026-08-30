@@ -664,7 +664,8 @@ describe("built-in agent profiles", () => {
     agents.set("isolated-agent", {
       name: "isolated-agent",
       description: "test",
-      prompt: "test",
+      tools: [],
+      systemPrompt: "test",
       workspace: "isolated",
     });
 

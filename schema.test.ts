@@ -143,13 +143,17 @@ describe("normalizeDelegateArguments", () => {
     const result = normalizeDelegateArguments({
       tasks: [{ prompt: "a", tools: "read, write" }],
     });
-    expect(result.tasks).toEqual([{ prompt: "a", tools: "read, write" }]);
+    expect(result.tasks as unknown).toEqual([
+      { prompt: "a", tools: "read, write" },
+    ]);
   });
 
   test("non-object input passes through untouched", () => {
     expect(normalizeDelegateArguments(undefined)).toBeUndefined();
     expect(normalizeDelegateArguments(null as unknown)).toBeNull();
-    expect(normalizeDelegateArguments("junk" as unknown)).toBe("junk");
+    expect(normalizeDelegateArguments("junk" as unknown) as unknown).toBe(
+      "junk",
+    );
   });
 
   test("empty calls stay empty so help still works", () => {
@@ -382,7 +386,7 @@ describe("validateDelegateOperation task-field whitelist", () => {
         { prompt: "do work" },
         { sessionAction: "close", sessionId: "s1" },
       ],
-    });
+    } as unknown as DelegateArguments);
     expect(err).toContain("task 2");
     expect(err).toContain("unknown field(s) 'sessionAction'");
     expect(err).toContain("'sessionAction' is a top-level field");
@@ -391,7 +395,7 @@ describe("validateDelegateOperation task-field whitelist", () => {
   test("rejects a task-level list entry mixed with work tasks", () => {
     const err = validateDelegateOperation({
       tasks: [{ prompt: "a" }, { sessionAction: "list" }, { prompt: "b" }],
-    });
+    } as unknown as DelegateArguments);
     expect(err).toContain("task 2");
     expect(err).toContain("unknown field(s) 'sessionAction'");
     expect(err).toContain("'sessionAction' is a top-level field");
@@ -406,7 +410,7 @@ describe("validateDelegateOperation task-field whitelist", () => {
         { sessionAction: "close", sessionId: "s1" },
         { sessionAction: "list" },
       ],
-    });
+    } as unknown as DelegateArguments);
     expect(err).toContain("task 1");
     expect(err).toContain("unknown field(s) 'sessionAction'");
     expect(err).toContain("'sessionAction' is a top-level field");
@@ -455,7 +459,7 @@ describe("validateDelegateOperation task-field whitelist", () => {
       prompt: "x",
       sessionAction: "prompt",
     });
-    expect(result).toEqual({
+    expect(result as unknown).toEqual({
       sessionAction: "prompt",
       tasks: [{ prompt: "x" }],
     });
@@ -471,7 +475,9 @@ describe("validateDelegateOperation task-field whitelist", () => {
       ticketAction: "poll",
       sessionAction: "prompt",
     });
-    expect(result.sessionAction).toBe("prompt");
+    expect(
+      (result as unknown as { sessionAction?: string }).sessionAction,
+    ).toBe("prompt");
     expect(validateDelegateOperation(result as DelegateArguments)).toContain(
       "ticket control cannot be combined with field(s) 'sessionAction'",
     );
@@ -783,7 +789,7 @@ describe("#32 normalizer case matrix", () => {
     const err = validateDelegateOperation({
       async: false,
       tasks: [{ prompt: "do work" }, { sessionAction: "list" }],
-    });
+    } as unknown as DelegateArguments);
     expect(err).toContain("task 2");
     expect(err).toContain("unknown field(s) 'sessionAction'");
     expect(err).toContain("'sessionAction' is a top-level field");
@@ -807,13 +813,15 @@ describe("#32 normalizer case matrix", () => {
     expect(
       normalizeDelegateArguments({
         tasks: [{ sessionAction: "prompt", prompt: "x" }],
-      }),
+      }) as unknown,
     ).toEqual({ tasks: [{ sessionAction: "prompt", prompt: "x" }] });
     expect(
       validate({ tasks: [{ sessionAction: "prompt", prompt: "x" }] }),
     ).toContain("unknown field(s) 'sessionAction'");
     expect(
-      normalizeDelegateArguments({ tasks: [{ sessionAction: "prompt" }] }),
+      normalizeDelegateArguments({
+        tasks: [{ sessionAction: "prompt" }],
+      }) as unknown,
     ).toEqual({ tasks: [{ sessionAction: "prompt" }] });
     expect(validate({ tasks: [{ sessionAction: "prompt" }] })).toContain(
       "'sessionAction' is a top-level field",

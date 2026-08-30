@@ -7,6 +7,7 @@ import {
 } from "./leaf.ts";
 import { deliverTicketResults, ticketRegistry } from "./tickets.ts";
 import type { AsyncTicket, TaskProgress } from "./types.ts";
+import { emptyUsage } from "./usage.ts";
 
 function mkProgress(): TaskProgress[] {
   return [
@@ -31,7 +32,6 @@ function mkCompletedTicket(overrides: Partial<AsyncTicket> = {}): AsyncTicket {
     tasks: [{ prompt: "find the bug" }],
     resolved: [
       {
-        index: 0,
         prompt: "find the bug",
         model: {} as never,
         tools: [],
@@ -49,6 +49,7 @@ function mkCompletedTicket(overrides: Partial<AsyncTicket> = {}): AsyncTicket {
         output: "found the bug",
         durationMs: 5,
         tokens: 42,
+        usage: emptyUsage(),
         touchedFiles: [],
       },
     ],

@@ -118,6 +118,7 @@ import { toolExpandHint } from "./key-hints.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
 import { availableToolNames } from "./tools.ts";
 import { generateTicketId } from "./tickets.ts";
+import { emptyUsage } from "./usage.ts";
 
 function expectToolExpandHint(text: string, present: boolean): void {
   const hint = toolExpandHint();
@@ -128,23 +129,14 @@ function expectToolExpandHint(text: string, present: boolean): void {
 
 // ── Integration test imports ──────────────────────────────────────────────
 
+import { when, calls, says } from "@marcfargas/pi-test-harness";
 import {
-  createTestSession,
-  when,
-  calls,
-  says,
-} from "@marcfargas/pi-test-harness";
-import { resolve } from "node:path";
-
-const EXTENSION = resolve(import.meta.dirname, "./delegate.ts");
-
-type TestSession = Awaited<ReturnType<typeof createTestSession>>;
-
-function getToolDef(ts: TestSession, name: string) {
-  const runner = ts.session.extensionRunner;
-  if (!runner) throw new Error("No extensionRunner on session");
-  return runner.getToolDefinition(name);
-}
+  createDelegateTestSession,
+  firstText,
+  getToolDef,
+  taskResultAt,
+  type TestSession,
+} from "./test-harness.ts";
 
 function getTasksArraySchema(schema: any): any {
   const tasks = schema.properties.tasks;
@@ -1123,7 +1115,7 @@ describe("extractTextContent", () => {
   test("skips non-text blocks", () => {
     expect(
       extractTextContent([
-        { type: "image", source: "base64" },
+        { type: "image" },
         { type: "text", text: "only text" },
       ]),
     ).toBe("only text");
@@ -1171,13 +1163,13 @@ describe("resolveModel", () => {
       { provider: "anthropic", id: "claude-haiku-4-5" },
     ]);
     const result = resolveModel("gpt-5", registry, parentModel);
-    expect(result).toEqual({ provider: "openai", id: "gpt-5" });
+    expect(result).toMatchObject({ provider: "openai", id: "gpt-5" });
   });
 
   test("finds provider/id spec", () => {
     const registry = makeRegistry([{ provider: "openai", id: "gpt-5" }]);
     const result = resolveModel("openai/gpt-5", registry, parentModel);
-    expect(result).toEqual({ provider: "openai", id: "gpt-5" });
+    expect(result).toMatchObject({ provider: "openai", id: "gpt-5" });
   });
 
   test("resolves a provider/id spec whose case differs from the registry (pi grammar is case-insensitive)", () => {
@@ -1190,10 +1182,10 @@ describe("resolveModel", () => {
     ]);
     expect(
       resolveModel("modal/zai-org/glm-5.3-flash", registry, parentModel),
-    ).toEqual({ provider: "modal", id: "zai-org/GLM-5.3-Flash" });
+    ).toMatchObject({ provider: "modal", id: "zai-org/GLM-5.3-Flash" });
     expect(
       resolveModel("MODAL/ZAI-ORG/GLM-5.3-FLASH", registry, parentModel),
-    ).toEqual({ provider: "modal", id: "zai-org/GLM-5.3-Flash" });
+    ).toMatchObject({ provider: "modal", id: "zai-org/GLM-5.3-Flash" });
   });
 
   test("resolves a namespaced id referenced with the wrong case (id contains a slash)", () => {
@@ -1206,7 +1198,7 @@ describe("resolveModel", () => {
     ]);
     expect(
       resolveModel("zai-org/glm-5.3-flash", registry, parentModel),
-    ).toEqual({ provider: "modal", id: "zai-org/GLM-5.3-Flash" });
+    ).toMatchObject({ provider: "modal", id: "zai-org/GLM-5.3-Flash" });
   });
 
   test("tolerates a thinking suffix on a case-mismatched reference", () => {
@@ -1218,7 +1210,7 @@ describe("resolveModel", () => {
       registry,
       parentModel,
     );
-    expect(result.model).toEqual({
+    expect(result.model).toMatchObject({
       provider: "modal",
       id: "zai-org/GLM-5.3-Flash",
     });
@@ -1258,7 +1250,10 @@ describe("resolveModel", () => {
       registry,
       parentModel,
     );
-    expect(result).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder" });
+    expect(result).toMatchObject({
+      provider: "openrouter",
+      id: "qwen/qwen3-coder",
+    });
   });
 
   test("tolerates a Pi-style thinking suffix for resolution only", () => {
@@ -1273,7 +1268,7 @@ describe("resolveModel", () => {
 
     // The suffix lets the reference resolve; it is reported (not honored here)
     // so the caller can use it as a last-resort thinking default.
-    expect(result.model).toEqual({
+    expect(result.model).toMatchObject({
       provider: "openai-codex",
       id: "gpt-5.6-luna",
     });
@@ -1287,7 +1282,7 @@ describe("resolveModel", () => {
 
     expect(
       resolveModelRequest("openrouter/model:exacto", registry, parentModel),
-    ).toEqual({ model: colonModel });
+    ).toMatchObject({ model: colonModel });
   });
 
   test("built-in default mirrors the live parent and bypasses delegate model defaults", () => {
@@ -2067,6 +2062,7 @@ describe("formatFailedTask", () => {
         error: "524 cloudflare timeout",
         durationMs: 1000,
         tokens: 0,
+        usage: emptyUsage(),
         touchedFiles: [],
       };
 
@@ -2108,6 +2104,7 @@ describe("formatFailedTask", () => {
       error: "524 cloudflare timeout",
       durationMs: 1000,
       tokens: 0,
+      usage: emptyUsage(),
       sessionFile: "/nonexistent/path/ghost.jsonl",
       touchedFiles: [],
     };
@@ -2128,6 +2125,7 @@ describe("formatFailedTask", () => {
       error: "sessionAction='close' requires sessionId.",
       durationMs: 0,
       tokens: 0,
+      usage: emptyUsage(),
       touchedFiles: [],
     };
     expect(formatFailedTask(r)).toEqual([
@@ -2142,6 +2140,7 @@ describe("formatFailedTask", () => {
       error: "",
       durationMs: 0,
       tokens: 0,
+      usage: emptyUsage(),
       touchedFiles: [],
     };
     expect(formatFailedTask(r)).toEqual(["[FAILED: unknown error]"]);
@@ -2155,6 +2154,7 @@ describe("formatFailedTask", () => {
       failureKind: "cancelled",
       durationMs: 1000,
       tokens: 42,
+      usage: emptyUsage(),
       touchedFiles: ["/home/daniel/build/pi-delegate/src/foo.ts"],
     };
     const lines = formatFailedTask(r, "/home/daniel/build/pi-delegate");
@@ -2170,6 +2170,7 @@ describe("formatFailedTask", () => {
       error: "Aborted",
       durationMs: 1000,
       tokens: 0,
+      usage: emptyUsage(),
       touchedFiles: [],
     };
     expect(formatFailedTask(r)).toEqual(["[FAILED: Aborted]"]);
@@ -2207,6 +2208,7 @@ describe("formatFailedTask", () => {
         failureKind: "model_error",
         durationMs: 1000,
         tokens: 0,
+        usage: emptyUsage(),
         sessionFile: withMessages,
         touchedFiles: [],
       };
@@ -2249,6 +2251,7 @@ describe("formatFailedTask", () => {
         error: "connection reset",
         durationMs: 1000,
         tokens: 0,
+        usage: emptyUsage(),
         sessionFile: withMessages,
         touchedFiles: [],
       };
@@ -2278,6 +2281,7 @@ describe("formatFailedTask", () => {
       error: "524 cloudflare timeout",
       durationMs: 1000,
       tokens: 0,
+      usage: emptyUsage(),
       touchedFiles: [],
     };
     let spillPath: string | undefined;
@@ -2343,6 +2347,7 @@ describe("formatCompletedTask", () => {
       output: "all done",
       durationMs: 1500,
       tokens: 42,
+      usage: emptyUsage(),
       touchedFiles: [],
       ...over,
     };
@@ -2554,6 +2559,7 @@ describe("output spill integration", () => {
       output: "all done",
       durationMs: 1500,
       tokens: 42,
+      usage: emptyUsage(),
       touchedFiles: [],
       ...over,
     } as ResultLike;
@@ -3101,7 +3107,7 @@ describe("delegate extension integration", () => {
   });
 
   test("registers the delegate tool", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     expect(toolDef).toBeDefined();
     expect(toolDef!.name).toBe("delegate"); // lookup key — hard contract
@@ -3114,7 +3120,7 @@ describe("delegate extension integration", () => {
   });
 
   test("has tasks array parameter with minItems 0 (allows help mode)", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const schema = toolDef!.parameters as any;
     const tasksArraySchema = getTasksArraySchema(schema);
@@ -3124,7 +3130,7 @@ describe("delegate extension integration", () => {
   });
 
   test("wires prepareArguments to recover stringified tasks arrays", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const prepare = toolDef!.prepareArguments;
     expect(prepare).toBeDefined();
@@ -3154,7 +3160,7 @@ describe("delegate extension integration", () => {
   });
 
   test("stays out of the system prompt but self-describes in the schema", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     // System-prompt stealth: no snippet, no guidelines.
     expect(toolDef!.promptSnippet).toBeUndefined();
@@ -3276,7 +3282,7 @@ describe("delegate extension integration", () => {
   });
 
   test("rejects mixed dispatch, ticket, and session-control shapes", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const invalidCalls = [
       { ticketAction: "poll", tasks: [{ prompt: "stray" }] },
@@ -3305,7 +3311,7 @@ describe("delegate extension integration", () => {
         undefined,
         ts.session.extensionRunner as any,
       );
-      const text = result.content[0].text;
+      const text = firstText(result);
       expect(text).toContain("Invalid delegate call");
       if ((params as any).tasks?.[0]?.deadlineMs !== undefined) {
         expect(text).toContain("deadlineMs must be a positive number");
@@ -3316,7 +3322,7 @@ describe("delegate extension integration", () => {
   });
 
   test("execute returns help when tasks is empty", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
 
     const result = await toolDef!.execute(
@@ -3327,7 +3333,7 @@ describe("delegate extension integration", () => {
       ts.session.extensionRunner as any,
     );
 
-    const text = result.content[0].text;
+    const text = firstText(result);
     expect(text).toContain("Delegate Tool Manual");
     expect(text).toContain("Available Custom Agents");
     expect(text).toContain("Task Fields");
@@ -3357,7 +3363,7 @@ describe("delegate extension integration", () => {
   });
 
   test("task schema has prompt as required string", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
     const taskSchema = tasksArraySchema.items;
@@ -3368,7 +3374,7 @@ describe("delegate extension integration", () => {
   });
 
   test("task schema has optional fields", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
     const taskSchema = tasksArraySchema.items;
@@ -3398,7 +3404,7 @@ describe("delegate extension integration", () => {
   });
 
   test("task schema exposes Pi's max thinking level", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const tasksArraySchema = getTasksArraySchema(toolDef!.parameters as any);
 
@@ -3406,7 +3412,7 @@ describe("delegate extension integration", () => {
   });
 
   test("execute rejects unknown agents and suggests help", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
 
     const result = await toolDef!.execute(
@@ -3417,7 +3423,7 @@ describe("delegate extension integration", () => {
       ts.session.extensionRunner as any,
     );
 
-    const text = result.content[0].text;
+    const text = firstText(result);
     expect(text).toContain("Unknown agent");
     expect(text).toContain("nonexistent-agent-xyz");
     expect(text).toContain("Available: default");
@@ -3425,7 +3431,7 @@ describe("delegate extension integration", () => {
   });
 
   test("execute falls back to hardcoded prompt when no systemPrompt, no agent, no getSystemPrompt", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
 
     // Test harness has no getSystemPrompt and no model — so we get past
@@ -3458,7 +3464,7 @@ describe("delegate extension integration", () => {
     // Fix: resolveModelSpec has no parent tier; when nothing explicit is
     // set it returns undefined, and resolveModel's undefined-guard returns
     // ctx.model directly (no registry lookup, no id splitting).
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
 
     const parentModel = {
@@ -3565,7 +3571,7 @@ describe("delegate renderers", () => {
   }
 
   test("renderCall shows task count", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -3579,7 +3585,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderCall shows task count for single task", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -3595,7 +3601,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderCall does not count characters in stringified tasks", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -3611,7 +3617,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderCall does not bloat with long prompts", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -3629,7 +3635,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult shows progress when partial", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -3666,7 +3672,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult shows done status when complete", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -3705,7 +3711,7 @@ describe("delegate renderers", () => {
   });
 
   test("auto-delivered async results use the compact result UI", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const runner = ts.session.extensionRunner;
     if (!runner) throw new Error("No extensionRunner on session");
     const renderer = runner.getMessageRenderer("async_delegate_result");
@@ -3720,6 +3726,7 @@ describe("delegate renderers", () => {
             "Useful answer first.\n\nFull explanation only when expanded.",
           durationMs: 1200,
           tokens: 42,
+          usage: emptyUsage(),
           touchedFiles: [],
         },
       ],
@@ -3808,7 +3815,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult hides output and tool summary in collapsed final mode", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -3852,7 +3859,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult shows all lines when expanded", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -3896,7 +3903,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult shows running tool activities in partial mode", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -3965,7 +3972,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult hides tool summary but shows output preview in collapsed final mode", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4037,7 +4044,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult expands tool results when expanded is true", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4090,7 +4097,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult shows error and hides tool summary in collapsed final mode", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4160,7 +4167,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult shows activities for completed subagent in partial mode", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4239,7 +4246,7 @@ describe("delegate renderers", () => {
   });
 
   test("partial render shows last 5 activities in expanded mode", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4336,7 +4343,7 @@ describe("delegate renderers", () => {
   });
 
   test("formatToolCallShort: various tool types render correctly", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4503,7 +4510,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult shows activity age for running tasks", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4553,7 +4560,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult surfaces cooperative stall cancellation before settlement", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const result = {
       content: [{ type: "text", text: "Running..." }],
@@ -4589,7 +4596,7 @@ describe("delegate renderers", () => {
   });
 
   test("collapsed running shows › with current tool and the effective expand hint", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4648,7 +4655,7 @@ describe("delegate renderers", () => {
   });
 
   test("collapsed running shows thinking… when no current tool", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4685,7 +4692,7 @@ describe("delegate renderers", () => {
   });
 
   test("expanded running shows current tool with elapsed duration", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4745,7 +4752,7 @@ describe("delegate renderers", () => {
   });
 
   test("expanded running shows live output from tool_execution_update", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4807,7 +4814,7 @@ describe("delegate renderers", () => {
   });
 
   test("collapsed done hides activities, expanded shows them", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4866,7 +4873,7 @@ describe("delegate renderers", () => {
   // ── UX-REVIEW tasks: warnings, async/ticket render, queue position ───────
 
   test("renderResult surfaces task warnings in the TUI (final and partial)", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -4923,7 +4930,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult shows a running-ticket banner for non-terminal async state", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -5018,7 +5025,7 @@ describe("delegate renderers", () => {
     };
     ticketRegistry.set("poll45678", ticket);
     try {
-      ts = await createTestSession({ extensions: [EXTENSION] });
+      ts = await createDelegateTestSession();
       const toolDef = getToolDef(ts, "delegate");
       const theme = mockTheme();
       const ctx = mockRenderCtx();
@@ -5048,7 +5055,7 @@ describe("delegate renderers", () => {
   });
 
   test("collapsed final preview strips markdown noise from the first content line", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -5097,7 +5104,7 @@ describe("delegate renderers", () => {
   });
 
   test("queue position shown for pending tasks when concurrency cap is saturated", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx({ executionStarted: true });
@@ -5139,7 +5146,7 @@ describe("delegate renderers", () => {
   });
 
   test("renderResult shows the overlap warning after the progress trees", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const theme = mockTheme();
     const ctx = mockRenderCtx();
@@ -5230,7 +5237,7 @@ describe("delegate pool", () => {
   });
 
   test("prompt is optional for session RPC actions", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
 
     // Redirect delegate.json discovery so execute's reload sees defaults
@@ -5255,7 +5262,7 @@ describe("delegate pool", () => {
         undefined,
         ts.session.extensionRunner as any,
       );
-      expect(listResult.content[0].text).toContain("Active sessions");
+      expect(firstText(listResult)).toContain("Active sessions");
 
       // close without prompt should work (even if session doesn't exist)
       const closeResult = await toolDef!.execute(
@@ -5265,7 +5272,7 @@ describe("delegate pool", () => {
         undefined,
         ts.session.extensionRunner as any,
       );
-      expect(closeResult.content[0].text).toContain("not found");
+      expect(firstText(closeResult)).toContain("not found");
     } finally {
       _resetTelemetryForTesting();
       mock.module("node:os", () => os);
@@ -5281,7 +5288,7 @@ describe("delegate pool", () => {
   });
 
   test("missing prompt throws for non-close/list actions", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
 
     await expect(
@@ -5296,7 +5303,7 @@ describe("delegate pool", () => {
   });
 
   test("close sessionAction requires sessionId", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
 
     const result = await toolDef!.execute(
@@ -5308,7 +5315,7 @@ describe("delegate pool", () => {
       undefined,
       ts.session.extensionRunner as any,
     );
-    expect(result.content[0].text).toContain(
+    expect(firstText(result)).toContain(
       "sessionAction 'close' requires sessionId",
     );
   });
@@ -6119,7 +6126,7 @@ describe("async delegate integration", () => {
   });
 
   test("poll with no tickets returns empty message", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const result = await toolDef!.execute(
       "tc-poll-1",
@@ -6128,16 +6135,16 @@ describe("async delegate integration", () => {
       undefined,
       ts.session.extensionRunner as any,
     );
-    expect(result.content[0].text).toContain("No async tickets");
+    expect(firstText(result)).toContain("No async tickets");
   });
 
   test("poll with no tickets includes a discovery hint", () => {
-    const result = handlePoll({ tasks: [], ticket: undefined }, {} as any);
+    const result = handlePoll({ ticket: undefined }, {} as any);
     // Dead-end must self-correct: a confused `ticketAction: "poll"` should point
     // the caller at the spawn syntax and the help path, not strand them.
-    expect(result.content[0].text).toContain("No async tickets");
-    expect(result.content[0].text).toContain("tasks: [{ agent, prompt }]");
-    expect(result.content[0].text).toContain("tasks: []");
+    expect(firstText(result)).toContain("No async tickets");
+    expect(firstText(result)).toContain("tasks: [{ agent, prompt }]");
+    expect(firstText(result)).toContain("tasks: []");
   });
 
   test("poll lists running tickets", () => {
@@ -6175,24 +6182,21 @@ describe("async delegate integration", () => {
       parentModelId: "test-model",
     };
     ticketRegistry.set("abc12345", ticket);
-    const result = handlePoll({ tasks: [], ticket: undefined }, {} as any);
-    expect(result.content[0].text).toContain("abc12345");
-    expect(result.content[0].text).toContain("running");
+    const result = handlePoll({ ticket: undefined }, {} as any);
+    expect(firstText(result)).toContain("abc12345");
+    expect(firstText(result)).toContain("running");
     // Enriched list: agent roster + copy-pasteable poll/cancel controls.
-    expect(result.content[0].text).toContain("scout");
-    expect(result.content[0].text).toContain(
+    expect(firstText(result)).toContain("scout");
+    expect(firstText(result)).toContain(
       'delegate({ ticketAction: "cancel", ticket: "abc12345", force: true })',
     );
 
     ticket.status = "cancelling";
-    const cancellingResult = handlePoll(
-      { tasks: [], ticket: undefined },
-      {} as any,
-    );
-    expect(cancellingResult.content[0].text).toContain(
+    const cancellingResult = handlePoll({ ticket: undefined }, {} as any);
+    expect(firstText(cancellingResult)).toContain(
       'delegate({ ticketAction: "poll", ticket: "abc12345" })',
     );
-    expect(cancellingResult.content[0].text).not.toContain(
+    expect(firstText(cancellingResult)).not.toContain(
       'delegate({ ticketAction: "cancel", ticket: "abc12345", force: true })',
     );
   });
@@ -6232,9 +6236,9 @@ describe("async delegate integration", () => {
       parentModelId: "test-model",
     };
     ticketRegistry.set("xyz98765", ticket);
-    const result = handlePoll({ tasks: [], ticket: "xyz98765" }, {} as any);
-    expect(result.content[0].text).toContain("xyz98765");
-    expect(result.content[0].text).toContain("RUNNING");
+    const result = handlePoll({ ticket: "xyz98765" }, {} as any);
+    expect(firstText(result)).toContain("xyz98765");
+    expect(firstText(result)).toContain("RUNNING");
   });
 
   test("poll with cancelling ticket returns CANCELLING status", () => {
@@ -6272,10 +6276,10 @@ describe("async delegate integration", () => {
       parentModelId: "test-model",
     };
     ticketRegistry.set("cancelling1", ticket);
-    const result = handlePoll({ tasks: [], ticket: "cancelling1" }, {} as any);
-    expect(result.content[0].text).toContain("cancelling1");
-    expect(result.content[0].text).toContain("CANCELLING");
-    expect(result.content[0].text).toContain("Cancellation requested");
+    const result = handlePoll({ ticket: "cancelling1" }, {} as any);
+    expect(firstText(result)).toContain("cancelling1");
+    expect(firstText(result)).toContain("CANCELLING");
+    expect(firstText(result)).toContain("Cancellation requested");
   });
 
   test("poll running ticket suppresses the (no output) placeholder for failed tasks", () => {
@@ -6303,6 +6307,7 @@ describe("async delegate integration", () => {
           error: "Aborted",
           durationMs: 1000,
           tokens: 0,
+          usage: emptyUsage(),
           touchedFiles: [],
         },
       ],
@@ -6322,12 +6327,9 @@ describe("async delegate integration", () => {
       parentModelId: "test-model",
     };
     ticketRegistry.set("failed-no-output", ticket);
-    const result = handlePoll(
-      { tasks: [], ticket: "failed-no-output" },
-      {} as any,
-    );
-    expect(result.content[0].text).toContain("Aborted");
-    expect(result.content[0].text).not.toContain("(no output)");
+    const result = handlePoll({ ticket: "failed-no-output" }, {} as any);
+    expect(firstText(result)).toContain("Aborted");
+    expect(firstText(result)).not.toContain("(no output)");
   });
 
   test("poll returns completed results for running ticket", () => {
@@ -6379,6 +6381,7 @@ describe("async delegate integration", () => {
           output: "found it",
           durationMs: 1000,
           tokens: 50,
+          usage: emptyUsage(),
           touchedFiles: [],
         },
         undefined,
@@ -6388,6 +6391,7 @@ describe("async delegate integration", () => {
           error: "timeout",
           durationMs: 2000,
           tokens: 0,
+          usage: emptyUsage(),
           touchedFiles: [],
         },
       ],
@@ -6429,7 +6433,7 @@ describe("async delegate integration", () => {
     ticketRegistry.set("partial1", ticket);
 
     const result = handlePoll({ ticket: "partial1" }, {} as any);
-    const text = result.content[0].text;
+    const text = firstText(result);
 
     // Header shows finalized count (done + failed) and active count for the
     // still-running task; failed tasks are also called out separately.
@@ -6449,14 +6453,14 @@ describe("async delegate integration", () => {
     // The placeholder carries a machine-visible pending marker so consumers
     // checking result.error can tell the task is not yet successful.
     expect(result.details.results).toHaveLength(3);
-    expect(result.details.results![0]!.agent).toBe("scout");
+    expect(taskResultAt(result.details.results!, 0).agent).toBe("scout");
     expect(result.details.results![1]).toMatchObject({
       id: "task-b",
       agent: "worker",
       output: "",
       error: "PENDING — result not available",
     });
-    expect(result.details.results![2]!.agent).toBe("runner");
+    expect(taskResultAt(result.details.results!, 2).agent).toBe("runner");
   });
 
   test("poll running-ticket header distinguishes succeeded from failed counts", () => {
@@ -6482,7 +6486,7 @@ describe("async delegate integration", () => {
     ticketRegistry.set("mixed-running", ticket);
 
     const result = handlePoll({ ticket: "mixed-running" }, {} as any);
-    const text = result.content[0].text;
+    const text = firstText(result);
 
     // 4 finalized out of 5 (2 succeeded + 2 failed), with 1 still active.
     // The header must not report only the 2 succeeded tasks.
@@ -6597,15 +6601,15 @@ describe("async delegate integration", () => {
       "does not isolate or serialize file access",
     );
     expect(result.details.overlapWarning).toContain(shared);
-    expect(result.content[0].text).toContain(
+    expect(firstText(result)).toContain(
       "does not isolate or serialize file access",
     );
-    expect(result.content[0].text).toContain(shared);
+    expect(firstText(result)).toContain(shared);
   });
 
   test("poll with unknown ticket returns not found", () => {
-    const result = handlePoll({ tasks: [], ticket: "nonexistent" }, {} as any);
-    expect(result.content[0].text).toContain("not found");
+    const result = handlePoll({ ticket: "nonexistent" }, {} as any);
+    expect(firstText(result)).toContain("not found");
   });
 
   test("cancel without force returns a non-destructive preview", () => {
@@ -6622,10 +6626,10 @@ describe("async delegate integration", () => {
       parentModelId: undefined,
     };
     ticketRegistry.set("cancel1", ticket);
-    const result = handleCancel({ tasks: [], ticket: "cancel1" });
-    expect(result.content[0].text).toContain("cancellation preview");
-    expect(result.content[0].text).toContain("NOT rolled back");
-    expect(result.content[0].text).toContain("force: true");
+    const result = handleCancel({ ticket: "cancel1" });
+    expect(firstText(result)).toContain("cancellation preview");
+    expect(firstText(result)).toContain("NOT rolled back");
+    expect(firstText(result)).toContain("force: true");
     expect(result.details.elapsedMs).toBeGreaterThanOrEqual(2500);
     expect(ticket.status).toBe("running");
     expect(controller.signal.aborted).toBe(false);
@@ -6645,8 +6649,8 @@ describe("async delegate integration", () => {
       parentModelId: undefined,
     };
     ticketRegistry.set("cancel1", ticket);
-    const result = handleCancel({ tasks: [], ticket: "cancel1", force: true });
-    expect(result.content[0].text).toContain("cancelling");
+    const result = handleCancel({ ticket: "cancel1", force: true });
+    expect(firstText(result)).toContain("cancelling");
     expect(ticket.status).toBe("cancelling");
     expect(ticket.completedAt).toBeUndefined();
     expect(controller.signal.aborted).toBe(true);
@@ -6721,9 +6725,9 @@ describe("async delegate integration", () => {
 
     const result = handleCancel({ ticket: "cancel-preview-overlap" });
 
-    expect(result.content[0].text).toContain("cancellation preview");
-    expect(result.content[0].text).toContain(shared);
-    expect(result.content[0].text).toContain(
+    expect(firstText(result)).toContain("cancellation preview");
+    expect(firstText(result)).toContain(shared);
+    expect(firstText(result)).toContain(
       "does not isolate or serialize file access",
     );
     expect(result.details.overlapWarning).toContain(
@@ -6806,9 +6810,9 @@ describe("async delegate integration", () => {
       force: true,
     });
 
-    expect(result.content[0].text).toContain("cancelling");
-    expect(result.content[0].text).toContain(shared);
-    expect(result.content[0].text).toContain(
+    expect(firstText(result)).toContain("cancelling");
+    expect(firstText(result)).toContain(shared);
+    expect(firstText(result)).toContain(
       "does not isolate or serialize file access",
     );
     expect(result.details.overlapWarning).toContain(
@@ -6820,8 +6824,8 @@ describe("async delegate integration", () => {
   });
 
   test("cancel requires ticket ID", () => {
-    const result = handleCancel({ tasks: [], ticket: undefined });
-    expect(result.content[0].text).toContain("requires a ticket ID");
+    const result = handleCancel({ ticket: undefined });
+    expect(firstText(result)).toContain("requires a ticket ID");
   });
 
   test("cancel on already completed ticket returns status", () => {
@@ -6838,8 +6842,8 @@ describe("async delegate integration", () => {
       parentModelId: undefined,
     };
     ticketRegistry.set("done1", ticket);
-    const result = handleCancel({ tasks: [], ticket: "done1" });
-    expect(result.content[0].text).toContain("already done");
+    const result = handleCancel({ ticket: "done1" });
+    expect(firstText(result)).toContain("already done");
   });
 
   test("formatCompletedTicket preserves index alignment for cancelled ticket with partial results", () => {
@@ -6889,6 +6893,7 @@ describe("async delegate integration", () => {
           output: "done early",
           durationMs: 500,
           tokens: 10,
+          usage: emptyUsage(),
           touchedFiles: [],
         },
         undefined, // task-b never started
@@ -6933,7 +6938,7 @@ describe("async delegate integration", () => {
 
     // Simulate poll after cancellation
     const result = handlePoll({ ticket: "cancelled-partial" }, {} as any);
-    const text = result.content[0].text;
+    const text = firstText(result);
 
     // Text output handles undefined results gracefully for cancelled tickets.
     expect(text).toContain("done early");
@@ -6946,7 +6951,7 @@ describe("async delegate integration", () => {
     // Undefined results are filled with full TaskResult placeholders carrying
     // the task id, agent, and the cancelled-pending error message.
     expect(result.details.results).toHaveLength(3);
-    expect(result.details.results![0]!.agent).toBe("scout");
+    expect(taskResultAt(result.details.results!, 0).agent).toBe("scout");
     expect(result.details.results![1]).toMatchObject({
       id: "task-b",
       agent: "worker",
@@ -6962,7 +6967,7 @@ describe("async delegate integration", () => {
   });
 
   test("execute rejects top-level cancel without a ticket", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
 
     const result = await toolDef!.execute(
@@ -6973,7 +6978,7 @@ describe("async delegate integration", () => {
       ts.session.extensionRunner as any,
     );
 
-    expect(result.content[0].text).toContain(
+    expect(firstText(result)).toContain(
       "ticketAction 'cancel' requires ticket",
     );
   });
@@ -7004,6 +7009,7 @@ describe("async delegate integration", () => {
           output: "found the bug",
           durationMs: 1234,
           tokens: 42,
+          usage: emptyUsage(),
           touchedFiles: [],
         },
       ],
@@ -7063,6 +7069,7 @@ describe("async delegate integration", () => {
     error,
     durationMs: 100,
     tokens: 10,
+    usage: emptyUsage(),
     touchedFiles: [],
   });
 
@@ -7276,7 +7283,7 @@ describe("async delegate integration", () => {
       parentModelId: "m",
     };
     const result = formatCompletedTicket(ticket);
-    const text = result.content[0]!.text;
+    const text = firstText(result);
     // Header must announce failure, not just "1/2 tasks completed"
     expect(text).toContain("FAILED");
     expect(text).toContain("1/2 tasks completed");
@@ -7309,7 +7316,7 @@ describe("async delegate integration", () => {
       parentModelId: "m",
     };
     const result = formatCompletedTicket(ticket);
-    const text = result.content[0]!.text;
+    const text = firstText(result);
     expect(text).toContain("CANCELLED");
   });
 
@@ -7338,7 +7345,7 @@ describe("async delegate integration", () => {
       parentModelId: "m",
     };
     const result = formatCompletedTicket(ticket);
-    const text = result.content[0]!.text;
+    const text = firstText(result);
     // No status tag for a successful ticket — header stays as before
     expect(text).not.toContain("FAILED");
     expect(text).not.toContain("CANCELLED");
@@ -7389,7 +7396,7 @@ describe("async delegate integration", () => {
     expect(result.details.results![1]!.error).toBe(
       "PENDING — result not available",
     );
-    expect(result.content[0]!.text).toContain("PENDING — result not available");
+    expect(firstText(result)).toContain("PENDING — result not available");
   });
 
   test("formatCompletedTicket marks pending named-agent resume header with ↻", () => {
@@ -7432,7 +7439,7 @@ describe("async delegate integration", () => {
       parentModelId: "m",
     };
     const result = formatCompletedTicket(ticket);
-    expect(result.content[0]!.text).toContain(
+    expect(firstText(result)).toContain(
       "=== coder ↻sess #task-1: continue the fixes ===",
     );
   });
@@ -7463,7 +7470,7 @@ describe("async delegate integration", () => {
     };
 
     const shutdownSnapshot = formatCompletedTicket(ticket);
-    expect(shutdownSnapshot.content[0]!.text).toContain(
+    expect(firstText(shutdownSnapshot)).toContain(
       "CANCELLED — task aborted mid-run",
     );
     expect(ticket.formattedResult).toBeUndefined();
@@ -7474,8 +7481,8 @@ describe("async delegate integration", () => {
 
     const settledSnapshot = formatCompletedTicket(ticket);
     expect(settledSnapshot).not.toBe(shutdownSnapshot);
-    expect(settledSnapshot.content[0]!.text).toContain("late worker result");
-    expect(settledSnapshot.details.results[0]!.output).toBe(
+    expect(firstText(settledSnapshot)).toContain("late worker result");
+    expect(taskResultAt(settledSnapshot.details.results, 0).output).toBe(
       "late worker result",
     );
     expect(formatCompletedTicket(ticket)).toBe(settledSnapshot);
@@ -7512,6 +7519,7 @@ describe("async delegate integration", () => {
           output: fullOutput,
           durationMs: 100,
           tokens: 10,
+          usage: emptyUsage(),
           touchedFiles: [],
         },
       ],
@@ -7520,12 +7528,12 @@ describe("async delegate integration", () => {
       parentModelId: "m",
     };
     const result = formatCompletedTicket(ticket);
-    const text = result.content[0]!.text;
+    const text = firstText(result);
     const repeated = formatCompletedTicket(ticket);
     // Terminal formatting is memoized: repeated poll/wait calls reuse the same
     // content and therefore the same single spill artifact.
     expect(repeated).toBe(result);
-    expect(repeated.content[0]!.text).toBe(text);
+    expect(firstText(repeated)).toBe(text);
     // Content is bounded: tail present, head absent, pointer present.
     expect(text).toContain("TAILMARKER");
     expect(text).not.toContain("HEADMARKER");
@@ -7545,7 +7553,7 @@ describe("async delegate integration", () => {
   });
 
   test("help text includes async mode section", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const result = await toolDef!.execute(
       "tc-help-async",
@@ -7554,12 +7562,12 @@ describe("async delegate integration", () => {
       undefined,
       ts.session.extensionRunner as any,
     );
-    expect(result.content[0].text).toContain("Async Mode");
-    expect(result.content[0].text).toContain("async: true");
-    expect(result.content[0].text).toContain("poll");
-    expect(result.content[0].text).toContain("cancel");
-    expect(result.content[0].text).toContain("timeoutMs: 600000");
-    expect(result.content[0].text).not.toContain("timeoutMs: 600_000");
+    expect(firstText(result)).toContain("Async Mode");
+    expect(firstText(result)).toContain("async: true");
+    expect(firstText(result)).toContain("poll");
+    expect(firstText(result)).toContain("cancel");
+    expect(firstText(result)).toContain("timeoutMs: 600000");
+    expect(firstText(result)).not.toContain("timeoutMs: 600_000");
   });
 
   test("poll running ticket exposes activity, tool and token counts", () => {
@@ -7609,7 +7617,7 @@ describe("async delegate integration", () => {
     ticketRegistry.set("active-tool", ticket);
 
     const result = handlePoll({ ticket: "active-tool" }, {} as any);
-    const text = result.content[0].text;
+    const text = firstText(result);
 
     // Header: finalized/active counts plus aggregate work performed.
     expect(text).toContain("0/1 finalized");
@@ -7668,7 +7676,7 @@ describe("async delegate integration", () => {
     ticketRegistry.set("reasoning", ticket);
 
     const result = handlePoll({ ticket: "reasoning" }, {} as any);
-    const text = result.content[0].text;
+    const text = firstText(result);
 
     // Between tool calls the latest completed activity is surfaced, not blank.
     expect(text).toContain("0/1 finalized");
@@ -7717,7 +7725,7 @@ describe("async delegate integration", () => {
     ticketRegistry.set("inactive", ticket);
 
     const result = handlePoll({ ticket: "inactive" }, {} as any);
-    const text = result.content[0].text;
+    const text = firstText(result);
 
     // No tool has ever started, but the row still reports the stale activity age.
     expect(text).toContain("0/1 finalized");
@@ -7827,7 +7835,7 @@ describe("async delegate integration", () => {
     ticketRegistry.set("mixed-phases", ticket);
 
     const result = handlePoll({ ticket: "mixed-phases" }, {} as any);
-    const text = result.content[0].text;
+    const text = firstText(result);
 
     expect(text).toContain("2/4 finalized");
     expect(text).toContain("1 active");
@@ -7838,7 +7846,7 @@ describe("async delegate integration", () => {
   });
 
   test("session RPC is top-level only and does not advertise poll, cancel, or prompt", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const schema = toolDef!.parameters as any;
     const tasksArraySchema = getTasksArraySchema(schema as any);
@@ -7853,14 +7861,14 @@ describe("async delegate integration", () => {
   });
 
   test("top-level ticketAction enum includes wait", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const schema = toolDef!.parameters as any;
     expect(schema.properties.ticketAction.enum).toContain("wait");
   });
 
   test("parameter schema includes top-level async ticket controls", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     const toolDef = getToolDef(ts, "delegate");
     const schema = toolDef!.parameters as any;
     expect(schema.properties.ticketAction.enum).toEqual([
@@ -7887,7 +7895,7 @@ describe("async delegate integration", () => {
         model: { id: "test-model" },
       } as any,
     );
-    expect(result.content[0].text).toContain("requires a ticket ID");
+    expect(firstText(result)).toContain("requires a ticket ID");
   });
 
   test("wait on unknown ticket returns not found", async () => {
@@ -7897,7 +7905,7 @@ describe("async delegate integration", () => {
       undefined,
       { model: { id: "test-model" } } as any,
     );
-    expect(result.content[0].text).toContain("not found");
+    expect(firstText(result)).toContain("not found");
   });
 
   test("wait on already-done ticket returns immediately", async () => {
@@ -7932,7 +7940,7 @@ describe("async delegate integration", () => {
       undefined,
       {} as any,
     );
-    expect(result.content[0].text).toContain("1/1 tasks completed");
+    expect(firstText(result)).toContain("1/1 tasks completed");
   });
 
   test("wait on already-failed ticket returns immediately", async () => {
@@ -7967,8 +7975,8 @@ describe("async delegate integration", () => {
       undefined,
       {} as any,
     );
-    expect(result.content[0].text).toContain("FAILED");
-    expect(result.content[0].text).toContain("boom");
+    expect(firstText(result)).toContain("FAILED");
+    expect(firstText(result)).toContain("boom");
   });
 
   test("wait does not expire an old running ticket", async () => {
@@ -8003,11 +8011,11 @@ describe("async delegate integration", () => {
       undefined,
       {} as any,
     );
-    expect(result.content[0].text).toContain("wait timed out");
-    expect(result.content[0].text).toContain("0/1 finalized");
-    expect(result.content[0].text).toContain("scout");
-    expect(result.content[0].text).toContain("timeoutMs omitted");
-    expect(result.content[0].text).toContain("do not poll after a timeout");
+    expect(firstText(result)).toContain("wait timed out");
+    expect(firstText(result)).toContain("0/1 finalized");
+    expect(firstText(result)).toContain("scout");
+    expect(firstText(result)).toContain("timeoutMs omitted");
+    expect(firstText(result)).toContain("do not poll after a timeout");
     expect(ticket.status).toBe("running");
     expect(controller.signal.aborted).toBe(false);
   });
@@ -8065,12 +8073,14 @@ describe("async delegate integration", () => {
       {} as any,
     );
 
-    expect(result.content[0].text).toContain("1/2 finalized");
-    expect(result.content[0].text).toContain("finding: unsafe retry");
-    expect(result.content[0].text).toContain("worker");
-    expect(result.content[0].text).toContain("2 tools");
+    expect(firstText(result)).toContain("1/2 finalized");
+    expect(firstText(result)).toContain("finding: unsafe retry");
+    expect(firstText(result)).toContain("worker");
+    expect(firstText(result)).toContain("2 tools");
     expect(result.details.results).toHaveLength(2);
-    expect(result.details.results![0]?.output).toBe("finding: unsafe retry");
+    expect(taskResultAt(result.details.results!, 0).output).toBe(
+      "finding: unsafe retry",
+    );
     expect(result.details.results![1]?.error).toBe(
       "PENDING — result not available",
     );
@@ -8130,7 +8140,7 @@ describe("async delegate integration", () => {
     // The placeholder carries a machine-visible pending marker; wait/poll
     // consumers can distinguish pending entries from successful ones.
     expect(result.details.results).toHaveLength(2);
-    expect(result.details.results![0]).toBe(results[0]);
+    expect(result.details.results![0]).toBe(results[0]!);
     const placeholder = result.details.results![1] as TaskResult;
     expect(placeholder).toBeDefined();
     expect(placeholder.id).toBe("task-b");
@@ -8183,7 +8193,7 @@ describe("async delegate integration", () => {
       undefined,
       {} as any,
     );
-    expect(result.content[0].text).toContain("1/1 tasks completed");
+    expect(firstText(result)).toContain("1/1 tasks completed");
   });
 
   test("wait on cancelling ticket resolves when shutdown finalizes it", async () => {
@@ -8220,6 +8230,7 @@ describe("async delegate integration", () => {
           output: "done early",
           durationMs: 500,
           tokens: 10,
+          usage: emptyUsage(),
           touchedFiles: [],
         },
         undefined,
@@ -8261,8 +8272,8 @@ describe("async delegate integration", () => {
       undefined,
       {} as any,
     );
-    expect(result.content[0].text).toContain("CANCELLED");
-    expect(result.content[0].text).toContain("CANCELLED — task not started");
+    expect(firstText(result)).toContain("CANCELLED");
+    expect(firstText(result)).toContain("CANCELLED — task not started");
     expect(result.details.status).toBe("cancelled");
     expect(ticket.completedAt).toBeDefined();
     expect(ticket.controller.signal.aborted).toBe(true);
@@ -8304,8 +8315,8 @@ describe("async delegate integration", () => {
     expect(getEventListeners(parentController.signal, "abort")).toHaveLength(1);
 
     const result = await wait;
-    expect(result.content[0].text).toContain("still running");
-    expect(result.content[0].text).toContain("timed out");
+    expect(firstText(result)).toContain("still running");
+    expect(firstText(result)).toContain("timed out");
     expect(ticket.status).toBe("running");
     expect(controller.signal.aborted).toBe(false);
     expect(getEventListeners(parentController.signal, "abort")).toHaveLength(0);
@@ -8345,8 +8356,8 @@ describe("async delegate integration", () => {
       {} as any,
     );
 
-    expect(result.content[0].text).toContain("aborted");
-    expect(result.content[0].text).not.toContain("timed out");
+    expect(firstText(result)).toContain("aborted");
+    expect(firstText(result)).not.toContain("timed out");
     expect(ticket.status).toBe("running");
   });
 
@@ -8387,7 +8398,7 @@ describe("async delegate integration", () => {
       undefined,
       {} as any,
     );
-    expect(result.content[0].text).toContain("aborted");
+    expect(firstText(result)).toContain("aborted");
     expect(ticket.status).toBe("running");
     expect(controller.signal.aborted).toBe(false);
   });
@@ -8673,7 +8684,7 @@ describe("async delegate integration", () => {
     }, 10);
 
     const result = await promise;
-    expect(result.content[0].text).toContain("1/1 tasks completed");
+    expect(firstText(result)).toContain("1/1 tasks completed");
     expect(sent).toHaveLength(0);
   });
 
@@ -8754,7 +8765,7 @@ describe("async delegate integration", () => {
     deliverTicketResults({ sendMessage: () => {} } as any, ticket);
 
     const result = await promise;
-    expect(result.content[0].text).toContain("1/1 tasks completed");
+    expect(firstText(result)).toContain("1/1 tasks completed");
   });
 
   test("wait progress update surfaces partial overlap warning from completed tasks", () => {
@@ -8918,9 +8929,9 @@ describe("async delegate integration", () => {
       {} as any,
     );
 
-    expect(result.content[0].text).toContain("wait timed out");
-    expect(result.content[0].text).toContain(shared);
-    expect(result.content[0].text).toContain(
+    expect(firstText(result)).toContain("wait timed out");
+    expect(firstText(result)).toContain(shared);
+    expect(firstText(result)).toContain(
       "does not isolate or serialize file access",
     );
     expect(result.details.overlapWarning).toContain(
@@ -9007,9 +9018,9 @@ describe("async delegate integration", () => {
       {} as any,
     );
 
-    expect(result.content[0].text).toContain("aborted");
-    expect(result.content[0].text).toContain(shared);
-    expect(result.content[0].text).toContain(
+    expect(firstText(result)).toContain("aborted");
+    expect(firstText(result)).toContain(shared);
+    expect(firstText(result)).toContain(
       "does not isolate or serialize file access",
     );
     expect(result.details.overlapWarning).toContain(
@@ -10522,7 +10533,7 @@ describe("touched-file overlap warning", () => {
           attributedFiles: ["/tmp/b.txt"],
           touchedFiles: ["/tmp/a.txt", "/tmp/b.txt"],
         },
-      ]),
+      ] as unknown as Parameters<typeof findTouchedOverlaps>[0]),
     ).toEqual([]);
   });
 
@@ -10581,7 +10592,7 @@ describe("touched-file overlap warning", () => {
       parentModelId: "m",
     };
     const result = formatCompletedTicket(ticket);
-    const text = result.content[0]!.text;
+    const text = firstText(result);
     expect(text).toContain("touched (best-effort):");
     expect(text).toContain(shared);
     expect(text).toContain("does not isolate or serialize file access");
@@ -10625,7 +10636,7 @@ describe("touched-file overlap warning", () => {
       parentModelId: "m",
     };
     const result = formatCompletedTicket(ticket);
-    const text = result.content[0]!.text;
+    const text = firstText(result);
     expect(text).not.toContain("does not isolate or serialize file access");
     expect(result.details.overlapWarning).toBeUndefined();
   });

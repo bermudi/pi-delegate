@@ -6,7 +6,7 @@ import {
 /** Render the active parent conversation as compact context for a subagent. */
 export function buildParentTranscript(
   entries: SessionEntry[],
-  leafId: string | null,
+  leafId: string | null | undefined,
 ): string | null {
   try {
     const ctx = buildSessionContext(entries, leafId);

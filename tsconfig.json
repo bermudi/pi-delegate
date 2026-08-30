@@ -10,5 +10,5 @@
     "allowImportingTsExtensions": true
   },
   "include": ["*.ts"],
-  "exclude": ["node_modules", "*.bundle.ts", "**/*.test.ts"]
+  "exclude": ["node_modules", "*.bundle.ts"]
 }

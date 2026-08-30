@@ -22,6 +22,12 @@ import {
 } from "./config.ts";
 import type { ResolvedTask, TaskProgress, TaskResult } from "./types.ts";
 
+const testWithOptions = test as unknown as (
+  name: string,
+  options: { timeout: number },
+  fn: () => void | Promise<void>,
+) => void;
+
 function makeRecorder(): {
   calls: CallRecord[];
   tasks: TaskRecord[];
@@ -292,7 +298,7 @@ describe("telemetry", () => {
     expect(tasks[1]!.error_snippet).toBeUndefined();
   });
 
-  test(
+  testWithOptions(
     "v2 schema migrates to v3 keeping legacy rows NULL for new columns",
     { timeout: 15_000 },
     async () => {
@@ -637,6 +643,7 @@ describe("telemetry", () => {
       total_tokens: 0,
       total_cost: 0,
       parent_session_file: undefined,
+      parent_cwd: undefined,
     });
 
     expect(calls).toHaveLength(1);
@@ -796,7 +803,7 @@ describe("telemetry", () => {
     expect(calls[0]!.pi_version).toBe(piCodingAgent.VERSION);
   });
 
-  test(
+  testWithOptions(
     "Node SQLite backend records rows and repairs an incomplete v1 schema",
     { timeout: 15_000 },
     async () => {
@@ -828,7 +835,7 @@ describe("telemetry", () => {
     },
   );
 
-  test(
+  testWithOptions(
     "DELEGATE_TELEMETRY_DB redirects the default database path",
     { timeout: 15_000 },
     async () => {
@@ -863,7 +870,7 @@ describe("telemetry", () => {
     },
   );
 
-  test(
+  testWithOptions(
     "explicit config dbPath wins over DELEGATE_TELEMETRY_DB",
     { timeout: 15_000 },
     async () => {
@@ -886,7 +893,7 @@ describe("telemetry", () => {
     },
   );
 
-  test(
+  testWithOptions(
     "Node SQLite backend survives simultaneous first opens",
     { timeout: 15_000 },
     async () => {
@@ -913,7 +920,7 @@ describe("telemetry", () => {
     },
   );
 
-  test(
+  testWithOptions(
     "Node SQLite backend rotates to a new database path when dbPath changes",
     { timeout: 15_000 },
     async () => {
@@ -951,7 +958,7 @@ describe("telemetry", () => {
     },
   );
 
-  test(
+  testWithOptions(
     "Node SQLite backend keeps only the current database handle after a path change",
     { timeout: 15_000 },
     async () => {
@@ -993,7 +1000,7 @@ describe("telemetry", () => {
     },
   );
 
-  test(
+  testWithOptions(
     "Node SQLite backend drops a stale span finish after a dbPath hot reload",
     { timeout: 15_000 },
     async () => {
@@ -1034,7 +1041,7 @@ describe("telemetry", () => {
     },
   );
 
-  test(
+  testWithOptions(
     "Node SQLite backend recovers after an initial open failure when dbPath is corrected",
     { timeout: 15_000 },
     async () => {

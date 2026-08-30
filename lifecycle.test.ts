@@ -26,7 +26,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
-import { createTestSession } from "@marcfargas/pi-test-harness";
+import {
+  createDelegateTestSession,
+  firstText,
+  getDelegateTool,
+  getExecContext,
+  type TestSession,
+} from "./test-harness.ts";
 // The test harness loads the extension via jiti. Under bun, jiti shares its
 // module graph with native imports, so the `ticketRegistry`/
 // `_setHostRetryBaseMsForTesting`/`_resetPoolForTesting` imported below are the
@@ -77,11 +83,7 @@ import type {
 } from "./types.ts";
 import { formatResumeTag, resumeMarker } from "./format.ts";
 
-const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
-
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-type TestSession = Awaited<ReturnType<typeof createTestSession>>;
 
 /** Create a canned LLM response stream that completes immediately. */
 function mockStream(text: string) {
@@ -163,22 +165,6 @@ function patchAuth(ts: TestSession, stream: StreamFn): void {
   // the subagent (reusing this runtime via the host seam) skips real providers.
   rt.streamSimple = stream;
   _setModelRuntimeFactoryForTesting(async () => ts.session.modelRuntime);
-}
-
-/** Get delegate tool definition from the test session. */
-function getDelegateTool(ts: TestSession) {
-  const runner = ts.session.extensionRunner;
-  if (!runner) throw new Error("No extensionRunner on session");
-  const toolDef = runner.getToolDefinition("delegate");
-  if (!toolDef) throw new Error("delegate tool not found");
-  return toolDef;
-}
-
-/** Create a proper ExtensionContext from the test session's runner. */
-function getExecContext(ts: TestSession) {
-  const runner = ts.session.extensionRunner;
-  if (!runner) throw new Error("No extensionRunner on session");
-  return runner.createContext();
 }
 
 /** Minimal ResolvedTask factory for direct runResolvedTask tests. Tests
@@ -403,7 +389,7 @@ describe("delegate task lifecycle integration", () => {
   test("fresh task (no sessionId, no resumeFrom) creates agent and returns output", async () => {
     const stream = installStreamMock("I completed the task successfully.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -438,7 +424,7 @@ describe("delegate task lifecycle integration", () => {
 
   test("built-in default forwards the live parent thinking level and native tools", async () => {
     const stream = installStreamMock("Default configuration inherited.");
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
     // The harness model defaults to non-reasoning. Mark this test model as
     // reasoning-capable so the public setter can represent a live high-thinking
@@ -484,7 +470,7 @@ describe("delegate task lifecycle integration", () => {
 
   test("disposes a fresh stateless session after successful completion", async () => {
     const stream = installStreamMock("Disposed after success.");
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     let disposals = 0;
@@ -527,7 +513,7 @@ describe("delegate task lifecycle integration", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-prompt-"));
@@ -594,7 +580,7 @@ describe("delegate task lifecycle integration", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const taskCwd = fs.mkdtempSync(
@@ -652,7 +638,7 @@ describe("delegate task lifecycle integration", () => {
   test("fresh task with systemPrompt override", async () => {
     const stream = installStreamMock("Reviewed. All good.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -689,7 +675,7 @@ describe("delegate task lifecycle integration", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-named-"));
@@ -743,7 +729,7 @@ describe("delegate task lifecycle integration", () => {
     // A .pi/agents/ghost.md placed in the per-task cwd must NOT be discovered.
     const stream = installStreamMock("Should never run.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const perTaskCwd = fs.mkdtempSync(
@@ -795,7 +781,7 @@ describe("delegate task lifecycle integration", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     // Stub the runtime's auth + stream so the sub-agent runs without real
     // credentials or network. This is separate from the facade patching below,
     // which only governs model *selection* in task-resolution.
@@ -871,7 +857,7 @@ describe("delegate task lifecycle integration", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -916,7 +902,7 @@ describe("delegate task lifecycle integration", () => {
   test("task with sessionId creates pooled session on first use", async () => {
     const stream = installStreamMock("Pooled task done.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -962,7 +948,7 @@ describe("delegate task lifecycle integration", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -1023,7 +1009,7 @@ describe("delegate task lifecycle integration", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1064,7 +1050,7 @@ describe("delegate task lifecycle integration", () => {
       streamSimple: () => mockStreamError("invalid api key"),
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1095,7 +1081,7 @@ describe("delegate task lifecycle integration", () => {
   test("close action tears down pooled session", async () => {
     const stream = installStreamMock("Done.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -1153,7 +1139,7 @@ describe("delegate task lifecycle integration", () => {
   test("list action shows active sessions", async () => {
     const stream = installStreamMock("Done.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -1198,7 +1184,7 @@ describe("delegate task lifecycle integration", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -1252,7 +1238,7 @@ describe("delegate task lifecycle integration", () => {
   test("async read-only tasks avoid overlapping-writer rejection and remain pollable", async () => {
     const stream = installStreamMock("Async task done.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -1274,7 +1260,7 @@ describe("delegate task lifecycle integration", () => {
 
     const ticketId = (dispatch.details as any).ticketId;
     expect(ticketId).toBeDefined();
-    expect(dispatch.content[0]?.text).not.toContain("Rejected before dispatch");
+    expect(firstText(dispatch)).not.toContain("Rejected before dispatch");
     expect((dispatch.details as any).progress).toHaveLength(2);
 
     // Poll until settled
@@ -1301,7 +1287,7 @@ describe("delegate task lifecycle integration", () => {
     };
 
     // Status is at the top level of details, not nested
-    const text = pollResult.content[0]?.text ?? "";
+    const text = firstText(pollResult) ?? "";
     expect(text).not.toContain("PENDING");
     expect(text).toContain("Async task done");
     expect(finalDetails.results[0]?.output).toContain("Async task done");
@@ -1311,7 +1297,7 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("unknown agent name produces clear error", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1324,7 +1310,7 @@ describe("delegate task lifecycle integration", () => {
       ctx,
     );
 
-    const text = result.content[0].text;
+    const text = firstText(result);
     expect(text).toContain("Unknown agent");
     expect(text).toContain("nonexistent-xyz-abc");
   });
@@ -1332,7 +1318,7 @@ describe("delegate task lifecycle integration", () => {
   test("named agent without tools field inherits the full agent set (*)", async () => {
     const stream = installStreamMock("Inherited tools, ran fine.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-notools-"));
@@ -1378,7 +1364,7 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("task without prompt (and not close/list/resume) throws", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1397,7 +1383,7 @@ describe("delegate task lifecycle integration", () => {
   test("resumeFrom rehydrates from a previous session file", async () => {
     const stream = installStreamMock("Resumed and continued.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     // Create a minimal session file with a prior conversation.
@@ -1492,7 +1478,7 @@ describe("delegate task lifecycle integration", () => {
     // no-duplication rule. The display tag must follow the caller's alias.
     const stream = installStreamMock("Resumed via alias.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const target = path.resolve(ts.cwd, "real-transcript.jsonl");
@@ -1603,7 +1589,7 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("resumeFrom with nonexistent file returns error", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1628,7 +1614,7 @@ describe("delegate task lifecycle integration", () => {
   });
 
   test("resumeFrom with placeholder string returns invalid path error", async () => {
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
 
     const toolDef = getDelegateTool(ts);
     const ctx = getExecContext(ts);
@@ -1660,7 +1646,7 @@ describe("delegate task lifecycle integration", () => {
   test("session config mismatch rejects with actionable message", async () => {
     const stream = installStreamMock("Init.");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -1744,7 +1730,11 @@ function mockStreamError(message: string) {
     timestamp: Date.now(),
   };
   queueMicrotask(() => {
-    stream.push({ type: "done", reason: "error", message: errorMsg });
+    stream.push({
+      type: "done",
+      reason: "error",
+      message: errorMsg,
+    } as never);
   });
   return stream;
 }
@@ -1803,7 +1793,7 @@ describe("delegate retry and error recovery", () => {
       "Recovered successfully.",
     );
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -1834,7 +1824,7 @@ describe("delegate retry and error recovery", () => {
       "Rate limit cleared.",
     );
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -1874,7 +1864,7 @@ describe("delegate retry and error recovery", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -1933,7 +1923,7 @@ describe("delegate retry and error recovery", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     try {
@@ -1979,7 +1969,7 @@ describe("delegate retry and error recovery", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -2017,7 +2007,7 @@ describe("delegate retry and error recovery", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -2065,7 +2055,7 @@ describe("delegate retry and error recovery", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -2108,7 +2098,7 @@ describe("delegate retry and error recovery", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -2163,7 +2153,7 @@ describe("delegate retry and error recovery", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -2227,7 +2217,7 @@ describe("delegate abort behavior", () => {
       },
     }));
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -2332,7 +2322,7 @@ describe("delegate pool-miss with resumeFrom and sessionId", () => {
     ];
     fs.writeFileSync(sessionFile, lines.join("\n") + "\n");
 
-    ts = await createTestSession({ extensions: [EXTENSION] });
+    ts = await createDelegateTestSession();
     patchAuth(ts, stream);
 
     const toolDef = getDelegateTool(ts);
@@ -2442,7 +2432,7 @@ describe("task telemetry boundary", () => {
       delegateStartedAt: Date.now(),
       telemetryCallId: "tc-telemetry-once",
       onProgress: () => {},
-    }) as never;
+    }) as TaskRunEnv;
 
   test("runResolvedTask records exactly one task row, on the final result", async () => {
     const taskRows: TaskRecord[] = [];
@@ -2916,7 +2906,7 @@ describe("whole-task retry gating", () => {
       async (_s, _p, _c, _signal, onProgressCallback) => {
         runAttempts += 1;
         bashMarker += 1;
-        onProgressCallback({
+        onProgressCallback?.({
           tokens: 10,
           toolUses: 1,
           durationMs: 10,
@@ -2959,30 +2949,7 @@ describe("whole-task retry gating", () => {
       signal: undefined,
       modelRegistry: {} as never,
       delegateStartedAt: Date.now(),
-      onProgress: (
-        p: {
-          activities: Array<{
-            id: string;
-            name: string;
-            args: Record<string, unknown>;
-            startTime: number;
-          }>;
-        },
-        u: {
-          tokens: number;
-          toolUses: number;
-          durationMs: number;
-          lastActivityAt?: number;
-          activities: Array<{
-            id: string;
-            name: string;
-            args: { command: string };
-            startTime: number;
-            endTime?: number;
-          }>;
-          failureKind?: "stalled" | "model_error";
-        },
-      ) => {
+      onProgress: (p: TaskProgress, u: AgentProgressUpdate) => {
         p.activities = u.activities;
         p.tokens = u.tokens;
         p.toolUses = u.toolUses;
@@ -3048,7 +3015,7 @@ describe("whole-task retry gating", () => {
       async (_s, _p, _c, _signal, onProgressCallback) => {
         runAttempts += 1;
         const attempt = runAttempts;
-        onProgressCallback({
+        onProgressCallback?.({
           tokens: 10,
           toolUses: 1,
           durationMs: 5,
@@ -3117,30 +3084,7 @@ describe("whole-task retry gating", () => {
       signal: undefined,
       modelRegistry: {} as never,
       delegateStartedAt: Date.now(),
-      onProgress: (
-        p: {
-          activities: Array<{
-            id: string;
-            name: string;
-            args: Record<string, unknown>;
-            startTime: number;
-          }>;
-        },
-        u: {
-          tokens: number;
-          toolUses: number;
-          durationMs: number;
-          lastActivityAt?: number;
-          activities: Array<{
-            id: string;
-            name: string;
-            args: Record<string, unknown>;
-            startTime: number;
-            endTime?: number;
-          }>;
-          failureKind?: "stalled" | "model_error";
-        },
-      ) => {
+      onProgress: (p: TaskProgress, u: AgentProgressUpdate) => {
         p.activities = [...p.activities, ...u.activities];
         p.tokens = u.tokens;
         p.toolUses = u.toolUses;
@@ -3220,7 +3164,7 @@ describe("whole-task retry gating", () => {
     _setRunAgentSessionForTesting(
       async (_s, _p, _c, _signal, onProgressCallback) => {
         runAttempts += 1;
-        onProgressCallback({
+        onProgressCallback?.({
           tokens: 15,
           toolUses: 1,
           durationMs: 5,
@@ -3263,30 +3207,7 @@ describe("whole-task retry gating", () => {
       signal: controller.signal,
       modelRegistry: {} as never,
       delegateStartedAt: Date.now(),
-      onProgress: (
-        p: {
-          activities: Array<{
-            id: string;
-            name: string;
-            args: Record<string, unknown>;
-            startTime: number;
-          }>;
-        },
-        u: {
-          tokens: number;
-          toolUses: number;
-          durationMs: number;
-          lastActivityAt?: number;
-          activities: Array<{
-            id: string;
-            name: string;
-            args: Record<string, unknown>;
-            startTime: number;
-            endTime?: number;
-          }>;
-          failureKind?: "stalled" | "model_error";
-        },
-      ) => {
+      onProgress: (p: TaskProgress, u: AgentProgressUpdate) => {
         p.activities = u.activities;
         p.tokens = u.tokens;
         p.toolUses = u.toolUses;
@@ -4347,6 +4268,7 @@ describe("quiescence-abandoned session ownership", () => {
         usage: emptyUsage(),
         touchedFiles: [],
         attributedFiles: [],
+        fileAttributions: [],
         prompted: true,
       },
       { safe },
@@ -4508,6 +4430,7 @@ describe("quiescence-abandoned session ownership", () => {
         usage: emptyUsage(),
         touchedFiles: [],
         attributedFiles: [],
+        fileAttributions: [],
         prompted: true,
       }));
       const reused = await runResolvedTask(
@@ -4869,7 +4792,7 @@ describe("scratch setup failure remedy", () => {
       modelRegistry: {} as never,
       delegateStartedAt: Date.now(),
       onProgress: () => {},
-    }) as never;
+    }) as TaskRunEnv;
 
   afterEach(() => {
     _setCreateScratchWorkspaceForTesting(undefined);

@@ -53,6 +53,7 @@ import {
   reserveSessionQuarantine,
 } from "./session-quarantine.ts";
 import type { ResolvedTask, TaskDef, TaskProgress } from "./types.ts";
+import { firstText, taskResultAt } from "./test-harness.ts";
 
 describe("progress preview sanitization", () => {
   test("flattens prompt newlines and removes ANSI and terminal controls before storage", () => {
@@ -63,7 +64,7 @@ describe("progress preview sanitization", () => {
         prompt,
         agentName: "scout",
         warnings: [],
-      } as ResolvedTask,
+      } as unknown as ResolvedTask,
     ]);
 
     expect(progress?.task).toBe("first red forged row link");
@@ -126,7 +127,7 @@ describe("dispatch-time shared-write gate", () => {
         workspace: "shared",
         tools: ["write"],
         agentName: "coder",
-      } as ResolvedTask,
+      } as unknown as ResolvedTask,
       { safe },
       undefined,
     );
@@ -155,10 +156,10 @@ describe("dispatch-time shared-write gate", () => {
       onUpdate: undefined,
     });
 
-    expect(result.content[0]?.text).toContain(
+    expect(firstText(result)).toContain(
       "Rejected before dispatch; no tasks were started.",
     );
-    expect(result.content[0]?.text).toContain("quarantined coder task");
+    expect(firstText(result)).toContain("quarantined coder task");
     expect(quarantinedTasks()).toHaveLength(1);
 
     confirmSafe();
@@ -181,7 +182,7 @@ describe("dispatch-time shared-write gate", () => {
           workspace: "shared",
           tools: ["read"],
           agentName: "scout",
-        } as ResolvedTask,
+        } as unknown as ResolvedTask,
         { safe: new Promise<void>(() => {}) },
         undefined,
       );
@@ -215,7 +216,7 @@ describe("dispatch-time shared-write gate", () => {
         onUpdate: undefined,
       });
 
-      expect(result.content[0]?.text).toContain(
+      expect(firstText(result)).toContain(
         "SessionId(s) quarantined after abandonment",
       );
       expect(result.details.progress).toEqual([]);
@@ -268,14 +269,16 @@ describe("dispatch-time shared-write gate", () => {
 
     try {
       const first = await dispatchDelegate(input("hung writer", 20));
-      expect(first.details.results[0]?.failureKind).toBe("deadline_exceeded");
+      expect(taskResultAt(first.details.results, 0).failureKind).toBe(
+        "deadline_exceeded",
+      );
       expect(quarantinedTasks()).toHaveLength(1);
 
       const blocked = await dispatchDelegate(input("overlapping writer"));
-      expect(blocked.content[0]?.text).toContain(
+      expect(firstText(blocked)).toContain(
         "Rejected before dispatch; no tasks were started.",
       );
-      expect(blocked.content[0]?.text).toContain("quarantined inline task");
+      expect(firstText(blocked)).toContain("quarantined inline task");
 
       resolveAcquisition({
         session: { dispose: () => disposed++ },
@@ -335,14 +338,14 @@ describe("dispatch-time shared-write gate", () => {
         } as any,
       });
 
-      expect(result.content[0]?.text).toContain(
+      expect(firstText(result)).toContain(
         "Rejected before dispatch; no tasks were started.",
       );
-      expect(result.content[0]?.text).toContain("Task 1#one, Task 2#two");
-      expect(result.content[0]?.text).toContain(tmpDir);
-      expect(result.content[0]?.text).not.toContain("delegate.json");
-      expect(result.content[0]?.text).not.toContain("allowUnsafeSharedWrites");
-      expect(result.content[0]?.text).toContain('workspace: "scratch"');
+      expect(firstText(result)).toContain("Task 1#one, Task 2#two");
+      expect(firstText(result)).toContain(tmpDir);
+      expect(firstText(result)).not.toContain("delegate.json");
+      expect(firstText(result)).not.toContain("allowUnsafeSharedWrites");
+      expect(firstText(result)).toContain('workspace: "scratch"');
       expect(result.details.results).toEqual([]);
       expect(result.details.progress).toEqual([]);
       expect(updates).toBe(0);
@@ -407,10 +410,8 @@ describe("dispatch-time shared-write gate", () => {
         } as any,
       });
 
-      expect(result.content[0]?.text).toContain(
-        "Task 2#typo: unknown tool(s): fnd",
-      );
-      expect(result.content[0]?.text).toContain(
+      expect(firstText(result)).toContain("Task 2#typo: unknown tool(s): fnd");
+      expect(firstText(result)).toContain(
         "Available: read, write, edit, bash, grep, find, ls",
       );
       expect(result.details.results).toEqual([]);
@@ -485,10 +486,8 @@ describe("dispatch-time shared-write gate", () => {
         } as any,
       });
 
-      expect(result.content[0]?.text).toContain(
-        "Task 2#typo: unknown tool(s): fnd",
-      );
-      expect(result.content[0]?.text).toContain(
+      expect(firstText(result)).toContain("Task 2#typo: unknown tool(s): fnd");
+      expect(firstText(result)).toContain(
         "Available: read, write, edit, bash, grep, find, ls",
       );
       expect(result.details.results).toEqual([]);
@@ -508,17 +507,15 @@ describe("dispatch-time shared-write gate", () => {
   test("an operator config flag authorizes unsafe shared writers with a visible warning", async () => {
     _setDelegateConfigForTesting({ allowUnsafeSharedWrites: true });
     const model = { provider: "test", id: "model" } as any;
-    _setRunAgentSessionForTesting(async (env) => ({
-      index: env.index,
-      taskId: env.task.id,
-      agent: env.resolved.agentName,
-      status: "success",
+    _setRunAgentSessionForTesting(async () => ({
       output: "done",
       durationMs: 1,
       tokens: 0,
-      toolUses: 0,
-      files: [],
       usage: emptyUsage(),
+      touchedFiles: [],
+      attributedFiles: [],
+      fileAttributions: [],
+      prompted: true,
     }));
 
     const result = await dispatchDelegate({
@@ -549,8 +546,8 @@ describe("dispatch-time shared-write gate", () => {
       onUpdate: undefined,
     });
 
-    expect(result.content[0]?.text).toContain("UNSAFE SHARED WRITES ENABLED");
-    expect(result.content[0]?.text).toContain("no isolation or rollback");
+    expect(firstText(result)).toContain("UNSAFE SHARED WRITES ENABLED");
+    expect(firstText(result)).toContain("no isolation or rollback");
     expect(result.details.results).toHaveLength(2);
     _setRunAgentSessionForTesting(undefined);
   });
@@ -583,7 +580,9 @@ describe("dispatch-time shared-write gate", () => {
         toolUses: 0,
         touchedFiles: [path.join(config.cwd, `${index}.txt`)],
         attributedFiles: [path.join(config.cwd, `${index}.txt`)],
+        fileAttributions: [],
         usage: emptyUsage(),
+        prompted: true,
       };
     });
     const artifactRoot = `${tmpDir}-artifacts`;
@@ -618,9 +617,9 @@ describe("dispatch-time shared-write gate", () => {
         onUpdate: undefined,
       });
 
-      expect(result.content[0]?.text).not.toContain("Rejected before dispatch");
-      expect(result.content[0]?.text).toContain("applied_unverified");
-      expect(result.content[0]?.text).toContain(
+      expect(firstText(result)).not.toContain("Rejected before dispatch");
+      expect(firstText(result)).toContain("applied_unverified");
+      expect(firstText(result)).toContain(
         "Changes were applied but not verified",
       );
       expect(result.details.results).toHaveLength(2);
@@ -682,7 +681,7 @@ describe("dispatch-time shared-write gate", () => {
       } as any,
     });
 
-    expect(result.content[0]?.text).toBe(
+    expect(firstText(result)).toBe(
       "Aborted before dispatch; no tasks were started.",
     );
     expect(result.details.results).toEqual([]);
@@ -760,10 +759,10 @@ describe("dispatch-time shared-write gate", () => {
       onUpdate: undefined,
     });
 
-    expect(result.content[0]?.text).toContain(
+    expect(firstText(result)).toContain(
       "Task 1#new, async ticket 'live1234' task 1#old",
     );
-    expect(result.content[0]?.text).toContain("Rejected before dispatch");
+    expect(firstText(result)).toContain("Rejected before dispatch");
     expect(ticketRegistry.size).toBe(1);
   });
 
@@ -787,6 +786,8 @@ describe("dispatch-time shared-write gate", () => {
         usage: emptyUsage(),
         touchedFiles: [],
         attributedFiles: [],
+        fileAttributions: [],
+        prompted: true,
       };
     });
     const invoke = (prompt: string) =>
@@ -817,10 +818,10 @@ describe("dispatch-time shared-write gate", () => {
     try {
       await started;
       const rejected = await invoke("incoming");
-      expect(rejected.content[0]?.text).toContain(
+      expect(firstText(rejected)).toContain(
         "Rejected before dispatch; no tasks were started.",
       );
-      expect(rejected.content[0]?.text).toContain("active sync task 1");
+      expect(firstText(rejected)).toContain("active sync task 1");
     } finally {
       releaseWorker();
       await active;
@@ -899,7 +900,7 @@ describe("dispatchSync touched-file overlap warning", () => {
     const session = makeFakeSession(touchedFiles, attributedFiles);
     const manager = makeFakeSessionManager(sessionFile);
     commit(sessionId, {
-      session,
+      session: session as unknown as Parameters<typeof commit>[1]["session"],
       sessionManager: manager,
       sessionFile,
       frozen: {
@@ -924,7 +925,7 @@ describe("dispatchSync touched-file overlap warning", () => {
         tools: [],
         systemPrompt: "",
         model: { provider: "test", id: "m" } as any,
-      } as ResolvedTask,
+      } as unknown as ResolvedTask,
       progress: {
         id: taskId,
         index: 0,
@@ -957,6 +958,7 @@ describe("dispatchSync touched-file overlap warning", () => {
           usage: { ...emptyUsage(), totalTokens: 1 },
           touchedFiles: [],
           attributedFiles: [],
+          fileAttributions: [],
           prompted: true,
         },
         { safe },
@@ -964,18 +966,26 @@ describe("dispatchSync touched-file overlap warning", () => {
     );
 
     const result = await dispatchSync({
-      ctx: { cwd: tmpDir, modelRegistry: {} as any },
+      ctx: {
+        cwd: tmpDir,
+        model: { provider: "test", id: "m" } as any,
+        modelRegistry: {} as any,
+        sessionManager: undefined,
+      },
       tasks: [{ prompt: "work" }],
       resolved: [task.resolved],
       progress: [task.progress],
       parentModelId: "m",
+      dispatchConfig: getDelegateConfigSnapshot(),
       signal: undefined,
       fire: () => {},
     });
 
-    expect(result.details.results[0]?.incomplete).toBe("quiescence_abandoned");
+    expect(taskResultAt(result.details.results, 0).incomplete).toBe(
+      "quiescence_abandoned",
+    );
     expect("usage" in result).toBe(false);
-    expect(result.content[0]?.text).toContain(
+    expect(firstText(result)).toContain(
       "token usage, and cost are lower bounds",
     );
 
@@ -992,6 +1002,7 @@ describe("dispatchSync touched-file overlap warning", () => {
     const result = await dispatchSync({
       ctx: {
         cwd: tmpDir,
+        model: { provider: "test", id: "m" } as any,
         modelRegistry: {} as any,
         sessionManager: undefined,
       },
@@ -999,11 +1010,12 @@ describe("dispatchSync touched-file overlap warning", () => {
       resolved: [a.resolved, b.resolved],
       progress: [a.progress, b.progress],
       parentModelId: "m",
+      dispatchConfig: getDelegateConfigSnapshot(),
       signal: undefined,
       fire: () => {},
     });
 
-    const text = result.content[0]!.text;
+    const text = firstText(result);
     expect(text).toContain("touched (best-effort): shared.txt");
     expect(text).toContain(shared);
     expect(text).toContain("does not isolate or serialize file access");
@@ -1017,6 +1029,7 @@ describe("dispatchSync touched-file overlap warning", () => {
     const result = await dispatchSync({
       ctx: {
         cwd: tmpDir,
+        model: { provider: "test", id: "m" } as any,
         modelRegistry: {} as any,
         sessionManager: undefined,
       },
@@ -1024,11 +1037,12 @@ describe("dispatchSync touched-file overlap warning", () => {
       resolved: [a.resolved, b.resolved],
       progress: [a.progress, b.progress],
       parentModelId: "m",
+      dispatchConfig: getDelegateConfigSnapshot(),
       signal: undefined,
       fire: () => {},
     });
 
-    const text = result.content[0]!.text;
+    const text = firstText(result);
     expect(text).not.toContain("does not isolate or serialize file access");
     expect(text).not.toContain("does not roll back completed writes");
   });
@@ -1044,6 +1058,7 @@ describe("dispatchSync touched-file overlap warning", () => {
     const result = await dispatchSync({
       ctx: {
         cwd: tmpDir,
+        model: { provider: "test", id: "m" } as any,
         modelRegistry: {} as any,
         sessionManager: undefined,
       },
@@ -1051,11 +1066,12 @@ describe("dispatchSync touched-file overlap warning", () => {
       resolved: [a.resolved, b.resolved],
       progress: [a.progress, b.progress],
       parentModelId: "m",
+      dispatchConfig: getDelegateConfigSnapshot(),
       signal: undefined,
       fire: () => {},
     });
 
-    const text = result.content[0]!.text;
+    const text = firstText(result);
     // Display still reports the best-effort union for each task.
     expect(text).toContain("touched (best-effort): a.txt, b.txt");
     // Overlap is computed only from directly attributable files.
@@ -1070,6 +1086,7 @@ describe("dispatchSync touched-file overlap warning", () => {
     const result = await dispatchSync({
       ctx: {
         cwd: tmpDir,
+        model: { provider: "test", id: "m" } as any,
         modelRegistry: {} as any,
         sessionManager: undefined,
       },
@@ -1080,12 +1097,13 @@ describe("dispatchSync touched-file overlap warning", () => {
       resolved: [a.resolved, b.resolved],
       progress: [a.progress, b.progress],
       parentModelId: "m",
+      dispatchConfig: getDelegateConfigSnapshot(),
       signal: undefined,
       fire: () => {},
     });
 
-    expect(result.details.results[0]!.id).toBe("task-a");
-    expect(result.details.results[1]!.id).toBe("task-b");
+    expect(taskResultAt(result.details.results, 0).id).toBe("task-a");
+    expect(taskResultAt(result.details.results, 1).id).toBe("task-b");
     expect(result.details.progress[0]!.id).toBe("task-a");
     expect(result.details.progress[1]!.id).toBe("task-b");
     // Result arrays stay index-aligned; ids are per-entry, not keys.
@@ -1149,6 +1167,7 @@ describe("dispatchSync touched-file overlap warning", () => {
       } as any,
       ctx: {
         cwd: tmpDir,
+        model: { provider: "test", id: "m" } as any,
         modelRegistry: {} as any,
         sessionManager: undefined,
       },
@@ -1156,6 +1175,7 @@ describe("dispatchSync touched-file overlap warning", () => {
       resolved: [task.resolved],
       progress: [task.progress],
       parentModelId: "model",
+      dispatchConfig: getDelegateConfigSnapshot(),
       callSpan,
     });
     const ticket = ticketRegistry.get(acknowledgment.details.ticketId!);
@@ -1225,6 +1245,7 @@ describe("dispatchSync touched-file overlap warning", () => {
     const result = await dispatchSync({
       ctx: {
         cwd: tmpDir,
+        model: { provider: "test", id: "m" } as any,
         modelRegistry: {} as any,
         sessionManager: undefined,
       },
@@ -1232,13 +1253,14 @@ describe("dispatchSync touched-file overlap warning", () => {
       resolved: [a.resolved, b.resolved],
       progress: [a.progress, b.progress],
       parentModelId: "m",
+      dispatchConfig: getDelegateConfigSnapshot(),
       signal: undefined,
       fire: () => {},
     });
 
     expect(result.details.results[0]!.error).toBeUndefined();
     expect(result.details.results[1]!.error).toBeUndefined();
-    expect(result.details.results[1]!.output).toBe("b done");
+    expect(taskResultAt(result.details.results, 1).output).toBe("b done");
   });
 
   test("async ticket and runner capture a dispatch-scoped config snapshot", async () => {
@@ -1277,6 +1299,7 @@ describe("dispatchSync touched-file overlap warning", () => {
       pi: { sendMessage: () => {} } as any,
       ctx: {
         cwd: tmpDir,
+        model: { provider: "test", id: "m" } as any,
         modelRegistry: {} as any,
         sessionManager: undefined,
       } as any,
@@ -1369,7 +1392,12 @@ describe("dispatchAsync leaf affinity", () => {
           sendMessage ??
           ((message: any, options: any) => sent.push({ message, options })),
       } as any,
-      ctx: { cwd: tmpDir, modelRegistry: {} as any, sessionManager: undefined },
+      ctx: {
+        cwd: tmpDir,
+        model: { provider: "test", id: "m" } as any,
+        modelRegistry: {} as any,
+        sessionManager: undefined,
+      },
       tasks: [{ prompt: "a" }] as TaskDef[],
       resolved: [
         {
@@ -1380,7 +1408,7 @@ describe("dispatchAsync leaf affinity", () => {
           tools: [],
           systemPrompt: "",
           model: { provider: "test", id: "m" } as any,
-        } as ResolvedTask,
+        } as unknown as ResolvedTask,
       ],
       progress: [
         {
@@ -1395,6 +1423,7 @@ describe("dispatchAsync leaf affinity", () => {
         } as TaskProgress,
       ],
       parentModelId: "m",
+      dispatchConfig: getDelegateConfigSnapshot(),
     });
     const ticketId = result.details.ticketId!;
     return { sent, notified, ticketId };

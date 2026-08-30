@@ -139,8 +139,8 @@ describe("Git-native isolated workspace", () => {
       git(repo, ["rev-parse", "--verify", `${conflict.proposalRef}^{commit}`]),
     ).toBeTruthy();
     expect(privateRefs(repo)).toEqual([
-      conflict.baselineRef,
-      conflict.proposalRef,
+      conflict.baselineRef!,
+      conflict.proposalRef!,
     ]);
   });
 
