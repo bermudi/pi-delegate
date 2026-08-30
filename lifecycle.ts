@@ -442,9 +442,10 @@ function recordTaskOutcome(
  *  that model, so same-model retry is pointless. Distinguished from a bare
  *  transient 429 (per-minute rate limit) by the *account-level* wording:
  *  "usage limit", "quota", "upgrade for higher limits", "exceeded your
- *  … quota", or an auth/credential failure (401/403 with word boundaries so a
- *  port like 4019 doesn't false-positive). The parent should resume with a
- *  different `model` (see `resumeFrom` + `model`). */
+ *  … quota", an auth/credential failure (401/403 with word boundaries so a
+ *  port like 4019 doesn't false-positive), or an invalidated OAuth token
+ *  ("invalid"/"invalidated" anywhere alongside "oauth token"). The parent
+ *  should resume with a different `model` (see `resumeFrom` + `model`). */
 export function isModelAttributableError(error: string | undefined): boolean {
   if (!error) return false;
   const e = error.toLowerCase();
@@ -463,6 +464,7 @@ export function isModelAttributableError(error: string | undefined): boolean {
     e.includes("authentication") ||
     e.includes("invalid api key") ||
     (e.includes("api key") && e.includes("invalid")) ||
+    (e.includes("oauth token") && e.includes("invalid")) ||
     /\b401\b/.test(e) ||
     /\b403\b/.test(e)
   );

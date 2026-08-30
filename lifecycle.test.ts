@@ -4791,6 +4791,20 @@ describe("isModelAttributableError", () => {
     expect(isModelAttributableError("authentication failed")).toBe(true);
   });
 
+  test("invalidated OAuth token → true (provider problem, not transient)", () => {
+    expect(
+      isModelAttributableError("request failed: your oauth token was invalidated"),
+    ).toBe(true);
+    expect(isModelAttributableError("Invalid OAuth token"))
+      .toBe(true);
+    expect(
+      isModelAttributableError("OAuth token invalidated; re-authenticate"),
+    ).toBe(true);
+    // OAuth wording without an invalid/invalidated signal stays transient.
+    expect(isModelAttributableError("oauth token refreshed successfully"))
+      .toBe(false);
+  });
+
   test("transient errors → false (same-model retry is appropriate)", () => {
     expect(isModelAttributableError("connection refused")).toBe(false);
     expect(isModelAttributableError("network error")).toBe(false);
