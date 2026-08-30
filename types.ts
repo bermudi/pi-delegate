@@ -444,6 +444,9 @@ export interface TaskRunEnv {
    *  use this instead of the live singleton so retry/stall/output/provider
    *  settings stay stable for the ticket's lifetime. */
   config?: import("./config.ts").DelegateConfig;
+  /** Injectable runtime context. When omitted, task execution falls back to the
+   *  module-level default runtime for backward compatibility. */
+  runtime?: import("./runtime.ts").DelegateRuntime;
 }
 
 /** Structural subset of Pi's `ExtensionContext` used by delegate's

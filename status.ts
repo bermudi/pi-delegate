@@ -26,7 +26,7 @@
  * there.
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { requestTicketCancel, ticketRegistry } from "./tickets.ts";
+import { getDefaultDelegateRuntime, type DelegateRuntime } from "./runtime.ts";
 import type { AsyncTicket } from "./types.ts";
 
 const STATUS_KEY = "delegate";
@@ -39,10 +39,12 @@ export interface ActiveTicketSummary {
 }
 
 /** Snapshot the live background work from the ticket registry. */
-export function activeTicketSummary(): ActiveTicketSummary {
+export function activeTicketSummary(
+  runtime: DelegateRuntime = getDefaultDelegateRuntime(),
+): ActiveTicketSummary {
   const tickets: AsyncTicket[] = [];
   let activeSubagents = 0;
-  for (const ticket of ticketRegistry.values()) {
+  for (const ticket of runtime.tickets.values()) {
     if (ticket.status !== "running" && ticket.status !== "cancelling") continue;
     tickets.push(ticket);
     activeSubagents += ticket.progress.filter(
@@ -88,10 +90,13 @@ const settledWarnedTicketIds = new Set<string>();
  *  Called on every ticket lifecycle mutation (create, progress, complete,
  *  cancel); event-driven only — no timers, so the text never goes stale
  *  (counts are the only content). */
-export function syncDelegateStatus(ctx?: ExtensionContext): void {
+export function syncDelegateStatus(
+  ctx?: ExtensionContext,
+  runtime?: DelegateRuntime,
+): void {
   if (ctx) lastCtx = ctx;
 
-  const summary = activeTicketSummary();
+  const summary = activeTicketSummary(runtime);
   const text = buildStatusText(summary);
 
   if (settledWarnedTicketIds.size) {
@@ -127,9 +132,12 @@ export function clearDelegateStatusContext(): void {
 /** Warn once per ticket at the first agent_settled with that ticket active —
  *  the "looks idle but isn't" moment. The persistent footer status carries
  *  the information from then on, so later settles stay quiet. */
-export function notifyActiveTicketsOnSettled(ctx: ExtensionContext): void {
+export function notifyActiveTicketsOnSettled(
+  ctx: ExtensionContext,
+  runtime?: DelegateRuntime,
+): void {
   lastCtx = ctx;
-  const summary = activeTicketSummary();
+  const summary = activeTicketSummary(runtime);
   const fresh = summary.tickets.filter(
     (t) => !settledWarnedTicketIds.has(t.id),
   );
@@ -167,9 +175,10 @@ export function notifyActiveTicketsOnSettled(ctx: ExtensionContext): void {
 export async function guardSessionReplacement(
   ctx: ExtensionContext,
   action: "switch" | "fork",
+  runtime?: DelegateRuntime,
 ): Promise<{ cancel: true } | undefined> {
   lastCtx = ctx;
-  const summary = activeTicketSummary();
+  const summary = activeTicketSummary(runtime);
   if (!summary.tickets.length || !ctx.hasUI) return undefined;
 
   const ids = summary.tickets.map((t) => t.id).join(", ");
@@ -194,9 +203,11 @@ export async function guardSessionReplacement(
  *  extension) is still handled at delivery time via leaf affinity. */
 export async function guardTreeNavigation(
   ctx: ExtensionContext,
+  runtime?: DelegateRuntime,
 ): Promise<{ cancel: true } | undefined> {
   lastCtx = ctx;
-  const summary = activeTicketSummary();
+  const rt = runtime ?? getDefaultDelegateRuntime();
+  const summary = activeTicketSummary(rt);
   if (!summary.tickets.length || !ctx.hasUI) return undefined;
 
   const ids = summary.tickets.map((t) => t.id).join(", ");
@@ -220,8 +231,10 @@ export async function guardTreeNavigation(
 
   if (choice === hold) return undefined;
   if (choice === cancel) {
-    for (const ticket of summary.tickets) requestTicketCancel(ticket);
-    syncDelegateStatus(ctx);
+    for (const ticket of summary.tickets) {
+      rt.tickets.requestTicketCancel(ticket);
+    }
+    syncDelegateStatus(ctx, rt);
     return undefined;
   }
   return { cancel: true };

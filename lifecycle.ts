@@ -14,8 +14,7 @@ import type {
   TaskRunEnv,
   ToolActivity,
 } from "./types.ts";
-import * as pool from "./pool.ts";
-import { isSessionBusy } from "./tickets.ts";
+import { getDefaultDelegateRuntime, type DelegateRuntime } from "./runtime.ts";
 import {
   createSubagentSessionManager,
   persistSessionHeader,
@@ -50,10 +49,6 @@ let runAgentSessionForTesting: RunAgentSession = runAgentSession;
 type CreateScratchWorkspace = typeof createScratchWorkspace;
 let createScratchWorkspaceForTesting: CreateScratchWorkspace =
   createScratchWorkspace;
-type DetachQuarantinedPooledSession =
-  typeof pool._quarantinePooledAgentWithoutDisposal;
-let detachQuarantinedPooledSessionForTesting: DetachQuarantinedPooledSession =
-  pool._quarantinePooledAgentWithoutDisposal;
 
 export function _setRunAgentSessionForTesting(
   override: RunAgentSession | undefined,
@@ -70,10 +65,11 @@ export function _setCreateScratchWorkspaceForTesting(
 
 /** @internal Simulate a pooled-detachment invariant failure in lifecycle tests. */
 export function _setQuarantinePooledSessionDetachForTesting(
-  override: DetachQuarantinedPooledSession | undefined,
+  override:
+    ((sessionId: string, expectedSession: AgentSession) => boolean) | undefined,
+  runtime: DelegateRuntime = getDefaultDelegateRuntime(),
 ): void {
-  detachQuarantinedPooledSessionForTesting =
-    override ?? pool._quarantinePooledAgentWithoutDisposal;
+  runtime.pool._setQuarantinePooledAgentWithoutDisposalForTesting(override);
 }
 
 /**
@@ -242,14 +238,16 @@ function disposeSession(session: AgentSession, description: string): void {
 /** Detach an abandoned session from every owner immediately, then dispose it
  * only after runner's background termination monitor proves quiescence. */
 function quarantineAcquiredSession(
+  env: TaskRunEnv,
   task: ResolvedTask,
   acquired: AcquiredSession,
   quarantine: SessionQuarantine,
 ): void {
   let mayDisposeAfterSafety = acquired.lifecycleOwnsSession;
   if (!acquired.lifecycleOwnsSession) {
+    const runtime = env.runtime!;
     const detached = task.sessionId
-      ? detachQuarantinedPooledSessionForTesting(
+      ? runtime.pool.quarantinePooledAgentWithoutDisposal(
           task.sessionId,
           acquired.session,
         )
@@ -617,11 +615,12 @@ type AcquireResult = AcquiredSession | { error: TaskResult };
  * checkout is pure (no lastUsed bump); lastUsed is bumped by commit().
  */
 function checkoutPooledSession(
+  env: TaskRunEnv,
   task: ResolvedTask,
   p: TaskProgress,
 ): AcquireResult | undefined {
   if (!task.sessionId) return undefined;
-  const co = pool.checkout(task.sessionId, {
+  const co = env.runtime!.pool.checkout(task.sessionId, {
     cwd: task.cwd,
     thinking: task.thinking,
     tools: task.tools,
@@ -762,7 +761,7 @@ async function acquireAgentSession(
   p: TaskProgress,
 ): Promise<AcquireResult> {
   if (task.sessionId) {
-    const pooled = checkoutPooledSession(task, p);
+    const pooled = checkoutPooledSession(env, task, p);
     if (pooled) return pooled;
   }
   if (task.resumeFrom) return resumeFromSessionFile(env, task, task.resumeFrom);
@@ -813,6 +812,10 @@ export async function runResolvedTask(
   p: TaskProgress,
   taskIndex: number,
 ): Promise<TaskResult> {
+  // Ensure every lifecycle call operates on an explicit runtime. Older callers
+  // (and some test fixtures) do not inject one, so the default runtime is the
+  // backward-compatible fallback.
+  env.runtime ??= getDefaultDelegateRuntime();
   return withResumeTranscriptLock(task.resumeFrom, async (transcript) => {
     let executionTask = task;
     if (task.resumeFrom) {
@@ -879,8 +882,9 @@ export async function runResolvedTask(
       return runResolvedTaskUnlocked(env, executionTask, p, taskIndex);
     };
 
+    const runtime = env.runtime!;
     return executionTask.sessionId
-      ? pool.withSessionLock(executionTask.sessionId, runLocked)
+      ? runtime.pool.withSessionLock(executionTask.sessionId, runLocked)
       : runLocked();
   });
 }
@@ -1198,7 +1202,10 @@ async function applySessionAction(
     // The per-session lock for action-based operations is already held by the
     // outer runResolvedTask() wrapper. Use the internal close helper to avoid a
     // reentrant deadlock on the same key.
-    const closed = await pool._closePooledAgentWithoutLock(task.sessionId);
+    const runtime = env.runtime!;
+    const closed = await runtime.pool.closePooledAgentWithoutLock(
+      task.sessionId,
+    );
     return finishTask(
       env,
       p,
@@ -1213,12 +1220,13 @@ async function applySessionAction(
   }
 
   if (task.sessionAction === "list") {
+    const runtime = env.runtime!;
     return finishTask(
       env,
       p,
       completeSessionAction(
         task,
-        `Active sessions:\n${pool.listPooledAgents().join("\n")}`,
+        `Active sessions:\n${runtime.pool.listPooledAgents().join("\n")}`,
         Date.now() - env.delegateStartedAt,
       ),
     );
@@ -1231,7 +1239,7 @@ function busySessionConflict(
   task: ResolvedTask,
 ): TaskResult | undefined {
   if (!task.sessionId) return undefined;
-  const busyTicketId = isSessionBusy(task.sessionId);
+  const busyTicketId = env.runtime!.tickets.isSessionBusy(task.sessionId);
   if (busyTicketId && busyTicketId !== env.ticketId) {
     return failTask(
       task,
@@ -1303,6 +1311,7 @@ function noteAttemptProgress(
 
 /** Commit, record, or evict a pooled session after one prompt attempt. */
 async function settlePooledAttempt(
+  env: TaskRunEnv,
   task: ResolvedTask,
   acquired: AcquiredSession,
   r: {
@@ -1313,6 +1322,7 @@ async function settlePooledAttempt(
   },
   sessionReleased: boolean,
 ): Promise<boolean> {
+  const runtime = env.runtime!;
   if (!task.sessionId) return sessionReleased;
   if (acquired.lifecycleOwnsSession) {
     // Pool misses (including resumeFrom) transfer ownership only on
@@ -1323,7 +1333,7 @@ async function settlePooledAttempt(
       r.failureKind !== "stalled" &&
       r.failureKind !== "deadline_exceeded"
     ) {
-      const committed = pool.commit(task.sessionId, {
+      const committed = runtime.pool.commit(task.sessionId, {
         session: acquired.session,
         sessionManager: acquired.sessionManager,
         sessionFile: acquired.sessionFile,
@@ -1353,7 +1363,7 @@ async function settlePooledAttempt(
   ) {
     try {
       return (
-        (await pool._closePooledAgentWithoutLock(task.sessionId)) ||
+        (await runtime.pool.closePooledAgentWithoutLock(task.sessionId)) ||
         sessionReleased
       );
     } catch (error) {
@@ -1371,7 +1381,7 @@ async function settlePooledAttempt(
   if (r.failureKind !== "deadline_exceeded") {
     // Pool hits stay owned by the pool, and non-stalled, non-aborted
     // completions (including failed attempts) must still count usage.
-    pool.recordUse(task.sessionId, r.tokens);
+    runtime.pool.recordUse(task.sessionId, r.tokens);
   }
   // Pre-prompt deadline (prompted === false): the pooled session was
   // checked out but never used. Leave it in the pool with no usage
@@ -1558,12 +1568,13 @@ async function runTaskAttempt(
         );
 
     if (quarantine) {
-      quarantineAcquiredSession(task, acquired, quarantine);
+      quarantineAcquiredSession(env, task, acquired, quarantine);
       // Neither lifecycle nor pool owns it now. The deferred safety callback is
       // the sole owner and finally below must not dispose it early.
       sessionReleased = true;
     } else {
       sessionReleased = await settlePooledAttempt(
+        env,
         task,
         acquired,
         r,

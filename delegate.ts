@@ -52,11 +52,14 @@ export type { AgentOverride } from "./config.ts";
 export {
   checkout,
   commit,
+  recordUse,
   configFor,
   closePooledAgent,
   closeAllPooledAgents,
   listPooledAgents,
   withSessionLock,
+  SessionPool,
+  defaultSessionPool,
 } from "./pool.ts";
 export type {
   FrozenConfig,
@@ -79,8 +82,11 @@ export {
   resolveFinalTicketStatus,
   settleTicket,
   formatCompletedTicket,
+  TicketRegistry,
 } from "./tickets.ts";
 export type { TicketDelivery, SettleTicketOptions } from "./tickets.ts";
+export { createDelegateRuntime, getDefaultDelegateRuntime } from "./runtime.ts";
+export type { DelegateRuntime } from "./runtime.ts";
 export {
   recordTreeNavigation,
   getCurrentLeafId,

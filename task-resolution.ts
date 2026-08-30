@@ -12,8 +12,7 @@ import {
   availableToolNames,
   resolveToolGroups,
 } from "./tools.ts";
-import { configFor } from "./pool.ts";
-import { isSessionBusy } from "./tickets.ts";
+import { getDefaultDelegateRuntime, type DelegateRuntime } from "./runtime.ts";
 import {
   isResumeFromQuarantined,
   isSessionIdQuarantined,
@@ -115,6 +114,7 @@ export function validateTasks(
   tasks: DispatchableTask[],
   agents: Map<string, AgentConfig>,
   parentModelId: string | undefined,
+  runtime: DelegateRuntime = getDefaultDelegateRuntime(),
 ): DelegateToolResult | null {
   const unknown: string[] = [];
   for (const task of tasks) {
@@ -203,7 +203,7 @@ export function validateTasks(
   // Disallow sessionIds already claimed by a running async ticket.
   const busyConflicts: string[] = [];
   for (const sid of sessionIds) {
-    const owner = isSessionBusy(sid);
+    const owner = runtime.tickets.isSessionBusy(sid);
     if (owner) busyConflicts.push(`${sid} (ticket ${owner})`);
   }
   if (busyConflicts.length) {
@@ -247,6 +247,7 @@ export function resolveTasks(
   agents: Map<string, AgentConfig>,
   parentDefaults: ParentAgentDefaults,
   dispatchConfig: DelegateConfig = getDelegateConfigSnapshot(),
+  runtime: DelegateRuntime = getDefaultDelegateRuntime(),
 ): ResolveTasksResult {
   // Build parent transcript lazily — only computed once if any task uses with-parent-transcript
   let parentTranscript: string | null = null;
@@ -305,7 +306,9 @@ export function resolveTasks(
     // win; inline subagents inherit the parent's base prompt when Pi exposes
     // it. The assembled parent project-context section was stripped above;
     // the child ResourceLoader supplies context for this task's cwd.
-    const pooledConfig = t.sessionId ? configFor(t.sessionId) : undefined;
+    const pooledConfig = t.sessionId
+      ? runtime.pool.configFor(t.sessionId)
+      : undefined;
     const isPoolHit = pooledConfig !== undefined;
     const parentNativeTools = parentDefaults.tools.filter((name) =>
       Object.hasOwn(TOOL_FACTORIES, name),

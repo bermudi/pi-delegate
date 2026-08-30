@@ -1,14 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
-import {
-  ticketRegistry,
-  generateTicketId,
-  deliverTicketResults,
-  sweepTickets,
-  resolveFinalTicketStatus,
-  settleTicket,
-  notifyWaiters,
-} from "./tickets.ts";
+import { getDefaultDelegateRuntime, type DelegateRuntime } from "./runtime.ts";
 import {
   getConcurrencyLimit,
   getMaxAsyncTickets,
@@ -165,6 +157,7 @@ export interface AsyncDispatchInput {
   callSpan?: CallSpan;
   dispatchConfig: DelegateConfig;
   dispatchWarning?: string;
+  runtime?: DelegateRuntime;
 }
 
 /** Inputs needed by the sync (blocking) dispatch path. */
@@ -179,6 +172,7 @@ export interface SyncDispatchInput {
   callSpan?: CallSpan;
   dispatchConfig: DelegateConfig;
   dispatchWarning?: string;
+  runtime?: DelegateRuntime;
 }
 
 /** Inputs for the normal task-validation, resolution, and dispatch path. */
@@ -192,6 +186,7 @@ export interface DelegateDispatchInput {
   signal: AbortSignal | undefined;
   onUpdate: AgentToolUpdateCallback<DelegateDetails> | undefined;
   callSpan?: CallSpan;
+  runtime?: DelegateRuntime;
 }
 
 function taskReference(task: DispatchableTask, index: number): string {
@@ -276,10 +271,11 @@ export async function dispatchDelegate(
     signal,
     onUpdate,
     callSpan,
+    runtime = getDefaultDelegateRuntime(),
   } = input;
   const tasks = params.tasks ?? [];
 
-  const validationError = validateTasks(tasks, agents, parentModelId);
+  const validationError = validateTasks(tasks, agents, parentModelId, runtime);
   if (validationError) {
     callSpan?.finish({
       status: "failed",
@@ -296,6 +292,7 @@ export async function dispatchDelegate(
     agents,
     parentDefaults,
     dispatchConfig,
+    runtime,
   );
   if (resolveResult.error !== undefined) {
     callSpan?.finish({
@@ -360,7 +357,7 @@ export async function dispatchDelegate(
           taskReference(tasks[index]!, index),
         );
 
-        for (const ticket of ticketRegistry.values()) {
+        for (const ticket of runtime.tickets.values()) {
           if (
             ticket.status !== "running" &&
             ticket.status !== "cancelling" &&
@@ -439,6 +436,7 @@ export async function dispatchDelegate(
           callSpan,
           dispatchConfig,
           dispatchWarning,
+          runtime,
         });
       }
 
@@ -510,6 +508,7 @@ export async function dispatchDelegate(
       callSpan,
       dispatchConfig,
       dispatchWarning,
+      runtime,
     });
   } finally {
     if (syncReservation) activeSyncDispatches.delete(syncReservation);
@@ -519,8 +518,12 @@ export async function dispatchDelegate(
 /** Deliver a settled ticket and, when leaf affinity downgraded delivery to a
  *  non-waking `nextTurn` message, tell the human — otherwise the completion is
  *  silent apart from the footer clearing. */
-function finishTicketDelivery(pi: ExtensionAPI, ticket: AsyncTicket): void {
-  if (deliverTicketResults(pi, ticket) === "deferred") {
+function finishTicketDelivery(
+  pi: ExtensionAPI,
+  ticket: AsyncTicket,
+  runtime: DelegateRuntime,
+): void {
+  if (runtime.tickets.deliverTicketResults(pi, ticket) === "deferred") {
     notifyCrossLeafDelivery(ticket);
   }
 }
@@ -555,10 +558,11 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     callSpan,
     dispatchConfig,
     dispatchWarning,
+    runtime = getDefaultDelegateRuntime(),
   } = input;
 
-  sweepTickets();
-  const runningCount = [...ticketRegistry.values()].filter(
+  runtime.tickets.sweepTickets();
+  const runningCount = [...runtime.tickets.values()].filter(
     (t) => t.status === "running" || t.status === "cancelling",
   ).length;
   const maxAsyncTickets = getMaxAsyncTickets(dispatchConfig);
@@ -580,7 +584,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     };
   }
 
-  const ticketId = generateTicketId();
+  const ticketId = runtime.tickets.generateTicketId();
   const controller = new AbortController();
   const ticket: AsyncTicket = {
     id: ticketId,
@@ -607,12 +611,12 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     // in effect when the ticket was spawned.
     config: dispatchConfig,
   };
-  ticketRegistry.set(ticketId, ticket);
+  runtime.tickets.set(ticketId, ticket);
   callSpan?.spawn();
   // Footer visibility for the new background work (see status.ts). Uses the
   // ctx cached from the dispatch path in extension.ts — DelegateToolCtx is
   // the intentionally narrowed surface and does not carry `ui`.
-  syncDelegateStatus();
+  syncDelegateStatus(undefined, runtime);
 
   // Capture values for the closure — do NOT use `signal` from execute()
   // The parent turn's signal dies when execute() returns.
@@ -630,16 +634,17 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       callSpan?.telemetryConfig ?? getTelemetryConfig(dispatchConfig),
     async: true,
     config: dispatchConfig,
+    runtime,
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
-      notifyWaiters(ticket);
+      runtime.tickets.notifyWaiters(ticket);
       // Live subagent counts in the footer. Deduped by text, so only
       // running/pending count transitions trigger a render.
-      syncDelegateStatus();
+      syncDelegateStatus(undefined, runtime);
     },
     onStatusChange: () => {
-      notifyWaiters(ticket);
-      syncDelegateStatus();
+      runtime.tickets.notifyWaiters(ticket);
+      syncDelegateStatus(undefined, runtime);
     },
   };
 
@@ -652,9 +657,9 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
   // In particular, result delivery is allowed to fail without re-entering the
   // worker completion path; the terminal ticket remains available to poll.
   const finishLiveSettlement = (t: AsyncTicket): void => {
-    syncDelegateStatus();
+    syncDelegateStatus(undefined, runtime);
     settleAsyncCall(t, callSpan);
-    finishTicketDelivery(pi, t);
+    finishTicketDelivery(pi, t, runtime);
   };
 
   const completion = mapConcurrentByModel(
@@ -692,10 +697,10 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       // A "cancelling" ticket that outlived its workers settles as
       // "cancelled": the per-task results record what actually happened;
       // the ticket state reports that the batch was aborted by the caller.
-      settleTicket(ticket, {
+      runtime.tickets.settleTicket(ticket, {
         status:
           ticket.status === "running"
-            ? resolveFinalTicketStatus(ticket)
+            ? runtime.tickets.resolveFinalTicketStatus(ticket)
             : "cancelled",
       });
       finishLiveSettlement(ticket);
@@ -710,7 +715,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         settleAsyncCall(ticket, callSpan);
         return;
       }
-      settleTicket(ticket, {
+      runtime.tickets.settleTicket(ticket, {
         status: ticket.status === "cancelling" ? "cancelled" : "failed",
         error: err instanceof Error ? err.message : String(err),
       });
@@ -765,6 +770,7 @@ export async function dispatchSync(
     callSpan,
     dispatchConfig,
     dispatchWarning,
+    runtime = getDefaultDelegateRuntime(),
   } = input;
 
   const startedAt = Date.now();
@@ -807,6 +813,7 @@ export async function dispatchSync(
       callSpan?.telemetryConfig ?? getTelemetryConfig(dispatchConfig),
     async: false,
     config: dispatchConfig,
+    runtime,
     onProgress: (p, u) => {
       updateProgressFromRun(p, u);
       fire();

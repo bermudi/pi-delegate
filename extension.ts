@@ -1,11 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-  handleCancel,
-  handlePoll,
-  handleWait,
-  cancelTicketForShutdown,
-  ticketRegistry,
-} from "./tickets.ts";
+import { getDefaultDelegateRuntime, type DelegateRuntime } from "./runtime.ts";
 import { discoverAgents } from "./agents.ts";
 import { getSubagentManualMarkdown } from "./manual.ts";
 import {
@@ -25,7 +19,6 @@ import { hostCompatError } from "./host-compat.ts";
 import { invalidateHostDepsCache } from "./host.ts";
 import { registerProviderExtensionNotifier } from "./provider-extensions.ts";
 import { recordTreeNavigation, resetLeafTracking } from "./leaf.ts";
-import { closeAllPooledAgents } from "./pool.ts";
 import { reconfigureGlobalConcurrency } from "./concurrency.ts";
 import { reloadDelegateConfig, getMaxConcurrent } from "./config.ts";
 import {
@@ -130,8 +123,15 @@ export function _setShutdownDrainTimeoutForTesting(
   shutdownDrainTimeoutMs = timeoutMs ?? DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS;
 }
 
-/** Register the delegate tool and clean up its parent-session resources. */
-export default function delegateExtension(pi: ExtensionAPI): void {
+/** Register the delegate tool and clean up its parent-session resources.
+ *
+ *  Production uses the module default runtime. Tests/embedders may pass a
+ *  fresh runtime as the second argument so all tool execution, status, and
+ *  shutdown operate in an isolated pool/ticket environment. */
+export default function delegateExtension(
+  pi: ExtensionAPI,
+  runtime: DelegateRuntime = getDefaultDelegateRuntime(),
+): void {
   // A /reload can reuse this module instance after the previous runtime closed
   // its SQLite handle. Permit the new runtime to open a fresh backend; stale
   // workers from the old runtime remain blocked from reopening it.
@@ -237,17 +237,17 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // ── Poll action ───────────────────────────────────────────────────
       if (params.ticketAction === "poll") {
-        const result = handlePoll(params, ctx);
+        const result = runtime.tickets.handlePoll(params, ctx);
         succeedCall();
         return result;
       }
 
       // ── Cancel action ─────────────────────────────────────────────────
       if (params.ticketAction === "cancel") {
-        const result = handleCancel(params);
+        const result = runtime.tickets.handleCancel(params);
         // A forced cancel flips the ticket to "cancelling" — keep the
         // footer status in step (deduped; the preview path is a no-op).
-        syncDelegateStatus(ctx);
+        syncDelegateStatus(ctx, runtime);
         succeedCall();
         return result;
       }
@@ -255,7 +255,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // ── Wait action ────────────────────────────────────────────────────
       if (params.ticketAction === "wait") {
         try {
-          const result = await handleWait(params, signal, onUpdate, ctx);
+          const result = await runtime.tickets.handleWait(
+            params,
+            signal,
+            onUpdate,
+            ctx,
+          );
           succeedCall();
           return result;
         } catch (err) {
@@ -283,7 +288,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         invalidateHostDepsCache();
         // Keep the footer-status pipeline in step exactly as a normal
         // dispatch would (deduped no-op when nothing is running).
-        syncDelegateStatus(ctx);
+        syncDelegateStatus(ctx, runtime);
         return await dispatchDelegate({
           pi,
           params: { ...params, tasks: [bridgeSessionControlTask(params)] },
@@ -297,6 +302,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           signal,
           onUpdate,
           callSpan,
+          runtime,
         });
       }
 
@@ -318,7 +324,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // dispatch narrows it to DelegateToolCtx (which has no `ui`). The
       // status push itself is a deduped no-op here; dispatchAsync re-syncs
       // after registering its ticket.
-      syncDelegateStatus(ctx);
+      syncDelegateStatus(ctx, runtime);
 
       // Keep expensive host deps shared within this dispatch, not indefinitely
       // across dispatches: edits to auth/models/settings/context files must be
@@ -338,6 +344,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           signal,
           onUpdate,
           callSpan,
+          runtime,
         });
       } catch (err) {
         failCall();
@@ -360,15 +367,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   // The turn settling with live tickets is the "looks idle but isn't" moment:
   // warn once per ticket. The footer status carries it from there.
   pi.on("agent_settled", (_event, ctx) => {
-    notifyActiveTicketsOnSettled(ctx);
+    notifyActiveTicketsOnSettled(ctx, runtime);
   });
 
   // Session replacements are cancellable — confirm before killing live work.
   pi.on("session_before_switch", (_event, ctx) =>
-    guardSessionReplacement(ctx, "switch"),
+    guardSessionReplacement(ctx, "switch", runtime),
   );
   pi.on("session_before_fork", (_event, ctx) =>
-    guardSessionReplacement(ctx, "fork"),
+    guardSessionReplacement(ctx, "fork", runtime),
   );
 
   // /tree navigation stays inside the same session: nothing is torn down and
@@ -376,10 +383,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   // user moves to. Ask first, and record the new leaf either way so delivery
   // can detect the mismatch (issue #30). `session_tree` also fires for
   // extension-driven ctx.navigateTree, which never reaches the guard.
-  pi.on("session_before_tree", (_event, ctx) => guardTreeNavigation(ctx));
+  pi.on("session_before_tree", (_event, ctx) =>
+    guardTreeNavigation(ctx, runtime),
+  );
   pi.on("session_tree", (event, ctx) => {
     recordTreeNavigation(event.newLeafId);
-    syncDelegateStatus(ctx);
+    syncDelegateStatus(ctx, runtime);
   });
 
   // ── Session shutdown: abort tickets and dispose live pooled sessions ──
@@ -395,7 +404,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // leave a trace. For quit the TUI is already stopped — stderr lands in
       // the scrollback. For reload the TUI survives — warn in place. Switch
       // and fork already passed the confirm guard above.
-      const active = activeTicketSummary();
+      const active = activeTicketSummary(runtime);
       if (active.tickets.length) {
         if (event.reason === "quit") {
           console.error(
@@ -416,15 +425,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         }
       }
 
-      for (const ticket of ticketRegistry.values()) {
+      for (const ticket of runtime.tickets.values()) {
         if (ticket.status === "running" || ticket.status === "cancelling") {
-          cancelTicketForShutdown(ticket);
+          runtime.tickets.cancelTicketForShutdown(ticket);
         }
         // Include already-cancelled tickets too: a repeated shutdown event can
         // race the first handler while its workers are still unwinding.
         if (ticket.completion) ticketCompletions.push(ticket.completion);
       }
-      syncDelegateStatus(ctx);
+      syncDelegateStatus(ctx, runtime);
       // The runtime is invalidated right after this handler returns; aborted
       // tickets keep unwinding asynchronously and must find no cached ctx (or
       // captured pi) to touch. The cancelled completion path still writes one
@@ -443,7 +452,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       // SQLite still stays open until both cleanup paths finish.
       let poolCleanup: Promise<void>;
       try {
-        poolCleanup = closeAllPooledAgents();
+        poolCleanup = runtime.pool.closeAllPooledAgents();
       } catch (error) {
         console.error("[delegate] pooled-session shutdown start failed", error);
         poolCleanup = Promise.resolve();
