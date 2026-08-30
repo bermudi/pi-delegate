@@ -35,7 +35,12 @@ function scratchWorkspaceAvailable(): boolean {
   return true;
 }
 
-const scratchTest = test.skipIf(!scratchWorkspaceAvailable());
+// Several scratch tests assume permission bits bind the owner (chmod 000
+// fixtures, the 0500 lease boundary) — root bypasses both via CAP_DAC_OVERRIDE,
+// so the suite would fail spuriously rather than test anything real.
+const scratchTest = test.skipIf(
+  !scratchWorkspaceAvailable() || process.getuid?.() === 0,
+);
 const fdTest = test.skipIf(
   process.platform !== "linux" ||
     !fs.existsSync("/proc/self/fd") ||
