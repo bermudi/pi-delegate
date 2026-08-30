@@ -35,8 +35,8 @@ delegate({
 ```
 
 Parent extension/MCP tools are not copied, and project instructions are rebuilt
-for the task's `cwd`. Omit `agent` when you want an ad-hoc task using delegate's
-normal inline defaults instead.
+for the task's `cwd`. Omit `agent` when you want an inline task using delegate's
+normal defaults instead.
 
 The other built-ins are:
 
@@ -216,8 +216,8 @@ over an installed extension.
   and workspace, and an explicit `model`/`thinking` replaces parent inheritance.
   For `default`, the `delegate.json` override maps are ignored (task fields still
   win); for the other built-ins, those maps win field-by-field over frontmatter.
-- **Ad-hoc subagent** — A subagent created from inline task fields instead of a
-  named Markdown agent profile. In current output this is labeled `ad-hoc`.
+- **Inline subagent** — A subagent created from inline task fields instead of a
+  named Markdown agent profile. In current output this is labeled `inline`.
 - **Inline task** — The task object itself when its configuration is supplied
   directly in the delegate call. Prefer this term over “inline agent” when
   talking about the API shape.

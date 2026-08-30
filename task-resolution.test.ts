@@ -505,7 +505,18 @@ describe("built-in agent profiles", () => {
     ]);
   });
 
-  test("an omitted-agent resume takes the resumed-transcript identity, not ad-hoc", () => {
+  test("an omitted-agent task uses the inline identity", () => {
+    const [resolved] = resolveTasks(
+      [{ prompt: "investigate" }] as any,
+      makeCtx(),
+      builtins,
+      { thinking: "high", tools: ["read", "write", "edit", "bash"] },
+    ).tasks!;
+
+    expect(resolved.agentName).toBe("inline");
+  });
+
+  test("an omitted-agent resume takes the resumed-transcript identity, not inline", () => {
     const transcript =
       "/tmp/sessions/2026-08-20T06-56-16-677Z_01a01df4-c925-7d92-a125-79eaacdfe2a9.jsonl";
 

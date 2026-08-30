@@ -194,7 +194,7 @@ function makeBaseTask(overrides: Partial<ResolvedTask> = {}): ResolvedTask {
     thinking: "off",
     systemPrompt: "",
     cwd: process.cwd(),
-    agentName: "ad-hoc",
+    agentName: "inline",
     warnings: [],
     ...overrides,
   };
@@ -433,7 +433,7 @@ describe("delegate task lifecycle integration", () => {
       "completed the task successfully",
     );
     expect(details.results[0]?.tokens).toBeGreaterThan(0);
-    expect(details.results[0]?.agent).toBe("ad-hoc");
+    expect(details.results[0]?.agent).toBe("inline");
   });
 
   test("built-in default forwards the live parent thinking level and native tools", async () => {
@@ -515,7 +515,7 @@ describe("delegate task lifecycle integration", () => {
     }
   });
 
-  test("ad-hoc prompt inherits the parent base but not global AGENTS.md", async () => {
+  test("inline prompt inherits the parent base but not global AGENTS.md", async () => {
     const projectInstruction = "SPAWN_PROMPT_HYGIENE_PROJECT_CONTEXT";
     const globalInstruction = "SPAWN_PROMPT_HYGIENE_GLOBAL_CONTEXT";
     let capturedSystemPrompt = "";
@@ -3339,7 +3339,7 @@ describe("delegate retry and deadline", () => {
 
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -3386,7 +3386,7 @@ describe("delegate retry and deadline", () => {
     const env = makeTestEnv();
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -3514,7 +3514,7 @@ describe("delegate pre-prompt deadline and pool", () => {
         task,
         {
           index: 0,
-          agent: "ad-hoc",
+          agent: "inline",
           task: task.prompt,
           status: "pending",
           durationMs: 0,
@@ -3585,7 +3585,7 @@ describe("delegate pre-prompt deadline and pool", () => {
     const env = makeTestEnv();
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -3679,7 +3679,7 @@ describe("delegate pre-prompt deadline and pool", () => {
     const env = makeTestEnv();
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -3765,7 +3765,7 @@ describe("delegate pre-prompt deadline and pool", () => {
     const env = makeTestEnv();
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -3864,7 +3864,7 @@ describe("delegate pre-prompt deadline and pool", () => {
     const env = makeTestEnv();
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -3946,7 +3946,7 @@ describe("delegate pre-prompt deadline and pool", () => {
     const env = makeTestEnv();
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -4031,7 +4031,7 @@ describe("delegate deadline on pool miss", () => {
     const env = makeTestEnv();
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -4074,7 +4074,7 @@ describe("lifecycle-level deadline and abort races", () => {
     const env = makeTestEnv({ delegateStartedAt: 0 });
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -4129,7 +4129,7 @@ describe("lifecycle-level deadline and abort races", () => {
     const env = makeTestEnv({ signal: controller.signal });
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -4179,7 +4179,7 @@ describe("lifecycle-level deadline and abort races", () => {
     const env = makeTestEnv({ signal: controller.signal });
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -4217,7 +4217,7 @@ describe("lifecycle-level deadline and abort races", () => {
     const env = makeTestEnv({ signal: controller.signal });
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,
@@ -4263,7 +4263,7 @@ describe("lifecycle-level deadline and abort races", () => {
     const env = makeTestEnv({ signal: controller.signal });
     const progress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "test prompt",
       status: "pending" as const,
       durationMs: 0,

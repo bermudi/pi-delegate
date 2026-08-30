@@ -42,7 +42,7 @@ export const delegateTaskSchema = Type.Object({
   agent: Type.Optional(
     Type.String({
       description:
-        "default mirrors the parent's tools; scout/coder/reviewer specialists. Ad-hoc tasks get * tools even when the parent is narrower.",
+        "default mirrors the parent's tools; scout/coder/reviewer specialists. Inline tasks get * tools even when the parent is narrower.",
     }),
   ),
   cwd: Type.Optional(
@@ -71,7 +71,7 @@ export const delegateTaskSchema = Type.Object({
   tools: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        "Names/presets: *=read/write/edit/bash (mutating); ro=read/grep/find/ls (read-only). Ad-hoc defaults to *.",
+        "Names/presets: *=read/write/edit/bash (mutating); ro=read/grep/find/ls (read-only). Inline defaults to *.",
     }),
   ),
   thinking: Type.Optional(
@@ -450,7 +450,7 @@ function wrapFlatTaskFields(record: Record<string, unknown>): void {
 }
 
 /** Per-entry recovery for one task: stringified (or bare-token) `tools` → a
- * real array, and `agent: ""` → omitted (ad-hoc). Other malformed input is
+ * real array, and `agent: ""` → omitted (inline). Other malformed input is
  * left for schema validation to reject loudly. */
 function normalizeTaskEntry(entry: unknown): unknown {
   if (!entry || typeof entry !== "object") return entry;
@@ -476,7 +476,7 @@ function normalizeTaskEntry(entry: unknown): unknown {
  *   unless ticket- or session-control intent makes the call legitimately
  *   taskless (see `hasTicketControlIntent` / `hasSessionControlIntent`);
  * - `tools` as a JSON string (or bare token) inside a task entry;
- * - `agent: ""` inside a task entry — treated as omitted (ad-hoc);
+ * - `agent: ""` inside a task entry — treated as omitted (inline);
  * All other invalid input is left for normal schema validation to reject
  * loudly.
  *

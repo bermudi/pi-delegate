@@ -85,7 +85,7 @@ export interface HostDepsOptions {
    * host deps are cached per (agentDir + cwd + systemPrompt): the expensive
    * `reload()` (skills, project AGENTS.md discovery) runs once per distinct combo, then
    * is reused across concurrent subagents. Provider-configured or
-   * allowlisted-extension tasks always receive fresh host deps. For ad-hoc
+   * allowlisted-extension tasks always receive fresh host deps. For inline
    * tasks (no named agent) pass undefined to use the discovered prompt.
    */
   systemPrompt?: string;

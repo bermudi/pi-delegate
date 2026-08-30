@@ -302,7 +302,7 @@ export function resolveTasks(
         : undefined;
 
     // Build system prompt. Explicit task prompts and named agent prompts
-    // win; ad-hoc subagents inherit the parent's base prompt when Pi exposes
+    // win; inline subagents inherit the parent's base prompt when Pi exposes
     // it. The assembled parent project-context section was stripped above;
     // the child ResourceLoader supplies context for this task's cwd.
     const pooledConfig = t.sessionId ? configFor(t.sessionId) : undefined;
@@ -625,12 +625,12 @@ export function resolveTasks(
       // display code treats "" and absent alike (`t.prompt || …`).
       prompt: prompt ?? "",
       // Keep the built-in selector visible in progress/results. Omitted-agent
-      // inline tasks retain the established `ad-hoc` label and config namespace
-      // — except resumes: a continued transcript is not a fresh ad-hoc spawn,
-      // so it carries the resumed-transcript identity instead.
+      // tasks use the `inline` label and config namespace — except resumes: a
+      // continued transcript is not a fresh inline spawn, so it carries the
+      // resumed-transcript identity instead.
       agentName:
         agent?.name ??
-        (resumeFromDisplay ? `resume:${resumeFromDisplay}` : "ad-hoc"),
+        (resumeFromDisplay ? `resume:${resumeFromDisplay}` : "inline"),
       resumeFromDisplay,
       warnings,
       reuseIntent: {

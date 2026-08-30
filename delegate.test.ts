@@ -3187,8 +3187,8 @@ describe("delegate extension integration", () => {
     expect(tasksArraySchema.items.properties.agent.description).toContain(
       "scout/coder/reviewer specialists",
     );
-    // The ad-hoc divergence is stated plainly (issue #40 decision pending) —
-    // never as a deliberate design choice.
+    // The inline divergence is deliberate (#40) and remains stated plainly —
+    // keep this assertion aligned with that documented decision.
     expect(tasksArraySchema.items.properties.agent.description).toContain(
       "even when the parent is narrower",
     );
@@ -4563,7 +4563,7 @@ describe("delegate renderers", () => {
         progress: [
           {
             index: 0,
-            agent: "ad-hoc",
+            agent: "inline",
             task: "task",
             status: "running",
             durationMs: 5000,
@@ -4875,11 +4875,11 @@ describe("delegate renderers", () => {
       content: [{ type: "text", text: "Done" }],
       details: {
         tasks: [{ prompt: "task" }],
-        results: [{ agent: "ad-hoc", output: "ok", durationMs: 0, tokens: 0 }],
+        results: [{ agent: "inline", output: "ok", durationMs: 0, tokens: 0 }],
         progress: [
           {
             index: 0,
-            agent: "ad-hoc",
+            agent: "inline",
             task: "task",
             status: "done",
             durationMs: 0,
@@ -5059,7 +5059,7 @@ describe("delegate renderers", () => {
         tasks: [{ prompt: "task" }],
         results: [
           {
-            agent: "ad-hoc",
+            agent: "inline",
             output:
               "# Heading\n\n- bullet\n1. step one\nThe real finding: X is broken.",
             durationMs: 0,
@@ -5069,7 +5069,7 @@ describe("delegate renderers", () => {
         progress: [
           {
             index: 0,
-            agent: "ad-hoc",
+            agent: "inline",
             task: "task",
             status: "done",
             durationMs: 0,

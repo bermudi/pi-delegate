@@ -275,7 +275,7 @@ describe("dispatch-time shared-write gate", () => {
       expect(blocked.content[0]?.text).toContain(
         "Rejected before dispatch; no tasks were started.",
       );
-      expect(blocked.content[0]?.text).toContain("quarantined ad-hoc task");
+      expect(blocked.content[0]?.text).toContain("quarantined inline task");
 
       resolveAcquisition({
         session: { dispose: () => disposed++ },

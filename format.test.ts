@@ -33,7 +33,7 @@ describe("resumeMarker", () => {
   });
 
   test("stays empty for fresh tasks", () => {
-    expect(resumeMarker({ agent: "ad-hoc" })).toBe("");
-    expect(resumeMarker({ agent: "ad-hoc", resumedFrom: undefined })).toBe("");
+    expect(resumeMarker({ agent: "inline" })).toBe("");
+    expect(resumeMarker({ agent: "inline", resumedFrom: undefined })).toBe("");
   });
 });

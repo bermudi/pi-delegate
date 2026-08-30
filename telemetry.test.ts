@@ -377,7 +377,7 @@ describe("telemetry", () => {
     const task: ResolvedTask = {
       id: "t1",
       prompt: "hello world",
-      agentName: "ad-hoc",
+      agentName: "inline",
       model: { id: "test/model" } as any,
       tools: ["read", "bash"],
       thinking: "low",
@@ -387,7 +387,7 @@ describe("telemetry", () => {
     };
     const progress: TaskProgress = {
       index: 0,
-      agent: "ad-hoc",
+      agent: "inline",
       task: "hello world",
       status: "done",
       durationMs: 10,
@@ -396,7 +396,7 @@ describe("telemetry", () => {
       activities: [],
     };
     const result: TaskResult = {
-      agent: "ad-hoc",
+      agent: "inline",
       output: "ok",
       durationMs: 10,
       tokens: 50,
@@ -461,7 +461,7 @@ describe("telemetry", () => {
     expect(row.id).toBe("stable-task-row");
     expect(row.call_id).toBe("call-1");
     expect(row.idx).toBe(0);
-    expect(row.agent).toBe("ad-hoc");
+    expect(row.agent).toBe("inline");
     expect(row.model).toBe("test/model");
     expect(row.thinking).toBe("low");
     expect(row.tools).toBe(JSON.stringify(["read", "bash"]));

@@ -232,7 +232,7 @@ describe("render-branches compatibility fallback", () => {
     expect(ctxWithout.lines.some((line) => line.includes("agent"))).toBe(true);
   });
 
-  test("a resumed task renders as a revival, not a fresh ad-hoc spawn", async () => {
+  test("a resumed task renders as a revival, not a fresh inline spawn", async () => {
     const { renderFinalBranch } = await import("./render-branches.ts");
 
     const theme = {
@@ -262,7 +262,7 @@ describe("render-branches compatibility fallback", () => {
       touchedFiles: [],
     });
 
-    // Omitted-agent resume: identity is `resume:<tag>` — no "ad-hoc", and no
+    // Omitted-agent resume: identity is `resume:<tag>` — no "inline", and no
     // duplicate ↻ marker on top of the resume identity.
     const resumed = {
       progress: [
@@ -290,7 +290,7 @@ describe("render-branches compatibility fallback", () => {
     expect(resumed.lines.some((line) => line.includes("resume:01a01df4"))).toBe(
       true,
     );
-    expect(resumed.lines.some((line) => line.includes("ad-hoc"))).toBe(false);
+    expect(resumed.lines.some((line) => line.includes("inline"))).toBe(false);
     expect(resumed.lines.some((line) => line.includes("↻"))).toBe(false);
 
     // Named-agent resume: keeps the name and gains the ↻ revival marker.
