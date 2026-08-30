@@ -326,6 +326,7 @@ describe("telemetry", () => {
     expect(row.model).toBe("test/model");
     expect(row.thinking).toBe("low");
     expect(row.tools).toBe(JSON.stringify(["read", "bash"]));
+    expect(row.workspace).toBe("shared");
     expect(row.tokens).toBe(75);
     expect(row.cost).toBe(0.02);
     expect(row.tool_uses).toBe(4);
@@ -335,6 +336,82 @@ describe("telemetry", () => {
     expect(row.async).toBe(0);
     expect(row.outcome).toBe("failed");
     expect(row.failure_kind).toBeUndefined();
+  });
+
+  test("recordTask captures workspace", () => {
+    const { tasks, recorder } = makeRecorder();
+    _setTelemetryForTesting(recorder);
+    const baseTask: ResolvedTask = {
+      id: "t1",
+      prompt: "p",
+      agentName: "reviewer",
+      model: { id: "m" } as any,
+      tools: ["read", "bash"],
+      thinking: "off",
+      systemPrompt: "",
+      cwd: "/tmp",
+      workspace: "scratch",
+      warnings: [],
+    };
+    const progress: TaskProgress = {
+      index: 0,
+      agent: "reviewer",
+      task: "p",
+      status: "done",
+      durationMs: 1,
+      tokens: 1,
+      toolUses: 0,
+      activities: [],
+    };
+    const result: TaskResult = {
+      agent: "reviewer",
+      output: "ok",
+      durationMs: 1,
+      tokens: 1,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 1,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      touchedFiles: [],
+    };
+    recordTask({
+      callId: "c1",
+      async: false,
+      taskIndex: 0,
+      task: baseTask,
+      progress,
+      result,
+      retries: 0,
+    });
+    expect(tasks[0]!.workspace).toBe("scratch");
+    // isolated
+    tasks.length = 0;
+    recordTask({
+      callId: "c1",
+      async: false,
+      taskIndex: 0,
+      task: { ...baseTask, workspace: "isolated" },
+      progress,
+      result,
+      retries: 0,
+    });
+    expect(tasks[0]!.workspace).toBe("isolated");
+    // default when omitted
+    tasks.length = 0;
+    recordTask({
+      callId: "c1",
+      async: false,
+      taskIndex: 0,
+      task: { ...baseTask, workspace: undefined },
+      progress,
+      result,
+      retries: 0,
+    });
+    expect(tasks[0]!.workspace).toBe("shared");
   });
 
   test("outcome uses structured cancellation rather than provider error text", () => {
@@ -602,7 +679,7 @@ describe("telemetry", () => {
         await expect(readNodeDatabase(dbPath)).resolves.toEqual({
           calls: 1,
           tasks: 0,
-          userVersion: 1,
+          userVersion: 2,
           journalMode: "wal",
           piVersion: piCodingAgent.VERSION,
         });
@@ -629,7 +706,7 @@ describe("telemetry", () => {
         await expect(readNodeDatabase(dbPath)).resolves.toEqual({
           calls: 8,
           tasks: 0,
-          userVersion: 1,
+          userVersion: 2,
           journalMode: "wal",
           piVersion: piCodingAgent.VERSION,
         });

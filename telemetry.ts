@@ -7,7 +7,12 @@ import * as crypto from "node:crypto";
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { getTelemetryConfig } from "./config.ts";
-import type { ResolvedTask, TaskProgress, TaskResult } from "./types.ts";
+import type {
+  ResolvedTask,
+  TaskProgress,
+  TaskResult,
+  WorkspaceMode,
+} from "./types.ts";
 
 export interface CallRecord {
   id: string;
@@ -35,6 +40,7 @@ export interface TaskRecord {
   model: string | undefined;
   thinking: string | undefined;
   tools: string;
+  workspace: WorkspaceMode | undefined;
   outcome: string;
   failure_kind: string | undefined;
   duration_ms: number;
@@ -87,7 +93,7 @@ let telemetryGeneration = 0;
 let telemetryClosed = false;
 let testingRecorder: TelemetryRecorder | undefined;
 
-const TELEMETRY_SCHEMA_VERSION = 1;
+const TELEMETRY_SCHEMA_VERSION = 2;
 const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 function defaultDbPath(): string {
@@ -206,6 +212,7 @@ const TELEMETRY_TABLES: readonly TelemetryTable[] = [
       ["model", "TEXT"],
       ["thinking", "TEXT"],
       ["tools", "TEXT"],
+      ["workspace", "TEXT"],
       ["outcome", "TEXT"],
       ["failure_kind", "TEXT"],
       ["duration_ms", "INTEGER"],
@@ -230,6 +237,7 @@ const TELEMETRY_TABLES: readonly TelemetryTable[] = [
         model TEXT,
         thinking TEXT,
         tools TEXT,
+        workspace TEXT,
         outcome TEXT,
         failure_kind TEXT,
         duration_ms INTEGER,
@@ -312,6 +320,26 @@ function initSchema(db: DatabaseSync): void {
       }
     }
 
+    // Backfill legacy rows that predate the workspace column. New rows store
+    // 'shared' explicitly, but ALTER TABLE leaves existing rows as NULL. Without
+    // this, GROUP BY workspace splits NULL vs 'shared' for the same semantics.
+    // Reviewer defaults to scratch, so preserve that heuristic for historical
+    // rows; everything else was shared by default. This is idempotent and runs
+    // inside the same transaction as the schema changes so a crash before COMMIT
+    // retries cleanly.
+    try {
+      db.exec(
+        "UPDATE tasks SET workspace='scratch' WHERE workspace IS NULL AND agent='reviewer'",
+      );
+      db.exec("UPDATE tasks SET workspace='shared' WHERE workspace IS NULL");
+    } catch {
+      // tasks may not exist on first run (fresh DB) or workspace column may
+      // have just been created via CREATE TABLE — UPDATE affecting 0 rows is fine.
+      // Any real error will surface on the next write and disable telemetry
+      // via the existing fail-open path, so swallowing here preserves the
+      // repair-loop's best-effort nature.
+    }
+
     // Set the marker only after every table/column operation succeeded.
     db.exec(`PRAGMA user_version = ${TELEMETRY_SCHEMA_VERSION}`);
     db.exec("COMMIT");
@@ -352,9 +380,9 @@ class SqliteTelemetryBackend implements TelemetryBackend {
     this.insertTask = db.prepare(
       `INSERT OR REPLACE INTO tasks(
         id, call_id, ts, version, pi_version, idx, agent, model, thinking,
-        tools, outcome, failure_kind, duration_ms, tokens, cost, tool_uses,
+        tools, workspace, outcome, failure_kind, duration_ms, tokens, cost, tool_uses,
         retries, prompt_chars, output_chars, session_file, async
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -392,6 +420,7 @@ class SqliteTelemetryBackend implements TelemetryBackend {
         record.model ?? null,
         record.thinking ?? null,
         record.tools,
+        record.workspace ?? null,
         record.outcome,
         record.failure_kind ?? null,
         record.duration_ms,
@@ -723,6 +752,7 @@ export function recordTask(input: TaskSpanInput): string | undefined {
     model: task.model?.id,
     thinking: task.thinking,
     tools: JSON.stringify(task.tools),
+    workspace: task.workspace ?? "shared",
     outcome: outcomeFromResult(result),
     failure_kind: result.failureKind,
     duration_ms: result.durationMs,
