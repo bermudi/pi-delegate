@@ -239,7 +239,7 @@ export function getSubagentManualMarkdown(
     "## Gotchas",
     "",
     "- Dispatch validation is batch-wide and runs before spawning: one invalid task rejects the call without starting its siblings.",
-    '- Shared writers that overlap tasks in the same call or a running sync/async dispatch are rejected. Unknown tools count as mutating. Run them sequentially, use `workspace: "isolated"` for Git-backed ordered reconciliation, or use `workspace: "scratch"` when changes may be discarded.',
+    '- Shared writers overlapping within one call are serialized in task order (reported in the result); overlap with a running sync/async dispatch is rejected. Unknown tools count as mutating. Use `workspace: "isolated"` for parallel writes with ordered reconciliation, or `workspace: "scratch"` where supported (plain `.git` directory — no linked worktrees or nested repos).',
     "- `*` means read/write/edit/bash, not every tool. `grep`, `find`, and `ls` are valid explicit tools and are the `ro` preset.",
     '- `tasks` is an array. The tool recovers common stringified calls for compatibility, but canonical calls use `{ tasks: [{ prompt: "..." }] }`.',
     '- Prefer `agent: "default"` — the parent\'s live model/thinking/native tools/base prompt — for general tasks. Pick `scout`/`coder`/`reviewer` only when the role or tool limits fit; they follow delegate.json tiers and may not run the parent model. Omitting `agent` creates an inline task (parent model, full tools).',

@@ -750,6 +750,57 @@ async function sweepStaleScratchLeases(
   }
 }
 
+/** Read-only pre-flight every scratch creation runs before anything exists:
+ * canonical cwd, safe project-root discovery, and the shared tree/git-metadata
+ * rule. Fast-fails on blockers that are knowable before a container, lease, or
+ * copy is created — a rejection here costs milliseconds instead of a doomed
+ * reflink copy. The post-copy validation stays the authority for trees that
+ * change mid-copy. Throws `ScratchSetupError` on any deterministic blocker. */
+async function resolveScratchSource(
+  cwd: string,
+  signal: AbortSignal,
+  parentSignal: AbortSignal | undefined,
+): Promise<{ sourceCwd: string; sourceRoot: string }> {
+  throwIfSetupCancelled(signal, parentSignal);
+  const sourceCwd = await fs.promises.realpath(cwd);
+  throwIfSetupCancelled(signal, parentSignal);
+  const sourceRoot = await findCopyRoot(sourceCwd, signal);
+  throwIfSetupCancelled(signal, parentSignal);
+  if (!isWithin(sourceRoot, sourceCwd)) {
+    throw new ScratchSetupError(
+      "Scratch workspace could not map the task cwd into its project root.",
+    );
+  }
+  await validateScratchTree(
+    sourceRoot,
+    sourceRoot,
+    false,
+    signal,
+    parentSignal,
+  );
+  await assertGitMetadataContained(sourceRoot, signal);
+  return { sourceCwd, sourceRoot };
+}
+
+/** Verify that scratch setup would proceed for `cwd`, without creating
+ * anything: the same pre-flight `createScratchWorkspace` runs before any
+ * container, lease, or copy exists (one walker, one rule — the post-copy
+ * validation stays the authority for trees that change mid-copy). Throws
+ * `ScratchSetupError` with the same message setup would produce, so callers
+ * can recommend scratch only where it can actually run. */
+export async function checkScratchWorkspaceSupport(
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (process.platform !== "linux" || !fs.existsSync("/proc/self/fd")) {
+    throw new ScratchSetupError(
+      "Scratch workspaces require Linux with GNU cp and /proc/self/fd available.",
+    );
+  }
+  const active = signal ?? new AbortController().signal;
+  await resolveScratchSource(cwd, active, active);
+}
+
 /**
  * Make an ephemeral, same-filesystem CoW copy of the Git repository containing
  * cwd (or cwd itself outside Git). This is accidental-write isolation, not a
@@ -791,30 +842,13 @@ export async function createScratchWorkspace(
   let copiedOwnerStat: fs.Stats | undefined;
   try {
     if (signal?.aborted) controller.abort(signal.reason);
-    throwIfSetupCancelled(controller.signal, signal);
-    sourceCwd = await fs.promises.realpath(cwd);
-    throwIfSetupCancelled(controller.signal, signal);
-    sourceRoot = await findCopyRoot(sourceCwd, controller.signal);
-    throwIfSetupCancelled(controller.signal, signal);
-    if (!isWithin(sourceRoot, sourceCwd)) {
-      throw new ScratchSetupError(
-        "Scratch workspace could not map the task cwd into its project root.",
-      );
-    }
-
-    // Fast-fail on blockers that are knowable before anything is created:
-    // the same rule the copy validation enforces, run read-only against the
-    // source. A rejection here costs milliseconds instead of a doomed
-    // reflink copy, and no lease/container is left behind. The post-copy
-    // validation below stays the authority — the tree can change mid-copy.
-    await validateScratchTree(
-      sourceRoot,
-      sourceRoot,
-      false,
+    const resolved = await resolveScratchSource(
+      cwd,
       controller.signal,
       signal,
     );
-    await assertGitMetadataContained(sourceRoot, controller.signal);
+    sourceCwd = resolved.sourceCwd;
+    sourceRoot = resolved.sourceRoot;
 
     containerDir = path.join(path.dirname(sourceRoot), SCRATCH_CONTAINER_NAME);
     const uid = process.getuid?.();

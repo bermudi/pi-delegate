@@ -159,7 +159,7 @@ export const delegateArgumentsSchema = Type.Object(
       Type.Array(delegateTaskSchema, {
         minItems: 0,
         description:
-          "Tasks run concurrently; shared workspaces share files. scratch uses a disposable CoW copy. []=full manual.",
+          "Tasks run concurrently; overlapping shared writers run in task order. scratch=disposable copy. []=manual.",
       }),
     ),
   },

@@ -3,7 +3,11 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { snapshotPhysicalToolTarget } from "./file-tracking.ts";
-import { createScratchWorkspace, _testHooks } from "./workspace.ts";
+import {
+  checkScratchWorkspaceSupport,
+  createScratchWorkspace,
+  _testHooks,
+} from "./workspace.ts";
 
 function reflinkCapableTestDir(): string | undefined {
   // Put the fixture beside this checkout rather than in /tmp: CI and developer
@@ -1325,4 +1329,66 @@ describe("scratch workspace", () => {
       }
     },
   );
+});
+
+describe("checkScratchWorkspaceSupport", () => {
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@example.com",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@example.com",
+  };
+
+  fdTest("passes for a plain Git repository", async () => {
+    const parent = fs.mkdtempSync(
+      path.join(process.cwd(), ".delegate-support-test-"),
+    );
+    try {
+      const repo = testRepo(parent);
+      fs.writeFileSync(path.join(repo, "file.txt"), "x");
+      await expect(checkScratchWorkspaceSupport(repo)).resolves.toBeUndefined();
+    } finally {
+      cleanTestDir(parent);
+    }
+  });
+
+  fdTest("rejects a linked Git worktree with the setup error", async () => {
+    const parent = fs.mkdtempSync(
+      path.join(process.cwd(), ".delegate-support-test-"),
+    );
+    try {
+      const repo = testRepo(parent);
+      execFileSync("git", ["commit", "--allow-empty", "--quiet", "-m", "init"], {
+        cwd: repo,
+        env: GIT_ENV,
+      });
+      const worktree = path.join(parent, "linked");
+      execFileSync("git", ["worktree", "add", "--quiet", worktree], {
+        cwd: repo,
+      });
+      await expect(checkScratchWorkspaceSupport(worktree)).rejects.toThrow(
+        "cannot safely copy linked Git metadata",
+      );
+    } finally {
+      cleanTestDir(parent);
+    }
+  });
+
+  fdTest("rejects a nested Git repository", async () => {
+    const parent = fs.mkdtempSync(
+      path.join(process.cwd(), ".delegate-support-test-"),
+    );
+    try {
+      const repo = testRepo(parent);
+      const nested = path.join(repo, "packages", "widget");
+      fs.mkdirSync(nested, { recursive: true });
+      execFileSync("git", ["init", "--quiet"], { cwd: nested });
+      await expect(checkScratchWorkspaceSupport(repo)).rejects.toThrow(
+        "does not support nested Git repositories",
+      );
+    } finally {
+      cleanTestDir(parent);
+    }
+  });
 });

@@ -34,6 +34,7 @@ import {
   type PreparedIsolatedBatch,
 } from "./isolated-workspace.ts";
 import { sanitizeTerminalLine } from "./utils.ts";
+import { checkScratchWorkspaceSupport } from "./workspace.ts";
 import { quarantinedTasks } from "./session-quarantine.ts";
 import type {
   AgentConfig,
@@ -131,6 +132,7 @@ export function makeFireUpdater(
   resolved: ResolvedTask[],
   parentModelId: string | undefined,
   dispatchWarning?: string,
+  serializedNotice?: string,
 ): () => void {
   return () =>
     onUpdate?.({
@@ -146,6 +148,7 @@ export function makeFireUpdater(
         progress: [...progress],
         parentModel: parentModelId,
         dispatchWarning,
+        serializedNotice,
       },
     });
 }
@@ -161,6 +164,9 @@ export interface AsyncDispatchInput {
   callSpan?: CallSpan;
   dispatchConfig: DelegateConfig;
   dispatchWarning?: string;
+  /** Same-call shared-writer groups admission serialized into task order. */
+  serializedGroups?: SharedWriteConflict[];
+  serializedNotice?: string;
   runtime?: DelegateRuntime;
 }
 
@@ -176,6 +182,9 @@ export interface SyncDispatchInput {
   callSpan?: CallSpan;
   dispatchConfig: DelegateConfig;
   dispatchWarning?: string;
+  /** Same-call shared-writer groups admission serialized into task order. */
+  serializedGroups?: SharedWriteConflict[];
+  serializedNotice?: string;
   runtime?: DelegateRuntime;
 }
 
@@ -206,12 +215,42 @@ function asAdmissionWriter(task: ResolvedTask): ResolvedTask {
     : task;
 }
 
-function sharedWriteRejection(
+const SCRATCH_VIABILITY_TIMEOUT_MS = 5_000;
+
+/** Verify scratch viability for the given task cwds before a rejection message
+ * recommends it. Resolves with the clause text to append: a recommendation
+ * when every cwd passes the same read-only pre-flight scratch setup runs,
+ * otherwise a short unavailability note carrying the blocking reason.
+ * Uncertainty (timeout, unexpected error) fails closed — no recommendation. */
+async function scratchRecommendation(cwds: readonly string[]): Promise<string> {
+  if (!cwds.length) return "";
+  try {
+    await Promise.all(
+      cwds.map((cwd) =>
+        checkScratchWorkspaceSupport(
+          cwd,
+          AbortSignal.timeout(SCRATCH_VIABILITY_TIMEOUT_MS),
+        ),
+      ),
+    );
+    return ', or use workspace: "scratch" when changes may be discarded';
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return ` workspace: "scratch" is unavailable in this checkout (${reason})`;
+  }
+}
+
+/** Compose the shared-write rejection after the admission lock has released:
+ * the scratch clause is verified against scratch's own pre-flight, so the
+ * message never vouches for a mode this checkout cannot run (linked Git
+ * worktrees, nested repositories, non-Linux hosts). */
+async function sharedWriteRejection(
   tasks: DispatchableTask[],
   parentModelId: string | undefined,
   conflicts: SharedWriteConflict[],
-  references: readonly string[] = tasks.map(taskReference),
-): DelegateToolResult {
+  references: readonly string[],
+  cwds: readonly string[],
+): Promise<DelegateToolResult> {
   const scopes = conflicts
     .map(({ scope, taskIndexes }) => {
       const refs = taskIndexes
@@ -220,6 +259,7 @@ function sharedWriteRejection(
       return `${refs} share ${scope.kind === "git" ? "Git root" : "directory"} '${scope.root}'.`;
     })
     .join(" ");
+  const scratch = await scratchRecommendation(cwds);
   return {
     content: [
       {
@@ -227,7 +267,7 @@ function sharedWriteRejection(
         text:
           `Rejected before dispatch; no tasks were started. ${scopes} ` +
           "Each listed task has mutating or unclassified tool capability, so concurrent shared execution could silently overwrite work. " +
-          'Run them sequentially, use workspace: "isolated" for Git-backed ordered reconciliation, or use workspace: "scratch" when changes may be discarded. ' +
+          `Run them sequentially, use workspace: "isolated" for Git-backed ordered reconciliation${scratch}. ` +
           "External processes remain outside this check.",
       },
     ],
@@ -235,23 +275,59 @@ function sharedWriteRejection(
   };
 }
 
-function sharedWriteSafetyFailure(
+async function sharedWriteSafetyFailure(
   tasks: DispatchableTask[],
   parentModelId: string | undefined,
   error: unknown,
-): DelegateToolResult {
+  cwds: readonly string[],
+): Promise<DelegateToolResult> {
   const detail =
     error instanceof Error ? error.message : "Unknown workspace error.";
+  const scratch = await scratchRecommendation(cwds);
   return {
     content: [
       {
         type: "text",
         text:
           `Rejected before dispatch; no tasks were started because shared-write safety could not be verified. ${detail} ` +
-          'Fix the task directory or Git metadata, run tasks sequentially, use workspace: "isolated" for Git-backed ordered reconciliation, or use workspace: "scratch" when changes may be discarded.',
+          `Fix the task directory or Git metadata, run tasks sequentially, use workspace: "isolated" for Git-backed ordered reconciliation${scratch}.`,
       },
     ],
     details: { tasks, results: [], progress: [], parentModel: parentModelId },
+  };
+}
+
+/** Build the predecessor gate that runs serialized task chains one at a time,
+ * in task order. Each chained successor awaits its predecessor's completion
+ * before acquiring a global slot; `complete` must be called in every task's
+ * `finally` so throw, abort, and queued-abort paths all unblock successors. */
+function buildSerializationGate(
+  groups: readonly SharedWriteConflict[] | undefined,
+): {
+  beforeAcquire: (index: number) => Promise<void>;
+  complete: (index: number) => void;
+} | undefined {
+  if (!groups?.length) return undefined;
+  const predecessor = new Map<number, number>();
+  for (const { taskIndexes } of groups) {
+    for (let position = 1; position < taskIndexes.length; position++) {
+      predecessor.set(taskIndexes[position]!, taskIndexes[position - 1]!);
+    }
+  }
+  if (predecessor.size === 0) return undefined;
+  const settled = new Map<number, Promise<void>>();
+  const resolvers = new Map<number, () => void>();
+  for (const index of new Set(predecessor.values())) {
+    let resolve!: () => void;
+    settled.set(index, new Promise<void>((r) => (resolve = r)));
+    resolvers.set(index, resolve);
+  }
+  return {
+    beforeAcquire: async (index) => {
+      const predecessorIndex = predecessor.get(index);
+      if (predecessorIndex !== undefined) await settled.get(predecessorIndex);
+    },
+    complete: (index) => resolvers.get(index)?.(),
   };
 }
 
@@ -312,13 +388,27 @@ export async function dispatchDelegate(
   }
   const resolved = resolveResult.tasks;
 
-  const dispatchWarning = dispatchConfig.allowUnsafeSharedWrites
+  // Mutated inside the admission lock: unsafe mode's standing warning, and the
+  // serialization notice built when same-call shared writers are ordered into
+  // task order instead of rejected. Mutually exclusive by construction —
+  // unsafe mode skips admission entirely.
+  let dispatchWarning = dispatchConfig.allowUnsafeSharedWrites
     ? UNSAFE_SHARED_WRITES_WARNING
     : undefined;
+  let serializedNotice: string | undefined;
+  let serializedGroups: SharedWriteConflict[] | undefined;
   const signalWasAbortedBeforeAdmission = signal?.aborted === true;
   let syncReservation: symbol | undefined;
   let admissionResult:
-    DelegateToolResult | { progress: TaskProgress[]; fire: () => void };
+    | DelegateToolResult
+    | { progress: TaskProgress[]; fire: () => void }
+    | {
+        rejected: {
+          conflicts: SharedWriteConflict[];
+          references: string[];
+          cwds: string[];
+        };
+      };
 
   try {
     admissionResult = await withSharedWriteAdmissionLock(async () => {
@@ -370,29 +460,65 @@ export async function dispatchDelegate(
         }
 
         const incomingCount = resolved.length;
-        const conflicts = (
-          await findSharedWriteConflicts(
-            [...incomingForSafety, ...activeResolved],
-            signal,
-          )
-        ).filter(({ taskIndexes }) => {
-          if (!taskIndexes.some((index) => index < incomingCount)) return false;
-          // Multiple isolated tasks in this call intentionally share one
-          // baseline/root. Any shared task or active dispatch in the same
-          // conflict group still rejects the call.
-          return !taskIndexes.every(
-            (index) =>
-              index < incomingCount &&
-              resolved[index]?.workspace === "isolated",
-          );
-        });
-        if (conflicts.length) {
-          return sharedWriteRejection(
-            tasks,
-            parentModelId,
-            conflicts,
-            references,
-          );
+        const rejectConflicts: SharedWriteConflict[] = [];
+        const serializedConflicts: SharedWriteConflict[] = [];
+        const rejectedCwds = new Set<string>();
+        for (const conflict of await findSharedWriteConflicts(
+          [...incomingForSafety, ...activeResolved],
+          signal,
+        )) {
+          const { taskIndexes } = conflict;
+          if (!taskIndexes.some((index) => index < incomingCount)) continue;
+          if (taskIndexes.every((index) => index < incomingCount)) {
+            const workspaces = new Set(
+              taskIndexes.map((index) => resolved[index]?.workspace),
+            );
+            if (workspaces.has("isolated")) {
+              if (workspaces.size === 1) {
+                // Multiple isolated tasks in this call intentionally share
+                // one baseline/root; no shared writer is involved.
+                continue;
+              }
+              // Mixed isolated/shared in this call: a shared writer cannot be
+              // ordered against the isolated reservation window (baseline
+              // snapshot through reconciliation).
+              rejectConflicts.push(conflict);
+            } else {
+              // Same-call shared writers: serialize in task order instead of
+              // rejecting. Concurrent dispatch is unordered anyway, so
+              // serial-in-dispatch-order refines the same contract.
+              serializedConflicts.push(conflict);
+            }
+          } else {
+            // An active writer (async ticket, running sync dispatch, or
+            // quarantined task) is involved: queueing behind unknown-duration
+            // work cannot be ordered safely here.
+            rejectConflicts.push(conflict);
+          }
+          for (const index of taskIndexes) {
+            if (index < incomingCount) rejectedCwds.add(resolved[index]!.cwd);
+          }
+        }
+        if (rejectConflicts.length) {
+          return {
+            rejected: {
+              conflicts: rejectConflicts,
+              references,
+              cwds: [...rejectedCwds],
+            },
+          };
+        }
+        if (serializedConflicts.length) {
+          serializedGroups = serializedConflicts;
+          serializedNotice = `Serialized: ${serializedConflicts
+            .map(({ scope, taskIndexes }) =>
+              `${taskIndexes
+                .map((index) => references[index] ?? `Task ${index + 1}`)
+                .join(", ")} share ${
+                scope.kind === "git" ? "Git root" : "directory"
+              } '${scope.root}' — running one at a time in task order.`,
+            )
+            .join(" ")}`;
         }
       }
 
@@ -404,6 +530,7 @@ export async function dispatchDelegate(
         resolved,
         parentModelId,
         dispatchWarning,
+        serializedNotice,
       );
       fire();
 
@@ -418,6 +545,8 @@ export async function dispatchDelegate(
           callSpan,
           dispatchConfig,
           dispatchWarning,
+          serializedGroups,
+          serializedNotice,
           runtime,
         });
       }
@@ -463,18 +592,32 @@ export async function dispatchDelegate(
       totalCost: 0,
       wallMs: Date.now() - callSpan.startedAt,
     });
-    return sharedWriteSafetyFailure(tasks, parentModelId, error);
+    return await sharedWriteSafetyFailure(
+      tasks,
+      parentModelId,
+      error,
+      [...new Set(resolved.map((task) => task.cwd))],
+    );
+  }
+
+  if ("rejected" in admissionResult) {
+    callSpan?.finish({
+      status: "failed",
+      totalTokens: 0,
+      totalCost: 0,
+      wallMs: Date.now() - (callSpan?.startedAt ?? Date.now()),
+    });
+    const { conflicts, references, cwds } = admissionResult.rejected;
+    return await sharedWriteRejection(
+      tasks,
+      parentModelId,
+      conflicts,
+      references,
+      cwds,
+    );
   }
 
   if ("content" in admissionResult) {
-    if (admissionResult.content[0]?.text.includes("Rejected before dispatch")) {
-      callSpan?.finish({
-        status: "failed",
-        totalTokens: 0,
-        totalCost: 0,
-        wallMs: Date.now() - callSpan.startedAt,
-      });
-    }
     return admissionResult;
   }
 
@@ -490,6 +633,8 @@ export async function dispatchDelegate(
       callSpan,
       dispatchConfig,
       dispatchWarning,
+      serializedGroups,
+      serializedNotice,
       runtime,
     });
   } finally {
@@ -622,6 +767,8 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     callSpan,
     dispatchConfig,
     dispatchWarning,
+    serializedGroups,
+    serializedNotice,
     runtime = getDefaultDelegateRuntime(),
   } = input;
 
@@ -670,6 +817,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     telemetryConfig: callSpan?.telemetryConfig,
     workersSettled: false,
     dispatchWarning,
+    serializedNotice,
     // Capture the dispatch-scoped snapshot so async workers and later poll/wait
     // formatting use the same retry/stall/output/provider settings that were
     // in effect when the ticket was spawned.
@@ -742,22 +890,28 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       }
 
       let results: TaskResult[];
+      const gate = buildSerializationGate(serializedGroups);
       try {
         results = await mapConcurrentByModel(
           executionResolved,
           (t) => getModelKey(t.model),
           (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
           async (t, i) => {
-            const result = await runResolvedTask(
-              asyncEnv,
-              t,
-              ticket.progress[i]!,
-              i,
-            );
-            ticket.results[i] = result;
-            return result;
+            try {
+              const result = await runResolvedTask(
+                asyncEnv,
+                t,
+                ticket.progress[i]!,
+                i,
+              );
+              ticket.results[i] = result;
+              return result;
+            } finally {
+              gate?.complete(i);
+            }
           },
           ticketSignal,
+          gate?.beforeAcquire,
         );
       } catch (error) {
         results = completeUnexpectedResults(
@@ -849,6 +1003,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
         text: [
           `Async ticket: ${ticketId}`,
           `${resolved.length} task(s) dispatched · ${runningCount + 1}/${maxAsyncTickets} async slots in use`,
+          ...(serializedNotice ? [serializedNotice] : []),
           ...(dispatchWarning ? [`WARNING: ${dispatchWarning}`] : []),
           "",
           "Work is detached. Stop this turn to let final results auto-deliver.",
@@ -866,6 +1021,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       status: ticket.status,
       elapsedMs: Date.now() - ticket.created,
       dispatchWarning,
+      serializedNotice,
     },
   };
 }
@@ -886,6 +1042,8 @@ export async function dispatchSync(
     callSpan,
     dispatchConfig,
     dispatchWarning,
+    serializedGroups,
+    serializedNotice,
     runtime = getDefaultDelegateRuntime(),
   } = input;
 
@@ -942,17 +1100,23 @@ export async function dispatchSync(
   );
   let results: TaskResult[];
   let isolatedReconciled = false;
+  const gate = buildSerializationGate(serializedGroups);
   try {
     results = await mapConcurrentByModel(
       executionResolved,
       (t) => getModelKey(t.model),
       (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
       async (t, i) => {
-        const result = await runResolvedTask(syncEnv, t, progress[i]!, i);
-        partialResults[i] = result;
-        return result;
+        try {
+          const result = await runResolvedTask(syncEnv, t, progress[i]!, i);
+          partialResults[i] = result;
+          return result;
+        } finally {
+          gate?.complete(i);
+        }
       },
       signal,
+      gate?.beforeAcquire,
     );
   } catch (error) {
     if (!isolatedBatch) throw error;
@@ -987,6 +1151,7 @@ export async function dispatchSync(
   parts.push(
     `${succeeded}/${finalResults.length} tasks completed successfully · ${fmtDuration(elapsedTotal)} wall time\n`,
   );
+  if (serializedNotice) parts.push(serializedNotice);
   if (dispatchWarning) parts.push(`WARNING: ${dispatchWarning}`);
   for (let i = 0; i < finalResults.length; i++) {
     const r = finalResults[i]!;
@@ -1024,6 +1189,7 @@ export async function dispatchSync(
       elapsedMs: elapsedTotal,
       overlapWarning: overlapWarning || undefined,
       dispatchWarning,
+      serializedNotice,
     },
     // Aggregate subagent spend so Pi folds it into the parent's
     // session/footer totals. Sync dispatch only — async results arrive via a

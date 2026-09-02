@@ -103,6 +103,7 @@ function buildWaitDetails(ticket: AsyncTicket): DelegateDetails {
     elapsedMs: (ticket.completedAt ?? Date.now()) - ticket.created,
     overlapWarning: overlapWarning || undefined,
     dispatchWarning: ticket.dispatchWarning,
+    serializedNotice: ticket.serializedNotice,
   };
 }
 
@@ -404,6 +405,9 @@ export class TicketRegistry extends Map<string, AsyncTicket> {
     parts.push(
       `${statusTag}${succeeded}/${ticket.results.length} ${completionLabel} · ${fmtDuration(elapsedTotal)} wall time\n`,
     );
+    if (ticket.serializedNotice) {
+      parts.push(ticket.serializedNotice);
+    }
     if (ticket.dispatchWarning) {
       parts.push(`WARNING: ${ticket.dispatchWarning}`);
     }
@@ -466,6 +470,7 @@ export class TicketRegistry extends Map<string, AsyncTicket> {
         elapsedMs: elapsedTotal,
         overlapWarning: overlapWarning || undefined,
         dispatchWarning: ticket.dispatchWarning,
+        serializedNotice: ticket.serializedNotice,
       },
     };
     if (canMemoize) ticket.formattedResult = formatted;
@@ -601,6 +606,7 @@ export class TicketRegistry extends Map<string, AsyncTicket> {
           elapsedMs: Date.now() - ticket.created,
           overlapWarning: snapshot.overlapWarning || undefined,
           dispatchWarning: ticket.dispatchWarning,
+          serializedNotice: ticket.serializedNotice,
         },
       };
     }

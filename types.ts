@@ -119,6 +119,9 @@ export interface AsyncTicket {
   workersSettled?: boolean;
   /** Batch-level warning attached to this dispatch, not to any one task. */
   dispatchWarning?: string;
+  /** Batch-level notice that overlapping shared writers were serialized into
+   *  task order instead of rejected. Informational, not a warning. */
+  serializedNotice?: string;
   /** Immutable dispatch-scoped delegate.json snapshot used by async workers and
    *  later result formatting. */
   config?: import("./config.ts").DelegateConfig;
@@ -291,6 +294,9 @@ export interface DelegateDetails {
   overlapWarning?: string;
   /** Warning that applies to the whole dispatch rather than an individual task. */
   dispatchWarning?: string;
+  /** Notice that overlapping shared writers in this dispatch were serialized
+   *  into task order instead of rejected. Informational, not a warning. */
+  serializedNotice?: string;
 }
 
 export interface TaskResult {

@@ -253,6 +253,61 @@ describe("mapConcurrentByModel", () => {
     expect(started).toEqual(["0", "1"]);
     expect(results).toEqual(["aborted-0", "aborted-1"]);
   });
+
+  test("a gated successor waits without holding a global slot", async () => {
+    _setGlobalConcurrencyLimitForTesting(2);
+
+    const events: number[] = [];
+    let releaseFirst!: () => void;
+    const firstReleased = new Promise<void>((r) => (releaseFirst = r));
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>((r) => (firstStarted = r));
+    let firstDone!: () => void;
+    const firstDonePromise = new Promise<void>((r) => (firstDone = r));
+
+    const serialized = mapConcurrentByModel(
+      [makeTask(0, "openai", "gpt-4"), makeTask(1, "openai", "gpt-4")],
+      (t) => getModelKey(t.model as any),
+      () => 2,
+      async (task) => {
+        events.push(task.id);
+        if (task.id === 0) {
+          firstStarted();
+          await firstReleased;
+          firstDone();
+        }
+        return task.id;
+      },
+      undefined,
+      async (index) => {
+        if (index === 1) await firstDonePromise;
+      },
+    );
+
+    await firstStartedPromise;
+    await delay(5);
+    // The predecessor holds one of two global slots; the gated successor must
+    // not hold the other while waiting, or an unrelated invocation starves.
+    const unrelated = mapConcurrentByModel(
+      [makeTask(9, "anthropic", "claude-3")],
+      (t) => getModelKey(t.model as any),
+      () => 2,
+      async (task) => {
+        events.push(task.id);
+        return task.id;
+      },
+    );
+    const raced = await Promise.race([
+      unrelated,
+      delay(200).then(() => "TIMEOUT" as const),
+    ]);
+    expect(raced).not.toBe("TIMEOUT");
+    expect(raced).toEqual([9]);
+
+    releaseFirst();
+    expect(await serialized).toEqual([0, 1]);
+    expect(events).toContain(1);
+  });
 });
 
 describe("reconfigureGlobalConcurrency", () => {

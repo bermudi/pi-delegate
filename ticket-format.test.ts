@@ -183,6 +183,22 @@ describe("live ticket poll formatting", () => {
     );
   });
 
+  test("formatLiveTicketPoll surfaces the serialization notice without warning styling", () => {
+    const ticket = mkTicket({
+      status: "running",
+      serializedNotice:
+        "Serialized: Task 1#a, Task 2#b share Git root '/repo' — running one at a time in task order.",
+      progress: [
+        mkProgress({ agent: "a", status: "done" }),
+        mkProgress({ agent: "b", status: "running" }),
+      ],
+    });
+    const snapshot = formatLiveTicketPoll(ticket, ticket.created + 1_000);
+    expect(snapshot.text).toContain("Serialized: Task 1#a, Task 2#b");
+    expect(snapshot.text).toContain("running one at a time in task order");
+    expect(snapshot.text).not.toContain("WARNING: Serialized:");
+  });
+
   test("formatLiveTicketPoll keeps results index-aligned with progress", () => {
     const ticket = mkTicket({
       resolved: [

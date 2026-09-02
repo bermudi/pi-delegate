@@ -246,15 +246,16 @@ export function formatLiveTicketPoll(
     findTouchedOverlaps(completedForOverlap),
   );
   const guidance = liveTicketGuidance(ticket);
+  const serializedNotice = ticket.serializedNotice ?? "";
   const dispatchWarning = ticket.dispatchWarning
     ? `WARNING: ${ticket.dispatchWarning}`
     : "";
   return {
     text: `${formatLiveTicketHeader(ticket, now)}\n${lines.join("\n")}${
       guidance ? `\n\n${guidance}` : ""
-    }${dispatchWarning ? `\n\n${dispatchWarning}` : ""}${
-      overlapWarning ? `\n\n${overlapWarning}` : ""
-    }`,
+    }${serializedNotice ? `\n\n${serializedNotice}` : ""}${
+      dispatchWarning ? `\n\n${dispatchWarning}` : ""
+    }${overlapWarning ? `\n\n${overlapWarning}` : ""}`,
     completedResults,
     overlapWarning,
   };

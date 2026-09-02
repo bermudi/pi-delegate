@@ -361,13 +361,38 @@ describe("dispatch-time shared-write gate", () => {
     ["sync", false],
     ["async", true],
   ] as const)(
-    "rejects same-root writers before %s dispatch creates progress or a ticket",
+    "serializes same-root shared writers in task order for %s dispatch",
     async (_mode, asyncMode) => {
       const model = { provider: "test", id: "model" } as any;
-      let updates = 0;
-      const finishes: Array<Record<string, unknown>> = [];
-      const result = await dispatchDelegate({
-        pi: {} as any,
+      const started: string[] = [];
+      let releaseFirst!: () => void;
+      const firstReleased = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let firstStarted!: () => void;
+      const firstStartedPromise = new Promise<void>((resolve) => {
+        firstStarted = resolve;
+      });
+      _setRunAgentSessionForTesting(async (_session, prompt) => {
+        started.push(prompt as string);
+        if (prompt === "one") {
+          firstStarted();
+          await firstReleased;
+        }
+        return {
+          output: `done ${String(prompt)}`,
+          durationMs: 1,
+          tokens: 0,
+          usage: emptyUsage(),
+          touchedFiles: [],
+          attributedFiles: [],
+          fileAttributions: [],
+          prompted: true,
+        };
+      });
+
+      const pending = dispatchDelegate({
+        pi: { sendMessage: () => {} } as any,
         params: {
           async: asyncMode,
           tasks: [
@@ -392,35 +417,387 @@ describe("dispatch-time shared-write gate", () => {
           tools: ["read", "write", "edit", "bash"],
         },
         signal: undefined,
-        onUpdate: (() => {
-          updates += 1;
-        }) as any,
-        callSpan: {
-          startedAt: Date.now(),
-          finish: (record: Record<string, unknown>) => finishes.push(record),
-        } as any,
+        onUpdate: undefined,
       });
+      try {
+        await firstStartedPromise;
+        // The successor must not start while its predecessor is running.
+        expect(started).toEqual(["one"]);
+      } finally {
+        releaseFirst();
+      }
+      const result = await pending;
 
-      expect(firstText(result)).toContain(
-        "Rejected before dispatch; no tasks were started.",
-      );
-      expect(firstText(result)).toContain("Task 1#one, Task 2#two");
-      expect(firstText(result)).toContain(tmpDir);
-      expect(firstText(result)).not.toContain("delegate.json");
-      expect(firstText(result)).not.toContain("allowUnsafeSharedWrites");
-      expect(firstText(result)).toContain('workspace: "scratch"');
-      expect(result.details.results).toEqual([]);
-      expect(result.details.progress).toEqual([]);
-      expect(updates).toBe(0);
-      expect(ticketRegistry.size).toBe(0);
-      expect(finishes).toHaveLength(1);
-      expect(finishes[0]).toMatchObject({
-        status: "failed",
-        totalTokens: 0,
-        totalCost: 0,
-      });
+      const serializedFragment = `Task 1#one, Task 2#two share Git root '${tmpDir}'`;
+      if (asyncMode) {
+        expect(firstText(result)).toContain("Async ticket:");
+        expect(firstText(result)).toContain("Serialized:");
+        expect(firstText(result)).toContain(serializedFragment);
+        expect(result.details.serializedNotice).toContain(serializedFragment);
+        const ticket = ticketRegistry.get(result.details.ticketId!);
+        expect(ticket).toBeDefined();
+        expect(ticket!.serializedNotice).toContain(serializedFragment);
+        await ticket!.completion;
+        expect(ticket!.status).toBe("done");
+        expect(started).toEqual(["one", "two"]);
+      } else {
+        expect(started).toEqual(["one", "two"]);
+        expect(firstText(result)).toContain(
+          "2/2 tasks completed successfully",
+        );
+        expect(firstText(result)).toContain("Serialized:");
+        expect(firstText(result)).toContain(serializedFragment);
+        expect(firstText(result)).toContain("running one at a time in task order");
+        expect(result.details.serializedNotice).toContain(serializedFragment);
+        expect(result.details.results).toHaveLength(2);
+      }
+      _setRunAgentSessionForTesting(undefined);
     },
   );
+
+  test("serialized successor still runs after a failed predecessor", async () => {
+    const model = { provider: "test", id: "model" } as any;
+    const started: string[] = [];
+    _setRunAgentSessionForTesting(async (_session, prompt) => {
+      started.push(prompt as string);
+      return {
+        ...(prompt === "one" ? { error: "boom" } : { output: "done two" }),
+        durationMs: 1,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+        fileAttributions: [],
+        prompted: true,
+      } as any;
+    });
+    try {
+      const result = await dispatchDelegate({
+        pi: {} as any,
+        params: {
+          tasks: [
+            { id: "one", prompt: "one", cwd: tmpDir },
+            { id: "two", prompt: "two", cwd: tmpDir },
+          ],
+        },
+        ctx: {
+          cwd: tmpDir,
+          model,
+          modelRegistry: {
+            getAvailable: () => [model],
+            find: () => model,
+            hasConfiguredAuth: () => true,
+          },
+          getSystemPrompt: () => "parent",
+        } as any,
+        agents: new Map(),
+        parentModelId: model.id,
+        parentDefaults: {
+          thinking: "off",
+          tools: ["read", "write", "edit", "bash"],
+        },
+        signal: undefined,
+        onUpdate: undefined,
+      });
+      expect(started.at(-1)).toBe("two");
+      expect(started).toContain("one");
+      expect(firstText(result)).toContain("1/2 tasks completed successfully");
+    } finally {
+      _setRunAgentSessionForTesting(undefined);
+    }
+  });
+
+  test("read-only tasks in the same root stay parallel with a shared writer", async () => {
+    const model = { provider: "test", id: "model" } as any;
+    const started: string[] = [];
+    let releaseWriter!: () => void;
+    const writerReleased = new Promise<void>((resolve) => {
+      releaseWriter = resolve;
+    });
+    let writerStarted!: () => void;
+    const writerStartedPromise = new Promise<void>((resolve) => {
+      writerStarted = resolve;
+    });
+    _setRunAgentSessionForTesting(async (_session, prompt) => {
+      started.push(prompt as string);
+      if (prompt === "writer") {
+        writerStarted();
+        await writerReleased;
+      }
+      return {
+        output: `done ${String(prompt)}`,
+        durationMs: 1,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+        fileAttributions: [],
+        prompted: true,
+      };
+    });
+    try {
+      const pending = dispatchDelegate({
+        pi: {} as any,
+        params: {
+          tasks: [
+            { id: "writer", prompt: "writer", cwd: tmpDir },
+            {
+              id: "ro1",
+              prompt: "ro1",
+              cwd: tmpDir,
+              tools: ["read", "grep", "find", "ls"],
+            },
+            {
+              id: "ro2",
+              prompt: "ro2",
+              cwd: tmpDir,
+              tools: ["read", "grep", "find", "ls"],
+            },
+          ],
+        },
+        ctx: {
+          cwd: tmpDir,
+          model,
+          modelRegistry: {
+            getAvailable: () => [model],
+            find: () => model,
+            hasConfiguredAuth: () => true,
+          },
+          getSystemPrompt: () => "parent",
+        } as any,
+        agents: new Map(),
+        parentModelId: model.id,
+        parentDefaults: {
+          thinking: "off",
+          tools: ["read", "write", "edit", "bash"],
+        },
+        signal: undefined,
+        onUpdate: undefined,
+      });
+      await writerStartedPromise;
+      const roDeadline = Date.now() + 2_000;
+      while (
+        !(started.includes("ro1") && started.includes("ro2")) &&
+        Date.now() < roDeadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(started).toEqual(expect.arrayContaining(["ro1", "ro2"]));
+      releaseWriter();
+      const result = await pending;
+      expect(firstText(result)).not.toContain("Serialized:");
+      expect(firstText(result)).toContain("3/3 tasks completed successfully");
+    } finally {
+      releaseWriter();
+      _setRunAgentSessionForTesting(undefined);
+    }
+  });
+
+  test("writers on distinct roots stay parallel without a serialization notice", async () => {
+    const otherDir = mkdtempSync(path.join(os.tmpdir(), "delegate-other-"));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: otherDir });
+      const model = { provider: "test", id: "model" } as any;
+      const started: string[] = [];
+      let releaseFirst!: () => void;
+      const firstReleased = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let firstStarted!: () => void;
+      const firstStartedPromise = new Promise<void>((resolve) => {
+        firstStarted = resolve;
+      });
+      _setRunAgentSessionForTesting(async (_session, prompt) => {
+        started.push(prompt as string);
+        if (prompt === "first") {
+          firstStarted();
+          await firstReleased;
+        }
+        return {
+          output: `done ${String(prompt)}`,
+          durationMs: 1,
+          tokens: 0,
+          usage: emptyUsage(),
+          touchedFiles: [],
+          attributedFiles: [],
+          fileAttributions: [],
+          prompted: true,
+        };
+      });
+      try {
+        const pending = dispatchDelegate({
+          pi: {} as any,
+          params: {
+            tasks: [
+              { id: "first", prompt: "first", cwd: tmpDir },
+              { id: "second", prompt: "second", cwd: otherDir },
+            ],
+          },
+          ctx: {
+            cwd: tmpDir,
+            model,
+            modelRegistry: {
+              getAvailable: () => [model],
+              find: () => model,
+              hasConfiguredAuth: () => true,
+            },
+            getSystemPrompt: () => "parent",
+          } as any,
+          agents: new Map(),
+          parentModelId: model.id,
+          parentDefaults: {
+            thinking: "off",
+            tools: ["read", "write", "edit", "bash"],
+          },
+          signal: undefined,
+          onUpdate: undefined,
+        });
+        await firstStartedPromise;
+        // A cold host-deps build for the second cwd can outrun any fixed
+        // delay; poll so load cannot flake the parallelism assertion. If the
+        // roots were (incorrectly) serialized, "second" would stay gated
+        // behind "first" and this poll would time out.
+        const parallelDeadline = Date.now() + 2_000;
+        while (!started.includes("second") && Date.now() < parallelDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect(started).toContain("second");
+        releaseFirst();
+        const result = await pending;
+        expect(firstText(result)).not.toContain("Serialized:");
+        expect(firstText(result)).toContain("2/2 tasks completed successfully");
+      } finally {
+        releaseFirst();
+        _setRunAgentSessionForTesting(undefined);
+      }
+    } finally {
+      rmSync(otherDir, { recursive: true, force: true });
+    }
+  });
+
+  test("mixed isolated and shared same-call overlap still rejects", async () => {
+    const model = { provider: "test", id: "model" } as any;
+    const result = await dispatchDelegate({
+      pi: {} as any,
+      params: {
+        tasks: [
+          { id: "iso", prompt: "iso", cwd: tmpDir, workspace: "isolated" },
+          { id: "shr", prompt: "shr", cwd: tmpDir, workspace: "shared" },
+        ],
+      },
+      ctx: {
+        cwd: tmpDir,
+        model,
+        modelRegistry: {
+          getAvailable: () => [model],
+          find: () => model,
+          hasConfiguredAuth: () => true,
+        },
+        getSystemPrompt: () => "parent",
+      } as any,
+      agents: new Map(),
+      parentModelId: model.id,
+      parentDefaults: {
+        thinking: "off",
+        tools: ["read", "write", "edit", "bash"],
+      },
+      signal: undefined,
+      onUpdate: undefined,
+    });
+    expect(firstText(result)).toContain(
+      "Rejected before dispatch; no tasks were started.",
+    );
+    expect(firstText(result)).toContain("Task 1#iso, Task 2#shr");
+    expect(result.details.results).toEqual([]);
+    expect(ticketRegistry.size).toBe(0);
+  });
+
+  test("rejection in a linked worktree drops the scratch recommendation", async () => {
+    execFileSync(
+      "git",
+      ["commit", "--allow-empty", "--quiet", "-m", "init"],
+      {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.com",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.com",
+        },
+      },
+    );
+    const worktreePath = path.join(tmpDir, "linked-wt");
+    execFileSync("git", ["worktree", "add", "--quiet", worktreePath], {
+      cwd: tmpDir,
+    });
+    const model = { provider: "test", id: "model" } as any;
+    let announceStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    let releaseWorker!: () => void;
+    const workerReleased = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    _setRunAgentSessionForTesting(async () => {
+      announceStarted();
+      await workerReleased;
+      return {
+        output: "done",
+        durationMs: 1,
+        tokens: 0,
+        usage: emptyUsage(),
+        touchedFiles: [],
+        attributedFiles: [],
+        fileAttributions: [],
+        prompted: true,
+      };
+    });
+    const invoke = (prompt: string) =>
+      dispatchDelegate({
+        pi: {} as any,
+        params: { tasks: [{ prompt, cwd: worktreePath }] },
+        ctx: {
+          cwd: worktreePath,
+          model,
+          modelRegistry: {
+            getAvailable: () => [model],
+            find: () => model,
+            hasConfiguredAuth: () => true,
+          },
+          getSystemPrompt: () => "parent",
+        } as any,
+        agents: new Map(),
+        parentModelId: model.id,
+        parentDefaults: {
+          thinking: "off",
+          tools: ["read", "write", "edit", "bash"],
+        },
+        signal: undefined,
+        onUpdate: undefined,
+      });
+
+    const active = invoke("active");
+    try {
+      await started;
+      const rejected = await invoke("incoming");
+      expect(firstText(rejected)).toContain(
+        "Rejected before dispatch; no tasks were started.",
+      );
+      expect(firstText(rejected)).not.toContain(
+        'workspace: "scratch" when changes may be discarded',
+      );
+      expect(firstText(rejected)).toContain(
+        'workspace: "scratch" is unavailable in this checkout',
+      );
+      expect(firstText(rejected)).toContain("linked Git metadata");
+    } finally {
+      releaseWorker();
+      await active;
+      _setRunAgentSessionForTesting(undefined);
+    }
+  });
 
   test.each([
     ["sync", false],
@@ -1164,6 +1541,10 @@ describe("dispatch-time shared-write gate", () => {
         "Rejected before dispatch; no tasks were started.",
       );
       expect(firstText(rejected)).toContain("active sync task 1");
+      // A plain Git checkout supports scratch, so the recommendation stands.
+      expect(firstText(rejected)).toContain(
+        'workspace: "scratch" when changes may be discarded',
+      );
     } finally {
       releaseWorker();
       await active;

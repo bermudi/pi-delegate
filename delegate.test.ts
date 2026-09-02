@@ -3237,12 +3237,13 @@ describe("delegate extension integration", () => {
     // Orchestration invariants from #27 are model-visible in the schema.
     expect(toolDef!.description).toContain("Sync");
     expect(toolDef!.description).toContain("async");
-    expect(schema.properties.tasks.description).toContain("shared workspaces");
     expect(schema.properties.tasks.description).toContain(
-      "disposable CoW copy",
+      "overlapping shared writers run in task order",
     );
-    expect(schema.properties.tasks.description).toContain("run concurrently");
-    expect(schema.properties.tasks.description).toContain("[]=full manual");
+    expect(schema.properties.tasks.description).toContain(
+      "run concurrently",
+    );
+    expect(schema.properties.tasks.description).toContain("[]=manual");
     expect(schema.properties.unsafeSharedWrites).toBeUndefined();
     expect(schema.properties.async.description).toContain("auto-deliver");
     expect(schema.properties.async.description).toContain("Wait");

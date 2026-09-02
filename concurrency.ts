@@ -181,6 +181,11 @@ export function getModelKey(model: Model<Api> | undefined): string {
  *
  * The total number of concurrently running tasks is also capped by the
  * configured `maxConcurrent` value, shared across all `delegate` invocations.
+ *
+ * `beforeAcquire` runs per item before its global slot is acquired — a
+ * serialized successor awaits its predecessor there while holding only its
+ * per-model worker slot, never a global slot, so a serialized batch cannot
+ * pin the shared semaphore while running one task at a time.
  */
 export async function mapConcurrentByModel<T, R>(
   items: T[],
@@ -188,6 +193,7 @@ export async function mapConcurrentByModel<T, R>(
   getConcurrency: (modelKey: string) => number,
   fn: (item: T, index: number) => Promise<R>,
   signal?: AbortSignal,
+  beforeAcquire?: (index: number) => Promise<void>,
 ): Promise<R[]> {
   if (items.length === 0) return [];
   const results: R[] = new Array(items.length);
@@ -215,6 +221,7 @@ export async function mapConcurrentByModel<T, R>(
         group.limit,
         async (_item, localIdx) => {
           const globalIdx = group.indices[localIdx]!;
+          if (beforeAcquire) await beforeAcquire(globalIdx);
           const acquired = await acquireGlobal(signal);
           if (!acquired) {
             // Aborted while queued for a global slot: we hold no slot, so we

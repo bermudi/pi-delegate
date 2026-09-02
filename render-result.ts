@@ -213,6 +213,12 @@ export function renderDelegateResult(
       lines.push(truncLine(theme.fg("warning", `⚠ ${warning}`), w), "");
     }
   }
+  if (details?.serializedNotice) {
+    const notice = sanitizeTerminalLine(details.serializedNotice);
+    if (notice) {
+      lines.push(truncLine(theme.fg("dim", `⏳ ${notice}`), w), "");
+    }
+  }
   if (details?.overlapWarning) {
     const warning = sanitizeTerminalLine(details.overlapWarning);
     if (warning) {
