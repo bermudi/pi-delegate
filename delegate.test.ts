@@ -3222,7 +3222,16 @@ describe("delegate extension integration", () => {
       "isolated",
     ]);
     expect(tasksArraySchema.items.properties.workspace.description).toContain(
-      "none confine access",
+      "shared/scratch/isolated",
+    );
+    expect(tasksArraySchema.items.properties.workspace.description).toContain(
+      "not a security boundary",
+    );
+    // The copy must never contain a bare "none" — glm-5.3 read the old
+    // "none confine access" gloss as a fourth enum value and sent
+    // `workspace:"none"`.
+    expect(tasksArraySchema.items.properties.workspace.description).not.toMatch(
+      /none/i,
     );
     expect(
       tasksArraySchema.items.properties.workspace.description,
@@ -3279,7 +3288,10 @@ describe("delegate extension integration", () => {
         (total, description) => total + description.length,
         0,
       ),
-    ).toBeLessThanOrEqual(1_900);
+      // 1950 (was 1900): raised for the workspace value list — enum-like
+      // copy now opens with "shared/scratch/isolated." so models stop
+      // inventing values like "none" (observed with glm-5.3).
+    ).toBeLessThanOrEqual(1_950);
   });
 
   test("rejects mixed dispatch, ticket, and session-control shapes", async () => {

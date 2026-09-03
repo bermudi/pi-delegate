@@ -101,7 +101,7 @@ export const delegateTaskSchema = Type.Object({
   workspace: Type.Optional(
     StringEnum(["shared", "scratch", "isolated"], {
       description:
-        "shared edits source; scratch discards; isolated orders Git worktree proposals; none confine access.",
+        "shared/scratch/isolated. shared edits source; scratch discards; isolated orders Git worktree proposals; not a security boundary.",
     }),
   ),
 });
@@ -286,9 +286,23 @@ function validateTicketMode(params: DelegateArguments): string | undefined {
     [...TASK_FIELD_NAMES, "tasks", "sessionAction"] as const
   ).filter((field) => rawParams[field] !== undefined);
   if (incompatibleFields.length) {
-    return `ticket control cannot be combined with field(s) ${incompatibleFields
+    const base = `ticket control cannot be combined with field(s) ${incompatibleFields
       .map((field) => `'${field}'`)
       .join(", ")}; call it separately.`;
+    // Kitchen-sink callers attach default-shaped ticket control to a real
+    // dispatch and then repeat the identical rejected call (observed in the
+    // wild: glm-5.3 sent `ticketAction:"wait"` + tasks + empty ticket six
+    // times in a row). With tasks present and no ticket id, address the
+    // likely intent — dispatch already blocks; async creates the tickets
+    // that ticketAction manages — instead of restating the field rule.
+    const wantsDispatch =
+      Array.isArray(params.tasks) &&
+      params.tasks.length > 0 &&
+      !params.ticket;
+    if (wantsDispatch) {
+      return `${base} Dispatched tasks run to completion before returning — omit ticketAction entirely; only async:true produces a ticket to wait on.`;
+    }
+    return base;
   }
   if (params.async === true) {
     return "ticket control cannot include async; call it separately.";

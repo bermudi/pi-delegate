@@ -619,6 +619,36 @@ describe("validateDelegateOperation task-field whitelist", () => {
     expect(err).toContain("call it separately");
   });
 
+  test("ticket control over a dispatch explains that dispatch already blocks", () => {
+    // Observed in the wild: glm-5.3 attached default-shaped ticket/session
+    // control to a real task (empty ticket, sessionAction "list") and then
+    // repeated the identical rejected call six times. The correction must
+    // address the intent — dispatch is synchronous — not just restate rules.
+    const err = validateDelegateOperation({
+      ticketAction: "wait",
+      timeoutMs: 0,
+      sessionAction: "list",
+      sessionId: "",
+      tasks: [{ prompt: "review the commit" }],
+    } as unknown as DelegateArguments);
+    expect(err).toContain(
+      "ticket control cannot be combined with field(s) 'sessionId', 'tasks', 'sessionAction'",
+    );
+    expect(err).toContain("call it separately");
+    expect(err).toContain("omit ticketAction entirely");
+    expect(err).toContain("async:true produces a ticket");
+  });
+
+  test("ticket control with a real ticket id keeps the terse correction", () => {
+    const err = validateDelegateOperation({
+      ticketAction: "poll",
+      ticket: "t-123",
+      tasks: [{ prompt: "x" }],
+    });
+    expect(err).toContain("call it separately");
+    expect(err).not.toContain("omit ticketAction entirely");
+  });
+
   test("allows a ticket-only wait call", () => {
     expect(
       validateDelegateOperation({
@@ -928,5 +958,14 @@ describe("getSubagentManualMarkdown", () => {
     expect(delegateTaskSchema.properties.workspace.description).toContain(
       "orders Git worktree proposals",
     );
+  });
+
+  test("workspace description opens with the closed value list and no 'none' trap", () => {
+    // glm-5.3 read the old "none confine access" gloss as a fourth workspace
+    // value and invented `workspace:"none"`. Enum-like copy must lead with
+    // the allowed values and never contain a bare word that reads like one.
+    const desc = delegateTaskSchema.properties.workspace.description ?? "";
+    expect(desc).toMatch(/^shared\/scratch\/isolated\./);
+    expect(desc).not.toMatch(/none/i);
   });
 });
