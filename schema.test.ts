@@ -956,8 +956,9 @@ describe("getSubagentManualMarkdown", () => {
     const manual = getSubagentManualMarkdown(new Map());
     expect(manual).toContain('sync or async one-shot `workspace: "isolated"`');
     expect(delegateTaskSchema.properties.workspace.description).toContain(
-      "orders Git worktree proposals",
+      "isolated reconciles Git",
     );
+    expect(manual).toContain("reconciles successful proposals in task order");
   });
 
   test("workspace description opens with the closed value list and no 'none' trap", () => {

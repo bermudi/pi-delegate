@@ -3188,15 +3188,18 @@ describe("delegate extension integration", () => {
     expect(toolDef!.description).toContain("tasks:[]=full manual");
     expect(schema.properties.ticket.description).toContain("polling all");
     expect(tasksArraySchema.items.properties.agent.description).toContain(
-      "default mirrors the parent's tools",
+      "Use built-ins first",
     );
     expect(tasksArraySchema.items.properties.agent.description).toContain(
-      "scout/coder/reviewer specialists",
+      "default=general",
     );
-    // The inline divergence is deliberate (#40) and remains stated plainly —
-    // keep this assertion aligned with that documented decision.
+    // Inline tasks still broaden to `*` even when the parent is narrower
+    // (#40), so the steering copy must preserve that disclosure.
     expect(tasksArraySchema.items.properties.agent.description).toContain(
-      "even when the parent is narrower",
+      "even if parent is narrower",
+    );
+    expect(tasksArraySchema.items.properties.agent.description).toContain(
+      "Omit only for inline",
     );
     expect(tasksArraySchema.items.properties.prompt.description).toContain(
       "cannot see this chat",

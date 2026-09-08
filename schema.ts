@@ -42,7 +42,7 @@ export const delegateTaskSchema = Type.Object({
   agent: Type.Optional(
     Type.String({
       description:
-        "default mirrors the parent's tools; scout/coder/reviewer specialists. Inline tasks get * tools even when the parent is narrower.",
+        "Use built-ins first: default=general; scout/coder/reviewer specialize. Omit only for inline; it gets * even if parent is narrower.",
     }),
   ),
   cwd: Type.Optional(
@@ -65,19 +65,19 @@ export const delegateTaskSchema = Type.Object({
   ),
   model: Type.Optional(
     Type.String({
-      description: "Model override; omit to inherit parent.",
+      description: "Override only if requested or required; else keep its default.",
     }),
   ),
   tools: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        "Names/presets: *=read/write/edit/bash (mutating); ro=read/grep/find/ls (read-only). Inline defaults to *.",
+        "Override only if requested or required. *=read/write/edit/bash; ro=read/grep/find/ls (read-only).",
     }),
   ),
   thinking: Type.Optional(
     StringEnum(VALID_THINKING_LEVELS, {
       description:
-        "off/minimal/low/medium/high/xhigh/max. Omit for agents — it overrides delegate.json tiers; default inherits.",
+        "off/minimal/low/medium/high/xhigh/max. Omit by default: overrides the agent's configured thinking budget.",
     }),
   ),
   sessionId: Type.Optional(
@@ -101,7 +101,7 @@ export const delegateTaskSchema = Type.Object({
   workspace: Type.Optional(
     StringEnum(["shared", "scratch", "isolated"], {
       description:
-        "shared/scratch/isolated. shared edits source; scratch discards; isolated orders Git worktree proposals; not a security boundary.",
+        "shared/scratch/isolated. Override if requested or required. scratch discards; isolated reconciles Git; not a security boundary.",
     }),
   ),
 });
@@ -159,7 +159,7 @@ export const delegateArgumentsSchema = Type.Object(
       Type.Array(delegateTaskSchema, {
         minItems: 0,
         description:
-          "Tasks run concurrently; overlapping shared writers run in task order. scratch=disposable copy. []=manual.",
+          "Use built-in defaults first. Tasks run concurrently; overlapping shared writers run in task order. []=manual.",
       }),
     ),
   },
