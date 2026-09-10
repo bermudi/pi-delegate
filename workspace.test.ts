@@ -1359,10 +1359,14 @@ describe("checkScratchWorkspaceSupport", () => {
     );
     try {
       const repo = testRepo(parent);
-      execFileSync("git", ["commit", "--allow-empty", "--quiet", "-m", "init"], {
-        cwd: repo,
-        env: GIT_ENV,
-      });
+      execFileSync(
+        "git",
+        ["commit", "--allow-empty", "--quiet", "-m", "init"],
+        {
+          cwd: repo,
+          env: GIT_ENV,
+        },
+      );
       const worktree = path.join(parent, "linked");
       execFileSync("git", ["worktree", "add", "--quiet", worktree], {
         cwd: repo,

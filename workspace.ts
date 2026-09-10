@@ -842,11 +842,7 @@ export async function createScratchWorkspace(
   let copiedOwnerStat: fs.Stats | undefined;
   try {
     if (signal?.aborted) controller.abort(signal.reason);
-    const resolved = await resolveScratchSource(
-      cwd,
-      controller.signal,
-      signal,
-    );
+    const resolved = await resolveScratchSource(cwd, controller.signal, signal);
     sourceCwd = resolved.sourceCwd;
     sourceRoot = resolved.sourceRoot;
 

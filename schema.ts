@@ -65,7 +65,8 @@ export const delegateTaskSchema = Type.Object({
   ),
   model: Type.Optional(
     Type.String({
-      description: "Override only if requested or required; else keep its default.",
+      description:
+        "Override only if requested or required; else keep its default.",
     }),
   ),
   tools: Type.Optional(
@@ -296,9 +297,7 @@ function validateTicketMode(params: DelegateArguments): string | undefined {
     // likely intent — dispatch already blocks; async creates the tickets
     // that ticketAction manages — instead of restating the field rule.
     const wantsDispatch =
-      Array.isArray(params.tasks) &&
-      params.tasks.length > 0 &&
-      !params.ticket;
+      Array.isArray(params.tasks) && params.tasks.length > 0 && !params.ticket;
     if (wantsDispatch) {
       return `${base} Dispatched tasks run to completion before returning — omit ticketAction entirely; only async:true produces a ticket to wait on.`;
     }

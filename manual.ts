@@ -244,7 +244,7 @@ export function getSubagentManualMarkdown(
     "- Shared writers overlapping within one call are serialized in task order (reported in the result); overlap with a running sync/async dispatch is rejected, so wait for it to finish. Unknown tools count as mutating.",
     "- `*` means read/write/edit/bash, not every tool. `grep`, `find`, and `ls` are valid explicit tools and are the `ro` preset.",
     '- `tasks` is an array. The tool recovers common stringified calls for compatibility, but canonical calls use `{ tasks: [{ prompt: "..." }] }`.',
-    '- Use a built-in agent first: `default` for general work, `scout` for read-only investigation, `coder` for implementation, and `reviewer` for review. Omitting `agent` creates a custom inline task rather than selecting a default.',
+    "- Use a built-in agent first: `default` for general work, `scout` for read-only investigation, `coder` for implementation, and `reviewer` for review. Omitting `agent` creates a custom inline task rather than selecting a default.",
     "- Omit `model`, `thinking`, `tools`, and `workspace` for built-ins unless the user requests an override or the built-in default cannot satisfy a concrete requirement. These task fields replace configured policy.",
     "- In particular, setting `thinking` overrides the agent's configured thinking budget. A casual effort value silently defeats that budget; leave it unset rather than estimating effort for every task.",
     "- An inline task with no `tools` uses `*`; a named custom task uses its profile; a profile with no tools uses `*`.",

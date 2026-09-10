@@ -3252,9 +3252,7 @@ describe("delegate extension integration", () => {
     expect(schema.properties.tasks.description).toContain(
       "overlapping shared writers run in task order",
     );
-    expect(schema.properties.tasks.description).toContain(
-      "run concurrently",
-    );
+    expect(schema.properties.tasks.description).toContain("run concurrently");
     expect(schema.properties.tasks.description).toContain("[]=manual");
     expect(schema.properties.unsafeSharedWrites).toBeUndefined();
     expect(schema.properties.async.description).toContain("auto-deliver");

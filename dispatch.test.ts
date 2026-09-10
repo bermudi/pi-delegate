@@ -442,12 +442,12 @@ describe("dispatch-time shared-write gate", () => {
         expect(started).toEqual(["one", "two"]);
       } else {
         expect(started).toEqual(["one", "two"]);
-        expect(firstText(result)).toContain(
-          "2/2 tasks completed successfully",
-        );
+        expect(firstText(result)).toContain("2/2 tasks completed successfully");
         expect(firstText(result)).toContain("Serialized:");
         expect(firstText(result)).toContain(serializedFragment);
-        expect(firstText(result)).toContain("running one at a time in task order");
+        expect(firstText(result)).toContain(
+          "running one at a time in task order",
+        );
         expect(result.details.serializedNotice).toContain(serializedFragment);
         expect(result.details.results).toHaveLength(2);
       }
@@ -713,20 +713,16 @@ describe("dispatch-time shared-write gate", () => {
   });
 
   test("rejection in a linked worktree drops the scratch recommendation", async () => {
-    execFileSync(
-      "git",
-      ["commit", "--allow-empty", "--quiet", "-m", "init"],
-      {
-        cwd: tmpDir,
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "t",
-          GIT_AUTHOR_EMAIL: "t@example.com",
-          GIT_COMMITTER_NAME: "t",
-          GIT_COMMITTER_EMAIL: "t@example.com",
-        },
+    execFileSync("git", ["commit", "--allow-empty", "--quiet", "-m", "init"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.com",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.com",
       },
-    );
+    });
     const worktreePath = path.join(tmpDir, "linked-wt");
     execFileSync("git", ["worktree", "add", "--quiet", worktreePath], {
       cwd: tmpDir,

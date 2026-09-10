@@ -303,10 +303,12 @@ async function sharedWriteSafetyFailure(
  * `finally` so throw, abort, and queued-abort paths all unblock successors. */
 function buildSerializationGate(
   groups: readonly SharedWriteConflict[] | undefined,
-): {
-  beforeAcquire: (index: number) => Promise<void>;
-  complete: (index: number) => void;
-} | undefined {
+):
+  | {
+      beforeAcquire: (index: number) => Promise<void>;
+      complete: (index: number) => void;
+    }
+  | undefined {
   if (!groups?.length) return undefined;
   const predecessor = new Map<number, number>();
   for (const { taskIndexes } of groups) {
@@ -511,12 +513,13 @@ export async function dispatchDelegate(
         if (serializedConflicts.length) {
           serializedGroups = serializedConflicts;
           serializedNotice = `Serialized: ${serializedConflicts
-            .map(({ scope, taskIndexes }) =>
-              `${taskIndexes
-                .map((index) => references[index] ?? `Task ${index + 1}`)
-                .join(", ")} share ${
-                scope.kind === "git" ? "Git root" : "directory"
-              } '${scope.root}' — running one at a time in task order.`,
+            .map(
+              ({ scope, taskIndexes }) =>
+                `${taskIndexes
+                  .map((index) => references[index] ?? `Task ${index + 1}`)
+                  .join(", ")} share ${
+                  scope.kind === "git" ? "Git root" : "directory"
+                } '${scope.root}' — running one at a time in task order.`,
             )
             .join(" ")}`;
         }
@@ -592,12 +595,9 @@ export async function dispatchDelegate(
       totalCost: 0,
       wallMs: Date.now() - callSpan.startedAt,
     });
-    return await sharedWriteSafetyFailure(
-      tasks,
-      parentModelId,
-      error,
-      [...new Set(resolved.map((task) => task.cwd))],
-    );
+    return await sharedWriteSafetyFailure(tasks, parentModelId, error, [
+      ...new Set(resolved.map((task) => task.cwd)),
+    ]);
   }
 
   if ("rejected" in admissionResult) {
