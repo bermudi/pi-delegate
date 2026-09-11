@@ -8,7 +8,7 @@
  * ever calling `session.prompt()`. These tests pin that seam with a fake
  * AgentSession so we don't need a real model/stream.
  */
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
@@ -3565,10 +3565,9 @@ describe("runAgentSession deadline", () => {
       ...fileTracking,
       getGitChangedFiles: lateGit,
     }));
-    mock.module("./timer.ts", () => ({
-      ...timer,
-      scheduleDeadline: noOpSchedule,
-    }));
+    // mock.restore() does not undo Bun module mocks. A restorable spy avoids
+    // disabling every later ticket wait/deadline in the same test process.
+    spyOn(timer, "scheduleDeadline").mockImplementation(noOpSchedule);
     try {
       const answer = {
         role: "assistant",
@@ -3621,10 +3620,7 @@ describe("runAgentSession deadline", () => {
       ...fileTracking,
       getGitChangedFiles: lateGit,
     }));
-    mock.module("./timer.ts", () => ({
-      ...timer,
-      scheduleDeadline: noOpSchedule,
-    }));
+    spyOn(timer, "scheduleDeadline").mockImplementation(noOpSchedule);
     try {
       const { session } = fakeSession({
         prompt: async () => {
