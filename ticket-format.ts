@@ -50,17 +50,18 @@ export function formatTicketAgentRoster(progress: TaskProgress[]): string {
 
 /**
  * Copy-pasteable poll/cancel controls for a live ticket. Cancelling tickets
- * keep poll (to watch unwind) but drop cancel (already requested).
+ * keep poll (to watch unwind) but drop cancel (already requested). Pause/
+ * resume needs the ticket's pause controller: without one, handlePause
+ * rejects the call, so no snippet is advertised.
  */
 export function formatTicketControlSnippets(ticket: AsyncTicket): string {
   if (ticket.status !== "running" && ticket.status !== "cancelling") return "";
   let snippets = `\n     poll:   delegate({ ticketAction: "poll", ticket: "${ticket.id}" })`;
   if (ticket.status === "running") {
-    const action =
-      ticket.pause?.state && ticket.pause.state !== "running"
-        ? "resume"
-        : "pause";
-    snippets += `\n     ${action}: delegate({ ticketAction: "${action}", ticket: "${ticket.id}" })`;
+    if (ticket.pause) {
+      const action = ticket.pause.state !== "running" ? "resume" : "pause";
+      snippets += `\n     ${action}: delegate({ ticketAction: "${action}", ticket: "${ticket.id}" })`;
+    }
     snippets += `\n     cancel: delegate({ ticketAction: "cancel", ticket: "${ticket.id}", force: true })`;
   }
   return snippets;

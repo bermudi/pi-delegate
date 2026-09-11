@@ -153,6 +153,15 @@ describe("ticket roster formatting", () => {
     expect(formatTicketControlSnippets(running)).toContain(
       'delegate({ ticketAction: "cancel", ticket: "abc12345", force: true })',
     );
+    // No pause controller attached (e.g. ticket registered but dispatch has
+    // not installed it yet): handlePause would reject, so advertise neither
+    // pause nor resume.
+    expect(formatTicketControlSnippets(running)).not.toContain(
+      'ticketAction: "pause"',
+    );
+    expect(formatTicketControlSnippets(running)).not.toContain(
+      'ticketAction: "resume"',
+    );
     expect(
       formatTicketControlSnippets(mkTicket({ status: "cancelling" })),
     ).not.toContain("cancel:");
