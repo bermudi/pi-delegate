@@ -100,6 +100,7 @@ function buildWaitDetails(ticket: AsyncTicket): DelegateDetails {
     parentModel: ticket.parentModelId,
     ticketId: ticket.id,
     status: ticket.status,
+    pauseState: ticket.status === "running" ? ticket.pause?.state : undefined,
     elapsedMs: (ticket.completedAt ?? Date.now()) - ticket.created,
     overlapWarning: overlapWarning || undefined,
     dispatchWarning: ticket.dispatchWarning,
@@ -112,6 +113,7 @@ function appendDispatchWarnings(
   details: DelegateDetails,
 ): string {
   const warnings = [
+    details.serializedNotice,
     details.dispatchWarning ? `WARNING: ${details.dispatchWarning}` : undefined,
     details.overlapWarning,
   ].filter((warning): warning is string => warning !== undefined);
@@ -124,15 +126,21 @@ function buildWaitRunningUpdate(
   const total = ticket.progress.length;
   const done = ticket.progress.filter((p) => p.status === "done").length;
   const failed = ticket.progress.filter((p) => p.status === "failed").length;
-  const running = ticket.progress.filter((p) => p.status === "running").length;
+  const running = ticket.progress.filter(
+    (p) => p.status === "running" && !p.paused,
+  ).length;
+  const paused = ticket.progress.filter(
+    (p) => p.status === "running" && p.paused,
+  ).length;
   const pending = ticket.progress.filter((p) => p.status === "pending").length;
   const finalized = done + failed;
 
   const parts: string[] = [
-    `Waiting for ticket ${ticket.id}: ${ticket.status.toUpperCase()}`,
+    `Waiting for ticket ${ticket.id}: ${(ticket.status === "running" ? (ticket.pause?.state ?? ticket.status) : ticket.status).toUpperCase()}`,
   ];
   parts.push(`${finalized}/${total} finalized`);
   if (running > 0) parts.push(`${running} active`);
+  if (paused > 0) parts.push(`${paused} paused`);
   if (failed > 0) parts.push(`${failed} failed`);
   if (pending > 0) parts.push(`${pending} queued`);
 
@@ -603,6 +611,8 @@ export class TicketRegistry extends Map<string, AsyncTicket> {
           // (friction #2). The LLM-facing content still names the ticket id too.
           ticketId: ticket.id,
           status: ticket.status,
+          pauseState:
+            ticket.status === "running" ? ticket.pause?.state : undefined,
           elapsedMs: Date.now() - ticket.created,
           overlapWarning: snapshot.overlapWarning || undefined,
           dispatchWarning: ticket.dispatchWarning,
@@ -612,6 +622,41 @@ export class TicketRegistry extends Map<string, AsyncTicket> {
     }
 
     return this.formatCompletedTicket(ticket);
+  }
+
+  /** Preview or request cancellation of a running async ticket. */
+  handlePause(params: {
+    ticket?: string;
+    ticketAction: "pause" | "resume";
+  }): AgentToolResult<DelegateDetails> {
+    const ticket = params.ticket ? this.get(params.ticket) : undefined;
+    if (!ticket || ticket.status !== "running" || !ticket.pause) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: !ticket
+              ? `Ticket '${params.ticket ?? ""}' not found.`
+              : `Cannot ${params.ticketAction} ticket '${ticket.id}': ${ticket.status === "running" ? "pause control unavailable" : `already ${ticket.status}`}.`,
+          },
+        ],
+        details: { tasks: [], results: [], progress: [] },
+      };
+    }
+    ticket.pause[params.ticketAction]();
+    console.info(
+      `[delegate] ticket '${ticket.id}' ${params.ticketAction} requested: ${ticket.pause.state}`,
+    );
+    const details = buildWaitDetails(ticket);
+    const text = `Ticket ${ticket.id}: ${ticket.pause.state.toUpperCase()}. ${
+      params.ticketAction === "pause"
+        ? "Current turns may finish; no subsequent turn or queued task starts while paused. Resume this ticket to continue. Existing background processes are not frozen; wall-clock deadlines still apply."
+        : "Continuing the same live sessions."
+    }`;
+    return {
+      content: [{ type: "text", text: appendDispatchWarnings(text, details) }],
+      details,
+    };
   }
 
   /** Preview or request cancellation of a running async ticket. */
@@ -879,6 +924,13 @@ export function handleCancel(params: {
   force?: boolean;
 }): AgentToolResult<DelegateDetails> {
   return ticketRegistry.handleCancel(params);
+}
+
+export function handlePause(params: {
+  ticket?: string;
+  ticketAction: "pause" | "resume";
+}): AgentToolResult<DelegateDetails> {
+  return ticketRegistry.handlePause(params);
 }
 
 export function handleWait(

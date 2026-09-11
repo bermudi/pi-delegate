@@ -21,6 +21,7 @@ export type {
   TaskRunEnv,
 } from "./types.ts";
 export type { DelegateConfig } from "./config.ts";
+export type { PauseState } from "./pause.ts";
 
 export {
   DEFAULT_AGENT_NAME,
@@ -76,6 +77,7 @@ export {
   isSessionBusy,
   handlePoll,
   handleCancel,
+  handlePause,
   handleWait,
   notifyWaiters,
   deliverTicketResults,

@@ -384,8 +384,8 @@ describe("dispatch-time shared-write gate", () => {
           durationMs: 1,
           tokens: 0,
           usage: emptyUsage(),
-          touchedFiles: [],
-          attributedFiles: [],
+          touchedFiles: [path.join(tmpDir, "same.ts")],
+          attributedFiles: [path.join(tmpDir, "same.ts")],
           fileAttributions: [],
           prompted: true,
         };
@@ -440,6 +440,10 @@ describe("dispatch-time shared-write gate", () => {
         await ticket!.completion;
         expect(ticket!.status).toBe("done");
         expect(started).toEqual(["one", "two"]);
+        expect(ticket!.results.map((r) => r?.serializedGroup)).toEqual([0, 0]);
+        expect(
+          ticketRegistry.formatCompletedTicket(ticket!).details.overlapWarning,
+        ).toBeUndefined();
       } else {
         expect(started).toEqual(["one", "two"]);
         expect(firstText(result)).toContain("2/2 tasks completed successfully");
@@ -450,6 +454,8 @@ describe("dispatch-time shared-write gate", () => {
         );
         expect(result.details.serializedNotice).toContain(serializedFragment);
         expect(result.details.results).toHaveLength(2);
+        expect(result.details.overlapWarning).toBeUndefined();
+        expect(firstText(result)).not.toContain("WARNING:");
       }
       _setRunAgentSessionForTesting(undefined);
     },
@@ -506,6 +512,93 @@ describe("dispatch-time shared-write gate", () => {
       _setRunAgentSessionForTesting(undefined);
     }
   });
+
+  test.each(["resume", "cancel", "shutdown"] as const)(
+    "paused serialized queue retains its reservation and supports %s",
+    async (action) => {
+      const started: string[] = [];
+      let releaseFirst!: () => void;
+      const released = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let announceFirst!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        announceFirst = resolve;
+      });
+      _setRunAgentSessionForTesting(async (_session, prompt) => {
+        started.push(prompt);
+        if (prompt === "one") {
+          announceFirst();
+          await released;
+        }
+        return {
+          output: "done",
+          durationMs: 1,
+          tokens: 0,
+          usage: emptyUsage(),
+          touchedFiles: [],
+          attributedFiles: [],
+          fileAttributions: [],
+          prompted: true,
+        };
+      });
+      const input = asyncIsolatedInput(tmpDir, ["one", "two"]);
+      input.params.tasks = input.params.tasks!.map((task) => ({
+        ...task,
+        workspace: "shared",
+      }));
+      const result = await dispatchDelegate(input);
+      const ticket = ticketRegistry.get(result.details.ticketId!);
+      expect(ticket).toBeDefined();
+      try {
+        await firstStarted;
+        const response = ticketRegistry.handlePause({
+          ticket: ticket!.id,
+          ticketAction: "pause",
+        });
+        expect(response.details.pauseState).toBe("pausing");
+        releaseFirst();
+        for (let n = 0; n < 200 && ticket!.pause!.state !== "paused"; n++)
+          await Bun.sleep(5);
+        expect(ticket!.pause!.state).toBe("paused");
+        expect(started).toEqual(["one"]);
+        expect(ticket!.workersSettled).toBe(false);
+
+        // Pausing cannot release the source to another shared writer.
+        const conflicting = asyncIsolatedInput(tmpDir, ["intruder"]);
+        conflicting.params.tasks = [
+          { prompt: "intruder", cwd: tmpDir, workspace: "shared" },
+        ];
+        expect(firstText(await dispatchDelegate(conflicting))).toContain(
+          "Rejected before dispatch",
+        );
+
+        if (action === "resume") {
+          const resumed = ticketRegistry.handlePause({
+            ticket: ticket!.id,
+            ticketAction: "resume",
+          });
+          expect(resumed.details.pauseState).toBe("running");
+        } else if (action === "cancel") {
+          ticketRegistry.handleCancel({ ticket: ticket!.id, force: true });
+        } else {
+          cancelTicketForShutdown(ticket!);
+        }
+        await ticket!.completion;
+        expect(started).toEqual(action === "resume" ? ["one", "two"] : ["one"]);
+        expect(ticket!.status).toBe(action === "resume" ? "done" : "cancelled");
+        expect(ticket!.workersSettled).toBe(true);
+      } finally {
+        releaseFirst();
+        if (ticket) {
+          requestTicketCancel(ticket);
+          ticket.pause?.resume();
+          await ticket.completion;
+        }
+        _setRunAgentSessionForTesting(undefined);
+      }
+    },
+  );
 
   test("read-only tasks in the same root stay parallel with a shared writer", async () => {
     const model = { provider: "test", id: "model" } as any;
@@ -1077,6 +1170,83 @@ describe("dispatch-time shared-write gate", () => {
       rmSync(artifactRoot, { recursive: true, force: true });
     }
   });
+
+  test.each(["resume", "cancel"] as const)(
+    "pause holds isolated proposals before source application until %s",
+    async (action) => {
+      commitFiles(tmpDir, { "base.txt": "base\n" });
+      let releaseWorker!: () => void;
+      const released = new Promise<void>((resolve) => {
+        releaseWorker = resolve;
+      });
+      let announceWorker!: () => void;
+      const started = new Promise<void>((resolve) => {
+        announceWorker = resolve;
+      });
+      _setRunAgentSessionForTesting(async (_session, _prompt, config) => {
+        writeFileSync(path.join(config.cwd, "base.txt"), "proposal\n");
+        announceWorker();
+        await released;
+        return {
+          output: "done",
+          durationMs: 1,
+          tokens: 0,
+          usage: emptyUsage(),
+          touchedFiles: [path.join(config.cwd, "base.txt")],
+          attributedFiles: [path.join(config.cwd, "base.txt")],
+          fileAttributions: [],
+          prompted: true,
+        };
+      });
+      const artifactRoot = `${tmpDir}-pause-artifacts`;
+      _setIsolatedArtifactRootForTesting(artifactRoot);
+      const response = await dispatchDelegate(
+        asyncIsolatedInput(tmpDir, ["one"]),
+      );
+      const ticket = ticketRegistry.get(response.details.ticketId!);
+      expect(ticket).toBeDefined();
+      try {
+        await started;
+        ticketRegistry.handlePause({
+          ticket: ticket!.id,
+          ticketAction: "pause",
+        });
+        releaseWorker();
+        for (let n = 0; n < 200 && ticket!.pause!.state !== "paused"; n++)
+          await Bun.sleep(5);
+        expect(ticket!.pause!.state).toBe("paused");
+        expect(ticket!.workersSettled).toBe(false);
+        expect(readFileSync(path.join(tmpDir, "base.txt"), "utf8")).toBe(
+          "base\n",
+        );
+        if (action === "resume") {
+          ticketRegistry.handlePause({
+            ticket: ticket!.id,
+            ticketAction: "resume",
+          });
+        } else {
+          ticketRegistry.handleCancel({ ticket: ticket!.id, force: true });
+        }
+        await ticket!.completion;
+        expect(ticket!.results[0]?.integration?.status).toBe(
+          action === "resume" ? "applied_unverified" : "retained",
+        );
+        expect(readFileSync(path.join(tmpDir, "base.txt"), "utf8")).toBe(
+          action === "resume" ? "proposal\n" : "base\n",
+        );
+      } finally {
+        releaseWorker();
+        if (ticket) {
+          requestTicketCancel(ticket);
+          ticket.pause?.resume();
+          await ticket.completion;
+        }
+        _setRunAgentSessionForTesting(undefined);
+        _setIsolatedArtifactRootForTesting(undefined);
+        rmSync(artifactRoot, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("sync parent cancellation retains a completed proposal before source apply", async () => {
     commitFiles(tmpDir, { "base.txt": "base\n" });
@@ -1737,8 +1907,10 @@ describe("dispatchSync touched-file overlap warning", () => {
     const text = firstText(result);
     expect(text).toContain("touched (best-effort): shared.txt");
     expect(text).toContain(shared);
-    expect(text).toContain("does not isolate or serialize file access");
-    expect(text).toContain("does not roll back completed writes");
+    expect(text).toContain(
+      "File reports do not prove simultaneous writes or a conflict",
+    );
+    expect(text).toContain("completed writes are not rolled back");
   });
 
   test("omits overlap warning when tasks touch distinct paths", async () => {
@@ -1762,8 +1934,10 @@ describe("dispatchSync touched-file overlap warning", () => {
     });
 
     const text = firstText(result);
-    expect(text).not.toContain("does not isolate or serialize file access");
-    expect(text).not.toContain("does not roll back completed writes");
+    expect(text).not.toContain(
+      "File reports do not prove simultaneous writes or a conflict",
+    );
+    expect(text).not.toContain("completed writes are not rolled back");
   });
 
   test("omits overlap warning when git-derived touchedFiles overlap but attributedFiles do not", async () => {
@@ -1794,8 +1968,10 @@ describe("dispatchSync touched-file overlap warning", () => {
     // Display still reports the best-effort union for each task.
     expect(text).toContain("touched (best-effort): a.txt, b.txt");
     // Overlap is computed only from directly attributable files.
-    expect(text).not.toContain("does not isolate or serialize file access");
-    expect(text).not.toContain("does not roll back completed writes");
+    expect(text).not.toContain(
+      "File reports do not prove simultaneous writes or a conflict",
+    );
+    expect(text).not.toContain("completed writes are not rolled back");
   });
 
   test("carries caller-provided task id onto result and progress", async () => {

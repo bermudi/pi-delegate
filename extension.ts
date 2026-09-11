@@ -243,6 +243,16 @@ export default function delegateExtension(
       }
 
       // ── Cancel action ─────────────────────────────────────────────────
+      if (params.ticketAction === "pause" || params.ticketAction === "resume") {
+        const result = runtime.tickets.handlePause({
+          ticket: params.ticket,
+          ticketAction: params.ticketAction,
+        });
+        syncDelegateStatus(ctx, runtime);
+        succeedCall();
+        return result;
+      }
+
       if (params.ticketAction === "cancel") {
         const result = runtime.tickets.handleCancel(params);
         // A forced cancel flips the ticket to "cancelling" — keep the

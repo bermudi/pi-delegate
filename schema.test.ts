@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Value } from "@sinclair/typebox/value";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import {
   delegateArgumentsSchema,
   delegateTaskSchema,
@@ -10,6 +11,40 @@ import { getSubagentManualMarkdown } from "./manual.ts";
 import type { DelegateArguments } from "./types.ts";
 
 describe("normalizeDelegateArguments", () => {
+  test.each(["pause", "resume"] as const)(
+    "validates %s as ticket-only control",
+    (ticketAction) => {
+      const valid = { ticketAction, ticket: "t1" };
+      expect(
+        validateToolArguments(
+          {
+            name: "delegate",
+            description: "Delegate",
+            parameters: delegateArgumentsSchema,
+          },
+          {
+            type: "toolCall",
+            id: "control",
+            name: "delegate",
+            arguments: valid,
+          },
+        ),
+      ).toEqual(valid);
+      expect(validateDelegateOperation(valid)).toBeUndefined();
+      expect(validateDelegateOperation({ ticketAction })).toContain(
+        "requires ticket",
+      );
+      expect(
+        validateDelegateOperation({ ...valid, tasks: [{ prompt: "no" }] }),
+      ).toContain("cannot be combined");
+      expect(validateDelegateOperation({ ...valid, timeoutMs: 1 })).toContain(
+        "only with ticketAction 'wait'",
+      );
+      expect(validateDelegateOperation({ ...valid, force: true })).toContain(
+        "only with ticketAction 'cancel'",
+      );
+    },
+  );
   test("passes well-formed arguments through unchanged", () => {
     const args = { tasks: [{ prompt: "hi", tools: ["read"] }], async: false };
     expect(normalizeDelegateArguments(args)).toEqual(args);
@@ -53,7 +88,13 @@ describe("normalizeDelegateArguments", () => {
   });
 
   test("does not wrap when a ticket action is present", () => {
-    for (const ticketAction of ["poll", "cancel", "wait"] as const) {
+    for (const ticketAction of [
+      "poll",
+      "cancel",
+      "wait",
+      "pause",
+      "resume",
+    ] as const) {
       const result = normalizeDelegateArguments({
         ticketAction,
         prompt: "stray",

@@ -202,6 +202,7 @@ export function renderDelegateResult(
     lines,
     ticketId,
     ticketStatus,
+    pauseState: details.pauseState,
     elapsedMs: details.elapsedMs,
   };
 

@@ -84,6 +84,8 @@ export interface TicketWaiter {
 }
 
 export interface AsyncTicket {
+  /** Orthogonal to lifecycle status: paused tickets remain live reservations. */
+  pause?: import("./pause.ts").PauseController;
   id: string;
   created: number;
   completedAt?: number;
@@ -253,6 +255,7 @@ export type TaskFailureKind =
   "cancelled" | "stalled" | "model_error" | "deadline_exceeded";
 
 export interface TaskProgress {
+  paused?: boolean;
   id?: string;
   index: number;
   agent: string;
@@ -278,6 +281,7 @@ export interface TaskProgress {
 }
 
 export interface DelegateDetails {
+  pauseState?: import("./pause.ts").PauseState;
   tasks: TaskDef[];
   results: (TaskResult | { error: string })[];
   progress: TaskProgress[];
@@ -300,6 +304,8 @@ export interface DelegateDetails {
 }
 
 export interface TaskResult {
+  /** Batch-local ordered-writer group; never suppress incomplete evidence. */
+  serializedGroup?: number;
   id?: string;
   agent: string;
   /** Short tag (via `formatResumeTag`) of the transcript this task continued
@@ -436,6 +442,7 @@ export interface AgentProgressUpdate {
 }
 
 export interface TaskRunEnv {
+  pause?: import("./pause.ts").PauseController;
   /** Abort signal — parent's for sync, ticket's for async. May be undefined when no parent signal is available. */
   signal: AbortSignal | undefined;
   modelRegistry: ModelRegistry;

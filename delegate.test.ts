@@ -3274,8 +3274,8 @@ describe("delegate extension integration", () => {
     // tool-definition payload. Keep truthful model-facing guidance compact but
     // informative. The per-field cap is a readability guard (raised 110 -> 130
     // in #32 so the most semantic fields stop writing telegraphese); the TOTAL
-    // is the actual payload proxy and must never be raised — do not mutilate
-    // useful copy merely to preserve a stale number either.
+    // is the actual payload proxy. Raise it only for justified new guidance;
+    // do not mutilate useful copy merely to preserve a stale number.
     const descriptions = [
       toolDef!.description!,
       ...topProperties.map(([, prop]) => prop.description as string),
@@ -3289,10 +3289,8 @@ describe("delegate extension integration", () => {
         (total, description) => total + description.length,
         0,
       ),
-      // 1950 (was 1900): raised for the workspace value list — enum-like
-      // copy now opens with "shared/scratch/isolated." so models stop
-      // inventing values like "none" (observed with glm-5.3).
-    ).toBeLessThanOrEqual(1_950);
+      // 2000 (was 1950): ticket pause/resume adds two real controls.
+    ).toBeLessThanOrEqual(2_000);
   });
 
   test("rejects mixed dispatch, ticket, and session-control shapes", async () => {
@@ -5231,8 +5229,10 @@ describe("delegate renderers", () => {
       ).getText();
       expect(rendered).toContain("2/2 finished");
       expect(rendered).toContain(shared);
-      expect(rendered).toContain("does not isolate or serialize file access");
-      expect(rendered).toContain("does not roll back completed writes");
+      expect(rendered).toContain(
+        "File reports do not prove simultaneous writes or a conflict",
+      );
+      expect(rendered).toContain("completed writes are not rolled back");
     } finally {
       process.stdout.columns = originalColumns;
     }
@@ -6612,11 +6612,11 @@ describe("async delegate integration", () => {
     // The two completed tasks already share an attributed file; the warning must
     // be surfaced in the poll view before the third task settles.
     expect(result.details.overlapWarning).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(result.details.overlapWarning).toContain(shared);
     expect(firstText(result)).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(firstText(result)).toContain(shared);
   });
@@ -6742,10 +6742,10 @@ describe("async delegate integration", () => {
     expect(firstText(result)).toContain("cancellation preview");
     expect(firstText(result)).toContain(shared);
     expect(firstText(result)).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(result.details.overlapWarning).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(result.details.overlapWarning).toContain(shared);
     expect(ticket.status).toBe("running");
@@ -6827,10 +6827,10 @@ describe("async delegate integration", () => {
     expect(firstText(result)).toContain("cancelling");
     expect(firstText(result)).toContain(shared);
     expect(firstText(result)).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(result.details.overlapWarning).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(result.details.overlapWarning).toContain(shared);
     expect(ticket.status).toBe("cancelling");
@@ -7889,6 +7889,8 @@ describe("async delegate integration", () => {
       "poll",
       "cancel",
       "wait",
+      "pause",
+      "resume",
     ]);
     expect(schema.properties.async).toBeDefined();
     expect(schema.properties.ticket).toBeDefined();
@@ -8861,10 +8863,10 @@ describe("async delegate integration", () => {
     expect(updates[0]!.content[0]!.text).toContain("2/3 finalized");
     expect(updates[0]!.content[0]!.text).toContain(shared);
     expect(updates[0]!.content[0]!.text).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(updates[0]!.details.overlapWarning).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(updates[0]!.details.overlapWarning).toContain(shared);
   });
@@ -8946,10 +8948,10 @@ describe("async delegate integration", () => {
     expect(firstText(result)).toContain("wait timed out");
     expect(firstText(result)).toContain(shared);
     expect(firstText(result)).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(result.details.overlapWarning).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(result.details.overlapWarning).toContain(shared);
     expect(ticket.status).toBe("running");
@@ -9035,10 +9037,10 @@ describe("async delegate integration", () => {
     expect(firstText(result)).toContain("aborted");
     expect(firstText(result)).toContain(shared);
     expect(firstText(result)).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(result.details.overlapWarning).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
     expect(result.details.overlapWarning).toContain(shared);
     expect(ticket.status).toBe("running");
@@ -10558,8 +10560,10 @@ describe("touched-file overlap warning", () => {
   test("formatTouchedOverlapWarning names paths and does not claim isolation or rollback", () => {
     const warning = formatTouchedOverlapWarning(["/tmp/shared.txt"]);
     expect(warning).toContain("/tmp/shared.txt");
-    expect(warning).toContain("does not isolate or serialize file access");
-    expect(warning).toContain("does not roll back completed writes");
+    expect(warning).toContain(
+      "File reports do not prove simultaneous writes or a conflict",
+    );
+    expect(warning).toContain("completed writes are not rolled back");
   });
 
   test("formatCompletedTicket emits overlap warning for identical touched paths", () => {
@@ -10609,9 +10613,11 @@ describe("touched-file overlap warning", () => {
     const text = firstText(result);
     expect(text).toContain("touched (best-effort):");
     expect(text).toContain(shared);
-    expect(text).toContain("does not isolate or serialize file access");
+    expect(text).toContain(
+      "File reports do not prove simultaneous writes or a conflict",
+    );
     expect(result.details.overlapWarning).toContain(
-      "does not isolate or serialize file access",
+      "File reports do not prove simultaneous writes or a conflict",
     );
   });
 
@@ -10651,7 +10657,9 @@ describe("touched-file overlap warning", () => {
     };
     const result = formatCompletedTicket(ticket);
     const text = firstText(result);
-    expect(text).not.toContain("does not isolate or serialize file access");
+    expect(text).not.toContain(
+      "File reports do not prove simultaneous writes or a conflict",
+    );
     expect(result.details.overlapWarning).toBeUndefined();
   });
 });

@@ -113,9 +113,9 @@ export const delegateTaskSchema = Type.Object({
 export const delegateArgumentsSchema = Type.Object(
   {
     ticketAction: Type.Optional(
-      StringEnum(["poll", "cancel", "wait"], {
+      StringEnum(["poll", "cancel", "wait", "pause", "resume"], {
         description:
-          "Ticket control: poll=snapshot; wait=block until settled; cancel=abort. Prefer wait; never cancel for time.",
+          "poll=snapshot; wait=await results; pause=stop between turns; resume=continue; cancel=abort. Prefer wait over polling.",
       }),
     ),
     sessionAction: Type.Optional(
@@ -213,7 +213,7 @@ export function validateDelegateOperation(
   const rawParams = params as Record<string, unknown>;
   if ("action" in rawParams) {
     return (
-      "unsupported field 'action'; use 'ticketAction' for poll/cancel/wait " +
+      "unsupported field 'action'; use 'ticketAction' for poll/cancel/wait/pause/resume " +
       "or 'sessionAction' for close/list."
     );
   }
@@ -327,7 +327,7 @@ function validateDispatchOrHelpMode(
   const tasks = params.tasks ?? [];
 
   if (params.ticket !== undefined) {
-    return "ticket requires ticketAction 'poll', 'cancel', or 'wait'.";
+    return "ticket requires ticketAction 'poll', 'cancel', 'wait', 'pause', or 'resume'.";
   }
   if (params.force === true)
     return "force is valid only with ticketAction 'cancel'.";
@@ -415,12 +415,14 @@ function normalizeToolsField(value: string): unknown {
 
 /** True when `record` carries a top-level ticket-control intent that makes a
  * flat task-field wrap illegitimate: an explicit `ticketAction`, or a bare
- * `ticket` id (which only makes sense with poll/cancel/wait). */
+ * `ticket` id (which only makes sense with ticket controls). */
 function hasTicketControlIntent(record: Record<string, unknown>): boolean {
   return (
     record.ticketAction === "poll" ||
     record.ticketAction === "cancel" ||
     record.ticketAction === "wait" ||
+    record.ticketAction === "pause" ||
+    record.ticketAction === "resume" ||
     record.ticket !== undefined
   );
 }

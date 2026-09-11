@@ -1546,6 +1546,7 @@ async function runTaskAttempt(
       timing.taskStartedAt,
       timing.deadlineAt,
       env.config,
+      env.pause ? { controller: env.pause, index: p.index } : undefined,
     );
 
     accounting.cumulativeTokens += r.tokens;

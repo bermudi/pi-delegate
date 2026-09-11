@@ -586,6 +586,7 @@ export function latestActivity(p: TaskProgress): ToolActivity | null {
  *  - "last: read src/bar.ts" after a tool completes and the model is thinking
  *  - "thinking" when no activity has been recorded yet */
 export function formatActivityLabel(p: TaskProgress): string {
+  if (p.paused) return "paused between turns";
   const activity = inFlightActivity(p) ?? latestActivity(p);
   if (!activity) return "thinking";
   const call = sanitizeTerminalLine(
@@ -599,6 +600,7 @@ export function formatActivityLabel(p: TaskProgress): string {
  *  as {@link formatActivityLabel} but adds elapsed time for in-flight tools and
  *  a completion/error icon for finished ones. */
 export function compactActivity(p: TaskProgress): string {
+  if (p.paused) return "paused between turns";
   const activity = inFlightActivity(p) ?? latestActivity(p);
   if (!activity) return "thinking…";
   const call = sanitizeTerminalLine(
@@ -656,18 +658,31 @@ export function findTouchedOverlaps(
   results: readonly {
     attributedFiles?: string[];
     workspace?: WorkspaceMode;
+    serializedGroup?: number;
+    incomplete?: string;
   }[],
 ): string[] {
-  const counts = new Map<string, number>();
+  const owners = new Map<string, (typeof results)[number][]>();
+  const overlaps = new Set<string>();
   for (const r of results) {
-    for (const f of r.attributedFiles ?? []) {
-      counts.set(f, (counts.get(f) ?? 0) + 1);
+    for (const f of new Set(r.attributedFiles ?? [])) {
+      const previous = owners.get(f) ?? [];
+      if (
+        previous.some(
+          (other) =>
+            r.serializedGroup === undefined ||
+            r.serializedGroup !== other.serializedGroup ||
+            r.incomplete !== undefined ||
+            other.incomplete !== undefined,
+        )
+      ) {
+        overlaps.add(f);
+      }
+      previous.push(r);
+      owners.set(f, previous);
     }
   }
-  return [...counts.entries()]
-    .filter(([, count]) => count > 1)
-    .map(([file]) => file)
-    .sort();
+  return [...overlaps].sort();
 }
 
 /**
@@ -680,5 +695,5 @@ export function findTouchedOverlaps(
  */
 export function formatTouchedOverlapWarning(overlaps: string[]): string | null {
   if (!overlaps.length) return null;
-  return `WARNING: These tasks reported touching the same file(s): ${overlaps.join(", ")}. Delegate does not isolate or serialize file access and does not roll back completed writes.`;
+  return `WARNING: Tasks without a verified ordering reported touching the same file(s): ${overlaps.join(", ")}. File reports do not prove simultaneous writes or a conflict; completed writes are not rolled back.`;
 }

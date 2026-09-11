@@ -54,6 +54,7 @@ export interface RenderState {
 
 /** Shared inputs for the partial and final render branches. */
 export interface BranchCtx {
+  pauseState?: import("./pause.ts").PauseState;
   progress: TaskProgress[];
   taskResults: (TaskResult | { error: string })[];
   total: number;
@@ -98,7 +99,11 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
   // Keep the live and final summaries in the same order so the header remains
   // easy to scan as a partial result resolves into its final form.
   const headerParts: string[] = [];
-  if (running > 0) headerParts.push(`${running} running`);
+  const paused = progress.filter(
+    (p) => p.status === "running" && p.paused,
+  ).length;
+  if (running > paused) headerParts.push(`${running - paused} running`);
+  if (paused > 0) headerParts.push(`${paused} paused`);
   headerParts.push(`${finished}/${total} finished`);
   if (failed > 0) headerParts.push(`${failed} failed`);
   headerParts.push(
@@ -111,7 +116,9 @@ export function renderPartialBranch(ctx: BranchCtx, h: RenderHelpers): void {
   const stateLabel =
     ctx.ticketStatus === "cancelling"
       ? `${theme.fg("error", "■ cancelling")} · `
-      : "";
+      : ctx.pauseState && ctx.pauseState !== "running"
+        ? `${theme.fg("warning", `Ⅱ ${ctx.pauseState}`)} · `
+        : "";
   const expandHint = toolExpandHint();
   const detailHint =
     !expanded && running > 0 && expandHint
@@ -362,7 +369,11 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
   if (ticketId && ticketIsLive) {
     // Background ticket — frame it as in-progress, not a finished result.
     const ticketParts = [`${finalized}/${total} finished`];
-    if (running > 0) ticketParts.push(`${running} active`);
+    const paused = progress.filter(
+      (p) => p.status === "running" && p.paused,
+    ).length;
+    if (running > paused) ticketParts.push(`${running - paused} active`);
+    if (paused > 0) ticketParts.push(`${paused} paused`);
     if (pending > 0) ticketParts.push(`${pending} queued`);
     if (failed > 0) ticketParts.push(`${failed} failed`);
     if (cancelled > 0) ticketParts.push(`${cancelled} cancelled`);
@@ -373,7 +384,9 @@ export function renderFinalBranch(ctx: BranchCtx, h: RenderHelpers): void {
     const stateLabel =
       ticketStatus === "cancelling"
         ? ` ${theme.fg("error", "cancelling")}`
-        : "";
+        : ctx.pauseState && ctx.pauseState !== "running"
+          ? ` ${theme.fg("warning", ctx.pauseState)}`
+          : "";
     lines.push(
       `${glyph}${stateLabel} ${theme.fg("muted", `${ticketLabel}${ticketParts.join(" · ")}`)}${detailHint}`,
       "",

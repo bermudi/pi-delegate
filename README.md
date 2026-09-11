@@ -164,6 +164,24 @@ the mitigation there; on quit, delegate also prints a trace line to the
 terminal naming the aborted tickets and agents, and on `/reload` it shows a
 warning notification.
 
+### Pause and resume
+
+Pause an async ticket with `delegate({ ticketAction: "pause", ticket: "<id>" })`;
+continue it with `ticketAction: "resume"`. Both return immediately.
+
+Each current model response and its tool calls finish, then the agent waits
+before its next model request. Queued tasks do not start. **Pausing** means
+work is reaching that boundary; **paused** means it has reached it. A task
+that finishes naturally may complete instead. Resume keeps the same live
+conversations, including scratch workspaces.
+
+Pause is not cancellation, rollback, or a process freeze. Background commands
+can keep running, and files may be unfinished. In-progress isolated preparation
+or application finishes before pausing. Sessions, concurrency slots and
+workspace reservations remain held. Inactivity checks stop while parked, but
+explicit wall-clock deadlines keep counting. Wait does not resume work; cancel
+still works. Pauses do not survive Pi exit or reload.
+
 ### Stall detection and cancellation
 
 `stallTimeoutMs` is an inactivity watchdog, not a hard execution deadline. When
@@ -231,7 +249,7 @@ over an installed extension.
 - **Resumed subagent** — A subagent rehydrated from a previous session `.jsonl`
   via `resumeFrom`. It can also be pooled by providing a `sessionId`.
 - **Async ticket** — A background execution handle returned when top-level
-  `async: true` is used. Poll, wait, or cancel tickets with top-level
+  `async: true` is used. Poll, wait, pause, resume, or cancel tickets with top-level
   `ticketAction: "poll"`, `ticketAction: "wait"` (blocks until the ticket settles;
   optional `timeoutMs`), or `ticketAction: "cancel"`.
 - **Skill** — A `SKILL.md` instruction bundle injected into the subagent system

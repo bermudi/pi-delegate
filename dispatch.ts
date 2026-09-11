@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import { getDefaultDelegateRuntime, type DelegateRuntime } from "./runtime.ts";
+import { PauseController } from "./pause.ts";
 import {
   getConcurrencyLimit,
   getMaxAsyncTickets,
@@ -824,6 +825,21 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
     config: dispatchConfig,
   };
   runtime.tickets.set(ticketId, ticket);
+  let lastPauseState = "running";
+  const pause = new PauseController(() => {
+    if (pause.state !== lastPauseState) {
+      lastPauseState = pause.state;
+      if (ticket.status === "running")
+        console.info(`[delegate] ticket '${ticketId}' ${lastPauseState}`);
+    }
+    for (const p of ticket.progress) p.paused = pause.isParked(p.index);
+    runtime.tickets.notifyWaiters(ticket);
+    syncDelegateStatus(undefined, runtime);
+  });
+  ticket.pause = pause;
+  // Preparation/source integration are operations too: a pause request must
+  // not claim quiet while either is mutating a workspace.
+  pause.enter(-1);
   callSpan?.spawn();
   // Footer visibility for the new background work (see status.ts). Uses the
   // ctx cached from the dispatch path in extension.ts — DelegateToolCtx is
@@ -836,6 +852,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
   const modelRegistry = ctx.modelRegistry;
 
   const asyncEnv: TaskRunEnv = {
+    pause,
     signal: ticketSignal,
     modelRegistry,
     ticketId,
@@ -879,6 +896,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       let executionResolved = resolved;
       let isolatedBatch: PreparedIsolatedBatch | undefined;
       try {
+        await pause.checkpoint(-1, ticketSignal);
         isolatedBatch = await prepareIsolatedBatch(resolved, ticketSignal);
         if (isolatedBatch) executionResolved = isolatedBatch.resolved;
       } catch (error) {
@@ -887,6 +905,8 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
           `Isolated workspace setup failed; no subagents were started. ${detail}`,
           { cause: error },
         );
+      } finally {
+        pause.leave(-1);
       }
 
       let results: TaskResult[];
@@ -897,21 +917,32 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
           (t) => getModelKey(t.model),
           (modelKey) => getConcurrencyLimit(modelKey, dispatchConfig),
           async (t, i) => {
+            pause.enter(i);
             try {
+              await pause.checkpoint(i, ticketSignal);
               const result = await runResolvedTask(
                 asyncEnv,
                 t,
                 ticket.progress[i]!,
                 i,
               );
+              const group = serializedGroups?.findIndex((group) =>
+                group.taskIndexes.includes(i),
+              );
+              if (group !== undefined && group >= 0)
+                result.serializedGroup = group;
               ticket.results[i] = result;
               return result;
             } finally {
+              pause.leave(i);
               gate?.complete(i);
             }
           },
           ticketSignal,
-          gate?.beforeAcquire,
+          async (i) => {
+            await gate?.beforeAcquire(i);
+            await pause.checkpoint(i, ticketSignal);
+          },
         );
       } catch (error) {
         results = completeUnexpectedResults(
@@ -921,33 +952,45 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
           error,
         );
         if (isolatedBatch) {
-          results = await reconcileIsolatedResults(
-            isolatedBatch,
-            resolved,
-            results,
-            {
-              shouldApplySource: () => false,
-              retainedReason:
-                "Batch execution failed before source application; completed proposals were retained for recovery.",
-            },
-          );
+          pause.enter(-1);
+          try {
+            await pause.checkpoint(-1, ticketSignal);
+            results = await reconcileIsolatedResults(
+              isolatedBatch,
+              resolved,
+              results,
+              {
+                shouldApplySource: () => false,
+                retainedReason:
+                  "Batch execution failed before source application; completed proposals were retained for recovery.",
+              },
+            );
+          } finally {
+            pause.leave(-1);
+          }
         }
         ticket.results = [...results];
         throw error;
       }
       if (isolatedBatch) {
-        results = await reconcileIsolatedResults(
-          isolatedBatch,
-          resolved,
-          results,
-          {
-            shouldApplySource: () =>
-              ticket.status === "running" && !ticketSignal.aborted,
-            signal: ticketSignal,
-            retainedReason:
-              "The async ticket was cancelled before source application; the proposal was retained for recovery.",
-          },
-        );
+        pause.enter(-1);
+        try {
+          await pause.checkpoint(-1, ticketSignal);
+          results = await reconcileIsolatedResults(
+            isolatedBatch,
+            resolved,
+            results,
+            {
+              shouldApplySource: () =>
+                ticket.status === "running" && !ticketSignal.aborted,
+              signal: ticketSignal,
+              retainedReason:
+                "The async ticket was cancelled before source application; the proposal was retained for recovery.",
+            },
+          );
+        } finally {
+          pause.leave(-1);
+        }
         ticket.results = [...results];
       }
 
@@ -1109,6 +1152,10 @@ export async function dispatchSync(
       async (t, i) => {
         try {
           const result = await runResolvedTask(syncEnv, t, progress[i]!, i);
+          const group = serializedGroups?.findIndex((group) =>
+            group.taskIndexes.includes(i),
+          );
+          if (group !== undefined && group >= 0) result.serializedGroup = group;
           partialResults[i] = result;
           return result;
         } finally {

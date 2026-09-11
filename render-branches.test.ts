@@ -25,6 +25,54 @@ import type {
  * playbook-driven model mocking, not for isolated host-export compatibility.
  */
 describe("render-branches compatibility fallback", () => {
+  test.each(["pausing", "paused"] as const)(
+    "shows %s in live and snapshot headers",
+    async (pauseState) => {
+      const { renderPartialBranch, renderFinalBranch } =
+        await import("./render-branches.ts");
+      for (const render of [renderPartialBranch, renderFinalBranch]) {
+        const ctx: BranchCtx = {
+          progress: [
+            {
+              ...makeTask(0).progress,
+              status: "running",
+              paused: pauseState === "paused",
+            },
+          ],
+          taskResults: [],
+          total: 1,
+          w: 150,
+          expanded: false,
+          state: {},
+          theme: {
+            fg: (_: string, text: string) => text,
+            bold: (text: string) => text,
+          } as never,
+          lines: [],
+          ticketId: "pause-test",
+          ticketStatus: "running",
+          pauseState,
+        };
+        render(ctx, {
+          statJoin: (parts) => parts.join(" · "),
+          modelLabel: () => "",
+          compactActivity: () =>
+            pauseState === "paused"
+              ? "paused between turns"
+              : "finishing current turn",
+          pushWarnings: () => {},
+        });
+        const text = ctx.lines.join("\n");
+        expect(text).toContain(pauseState);
+        if (pauseState === "paused") {
+          expect(text).toContain("1 paused");
+          expect(text).not.toContain("1 active");
+          expect(text).not.toContain("1 running");
+        }
+      }
+    },
+  );
+
   test("falls back to plain text when getMarkdownTheme is unavailable", async () => {
     mock.module("@earendil-works/pi-coding-agent", ((original: unknown) => {
       const ns = original as Record<string, unknown>;

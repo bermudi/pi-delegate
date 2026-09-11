@@ -127,6 +127,10 @@ export async function runAgentSession(
   deadlineAt?: number,
   /** Dispatch-scoped delegate.json snapshot for the stall timeout. */
   delegateConfig?: import("./config.ts").DelegateConfig,
+  pause?: {
+    controller: import("./pause.ts").PauseController;
+    index: number;
+  },
 ): Promise<{
   output: string;
   error?: string;
@@ -176,6 +180,8 @@ export async function runAgentSession(
   let recoveryBarrier: QuiescenceBarrier | undefined;
   let abandonmentSafety: Promise<void> | undefined;
   let unsubscribeFull: (() => void) | undefined;
+  let unsubscribePause: (() => void) | undefined;
+  let pausedAtTurnBoundary = false;
   let unsubscribeRecovery: (() => void) | undefined;
   const safeLog = (message: string, error?: unknown): void => {
     try {
@@ -187,10 +193,17 @@ export async function runAgentSession(
   const removeFullListener = (): void => {
     const remove = unsubscribeFull;
     unsubscribeFull = undefined;
+    const removePause = unsubscribePause;
+    unsubscribePause = undefined;
     try {
       remove?.();
     } catch (error) {
       safeLog("[delegate] full AgentSession listener cleanup failed", error);
+    }
+    try {
+      removePause?.();
+    } catch (error) {
+      safeLog("[delegate] turn-pause listener cleanup failed", error);
     }
   };
   const removeRecoveryListener = (): void => {
@@ -415,7 +428,13 @@ export async function runAgentSession(
   };
   const armStallWatchdog = (graceMs = 0) => {
     clearStallWatchdog();
-    if (!stallTimeoutMs || stalled || signal?.aborted || deadlineExceeded)
+    if (
+      !stallTimeoutMs ||
+      stalled ||
+      signal?.aborted ||
+      deadlineExceeded ||
+      pausedAtTurnBoundary
+    )
       return;
 
     const grace = Number.isFinite(graceMs) && graceMs > 0 ? graceMs : 0;
@@ -625,6 +644,35 @@ export async function runAgentSession(
   // result, isError) — AgentSession forwards the underlying agent events
   // verbatim. Retry and compaction events are handled below; queue/bookkeeping
   // events and thinking changes are intentionally ignored.
+  // AgentSession subscribers are notifications, not an awaited barrier.
+  // Pi core explicitly awaits Agent subscribers before proceeding from
+  // turn_start to the next model request, including retries/continuations.
+  // Never gate turn_end: a final turn should be allowed to finish the task.
+  if (pause) {
+    unsubscribePause = session.agent.subscribe(async (event, turnSignal) => {
+      if (event.type !== "turn_start" || pause.controller.state === "running")
+        return;
+      pausedAtTurnBoundary = true;
+      clearStallWatchdog();
+      try {
+        await pause.controller.checkpoint(
+          pause.index,
+          turnSignal && signal
+            ? AbortSignal.any([turnSignal, signal])
+            : (turnSignal ?? signal),
+        );
+        if (turnSignal?.aborted || signal?.aborted) {
+          throw new Error(
+            "Paused turn cancelled before the next model request",
+          );
+        }
+      } finally {
+        pausedAtTurnBoundary = false;
+        noteActivity("resuming at turn boundary");
+      }
+    });
+  }
+
   unsubscribeFull = session.subscribe((event: AgentSessionEvent) => {
     barrier.noteEvent();
     recoveryBarrier?.noteEvent();

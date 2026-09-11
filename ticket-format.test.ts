@@ -16,6 +16,10 @@ import {
   ticketStatusIcon,
 } from "./ticket-format.ts";
 import type { AsyncTicket, TaskProgress, TaskResult } from "./types.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { PauseController } from "./pause.ts";
+import { TicketRegistry } from "./tickets.ts";
+import { buildStatusText } from "./status.ts";
 
 function mkProgress(
   overrides: Partial<TaskProgress> & Pick<TaskProgress, "agent" | "status">,
@@ -46,6 +50,74 @@ function mkTicket(overrides: Partial<AsyncTicket> = {}): AsyncTicket {
 }
 
 describe("ticket roster formatting", () => {
+  test("pause/resume RPC, poll, wait, controls and footer agree on pause state", async () => {
+    const pause = new PauseController();
+    const ticket = mkTicket({ pause });
+    const registry = new TicketRegistry();
+    registry.set(ticket.id, ticket);
+    pause.enter(0);
+    expect(
+      registry.handlePause({ ticket: ticket.id, ticketAction: "pause" }).details
+        .pauseState,
+    ).toBe("pausing");
+    expect(formatLiveTicketHeader(ticket)).toContain("PAUSING");
+    expect(formatTicketRosterLine(ticket)).toContain("pausing");
+    const parked = pause.checkpoint(0, ticket.controller.signal);
+    expect(
+      registry.handlePoll({ ticket: ticket.id }, {} as ExtensionContext).details
+        .pauseState,
+    ).toBe("paused");
+    expect(formatLiveTicketHeader(ticket)).toContain("PAUSED");
+    expect(formatTicketControlSnippets(ticket)).toContain(
+      'ticketAction: "resume"',
+    );
+    expect(formatTicketControlSnippets(ticket)).not.toContain(
+      'ticketAction: "pause"',
+    );
+    expect(liveTicketGuidance(ticket)).toContain("Wait does not resume");
+    expect(
+      buildStatusText({ tickets: [ticket], activeSubagents: 1 }),
+    ).toContain("paused");
+    const wait = await registry.handleWait(
+      { ticket: ticket.id, timeoutMs: 0 },
+      undefined,
+      undefined,
+      {} as ExtensionContext,
+    );
+    expect(wait.details.pauseState).toBe("paused");
+    expect(pause.state).toBe("paused");
+    registry.sweepTickets();
+    expect(registry.has(ticket.id)).toBe(true);
+    expect(
+      registry.handlePause({ ticket: ticket.id, ticketAction: "resume" })
+        .details.pauseState,
+    ).toBe("running");
+    await parked;
+    expect(formatTicketControlSnippets(ticket)).toContain(
+      'ticketAction: "pause"',
+    );
+    expect(
+      registry.handlePause({ ticket: ticket.id, ticketAction: "resume" })
+        .details.pauseState,
+    ).toBe("running");
+    pause.leave(0);
+    ticket.status = "done";
+    expect(
+      registry.handlePause({ ticket: ticket.id, ticketAction: "pause" })
+        .content,
+    ).toEqual([
+      {
+        type: "text",
+        text: `Cannot pause ticket '${ticket.id}': already done.`,
+      },
+    ]);
+    expect(pause.state).toBe("running");
+    expect(
+      registry.handlePause({ ticket: "missing", ticketAction: "resume" })
+        .content,
+    ).toEqual([{ type: "text", text: "Ticket 'missing' not found." }]);
+  });
+
   test("ticketStatusIcon maps live/done/failed", () => {
     expect(ticketStatusIcon("running")).toBe("⏳");
     expect(ticketStatusIcon("cancelling")).toBe("⏳");

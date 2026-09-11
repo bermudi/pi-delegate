@@ -56,6 +56,11 @@ export function formatTicketControlSnippets(ticket: AsyncTicket): string {
   if (ticket.status !== "running" && ticket.status !== "cancelling") return "";
   let snippets = `\n     poll:   delegate({ ticketAction: "poll", ticket: "${ticket.id}" })`;
   if (ticket.status === "running") {
+    const action =
+      ticket.pause?.state && ticket.pause.state !== "running"
+        ? "resume"
+        : "pause";
+    snippets += `\n     ${action}: delegate({ ticketAction: "${action}", ticket: "${ticket.id}" })`;
     snippets += `\n     cancel: delegate({ ticketAction: "cancel", ticket: "${ticket.id}", force: true })`;
   }
   return snippets;
@@ -71,7 +76,11 @@ export function formatTicketRosterLine(
     (p) => p.status === "done" || p.status === "failed",
   ).length;
   const age = fmtDuration(now - ticket.created);
-  return `${icon} ${ticket.id}${formatTicketAgentRoster(ticket.progress)} · ${finalized}/${ticket.progress.length} finalized · ${ticket.status} · ${age}${formatTicketControlSnippets(ticket)}`;
+  const state =
+    ticket.status === "running"
+      ? (ticket.pause?.state ?? ticket.status)
+      : ticket.status;
+  return `${icon} ${ticket.id}${formatTicketAgentRoster(ticket.progress)} · ${finalized}/${ticket.progress.length} finalized · ${state} · ${age}${formatTicketControlSnippets(ticket)}`;
 }
 
 /** Full roster listing when poll is called without a ticket id. */
@@ -88,6 +97,8 @@ export function missingTicketPollText(ticketId: string): string {
 
 /** Running-task line shared by poll snapshots and cancel previews. */
 export function formatInFlightTaskLine(p: TaskProgress): string {
+  if (p.paused)
+    return `Ⅱ ${p.agent}${resumeMarker(p)}${formatTaskId(p.id)} · paused between turns`;
   const parts: string[] = [formatActivityLabel(p)];
   if (p.toolUses > 0)
     parts.push(`${p.toolUses} tool${p.toolUses === 1 ? "" : "s"}`);
@@ -183,7 +194,10 @@ export function formatLiveTicketHeader(
   ).length;
   const totalCount = ticket.progress.length;
   const runningCount = ticket.progress.filter(
-    (p) => p.status === "running",
+    (p) => p.status === "running" && !p.paused,
+  ).length;
+  const pausedCount = ticket.progress.filter(
+    (p) => p.status === "running" && p.paused,
   ).length;
   const pendingCount = ticket.progress.filter(
     (p) => p.status === "pending",
@@ -191,12 +205,15 @@ export function formatLiveTicketHeader(
   const totalTools = ticket.progress.reduce((sum, p) => sum + p.toolUses, 0);
   const totalTokens = ticket.progress.reduce((sum, p) => sum + p.tokens, 0);
   const headerStatus =
-    ticket.status === "cancelling" ? "CANCELLING" : "RUNNING";
+    ticket.status === "cancelling"
+      ? "CANCELLING"
+      : (ticket.pause?.state ?? "running").toUpperCase();
   const headerParts: string[] = [
     `Ticket ${ticket.id}: ${headerStatus}`,
     `${settledCount}/${totalCount} finalized`,
   ];
   if (runningCount > 0) headerParts.push(`${runningCount} active`);
+  if (pausedCount > 0) headerParts.push(`${pausedCount} paused`);
   if (pendingCount > 0) headerParts.push(`${pendingCount} queued`);
   if (failedCount > 0) headerParts.push(`${failedCount} failed`);
   headerParts.push(`${totalTools} tool${totalTools === 1 ? "" : "s"}`);
@@ -208,6 +225,9 @@ export function formatLiveTicketHeader(
 export function liveTicketGuidance(ticket: AsyncTicket): string {
   if (ticket.status === "cancelling") {
     return "Cancellation requested. Active subagents are aborting and returning partial results. Wait without timeoutMs for final status; do not repeatedly poll.";
+  }
+  if (ticket.pause && ticket.pause.state !== "running") {
+    return `Pause requested: current turns may finish, then further turns and queued tasks stay blocked. Resume with delegate({ ticketAction: "resume", ticket: "${ticket.id}" }). Wait does not resume a paused ticket.`;
   }
   const settledCount = ticket.progress.filter(
     (p) => p.status === "done" || p.status === "failed",

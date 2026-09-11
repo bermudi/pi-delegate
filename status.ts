@@ -64,6 +64,15 @@ export function buildStatusText(
 ): string | undefined {
   const { tickets, activeSubagents } = summary;
   if (tickets.length === 0) return undefined;
+  const held = tickets.filter(
+    (ticket) =>
+      ticket.status === "running" &&
+      ticket.pause &&
+      ticket.pause.state !== "running",
+  );
+  if (held.length) {
+    return `Ⅱ ${held.map((ticket) => `${ticket.id} ${ticket.pause!.state}`).join(" · ")}${tickets.length > held.length ? ` · ${tickets.length - held.length} other ticket(s)` : ""}`;
+  }
   // Wind-down window: tasks have settled but the ticket has not flipped to a
   // terminal status yet. "settling" is more honest than "0 subagents".
   if (activeSubagents === 0) {
