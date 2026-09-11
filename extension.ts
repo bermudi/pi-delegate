@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerSubagentBrowser } from "./browser.ts";
 import { getDefaultDelegateRuntime, type DelegateRuntime } from "./runtime.ts";
 import { discoverAgents } from "./agents.ts";
 import { getSubagentManualMarkdown } from "./manual.ts";
@@ -136,6 +137,7 @@ export default function delegateExtension(
   // its SQLite handle. Permit the new runtime to open a fresh backend; stale
   // workers from the old runtime remain blocked from reopening it.
   prepareTelemetryForSession();
+  const browserHistory = registerSubagentBrowser(pi, runtime);
 
   // Async completion arrives as a custom message after the original tool call
   // has returned. Give it the same compact/expanded UI as sync results while
@@ -156,6 +158,8 @@ export default function delegateExtension(
     prepareArguments: normalizeDelegateArguments,
 
     async execute(_id, params: DelegateArguments, signal, onUpdate, ctx) {
+      const browserGeneration = browserHistory.generation;
+      const captureBrowser = ctx.mode === "tui" && !params.async;
       // Reload user-edited delegate.json at the start of every execution.
       // Help, poll, cancel, wait, and invalid calls observe new settings, and
       // the global concurrency cap is reconfigured so hot-reloaded maxConcurrent
@@ -341,7 +345,7 @@ export default function delegateExtension(
       // visible without restarting Pi.
       invalidateHostDepsCache();
       try {
-        return await dispatchDelegate({
+        const result = await dispatchDelegate({
           pi,
           params,
           ctx,
@@ -352,11 +356,25 @@ export default function delegateExtension(
             tools: pi.getActiveTools(),
           },
           signal,
-          onUpdate,
+          onUpdate: captureBrowser
+            ? (update) => {
+                browserHistory.update(
+                  _id,
+                  update.details,
+                  false,
+                  browserGeneration,
+                );
+                onUpdate?.(update);
+              }
+            : onUpdate,
           callSpan,
           runtime,
         });
+        if (captureBrowser)
+          browserHistory.update(_id, result.details, true, browserGeneration);
+        return result;
       } catch (err) {
+        if (captureBrowser) browserHistory.fail(_id, err, browserGeneration);
         failCall();
         throw err;
       }

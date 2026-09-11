@@ -62,6 +62,11 @@ function plural(n: number, noun: string): string {
 export function buildStatusText(
   summary: ActiveTicketSummary,
 ): string | undefined {
+  const text = buildStatusSummary(summary);
+  return text === undefined ? undefined : `${text} · /subagents`;
+}
+
+function buildStatusSummary(summary: ActiveTicketSummary): string | undefined {
   const { tickets, activeSubagents } = summary;
   if (tickets.length === 0) return undefined;
   const held = tickets.filter(

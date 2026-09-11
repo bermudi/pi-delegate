@@ -151,7 +151,7 @@ Async tickets keep running after the parent's turn settles, and pi renders an
 idle session — so delegate adds three signals:
 
 - **Footer status** — while any ticket is active, the footer shows
-  `⏳ 2 subagents · t5042v19`, updated live as subagents start and finish.
+  `⏳ 2 subagents · t5042v19 · /subagents`, updated live as subagents start and finish.
 - **Settle warning** — the first time a turn settles with a ticket still
   active, a warning notification names the ticket and reminds you that
   quitting aborts it. Once per ticket; the footer carries it from there.
@@ -163,6 +163,36 @@ by an extension — pi's `session_shutdown` is advisory. The footer status is
 the mitigation there; on quit, delegate also prints a trace line to the
 terminal naming the aborted tickets and agents, and on `/reload` it shows a
 warning notification.
+
+### Live subagent browser
+
+Press **Ctrl+Shift+B** from the editor, or run **`/subagents`**, to open a live
+browser without sending a model request. It shows both sync tasks and async
+tickets, including retained completed work. Your draft is left untouched.
+
+| Key | Action |
+| --- | --- |
+| ↑ / ↓ | Select an agent |
+| Tab / ← / → | Switch between tool activity and assistant responses |
+| PgUp / PgDn | Scroll the selected view |
+| Home / End | Jump to oldest retained text / follow live output |
+| p | Pause or resume the selected agent's **whole async ticket** |
+| Esc | Close and return to your draft |
+
+The view shows running commands, tool results, edited file paths, queue
+dependencies, errors, token counts and activity age. Pause controls use the
+same cooperative boundary described below; they do not freeze subprocesses.
+Down in the editor keeps its normal behavior rather than intercepting menus
+or replacing a custom editor.
+
+This is a bounded live preview, not a transcript archive: assistant text keeps
+the current attempt's last 32K characters (no thinking blocks); tool activity
+shows up to 100 recent calls with output tails. The browser retains the last
+20 completed sync calls. Async results remain available until the existing
+ticket cleanup removes them (eligible after 30 minutes). Nothing is recovered
+from transcripts after a restart. A refresh timer runs only while the browser
+is open and is cleared on close or shutdown. This feature requires Pi's TUI,
+not print/JSON/RPC mode.
 
 ### Pause and resume
 

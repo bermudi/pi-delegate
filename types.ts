@@ -255,6 +255,11 @@ export type TaskFailureKind =
   "cancelled" | "stalled" | "model_error" | "deadline_exceeded";
 
 export interface TaskProgress {
+  /** Bounded assistant-text tail for the live browser; no private thinking. */
+  assistantPreview?: string;
+  activity?: string;
+  /** Index of the same-call writer this task must follow. */
+  waitingFor?: number;
   paused?: boolean;
   id?: string;
   index: number;
@@ -432,6 +437,8 @@ export interface AgentRunConfig {
 }
 
 export interface AgentProgressUpdate {
+  assistantPreview?: string;
+  activity?: string;
   tokens: number;
   toolUses: number;
   durationMs: number;

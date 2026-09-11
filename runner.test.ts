@@ -123,6 +123,47 @@ function fakeSession(opts: {
 }
 
 describe("runAgentSession abort re-check", () => {
+  test("publishes live assistant text across turns without exposing thinking", async () => {
+    const previews: string[] = [];
+    const phases: string[] = [];
+    const assistant = (text: string) => ({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "not part of the browser" },
+        { type: "text", text },
+      ],
+    });
+    const { session } = fakeSession({
+      messages: [],
+      prompt: async (emit) => {
+        emit({ type: "message_start", message: assistant("") });
+        emit({ type: "message_update", message: assistant("first") });
+        expect(previews.at(-1)).toBe("first");
+        emit({ type: "message_end", message: assistant("first response") });
+        emit({ type: "message_start", message: assistant("") });
+        emit({ type: "message_update", message: assistant("second response") });
+        expect(previews.at(-1)).toBe("first response\n\nsecond response");
+        emit({ type: "message_end", message: assistant("second response") });
+      },
+    });
+    await runAgentSession(
+      session as never,
+      "scripted test",
+      { cwd: process.cwd() },
+      undefined,
+      (update) => {
+        previews.push(update.assistantPreview ?? "");
+        phases.push(update.activity ?? "");
+      },
+      new Set<string>(),
+      Date.now(),
+    );
+    expect(
+      previews.some((text) => text.includes("not part of the browser")),
+    ).toBe(false);
+    expect(phases).toContain("streaming model output");
+  });
+
   test("already-aborted signal returns 'Aborted' without calling prompt()", async () => {
     const controller = new AbortController();
     controller.abort();

@@ -365,6 +365,7 @@ describe("dispatch-time shared-write gate", () => {
     async (_mode, asyncMode) => {
       const model = { provider: "test", id: "model" } as any;
       const started: string[] = [];
+      let latestProgress: TaskProgress[] = [];
       let releaseFirst!: () => void;
       const firstReleased = new Promise<void>((resolve) => {
         releaseFirst = resolve;
@@ -417,12 +418,20 @@ describe("dispatch-time shared-write gate", () => {
           tools: ["read", "write", "edit", "bash"],
         },
         signal: undefined,
-        onUpdate: undefined,
+        onUpdate: (update) => {
+          latestProgress = update.details?.progress ?? [];
+        },
       });
       try {
         await firstStartedPromise;
         // The successor must not start while its predecessor is running.
         expect(started).toEqual(["one"]);
+        const liveProgress = asyncMode
+          ? [...ticketRegistry.values()].find(
+              (ticket) => ticket.tasks[0]?.id === "one",
+            )!.progress
+          : latestProgress;
+        expect(liveProgress[1]!.waitingFor).toBe(0);
       } finally {
         releaseFirst();
       }

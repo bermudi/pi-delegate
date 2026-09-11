@@ -3,6 +3,7 @@ import type {
   AgentSession,
   AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
+import { AssistantPreview } from "./assistant-preview.ts";
 import {
   getGitChangedFiles,
   extractAttributedFromActivities,
@@ -219,6 +220,7 @@ export async function runAgentSession(
     }
   };
   const activities: ToolActivity[] = [];
+  const assistantPreview = new AssistantPreview();
   const pendingById = new Map<string, ToolActivity>();
   let notifyCancellationRequested!: () => void;
   const cancellationRequested = new Promise<void>((resolve) => {
@@ -390,6 +392,8 @@ export async function runAgentSession(
     try {
       const cancellationSource = currentCancellationSource();
       onProgress({
+        assistantPreview: assistantPreview.text,
+        activity: phase,
         tokens: delta,
         toolUses,
         durationMs: Date.now() - startTime,
@@ -726,12 +730,14 @@ export async function runAgentSession(
       case "message_start":
       case "message_update":
         if (event.message?.role === "assistant") {
+          assistantPreview.update(extractOutput([event.message]));
           rememberPartialAssistant(event.message);
         }
         noteActivity("streaming model output");
         break;
       case "message_end":
         if (event.message.role === "assistant") {
+          assistantPreview.finish(extractOutput([event.message]));
           assistantMessagesForAttempt.push(event.message);
           // Keep a text-bearing partial if the host follows a provider
           // exception with an empty synthetic failure message. A real

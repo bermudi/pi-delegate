@@ -361,6 +361,8 @@ export function updateProgressFromRun(
     u.durationMs,
   );
   p.lastActivityAt = u.lastActivityAt;
+  p.assistantPreview = u.assistantPreview;
+  p.activity = u.activity;
   p.activities = mergeToolActivities(p.activities, u.activities);
   p.failureKind = u.failureKind;
 }

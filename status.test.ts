@@ -150,7 +150,7 @@ describe("buildStatusText", () => {
       progressStatuses: ["running", "running"],
     });
     expect(buildStatusText({ tickets: [ticket], activeSubagents: 2 })).toBe(
-      "⏳ 2 subagents · t5042v19",
+      "⏳ 2 subagents · t5042v19 · /subagents",
     );
   });
 
@@ -158,7 +158,7 @@ describe("buildStatusText", () => {
     const a = mkTicket("a");
     const b = mkTicket("b", { progressStatuses: ["running", "pending"] });
     expect(buildStatusText({ tickets: [a, b], activeSubagents: 3 })).toBe(
-      "⏳ 3 subagents · 2 tickets",
+      "⏳ 3 subagents · 2 tickets · /subagents",
     );
   });
 
@@ -168,7 +168,7 @@ describe("buildStatusText", () => {
       progressStatuses: ["done", "failed"],
     });
     expect(buildStatusText({ tickets: [ticket], activeSubagents: 0 })).toBe(
-      "⏳ a settling…",
+      "⏳ a settling… · /subagents",
     );
   });
 });
@@ -183,7 +183,7 @@ describe("syncDelegateStatus", () => {
     });
     ticketRegistry.set("a", ticket);
     syncDelegateStatus(ctx);
-    expect(calls.setStatus).toEqual(["⏳ 2 subagents · a"]);
+    expect(calls.setStatus).toEqual(["⏳ 2 subagents · a · /subagents"]);
 
     ticket.progress[0]!.status = "done";
     ticket.progress[1]!.status = "done";
@@ -191,7 +191,10 @@ describe("syncDelegateStatus", () => {
     ticket.completedAt = Date.now();
     ticketRegistry.set("a", ticket);
     syncDelegateStatus();
-    expect(calls.setStatus).toEqual(["⏳ 2 subagents · a", undefined]);
+    expect(calls.setStatus).toEqual([
+      "⏳ 2 subagents · a · /subagents",
+      undefined,
+    ]);
   });
 
   test("dedupes unchanged status text", () => {
@@ -200,7 +203,7 @@ describe("syncDelegateStatus", () => {
     syncDelegateStatus(ctx);
     syncDelegateStatus();
     syncDelegateStatus();
-    expect(calls.setStatus).toEqual(["⏳ 1 subagent · a"]);
+    expect(calls.setStatus).toEqual(["⏳ 1 subagent · a · /subagents"]);
   });
 
   test("is a no-op without a ctx ever seen", () => {
@@ -404,13 +407,16 @@ describe("session teardown", () => {
     const { ctx, calls } = mkCtx();
     ticketRegistry.set("a", mkTicket("a"));
     syncDelegateStatus(ctx);
-    expect(calls.setStatus).toEqual(["⏳ 1 subagent · a"]);
+    expect(calls.setStatus).toEqual(["⏳ 1 subagent · a · /subagents"]);
 
     // What the session_shutdown handler does, in order.
     for (const t of ticketRegistry.values()) cancelTicketForShutdown(t);
     syncDelegateStatus(ctx);
     clearDelegateStatusContext();
-    expect(calls.setStatus).toEqual(["⏳ 1 subagent · a", undefined]);
+    expect(calls.setStatus).toEqual([
+      "⏳ 1 subagent · a · /subagents",
+      undefined,
+    ]);
 
     // The aborted ticket keeps unwinding asynchronously (dispatch .then →
     // syncDelegateStatus). It must find no cached ctx and touch nothing.
@@ -434,7 +440,7 @@ describe("session teardown", () => {
     // A fresh ctx from the next live event recovers the footer.
     const { ctx, calls } = mkCtx();
     syncDelegateStatus(ctx);
-    expect(calls.setStatus).toEqual(["⏳ 1 subagent · a"]);
+    expect(calls.setStatus).toEqual(["⏳ 1 subagent · a · /subagents"]);
   });
 
   test("shutdown cancellation preserves completed task usage", () => {

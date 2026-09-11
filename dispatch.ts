@@ -304,6 +304,7 @@ async function sharedWriteSafetyFailure(
  * `finally` so throw, abort, and queued-abort paths all unblock successors. */
 function buildSerializationGate(
   groups: readonly SharedWriteConflict[] | undefined,
+  progress: TaskProgress[],
 ):
   | {
       beforeAcquire: (index: number) => Promise<void>;
@@ -315,6 +316,8 @@ function buildSerializationGate(
   for (const { taskIndexes } of groups) {
     for (let position = 1; position < taskIndexes.length; position++) {
       predecessor.set(taskIndexes[position]!, taskIndexes[position - 1]!);
+      const row = progress[taskIndexes[position]!];
+      if (row) row.waitingFor = taskIndexes[position - 1]!;
     }
   }
   if (predecessor.size === 0) return undefined;
@@ -329,6 +332,8 @@ function buildSerializationGate(
     beforeAcquire: async (index) => {
       const predecessorIndex = predecessor.get(index);
       if (predecessorIndex !== undefined) await settled.get(predecessorIndex);
+      const row = progress[index];
+      if (row) row.waitingFor = undefined;
     },
     complete: (index) => resolvers.get(index)?.(),
   };
@@ -910,7 +915,7 @@ export function dispatchAsync(input: AsyncDispatchInput): DelegateToolResult {
       }
 
       let results: TaskResult[];
-      const gate = buildSerializationGate(serializedGroups);
+      const gate = buildSerializationGate(serializedGroups, ticket.progress);
       try {
         results = await mapConcurrentByModel(
           executionResolved,
@@ -1143,7 +1148,7 @@ export async function dispatchSync(
   );
   let results: TaskResult[];
   let isolatedReconciled = false;
-  const gate = buildSerializationGate(serializedGroups);
+  const gate = buildSerializationGate(serializedGroups, progress);
   try {
     results = await mapConcurrentByModel(
       executionResolved,
