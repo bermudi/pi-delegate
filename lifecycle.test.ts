@@ -24,7 +24,10 @@ import {
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import {
+  createAssistantMessageEventStream,
+  getSystemMessageText,
+} from "@earendil-works/pi-ai";
 import { AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   createDelegateTestSession,
@@ -133,6 +136,21 @@ function mockPiAiStream(
   // AgentSession streamFn calls the real, network-hitting streamSimple.
   mock.module("@earendil-works/pi-ai/compat", factory as never);
   return factory({}).streamSimple as StreamFn;
+}
+
+/** Pi 0.87 folds the request's `systemPrompt` shorthand into a leading system
+ *  message before the provider sees it, and renders the prompt from
+ *  `content` plus named `sections`. Capture via pi's own renderer. */
+function capturedPromptText(context: {
+  systemPrompt?: string;
+  messages?: unknown[];
+}): string {
+  if (context.systemPrompt) return context.systemPrompt;
+  const first = context.messages?.[0];
+  if (!first || (first as { role?: string }).role !== "system") return "";
+  return getSystemMessageText(
+    first as Parameters<typeof getSystemMessageText>[0],
+  );
 }
 
 /** Install a stream mock returning a canned response; returns the override. */
@@ -507,8 +525,11 @@ describe("delegate task lifecycle integration", () => {
     let capturedSystemPrompt = "";
     const stream = mockPiAiStream((orig) => ({
       ...orig,
-      streamSimple: (_model: unknown, context: { systemPrompt?: string }) => {
-        capturedSystemPrompt = context.systemPrompt ?? "";
+      streamSimple: (
+        _model: unknown,
+        context: Parameters<typeof capturedPromptText>[0],
+      ) => {
+        capturedSystemPrompt = capturedPromptText(context);
         return mockStream("Prompt captured.");
       },
     }));
@@ -574,8 +595,11 @@ describe("delegate task lifecycle integration", () => {
     let capturedSystemPrompt = "";
     const stream = mockPiAiStream((orig) => ({
       ...orig,
-      streamSimple: (_model: unknown, context: { systemPrompt?: string }) => {
-        capturedSystemPrompt = context.systemPrompt ?? "";
+      streamSimple: (
+        _model: unknown,
+        context: Parameters<typeof capturedPromptText>[0],
+      ) => {
+        capturedSystemPrompt = capturedPromptText(context);
         return mockStream("Prompt captured.");
       },
     }));
@@ -669,8 +693,11 @@ describe("delegate task lifecycle integration", () => {
     let capturedSystemPrompt = "";
     const stream = mockPiAiStream((orig) => ({
       ...orig,
-      streamSimple: (_model: unknown, context: { systemPrompt?: string }) => {
-        capturedSystemPrompt = context.systemPrompt ?? "";
+      streamSimple: (
+        _model: unknown,
+        context: Parameters<typeof capturedPromptText>[0],
+      ) => {
+        capturedSystemPrompt = capturedPromptText(context);
         return mockStream("Named agent ran.");
       },
     }));
