@@ -810,11 +810,18 @@ describe("dispatch-time shared-write gate", () => {
       "Rejected before dispatch; no tasks were started.",
     );
     expect(firstText(result)).toContain("Task 1#iso, Task 2#shr");
+    // The remedy must match the failure: a uniform workspace, not a mode the
+    // admission boundary itself rejects for this group.
+    expect(firstText(result)).toContain(
+      'Make every task workspace: "isolated" (one shared baseline, reconciled in task order) or make them all shared (serialized one at a time).',
+    );
+    expect(firstText(result)).not.toContain("scratch");
+    expect(firstText(result)).not.toContain("ticketAction");
     expect(result.details.results).toEqual([]);
     expect(ticketRegistry.size).toBe(0);
   });
 
-  test("rejection in a linked worktree drops the scratch recommendation", async () => {
+  test("rejection against active work never recommends a workspace mode, even from a linked worktree", async () => {
     execFileSync("git", ["commit", "--allow-empty", "--quiet", "-m", "init"], {
       cwd: tmpDir,
       env: {
@@ -883,13 +890,16 @@ describe("dispatch-time shared-write gate", () => {
       expect(firstText(rejected)).toContain(
         "Rejected before dispatch; no tasks were started.",
       );
-      expect(firstText(rejected)).not.toContain(
-        'workspace: "scratch" when changes may be discarded',
-      );
+      // The active-writer remedy is sequencing across calls. Workspace modes
+      // are absent by design — admission rejects shared AND isolated incoming
+      // tasks against active writers, and scratch would race the running
+      // writer's source state — so the message never vouches for them.
       expect(firstText(rejected)).toContain(
-        'workspace: "scratch" is unavailable in this checkout',
+        "Wait for the active work to settle, then re-dispatch.",
       );
-      expect(firstText(rejected)).toContain("linked Git metadata");
+      expect(firstText(rejected)).not.toContain("scratch");
+      expect(firstText(rejected)).not.toContain('workspace: "isolated"');
+      expect(firstText(rejected)).not.toContain("ticketAction");
     } finally {
       releaseWorker();
       await active;
@@ -1657,6 +1667,15 @@ describe("dispatch-time shared-write gate", () => {
       "Task 1#new, async ticket 'live1234' task 1#old",
     );
     expect(firstText(result)).toContain("Rejected before dispatch");
+    // The rejection names the real remedy — sequencing against the running
+    // ticket — instead of the workspace escapes admission rejects anyway.
+    expect(firstText(result)).toContain(
+      "no workspace setting orders shared or isolated execution against already-running work",
+    );
+    expect(firstText(result)).toContain(
+      'delegate({ ticketAction: "wait", ticket: "live1234" })',
+    );
+    expect(firstText(result)).not.toContain("scratch");
     expect(ticketRegistry.size).toBe(1);
   });
 
@@ -1716,10 +1735,15 @@ describe("dispatch-time shared-write gate", () => {
         "Rejected before dispatch; no tasks were started.",
       );
       expect(firstText(rejected)).toContain("active sync task 1");
-      // A plain Git checkout supports scratch, so the recommendation stands.
+      // A running sync dispatch has no ticket to wait on: the prose must not
+      // offer workspace modes (rejected against active writers anyway) and
+      // must not print a wait snippet for a nonexistent ticket.
       expect(firstText(rejected)).toContain(
-        'workspace: "scratch" when changes may be discarded',
+        "Wait for the active work to settle, then re-dispatch.",
       );
+      expect(firstText(rejected)).not.toContain("ticketAction");
+      expect(firstText(rejected)).not.toContain('workspace: "isolated"');
+      expect(firstText(rejected)).not.toContain("scratch");
     } finally {
       releaseWorker();
       await active;

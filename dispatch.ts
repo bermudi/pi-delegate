@@ -207,6 +207,19 @@ function taskReference(task: DispatchableTask, index: number): string {
   return `Task ${index + 1}${task.id ? `#${task.id}` : ""}`;
 }
 
+/** Classifies why an admission conflict rejects the whole call: the group
+ * touches already-running work (async ticket, running sync dispatch, or
+ * quarantined task), or it mixes isolated reservations with same-call shared
+ * writers. The rejection prose differs because the remedies differ — only the
+ * active-writer class carries ticket ids for wait snippets. No class recommends
+ * workspace escapes: both reject shared AND isolated incoming tasks, and a
+ * scratch copy would race the conflicting writers' source state. */
+type RejectedSharedWriteConflict = SharedWriteConflict &
+  (
+    | { kind: "active-writer"; ticketIds: string[] }
+    | { kind: "mixed-isolated" }
+  );
+
 /** Isolated workers do not share their worktrees with each other, but their
  * source root must remain reserved against shared writers until ordered apply
  * finishes. Represent them as shared only inside the admission index. */
@@ -241,35 +254,63 @@ async function scratchRecommendation(cwds: readonly string[]): Promise<string> {
   }
 }
 
-/** Compose the shared-write rejection after the admission lock has released:
- * the scratch clause is verified against scratch's own pre-flight, so the
- * message never vouches for a mode this checkout cannot run (linked Git
- * worktrees, nested repositories, non-Linux hosts). */
+/** Compose the shared-write rejection after the admission lock has released.
+ * Prose is classed per conflict kind because the remedies genuinely differ:
+ * an active-writer conflict is resolved by sequencing across calls (wait for
+ * the running work, then re-dispatch) — no workspace setting changes that, and
+ * recommending one loops literal models into guaranteed re-rejections; a
+ * same-call isolated/shared mix is resolved by making workspaces uniform.
+ * Neither class suggests scratch: a copy taken mid-conflict races the very
+ * writers the boundary exists to order. */
 async function sharedWriteRejection(
   tasks: DispatchableTask[],
   parentModelId: string | undefined,
-  conflicts: SharedWriteConflict[],
+  rejects: readonly RejectedSharedWriteConflict[],
   references: readonly string[],
-  cwds: readonly string[],
 ): Promise<DelegateToolResult> {
-  const scopes = conflicts
-    .map(({ scope, taskIndexes }) => {
-      const refs = taskIndexes
-        .map((index) => references[index] ?? `Active writer ${index + 1}`)
-        .join(", ");
-      return `${refs} share ${scope.kind === "git" ? "Git root" : "directory"} '${scope.root}'.`;
-    })
-    .join(" ");
-  const scratch = await scratchRecommendation(cwds);
+  const scopesFor = (kind: RejectedSharedWriteConflict["kind"]) =>
+    rejects
+      .filter((reject) => reject.kind === kind)
+      .map(({ scope, taskIndexes }) => {
+        const refs = taskIndexes
+          .map((index) => references[index] ?? `Active writer ${index + 1}`)
+          .join(", ");
+        return `${refs} share ${scope.kind === "git" ? "Git root" : "directory"} '${scope.root}'.`;
+      })
+      .join(" ");
+  const parts: string[] = [];
+  const activeRejects = rejects.filter(
+    (reject): reject is Extract<RejectedSharedWriteConflict, { kind: "active-writer" }> =>
+      reject.kind === "active-writer",
+  );
+  if (activeRejects.length) {
+    const ticketIds = [
+      ...new Set(activeRejects.flatMap((reject) => reject.ticketIds)),
+    ];
+    const waitHint = ticketIds.length
+      ? ` (for async ticket${ticketIds.length > 1 ? "s" : ""}: ${ticketIds
+          .map((id) => `delegate({ ticketAction: "wait", ticket: "${id}" })`)
+          .join("; ")})`
+      : "";
+    parts.push(
+      `${scopesFor("active-writer")} Each listed task has mutating or unclassified tool capability, and no workspace setting orders shared or isolated execution against already-running work. ` +
+        `Wait for the active work to settle${waitHint}, then re-dispatch.`,
+    );
+  }
+  if (rejects.some((reject) => reject.kind === "mixed-isolated")) {
+    parts.push(
+      `${scopesFor("mixed-isolated")} Isolated tasks reserve the source root from baseline snapshot through reconciliation, so shared writers cannot be interleaved into the same call. ` +
+        `Make every task workspace: "isolated" (one shared baseline, reconciled in task order) or make them all shared (serialized one at a time).`,
+    );
+  }
   return {
     content: [
       {
         type: "text",
         text:
-          `Rejected before dispatch; no tasks were started. ${scopes} ` +
-          "Each listed task has mutating or unclassified tool capability, so concurrent shared execution could silently overwrite work. " +
-          `Run them sequentially, use workspace: "isolated" for Git-backed ordered reconciliation${scratch}. ` +
-          "External processes remain outside this check.",
+          "Rejected before dispatch; no tasks were started. " +
+          parts.join(" ") +
+          " External processes remain outside this check.",
       },
     ],
     details: { tasks, results: [], progress: [], parentModel: parentModelId },
@@ -412,9 +453,8 @@ export async function dispatchDelegate(
     | { progress: TaskProgress[]; fire: () => void }
     | {
         rejected: {
-          conflicts: SharedWriteConflict[];
+          rejects: RejectedSharedWriteConflict[];
           references: string[];
-          cwds: string[];
         };
       };
 
@@ -433,6 +473,10 @@ export async function dispatchDelegate(
       ) {
         const incomingForSafety = resolved.map(asAdmissionWriter);
         const activeResolved: ResolvedTask[] = [];
+        // Ticket ownership per active-resolved entry (undefined for sync
+        // dispatches and quarantined tasks), index-aligned with
+        // activeResolved so rejections can name actionable wait snippets.
+        const activeTicketIds: (string | undefined)[] = [];
         const references = resolved.map((_, index) =>
           taskReference(tasks[index]!, index),
         );
@@ -447,6 +491,7 @@ export async function dispatchDelegate(
           }
           for (let index = 0; index < ticket.resolved.length; index++) {
             activeResolved.push(ticket.resolved[index]!);
+            activeTicketIds.push(ticket.id);
             references.push(
               `async ticket '${ticket.id}' ${taskReference(ticket.tasks[index]!, index).toLowerCase()}`,
             );
@@ -455,6 +500,7 @@ export async function dispatchDelegate(
         for (const active of activeSyncDispatches.values()) {
           for (let index = 0; index < active.resolved.length; index++) {
             activeResolved.push(active.resolved[index]!);
+            activeTicketIds.push(undefined);
             references.push(
               `active sync ${taskReference(active.tasks[index]!, index).toLowerCase()}`,
             );
@@ -462,15 +508,15 @@ export async function dispatchDelegate(
         }
         for (const quarantined of quarantinedTasks()) {
           activeResolved.push(asAdmissionWriter(quarantined));
+          activeTicketIds.push(undefined);
           references.push(
             `quarantined ${quarantined.agentName}${quarantined.id ? ` task #${quarantined.id}` : " task"}`,
           );
         }
 
         const incomingCount = resolved.length;
-        const rejectConflicts: SharedWriteConflict[] = [];
+        const rejectConflicts: RejectedSharedWriteConflict[] = [];
         const serializedConflicts: SharedWriteConflict[] = [];
-        const rejectedCwds = new Set<string>();
         for (const conflict of await findSharedWriteConflicts(
           [...incomingForSafety, ...activeResolved],
           signal,
@@ -490,7 +536,7 @@ export async function dispatchDelegate(
               // Mixed isolated/shared in this call: a shared writer cannot be
               // ordered against the isolated reservation window (baseline
               // snapshot through reconciliation).
-              rejectConflicts.push(conflict);
+              rejectConflicts.push({ ...conflict, kind: "mixed-isolated" });
             } else {
               // Same-call shared writers: serialize in task order instead of
               // rejecting. Concurrent dispatch is unordered anyway, so
@@ -501,18 +547,23 @@ export async function dispatchDelegate(
             // An active writer (async ticket, running sync dispatch, or
             // quarantined task) is involved: queueing behind unknown-duration
             // work cannot be ordered safely here.
-            rejectConflicts.push(conflict);
-          }
-          for (const index of taskIndexes) {
-            if (index < incomingCount) rejectedCwds.add(resolved[index]!.cwd);
+            const ticketIds = [
+              ...new Set(
+                taskIndexes.flatMap((index) => {
+                  if (index < incomingCount) return [];
+                  const ticketId = activeTicketIds[index - incomingCount];
+                  return ticketId ? [ticketId] : [];
+                }),
+              ),
+            ];
+            rejectConflicts.push({ ...conflict, kind: "active-writer", ticketIds });
           }
         }
         if (rejectConflicts.length) {
           return {
             rejected: {
-              conflicts: rejectConflicts,
+              rejects: rejectConflicts,
               references,
-              cwds: [...rejectedCwds],
             },
           };
         }
@@ -613,14 +664,8 @@ export async function dispatchDelegate(
       totalCost: 0,
       wallMs: Date.now() - (callSpan?.startedAt ?? Date.now()),
     });
-    const { conflicts, references, cwds } = admissionResult.rejected;
-    return await sharedWriteRejection(
-      tasks,
-      parentModelId,
-      conflicts,
-      references,
-      cwds,
-    );
+    const { rejects, references } = admissionResult.rejected;
+    return await sharedWriteRejection(tasks, parentModelId, rejects, references);
   }
 
   if ("content" in admissionResult) {
