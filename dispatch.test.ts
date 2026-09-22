@@ -1750,6 +1750,112 @@ describe("dispatch-time shared-write gate", () => {
       _setRunAgentSessionForTesting(undefined);
     }
   });
+
+  // Pins the scratch-viability I/O that survives only on the fail-closed
+  // sharedWriteSafetyFailure path (#51): scratch is recommended only after its
+  // own pre-flight passes, and an unavailability clause names the blocking
+  // reason instead. The SharedWriteSafetyError is forced via an inherited
+  // GIT_DIR redirect — the guard throws on env presence before any Git call,
+  // so the value only matters to scratchRecommendation's own git discovery.
+  test.each([
+    [
+      "recommends scratch when its pre-flight passes",
+      "recommend" as const,
+    ],
+    [
+      "names why scratch is unavailable when its pre-flight fails",
+      "unavailable" as const,
+    ],
+  ])(
+    "shared-write safety failure verifies scratch viability first: %s",
+    async (_name, variant) => {
+      let taskCwd = tmpDir;
+      if (variant === "unavailable") {
+        execFileSync(
+          "git",
+          ["commit", "--allow-empty", "--quiet", "-m", "init"],
+          {
+            cwd: tmpDir,
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: "t",
+              GIT_AUTHOR_EMAIL: "t@example.com",
+              GIT_COMMITTER_NAME: "t",
+              GIT_COMMITTER_EMAIL: "t@example.com",
+            },
+          },
+        );
+        const worktreePath = path.join(tmpDir, "linked-wt");
+        execFileSync("git", ["worktree", "add", "--quiet", worktreePath], {
+          cwd: tmpDir,
+        });
+        taskCwd = worktreePath;
+      }
+      // For "recommend": a valid GIT_DIR keeps scratch's own git discovery
+      // working, so the pre-flight passes and the recommendation stands.
+      // For "unavailable": GIT_DIR breaks discovery, so scratch falls back to
+      // the cwd — a linked worktree whose `.git` file then fails validation.
+      const previousGitDir = process.env.GIT_DIR;
+      process.env.GIT_DIR =
+        variant === "recommend" ? path.join(tmpDir, ".git") : "/nonexistent";
+      try {
+        const model = { provider: "test", id: "model" } as any;
+        const result = await dispatchDelegate({
+          pi: {} as any,
+          params: {
+            tasks: [
+              { id: "a", prompt: "a", cwd: taskCwd, workspace: "shared", tools: ["read", "write", "edit", "bash"] },
+              { id: "b", prompt: "b", cwd: taskCwd, workspace: "shared", tools: ["read", "write", "edit", "bash"] },
+            ],
+          },
+          ctx: {
+            cwd: taskCwd,
+            model,
+            modelRegistry: {
+              getAvailable: () => [model],
+              find: () => model,
+              hasConfiguredAuth: () => true,
+            },
+            getSystemPrompt: () => "parent",
+          } as any,
+          agents: new Map(),
+          parentModelId: model.id,
+          parentDefaults: {
+            thinking: "off",
+            tools: ["read", "write", "edit", "bash"],
+          },
+          signal: undefined,
+          onUpdate: undefined,
+        });
+        const text = firstText(result);
+        expect(text).toContain(
+          "Rejected before dispatch; no tasks were started because shared-write safety could not be verified.",
+        );
+        expect(text).toContain(
+          "Could not safely verify a bash-capable shared-write batch while GIT_DIR redirects",
+        );
+        if (variant === "recommend") {
+          expect(text).toContain(
+            ', or use workspace: "scratch" when changes may be discarded',
+          );
+        } else {
+          expect(text).toContain(
+            'workspace: "scratch" is unavailable in this checkout',
+          );
+          expect(text).toContain("linked Git metadata");
+          expect(text).not.toContain("when changes may be discarded");
+        }
+        expect(result.details.results).toEqual([]);
+        expect(ticketRegistry.size).toBe(0);
+      } finally {
+        if (previousGitDir === undefined) {
+          delete process.env.GIT_DIR;
+        } else {
+          process.env.GIT_DIR = previousGitDir;
+        }
+      }
+    },
+  );
 });
 
 function makeFakeSession(
