@@ -215,10 +215,7 @@ function taskReference(task: DispatchableTask, index: number): string {
  * workspace escapes: both reject shared AND isolated incoming tasks, and a
  * scratch copy would race the conflicting writers' source state. */
 type RejectedSharedWriteConflict = SharedWriteConflict &
-  (
-    | { kind: "active-writer"; ticketIds: string[] }
-    | { kind: "mixed-isolated" }
-  );
+  ({ kind: "active-writer"; ticketIds: string[] } | { kind: "mixed-isolated" });
 
 /** Isolated workers do not share their worktrees with each other, but their
  * source root must remain reserved against shared writers until ordered apply
@@ -280,8 +277,12 @@ async function sharedWriteRejection(
       .join(" ");
   const parts: string[] = [];
   const activeRejects = rejects.filter(
-    (reject): reject is Extract<RejectedSharedWriteConflict, { kind: "active-writer" }> =>
-      reject.kind === "active-writer",
+    (
+      reject,
+    ): reject is Extract<
+      RejectedSharedWriteConflict,
+      { kind: "active-writer" }
+    > => reject.kind === "active-writer",
   );
   if (activeRejects.length) {
     const ticketIds = [
@@ -556,7 +557,11 @@ export async function dispatchDelegate(
                 }),
               ),
             ];
-            rejectConflicts.push({ ...conflict, kind: "active-writer", ticketIds });
+            rejectConflicts.push({
+              ...conflict,
+              kind: "active-writer",
+              ticketIds,
+            });
           }
         }
         if (rejectConflicts.length) {
@@ -665,7 +670,12 @@ export async function dispatchDelegate(
       wallMs: Date.now() - (callSpan?.startedAt ?? Date.now()),
     });
     const { rejects, references } = admissionResult.rejected;
-    return await sharedWriteRejection(tasks, parentModelId, rejects, references);
+    return await sharedWriteRejection(
+      tasks,
+      parentModelId,
+      rejects,
+      references,
+    );
   }
 
   if ("content" in admissionResult) {

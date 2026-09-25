@@ -1758,10 +1758,7 @@ describe("dispatch-time shared-write gate", () => {
   // GIT_DIR redirect — the guard throws on env presence before any Git call,
   // so the value only matters to scratchRecommendation's own git discovery.
   test.each([
-    [
-      "recommends scratch when its pre-flight passes",
-      "recommend" as const,
-    ],
+    ["recommends scratch when its pre-flight passes", "recommend" as const],
     [
       "names why scratch is unavailable when its pre-flight fails",
       "unavailable" as const,
@@ -1804,8 +1801,20 @@ describe("dispatch-time shared-write gate", () => {
           pi: {} as any,
           params: {
             tasks: [
-              { id: "a", prompt: "a", cwd: taskCwd, workspace: "shared", tools: ["read", "write", "edit", "bash"] },
-              { id: "b", prompt: "b", cwd: taskCwd, workspace: "shared", tools: ["read", "write", "edit", "bash"] },
+              {
+                id: "a",
+                prompt: "a",
+                cwd: taskCwd,
+                workspace: "shared",
+                tools: ["read", "write", "edit", "bash"],
+              },
+              {
+                id: "b",
+                prompt: "b",
+                cwd: taskCwd,
+                workspace: "shared",
+                tools: ["read", "write", "edit", "bash"],
+              },
             ],
           },
           ctx: {
