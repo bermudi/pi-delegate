@@ -58,8 +58,9 @@ describe("delegate public tool contract", () => {
       ["async", "operationId", "tasks", "workspace"].sort(),
     );
 
-    // The task shape stays what it was — minus `model`, which callers no
-    // longer select (an explicit `model` gets a validation error instead).
+    // The task shape stays what it was — minus `model` and `thinking`,
+    // which callers no longer select (an explicit one gets a validation
+    // error instead).
     expect(Object.keys(taskFields).sort()).toEqual(
       [
         "agent",
@@ -71,7 +72,6 @@ describe("delegate public tool contract", () => {
         "resumeFrom",
         "sessionId",
         "systemPrompt",
-        "thinking",
         "tools",
         "workspace",
       ].sort(),

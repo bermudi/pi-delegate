@@ -902,6 +902,32 @@ configurable `default` — the wrong knob: inheritance is the invariant).
   agent's configured model changed between calls rejects as a frozen-config
   mismatch (`tests/contract/sessions.test.ts`).
 
+## Tenth tranche (effort is user-configured; modelsByParent)
+
+Issue #32 extends the no-caller-selection stance to effort: the task
+`thinking` field is rejected exactly like `model` (inside a task,
+flat-folded, top-level, and on the sibling tools), and `models` entries
+gain an optional `:effort` suffix plus a `modelsByParent` map scoped to the
+parent's exact `provider/model-id` (case-insensitive; scoped wins over
+unscoped). Effective effort: configured `:effort` → profile default →
+parent's live level when the child runs the parent model → the model's
+default. Recorded in SPEC.md "Dispatch" and COMPATIBILITY.md.
+
+- `src/config.ts` parses `provider/model[:effort]` entries (unknown suffix
+  or dangling colon fails at load) and the `modelsByParent` map (keys
+  normalized lowercase; a key that is not a `provider/model-id` fails).
+- `src/validation.ts` and the boundary layer reject `thinking` wherever it
+  appears with guidance toward the config — the field left the task schema
+  entirely.
+- `src/host.ts` resolves the scoped pin first, then unscoped, then the
+  parent mirror; effort resolves per the chain above.
+- New live tests: `thinking` rejected in all positions
+  (`tests/contract/validation.test.ts`); a matching `modelsByParent` key —
+  deliberately upper-cased — wins over `models`; a non-matching key falls
+  back; and a `:effort` pin reaches the provider as `reasoning` while a
+  bare pin does not inherit the parent's level and an unpinned task
+  mirrors it (`tests/contract/dispatch.test.ts`).
+
 ## Next contract slices
 
 Done: mode exclusivity and validation failures; batch-before-start
@@ -918,7 +944,9 @@ identity via `operationId` (issue #16; `SPEC.md` "Explicit operation
 identity", `tests/contract/operations.test.ts`); LLM-facing output
 bounding with owner-only spill files, running-poll tail-only views, and
 lossless fallback (issue #25; `SPEC.md` "Output bounding",
-`tests/contract/output-bounds.test.ts`).
+`tests/contract/output-bounds.test.ts`); user-configured model/effort with
+parent-scoped pins and removal of the task `thinking` field (issue #32;
+`tests/contract/dispatch.test.ts`, `tests/contract/validation.test.ts`).
 
 Remaining:
 

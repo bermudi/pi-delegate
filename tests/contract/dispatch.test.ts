@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import {
   fauxAssistantMessage,
   type FauxResponseFactory,
@@ -359,6 +360,111 @@ describe("delegate dispatch contract", () => {
       expect(result.text).toContain("not available");
       expect(result.text).toContain("delegate.json");
       expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "a parent-scoped modelsByParent pin wins over the unscoped models entry (#32)",
+    async () => {
+      // SPEC: a modelsByParent entry keyed by the parent's exact
+      // provider/model-id — matched case-insensitively, hence the shouting
+      // key — wins over the unscoped "models" pin for the same agent. The
+      // scoped pin targets the parent's own model, so the win shows as a
+      // primary-provider call instead of an alt-provider call.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      configureDelegate(session, {
+        models: { scout: subagents.alt.spec },
+        modelsByParent: {
+          "Delegate-Faux/FAUX-1": { scout: subagents.spec },
+        },
+      });
+      subagents.respond([fauxAssistantMessage("SCOPED-PARENT-MODEL")]);
+      subagents.alt.respond([fauxAssistantMessage("UNSCOPED-LOSES")]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "look around", agent: "scout" }],
+      });
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("SCOPED-PARENT-MODEL");
+      expect(subagents.state.callCount).toBe(1); // scoped pin → parent model
+      expect(subagents.alt.state.callCount).toBe(0); // unscoped pin ignored
+    },
+  );
+
+  test(
+    "a non-matching modelsByParent key falls back to the unscoped entry (#32)",
+    async () => {
+      // SPEC: a modelsByParent key names an exact parent provider/model-id;
+      // when the parent does not match, the unscoped "models" pin applies.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      configureDelegate(session, {
+        models: { scout: subagents.alt.spec },
+        modelsByParent: {
+          "other-provider/other-model": { scout: subagents.spec },
+        },
+      });
+      subagents.alt.respond([fauxAssistantMessage("UNSCOPED-APPLIES")]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "look around", agent: "scout" }],
+      });
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("UNSCOPED-APPLIES");
+      expect(subagents.alt.state.callCount).toBe(1);
+      expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "a :effort pin sets the child's thinking; a bare pin uses the model default; an unpinned task mirrors the parent (#32)",
+    async () => {
+      // SPEC: effort is user-configured only. A configured :effort reaches
+      // the provider as the request's reasoning level; a pin without one
+      // does not inherit the parent's (it runs at the model's default);
+      // a task on the parent's model mirrors the parent's live level.
+      // dependsOn chains the three tasks into phases so the captured
+      // reasoning order is the task order; "low" is a level the faux model
+      // supports (xhigh/max require a thinkingLevelMap).
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      (session.session as AgentSession).setThinkingLevel("low");
+      configureDelegate(session, {
+        models: {
+          scout: `${subagents.alt.spec}:high`,
+          reviewer: subagents.alt.spec,
+        },
+      });
+      const reasoning: unknown[] = [];
+      const capture =
+        (reply: string): FauxResponseFactory =>
+        (_context, options) => {
+          reasoning.push(options?.reasoning);
+          return fauxAssistantMessage(reply);
+        };
+      subagents.alt.respond([capture("SCOUT-EFFORT"), capture("REVIEWER-BARE")]);
+      subagents.respond([capture("INLINE-PARENT")]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          { id: "a", prompt: "a", agent: "scout" },
+          { id: "b", prompt: "b", agent: "reviewer", dependsOn: ["a"] },
+          { id: "c", prompt: "c", dependsOn: ["b"] },
+        ],
+      });
+
+      expect(result.isError).toBe(false);
+      expect(reasoning).toEqual([
+        "high", // configured :effort wins
+        // Bare pin to a different model: the model's own default, never the
+        // parent's "low" — whatever the default resolves to, it is not the
+        // inherited level.
+        "medium",
+        "low", // unpinned inline task mirrors the parent's level
+      ]);
     },
   );
 

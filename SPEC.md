@@ -43,7 +43,6 @@ A task accepts:
 | `cwd` | Working directory; relative paths resolve from the parent cwd |
 | `systemPrompt` | Base prompt; project context is added separately |
 | `tools` | Exact capability list; `*` = read/write/edit/bash, `ro` = read/grep/find/ls |
-| `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `sessionId` | Key for a live reusable session |
 | `resumeFrom` | Absolute `.jsonl` transcript path |
 | `deadlineMs` | Positive wall-clock budget beginning after queueing; omission means no deadline |
@@ -80,11 +79,23 @@ Subagents run on the parent's model. The user may override a **named agent**
 under `"models"` in the user-global `delegate.json` — an object mapping agent
 name to a model reference. There is deliberately no `"default"` entry and no
 way to redirect inline or `default`-profile tasks: they mirror the parent's
-model unconditionally. Callers never select models: a task `model` field is
-rejected before tasks start, whatever value it carries — the model registry
-containing a model is not authorization to spend on it. A configured
-reference that does not resolve in the session's model registry fails the
-whole call, naming the config entry.
+model unconditionally. A second map, `"modelsByParent"`, scopes those pins to
+the parent's exact `provider/model-id` (case-insensitive):
+`{"modelsByParent": {"<parent provider/model-id>": {"scout": "..."}}}` — a
+scoped entry wins over the unscoped `"models"` entry for the same agent.
+Callers never select models: a task `model` field is rejected before tasks
+start, whatever value it carries — the model registry containing a model is
+not authorization to spend on it. A configured reference that does not
+resolve in the session's model registry fails the whole call, naming the
+config entry.
+
+Effort is likewise user-configured only — a task `thinking` field is rejected
+like `model`. A `"models"` or `"modelsByParent"` reference may carry a
+`:effort` suffix (`off`…`max`) pinning the child's thinking level; an
+unrecognized suffix fails at config load. Effective effort resolves as:
+configured `:effort` (a scoped pin's wins over an unscoped one's) → the
+profile's own thinking default → the parent's live thinking level when the
+child runs the parent's model → the model's default otherwise.
 
 The user-global `delegate.json` is discovered from the session's agent
 directory: the `DELEGATE_AGENT_DIR` environment variable when set, else the

@@ -162,23 +162,29 @@ and migration guidance; none may arrive as silent rewrite drift.
   scout/coder/reviewer, and inline dispatches do not probe the inventory;
   their existing capabilities are unchanged.
 
-- **Task `model` field removed; models are user-configured only.** V1
-  resolved any registry-resolvable model reference (including
-  `:thinking`-suffixed ones) the caller cared to type, letting a subagent
-  spend on any model in the registry — and callers are reliably bad at
-  picking models (stale training-data names, wrong cost tier). V2 tasks
-  carry no model selection at all. Inline tasks and the `default` profile
-  mirror the parent's model unconditionally — inheritance is the invariant,
+- **Task `model` and `thinking` fields removed; model and effort are
+  user-configured only (#32).** V1 resolved any registry-resolvable model
+  reference (including `:thinking`-suffixed ones) the caller cared to type,
+  letting a subagent spend on any model in the registry — and callers are
+  reliably bad at picking models (stale training-data names, wrong cost
+  tier). V2 tasks carry no model or effort selection at all: both fields
+  are rejected before tasks start, with guidance toward the config. Inline
+  tasks and the `default` profile mirror the parent's exact
+  `provider/model:effort` unconditionally — inheritance is the invariant,
   not a configurable, and `models.default` is rejected at config load. A
   *named agent* runs on the model the user assigned it under `"models"` in
-  the user-global `delegate.json` (object: agent name → reference), else the
-  parent's model. A task `model` field is rejected before tasks start with
-guidance toward the config; a configured reference that does not resolve in
-  the session's registry fails the same way, naming the entry.
+  the user-global `delegate.json` (object: agent name →
+  `provider/model[:effort]`), else the parent's model; a `"modelsByParent"`
+  map scopes pins to the parent's exact `provider/model-id` and wins over
+  the unscoped entry. A configured reference's `:effort` suffix pins the
+  child's thinking level; a bare pinned model runs at that model's default;
+  a configured reference that does not resolve in the session's registry
+  fails the same way, naming the entry.
   Migration: move any per-task model choice into `delegate.json`
-  `"models"` — e.g. `{"scout": "<provider/model-id>"}` with references
-  taken from your actual configured models; callers stop sending `model`. The
-  model-failure recovery hint now addresses the operator, not the caller.
+  `"models"` — e.g. `{"scout": "<provider/model-id>:high"}` with references
+  taken from your actual configured models; callers stop sending `model`
+  and `thinking`. The model-failure recovery hint now addresses the
+  operator, not the caller.
 
 - **Operator unsafe-write bypass not carried (user decision, 2026-09-21).**
   V1's `"allowUnsafeSharedWrites"` escape hatch is gone: no operator or
@@ -199,13 +205,18 @@ guidance toward the config; a configured reference that does not resolve in
   (`output.spillThresholdChars`/`output.spillTailChars` regained their v1
   meaning when output bounding shipped — see the shipped-capabilities
   list below.) Model choice for named agents lives only under
-  user-global `"models"`; per-agent `thinking`/`tools` preferences are
-  task fields today and agent Markdown frontmatter once named profiles
-  land (#7), keeping their v1 precedence below task fields. Async tickets
+  user-global `"models"`; the parent-scoped half of
+  `agentOverridesByParentModel` regained its meaning as `"modelsByParent"`
+  when #32 landed — model pins only, scoped by the parent's exact
+  `provider/model-id`. Per-agent `thinking` is configured by the `:effort`
+  suffix on those entries (#32: callers no longer set it at all);
+  per-agent `tools` preferences are task fields today and agent Markdown
+  frontmatter once named profiles land (#7). Async tickets
   are uncapped in count and live for the host lifetime: `concurrency`
   bounds execution, not ticket creation, and settled tickets stay pollable
   until the host exits.
-  Migration: express per-agent thinking/tools as task fields now
+  Migration: express per-agent effort as `:effort` on `models`/
+  `modelsByParent` entries and per-agent tools as task fields now
   (frontmatter later); drop the stale keys; rely on concurrency bounds and
   polling rather than a ticket cap or TTL sweep.
 

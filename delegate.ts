@@ -54,6 +54,7 @@ import {
 } from "./src/types.ts";
 import {
   MODEL_FIELD_REJECTION,
+  THINKING_FIELD_REJECTION,
   validateDispatchCall,
   validateSessionCall,
   validateTicketCall,
@@ -113,12 +114,6 @@ const taskSchema = Type.Object(
         description:
           "Exact capabilities. '*' = the writer group (read, bash, edit, write); 'ro' = the read-only group (read, grep, find, ls); other entries name one child tool each.",
       }),
-    ),
-    thinking: Type.Optional(
-      stringEnum(
-        ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
-        { description: "Thinking budget level." },
-      ),
     ),
     sessionId: Type.Optional(
       Type.String({
@@ -257,9 +252,9 @@ type TaskSchemaArguments = Static<typeof taskSchema>;
 /**
  * Flat-field fold list, derived from the task schema's own keys so a field
  * added to taskSchema participates in boundary recovery without a second
- * hand-maintained list. `model` is deliberately absent: it is not a task
- * field and is rejected outright wherever it appears — folding or echoing
- * it would only disguise the rejection.
+ * hand-maintained list. `model` and `thinking` are deliberately absent:
+ * they are not task fields and are rejected outright wherever they appear —
+ * folding or echoing them would only disguise the rejection.
  */
 const taskFieldNames = Object.keys(
   taskSchema.properties,
@@ -425,6 +420,9 @@ function normalizeTask(value: unknown, index: number): unknown {
   if (task.model !== undefined) {
     throw new Error(`tasks[${index}]: ${MODEL_FIELD_REJECTION}`);
   }
+  if (task.thinking !== undefined) {
+    throw new Error(`tasks[${index}]: ${THINKING_FIELD_REJECTION}`);
+  }
   if (typeof task.tools === "string") task.tools = normalizeTools(task.tools);
   stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent"]);
   return task;
@@ -525,11 +523,15 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
         `session operations use delegate_session({ action: "list" }).`,
     );
   }
-  // `model` is invalid wherever a caller puts it — inside a task, folded
-  // into one, or stranded at the top level beside an explicit tasks array.
-  // Reject it like `context`, before the fold can absorb it.
+  // `model` and `thinking` are invalid wherever a caller puts them — inside
+  // a task, folded into one, or stranded at the top level beside an explicit
+  // tasks array. Reject them like `context`, before the fold can absorb
+  // them.
   if (args.model !== undefined) {
     throw new Error(MODEL_FIELD_REJECTION);
+  }
+  if (args.thinking !== undefined) {
+    throw new Error(THINKING_FIELD_REJECTION);
   }
   if (typeof args.tasks === "string") {
     const parsed = parseArray(args.tasks);
@@ -618,6 +620,9 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
   if (args.model !== undefined) {
     throw new Error(MODEL_FIELD_REJECTION);
   }
+  if (args.thinking !== undefined) {
+    throw new Error(THINKING_FIELD_REJECTION);
+  }
   if (typeof args.force === "string") {
     throw new Error(
       `'force' must be a boolean, not the string ${JSON.stringify(args.force)}.`,
@@ -676,6 +681,9 @@ function prepareSessionArguments(value: unknown): SessionToolArguments {
   if (args.model !== undefined) {
     throw new Error(MODEL_FIELD_REJECTION);
   }
+  if (args.thinking !== undefined) {
+    throw new Error(THINKING_FIELD_REJECTION);
+  }
 
   return args as SessionToolArguments;
 }
@@ -696,7 +704,7 @@ Three sibling tools share Delegate's machinery:
 - Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
   key), \`agent\` (\`default\`/\`scout\`/\`coder\`/\`reviewer\`; omit for
   inline), \`cwd\`, \`systemPrompt\`, \`tools\` (\`*\` writer group, \`ro\`
-  read-only group, or tool names), \`thinking\`, \`deadlineMs\` (ms),
+  read-only group, or tool names), \`deadlineMs\` (ms),
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated),
   \`dependsOn\` (task ids to run first).
   A top-level \`workspace\` is the batch default.
@@ -710,10 +718,11 @@ Three sibling tools share Delegate's machinery:
 - \`operationId\` (1-64 letters/digits/./_/-) makes a dispatch duplicate-safe:
   same id + same request returns the original in-flight or settled result;
   same id + a changed request is an error. Dispatch-only.
-- Models: you never pick models. Tasks run on the parent's model; a named
-  agent may instead run on the model the user configured for it under
-  "models" in the user-global delegate.json. A task \`model\` field is
-  rejected.
+- Models and effort: you never pick either — task \`model\` and \`thinking\`
+  fields are rejected. Tasks run on the parent's model at the parent's
+  effort; a named agent may instead run on the model (and optional
+  \`:effort\`) the user configured for it under "models"/"modelsByParent" in
+  the user-global delegate.json.
 - Children never inherit parent conversation history. Supply a self-contained
   brief; project instructions and child-owned pooled/resumed history still apply.
 

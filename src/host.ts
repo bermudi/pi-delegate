@@ -158,10 +158,9 @@ function isGlobalContextFile(filePath: string, agentDir: string): boolean {
 }
 
 function resolveModel(
-  spec: string | undefined,
+  spec: string,
   env: HostEnvironment,
 ): Model<Api> | undefined {
-  if (spec === undefined) return env.ctx.model as Model<Api> | undefined;
   // Lookups go through the public ModelRegistry facade; the private runtime
   // grab (env.modelRuntime) exists solely to hand child sessions the parent's
   // runtime so registered providers and auth carry over.
@@ -191,11 +190,14 @@ const RESUME_DEFAULT_PROMPT =
  * tools, absolute cwd, and the shared-write reservation roots. Everything
  * that can fail is resolved here, before admission and before execution.
  *
- * Model policy: callers never select models. A named agent runs on the
- * model configured for it under "models" in the user-global delegate.json;
- * everything else — inline tasks and the `default` profile — mirrors the
- * parent's model, unconditionally. The model registry knowing a reference
- * is not authorization — only the user's configuration is.
+ * Model and effort policy: callers select neither. A named agent runs on
+ * the pin configured for it under "modelsByParent" (when the parent matches)
+ * or "models" in the user-global delegate.json — the pin's `:effort` sets
+ * the child's thinking level; everything else — inline tasks, the `default`
+ * profile, and unpinned named agents — mirrors the parent's model at the
+ * parent's thinking level, and a bare pin to a different model runs at that
+ * model's default. The model registry knowing a reference is not
+ * authorization — only the user's configuration is.
  */
 export async function resolveTasks(
   tasks: readonly TaskInput[],
@@ -244,22 +246,40 @@ export async function resolveTasks(
       throw new Error(`${where}: ${tools}`);
     }
 
-    // Model selection is user-only and inheritance-first: named agents use
-    // their configured entry when one exists; inline/default tasks always
-    // mirror the parent. A caller-supplied model field was rejected in
-    // validation.
+    // Model selection is user-only and inheritance-first: a named agent uses
+    // its configured pin (parent-scoped wins over unscoped) when one exists;
+    // inline/default tasks always mirror the parent. Caller-supplied model
+    // and thinking fields were rejected in validation.
+    const parentModel = env.ctx.model as Model<Api> | undefined;
+    const parentKey =
+      parentModel === undefined
+        ? undefined
+        : `${parentModel.provider}/${parentModel.id}`.toLowerCase();
     const agentName = task.agent ?? "default";
-    const modelSpec = configuredModelFor(task.agent, config);
-    const model = resolveModel(modelSpec, env);
+    const assignment = configuredModelFor(task.agent, parentKey, config);
+    const model = assignment
+      ? resolveModel(assignment.ref, env)
+      : parentModel;
     if (!model) {
       throw new Error(
-        modelSpec
-          ? `${where}: models.${agentName} is configured as '${modelSpec}' in ${configPathOf(env.agentDir)} but is not available in this session's model registry.`
+        assignment
+          ? `${where}: ${assignment.origin} is configured as '${assignment.ref}' in ${configPathOf(env.agentDir)} but is not available in this session's model registry.`
           : agentName === "default"
             ? `${where}: no parent model is selected — inline/default tasks inherit it and are not configurable otherwise.`
             : `${where}: no model is configured for agent '${agentName}' and no parent model is selected; add models.${agentName} under "models" in ${configPathOf(env.agentDir)}.`,
       );
     }
+    // Effort: the pin's :effort wins; else the profile default; else the
+    // parent's live level when the child runs the parent's model; else the
+    // model's own default.
+    const runsParentModel =
+      parentModel !== undefined &&
+      model.provider === parentModel.provider &&
+      model.id === parentModel.id;
+    const thinking =
+      assignment?.thinking ??
+      profile?.thinking ??
+      (runsParentModel ? env.ctx.thinkingLevel : undefined);
 
     const cwd = task.cwd ? resolve(env.ctx.cwd, task.cwd) : env.ctx.cwd;
     if (!existsSync(cwd)) {
@@ -284,7 +304,7 @@ export async function resolveTasks(
       agent: task.agent ?? "inline",
       cwd: canonicalPath(cwd),
       model,
-      thinking: task.thinking ?? profile?.thinking ?? env.ctx.thinkingLevel,
+      thinking,
       tools,
       systemPrompt: task.systemPrompt ?? profile?.systemPrompt,
       sessionId: task.sessionId,

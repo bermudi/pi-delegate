@@ -91,6 +91,16 @@ export const MODEL_FIELD_REJECTION =
   `configured for its agent under "models" in the delegate.json config.`;
 
 /**
+ * Callers never select subagent effort either (SPEC "Dispatch") — effort is
+ * user-configured via `:effort` suffixes on "models"/"modelsByParent"
+ * entries. Same everywhere-it-appears rejection as `model`.
+ */
+export const THINKING_FIELD_REJECTION =
+  `the thinking field is not accepted — callers do not select subagent effort. ` +
+  `Remove it: the task runs at the configured :effort for its agent, or at ` +
+  `the parent's level when it runs on the parent's model.`;
+
+/**
  * Within-tool rules for `delegate_ticket`: `ticket` is required for every
  * action except `poll` (bare poll is the roster), `force` only accompanies
  * `cancel`, `timeoutMs` only `wait`, and `taskId`/`questionId`/`answer`
@@ -218,6 +228,9 @@ function validateTasks(tasks: readonly TaskInput[]): void {
     }
     if (task.model !== undefined) {
       fail(`${where}: ${MODEL_FIELD_REJECTION}`);
+    }
+    if (task.thinking !== undefined) {
+      fail(`${where}: ${THINKING_FIELD_REJECTION}`);
     }
     if (task.prompt !== undefined && task.prompt.trim() === "") {
       fail(`${where}: prompt must be a non-empty string.`);

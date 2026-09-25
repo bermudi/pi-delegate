@@ -32,7 +32,8 @@ These are decided, recorded, and carry migration guidance. No action needed.
 | Parent conversation sharing (#14) | `context: "with-parent-transcript"` injected parent history | `context` field rejected entirely; briefs must be self-contained |
 | Mixed async batches (#6) | settled as `completed` with per-task statuses | settle as `partial` — headline never lies |
 | Unknown singular ticket RPC (#6) | successful "not found" response | tool error naming the missing ticket |
-| Task `model` field | any registry-resolvable model the caller typed | rejected; models are user-config only (`delegate.json` `"models"`, named agents only) |
+| Task `model` field | any registry-resolvable model the caller typed | rejected; models are user-config only (`delegate.json` `"models"`/`"modelsByParent"`, named agents only) |
+| Task `thinking` field | caller-chosen effort level | rejected (#32); effort is user-config only — `:effort` on `models`/`modelsByParent` entries, else parent/model default |
 | Unavailable parent tools | silent fallback to writer tools for `default` profile | whole call fails closed before children start, with cause + guidance |
 | Telemetry default | **enabled by default** (v1 `DEFAULT_DELEGATE_CONFIG` has `telemetry.enabled: true`) | disabled by default; requires explicit opt-in |
 
@@ -89,7 +90,7 @@ serial shared batches or parallel `isolated` edits.
 | Quit trace / reload warning | **Shipped** (2026-09-22) — names tickets, not agent labels (v1 listed agents too) | issue #24 |
 | Tree-navigation consent prompt | **Shipped** (2026-09-22) — 2-way cancel/stay, a deliberate divergence (v1's third "hold" option dropped by owner decision); cancel force-cancels live tickets, stay blocks the transition | issue #24 |
 | Output spill | **Shipped** (2026-09-23) — settled/sync output over `output.spillThresholdChars` spills to an owner-only temp file with a bounded tail; running-ticket views tail-only, never write; lossless on write failure; full output in `details` | issue #25; `src/spill.ts`, `SPEC.md` "Output bounding" |
-| `agentOverrides` / `agentOverridesByParentModel` | **Dropped** | COMPATIBILITY breaking change; per-agent thinking/tools → task fields today, frontmatter once #7 lands |
+| `agentOverrides` / `agentOverridesByParentModel` | **Partially restored** (#32) | model pins → `models`/`modelsByParent` (agent → `provider/model[:effort]`); per-agent tools → task fields today, frontmatter once #7 lands |
 | `maxAsyncTickets` cap | **Dropped** | same entry; tickets uncapped, host-lifetime, bounded by `concurrency` on execution only |
 | Ticket TTL cleanup | Already deliberate (SPEC: host-lifetime tickets) | no action |
 | Retry bound 3 → 2 | Already covered by "retry machinery" in COMPATIBILITY's may-change list | no action |
@@ -125,7 +126,7 @@ an accepted gap, recorded in `TEST-MIGRATION.md`.
 | Session store | in-memory pool + custom layout | `<agentDir>/delegate-sessions/` file-backed, insert-on-success |
 | Provider extensions | allowlist | verified, provider-scoped allowlist; integration status recorded |
 | Scratch vs shared writer | (v1 scratch reserved on source) | scratch holds no source reservation — runs beside a shared writer |
-| Config surface | `maxConcurrent`, `concurrency{providers}`, `agentOverrides{,ByParentModel}`, `allowUnsafeSharedWrites`, `stallTimeoutMs`, `telemetry{enabled}`, `maxAsyncTickets`, `output.spill{Threshold,Tail}Chars` | `maxConcurrent`, `concurrency{default,providers,models}`, `stallTimeoutMs`, `models`, `telemetry{enabled,dbPath}`, `output.spill{Threshold,Tail}Chars` |
+| Config surface | `maxConcurrent`, `concurrency{providers}`, `agentOverrides{,ByParentModel}`, `allowUnsafeSharedWrites`, `stallTimeoutMs`, `telemetry{enabled}`, `maxAsyncTickets`, `output.spill{Threshold,Tail}Chars` | `maxConcurrent`, `concurrency{default,providers,models}`, `stallTimeoutMs`, `models`, `modelsByParent`, `telemetry{enabled,dbPath}`, `output.spill{Threshold,Tail}Chars` |
 | Stall watchdog | 15 min default | 15 min default (parity) |
 | Package | published `@bermudi/pi-delegate` 0.1.21, esbuild bundle step | no bundle, `files: [delegate.ts, README]` |
 

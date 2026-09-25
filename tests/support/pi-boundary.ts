@@ -196,8 +196,16 @@ export function configureDelegate(
 export async function installSubagentModel(
   session: TestSession,
 ): Promise<SubagentModel> {
-  const faux = fauxProvider({ provider: "delegate-faux" });
-  const alt = fauxProvider({ provider: "delegate-faux-2" });
+  // reasoning: true — without it Pi clamps a child's thinking level to
+  // "off" before streaming, which would hide configured :effort pins.
+  const faux = fauxProvider({
+    provider: "delegate-faux",
+    models: [{ id: "faux-1", reasoning: true }],
+  });
+  const alt = fauxProvider({
+    provider: "delegate-faux-2",
+    models: [{ id: "faux-1", reasoning: true }],
+  });
   const runtime = (session.session as AgentSession).modelRuntime;
   runtime.registerNativeProvider(faux.provider);
   runtime.registerNativeProvider(alt.provider);

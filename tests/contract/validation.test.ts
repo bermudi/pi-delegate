@@ -46,7 +46,6 @@ describe("delegate validation contract", () => {
     // workspace value and sent workspace:"none". Closed enums are the contract.
     for (const arguments_ of [
       { tasks: [{ prompt: "x", workspace: "none" }] },
-      { tasks: [{ prompt: "x", thinking: "ultra" }] },
     ]) {
       const result = await call(arguments_);
       expect(result.isError).toBe(true);
@@ -241,6 +240,37 @@ describe("delegate validation contract", () => {
       expect(result.isError).toBe(true);
       expect(result.text).toContain("model field is not accepted");
       expect(result.text).toContain("delegate.json");
+    },
+  );
+
+  test(
+    "the thinking field is rejected wherever it appears (#32)",
+    async () => {
+      // Issue #32: effort is user-configured only — `thinking` rejects like
+      // `model`, inside a task, flat-folded, stranded at the top level, and
+      // on the sibling tools.
+      session = await openDelegateBoundary();
+      for (const arguments_ of [
+        { tasks: [{ prompt: "x", thinking: "high" }] },
+        { prompt: "x", thinking: "high" },
+        { tasks: [{ prompt: "x" }], thinking: "high" },
+      ]) {
+        const result = await callDelegate(session, arguments_);
+        expect(result.isError).toBe(true);
+        expect(result.text).toContain("thinking field is not accepted");
+      }
+      const ticket = await callDelegateTicket(session, {
+        action: "poll",
+        thinking: "high",
+      });
+      expect(ticket.isError).toBe(true);
+      expect(ticket.text).toContain("thinking field is not accepted");
+      const sessionResult = await callDelegateSession(session, {
+        action: "list",
+        thinking: "high",
+      });
+      expect(sessionResult.isError).toBe(true);
+      expect(sessionResult.text).toContain("thinking field is not accepted");
     },
   );
 

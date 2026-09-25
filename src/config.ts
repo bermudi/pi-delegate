@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { knownAgentNames } from "./profiles.ts";
 import type { OutputBounds } from "./types.ts";
 
@@ -18,17 +19,34 @@ export interface TelemetryConfig {
   readonly dbPath: string | undefined;
 }
 
+/** A parsed `provider/model[:effort]` pin from `models`/`modelsByParent`. */
+export interface ModelAssignment {
+  /** Model reference with any `:effort` suffix already stripped. */
+  readonly ref: string;
+  /** Configured effort suffix, when one was given. */
+  readonly thinking: ThinkingLevel | undefined;
+}
+
 export interface DelegateConfig {
   /** Global bound on simultaneously executing tasks. */
   readonly maxConcurrent: number;
   readonly concurrency: ConcurrencyConfig;
   /**
    * Per-agent model assignment: named agent (scout, coder, ...) → model
-   * reference. There is deliberately no "default" entry: inline tasks and
-   * the `default` profile always mirror the parent's model. Callers never
-   * select models; entries here are the only override, user-authored.
+   * reference with an optional `:effort` suffix. There is deliberately no
+   * "default" entry: inline tasks and the `default` profile always mirror
+   * the parent's model. Callers never select models; entries here are the
+   * only override, user-authored.
    */
-  readonly models: Readonly<Record<string, string>>;
+  readonly models: Readonly<Record<string, ModelAssignment>>;
+  /**
+   * Parent-scoped pins, keyed by the parent's exact `provider/model-id`
+   * (normalized lowercase). An entry here wins over `models` for the same
+   * agent; a non-matching parent key simply never applies.
+   */
+  readonly modelsByParent: Readonly<
+    Record<string, Readonly<Record<string, ModelAssignment>>>
+  >;
   /**
    * Inactivity watchdog: a task whose session emits no events for this long
    * is cooperatively aborted as stalled. 0 disables it.
@@ -48,24 +66,41 @@ export const DEFAULT_CONFIG: DelegateConfig = {
   maxConcurrent: 3,
   concurrency: { default: undefined, providers: {}, models: {} },
   models: {},
+  modelsByParent: {},
   stallTimeoutMs: 15 * 60 * 1000,
   telemetry: { enabled: false, dbPath: undefined },
   output: { spillThresholdChars: 8000, spillTailChars: 2000 },
 };
 
+/** A `ModelAssignment` plus the config path that produced it, for errors. */
+export interface ResolvedModelAssignment extends ModelAssignment {
+  /** Config path naming the winning entry (e.g. `models.scout`). */
+  readonly origin: string;
+}
+
 /**
- * Model reference for one task: the named agent's configured entry, or
+ * Model pin for one task: the named agent's `modelsByParent` entry when the
+ * parent matches (scoped wins over unscoped), else its `models` entry, else
  * undefined (= the parent's model). Inline tasks and the `default` profile
  * never get an entry — mirroring the parent is the invariant, not a
  * configurable.
  */
 export function configuredModelFor(
   agent: string | undefined,
+  parentKey: string | undefined,
   config: DelegateConfig,
-): string | undefined {
+): ResolvedModelAssignment | undefined {
   if (agent === undefined || agent === "default") return undefined;
-  return config.models[agent];
-};
+  const scoped =
+    parentKey === undefined ? undefined : config.modelsByParent[parentKey]?.[agent];
+  if (scoped) {
+    return { ...scoped, origin: `modelsByParent.${parentKey}.${agent}` };
+  }
+  const entry = config.models[agent];
+  return entry === undefined
+    ? undefined
+    : { ...entry, origin: `models.${agent}` };
+}
 
 /** Effective per-model bound: model key, then provider, then default, then global. */
 export function modelConcurrencyLimit(
@@ -169,7 +204,8 @@ export function loadDelegateConfig(agentDir: string): DelegateConfig {
   return {
     maxConcurrent: (maxConcurrent as number) ?? DEFAULT_CONFIG.maxConcurrent,
     concurrency: parseConcurrency(config.concurrency, path),
-    models: parseModels(config.models, path),
+    models: parseModels(config.models, "models", path),
+    modelsByParent: parseModelsByParent(config.modelsByParent, path),
     stallTimeoutMs:
       (stallTimeoutMs as number) ?? DEFAULT_CONFIG.stallTimeoutMs,
     telemetry: parseTelemetry(config.telemetry, path),
@@ -251,41 +287,117 @@ function parseTelemetry(value: unknown, path: string): TelemetryConfig {
   };
 }
 
+const THINKING_LEVELS: ReadonlySet<string> = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
 /**
- * Parse the `models` map: named agent → model reference. Keys must name a
- * known non-default agent (a typo fails at load instead of silently never
- * matching); a "default" key is rejected explicitly — inline/default tasks
- * inherit the parent's model, full stop. Values must be non-empty strings,
- * stored trimmed. A malformed entry fails loudly — a silently dropped
- * assignment would surface later as a confusing per-task failure.
+ * Parse one `provider/model[:effort]` reference. A trailing `:level` pins
+ * the child's thinking level; a suffix that is not a known level — or a
+ * dangling colon — fails loudly at load instead of silently shadowing the
+ * model id it was probably meant to be part of.
  */
-function parseModels(value: unknown, path: string): Record<string, string> {
+function parseModelEntry(value: unknown, name: string, path: string): ModelAssignment {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(
+      `${path}: ${name} must be a non-empty model reference; got ${JSON.stringify(value)}.`,
+    );
+  }
+  const trimmed = value.trim();
+  const colon = trimmed.lastIndexOf(":");
+  if (colon === -1) return { ref: trimmed, thinking: undefined };
+  const suffix = trimmed.slice(colon + 1);
+  if (!THINKING_LEVELS.has(suffix)) {
+    throw new Error(
+      `${path}: ${name} has an unrecognized effort suffix; got ${JSON.stringify(trimmed)}. ` +
+        `Known levels: ${[...THINKING_LEVELS].join(", ")}.`,
+    );
+  }
+  const ref = trimmed.slice(0, colon);
+  if (ref === "") {
+    throw new Error(
+      `${path}: ${name} must name a model before its :${suffix} suffix; got ${JSON.stringify(trimmed)}.`,
+    );
+  }
+  return { ref, thinking: suffix as ThinkingLevel };
+}
+
+/**
+ * Parse an agent → pin map (`models`, or one inner `modelsByParent` map):
+ * keys must name a known non-default agent (a typo fails at load instead
+ * of silently never matching); a "default" key is rejected explicitly —
+ * inline/default tasks inherit the parent's model, full stop. Values are
+ * `provider/model[:effort]` references. A malformed entry fails loudly — a
+ * silently dropped assignment would surface later as a confusing per-task
+ * failure.
+ */
+function parseModels(
+  value: unknown,
+  name: string,
+  path: string,
+): Record<string, ModelAssignment> {
   if (value === undefined) return {};
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(
-      `${path}: models must be an object mapping a named agent to a model reference.`,
+      `${path}: ${name} must be an object mapping a named agent to a model reference.`,
     );
   }
-  const known = knownAgentNames().filter((name) => name !== "default");
-  const out: Record<string, string> = {};
+  const known = knownAgentNames().filter((n) => n !== "default");
+  const out: Record<string, ModelAssignment> = {};
   for (const [agent, entry] of Object.entries(value as Record<string, unknown>)) {
     if (agent === "default") {
       throw new Error(
-        `${path}: models.default is rejected — inline/default tasks always run on the parent's model. ` +
+        `${path}: ${name}.default is rejected — inline/default tasks always run on the parent's model. ` +
           `Configure named agents only: ${known.join(", ")}.`,
       );
     }
     if (!known.includes(agent)) {
       throw new Error(
-        `${path}: models key '${agent}' is not a known agent; known agents: ${known.join(", ")}.`,
+        `${path}: ${name} key '${agent}' is not a known agent; known agents: ${known.join(", ")}.`,
       );
     }
-    if (typeof entry !== "string" || entry.trim() === "") {
+    out[agent] = parseModelEntry(entry, `${name}.${agent}`, path);
+  }
+  return out;
+}
+
+/**
+ * Parse the `modelsByParent` map: parent's exact `provider/model-id` → an
+ * agent → pin map. Keys are normalized lowercase (matching is
+ * case-insensitive, like model references elsewhere); a key without a
+ * non-empty `provider/id` shape — or one carrying a `:` — is a config
+ * error, since it could never match a real model identity.
+ */
+function parseModelsByParent(
+  value: unknown,
+  path: string,
+): Record<string, Record<string, ModelAssignment>> {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${path}: modelsByParent must be an object mapping a parent provider/model-id to per-agent model references.`,
+    );
+  }
+  const out: Record<string, Record<string, ModelAssignment>> = {};
+  for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+    const normalized = key.trim().toLowerCase();
+    if (
+      normalized === "" ||
+      normalized.includes(":") ||
+      normalized.split("/").some((part) => part === "") ||
+      !normalized.includes("/")
+    ) {
       throw new Error(
-        `${path}: models.${agent} must be a non-empty model reference; got ${JSON.stringify(entry)}.`,
+        `${path}: modelsByParent key '${key}' must be an exact provider/model-id (no effort suffix); got ${JSON.stringify(key)}.`,
       );
     }
-    out[agent] = entry.trim();
+    out[normalized] = parseModels(inner, `modelsByParent.${key}`, path);
   }
   return out;
 }
