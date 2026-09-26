@@ -124,7 +124,7 @@ an accepted gap, recorded in `TEST-MIGRATION.md`.
 | --- | --- | --- |
 | Result rendering | full render layer (branches, transcript text, spill) | compact status/integration/notice summaries + spill bounding; expanded views re-render complete outcomes from `details.results` |
 | Session store | in-memory pool + custom layout | `<agentDir>/delegate-sessions/` file-backed, insert-on-success |
-| Provider extensions | allowlist | verified, provider-scoped allowlist; integration status recorded |
+| Provider extensions | allowlist | children run extension-free; provider registration and auth come from the parent's shared model runtime (verified live 2026-09-26, issue #5) |
 | Scratch vs shared writer | (v1 scratch reserved on source) | scratch holds no source reservation — runs beside a shared writer |
 | Config surface | `maxConcurrent`, `concurrency{providers}`, `agentOverrides{,ByParentModel}`, `allowUnsafeSharedWrites`, `stallTimeoutMs`, `telemetry{enabled}`, `maxAsyncTickets`, `output.spill{Threshold,Tail}Chars` | `maxConcurrent`, `concurrency{default,providers,models}`, `stallTimeoutMs`, `models`, `modelsByParent`, `telemetry{enabled,dbPath}`, `output.spill{Threshold,Tail}Chars` |
 | Stall watchdog | 15 min default | 15 min default (parity) |

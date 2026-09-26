@@ -33,9 +33,11 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   precedence; Markdown discovery order and first-definition wins.
 - User-global `delegate.json` configuration. Project files do not become
   delegate configuration.
-- Parent model inheritance and project instructions and extension isolation, including verified
-  provider-scoped exceptions and the meanings of `*` and `ro`, subject to the
-  model-selection and parent-history departures below.
+- Parent model inheritance and project instructions and extension isolation, with children
+  resolved through the parent's shared model runtime (extension-free; no
+  provider-extension allowlist — verified live 2026-09-26, issue #5) and the
+  meanings of `*` and `ro`, subject to the model-selection and parent-history
+  departures below.
 
 ### Execution and state
 

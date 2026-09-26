@@ -71,8 +71,11 @@ This does not remove a child's own pooled `sessionId` or explicit `resumeFrom` h
 
 Task fields override profile defaults. Project context is rebuilt for the
 task cwd; the parent's extension inventory, MCP tools, and user-global
-harness instructions are not inherited. Provider extensions are disabled
-except for the verified, provider-scoped allowlist.
+harness instructions are not inherited. Children run with all extensions
+disabled and resolve provider registrations and auth through the parent's
+shared model runtime; a model the runtime cannot resolve or authenticate
+fails the task with that cause — there is no provider-extension fallback.
+Verified live against real providers 2026-09-26 (issue #5).
 
 Named agents also come from user-authored Markdown profiles, discovered per
 dispatch — edits take effect without a reload — in first-definition-wins
