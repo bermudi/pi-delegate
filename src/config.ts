@@ -355,9 +355,10 @@ function parseModels(
 /**
  * Parse the `modelsByParent` map: parent's exact `provider/model-id` → an
  * agent → pin map. Keys are normalized lowercase (matching is
- * case-insensitive, like model references elsewhere); a key without a
- * non-empty `provider/id` shape — or one carrying a `:` — is a config
- * error, since it could never match a real model identity.
+ * case-insensitive, like model references elsewhere); a key that cannot be
+ * a `provider/model-id` identity — empty, extra slashes, internal
+ * whitespace, or any colon (e.g. a leftover effort suffix) — is a config
+ * error, since it could never match a real parent model.
  */
 function parseModelsByParent(
   value: unknown,
@@ -373,12 +374,7 @@ function parseModelsByParent(
   const out: Record<string, Record<string, ModelAssignment>> = {};
   for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
     const normalized = key.trim().toLowerCase();
-    if (
-      normalized === "" ||
-      normalized.includes(":") ||
-      normalized.split("/").some((part) => part === "") ||
-      !normalized.includes("/")
-    ) {
+    if (!/^[^/\s:]+\/[^/\s:]+$/.test(normalized)) {
       throw new Error(
         `${path}: modelsByParent key '${key}' must be an exact provider/model-id (no effort suffix); got ${JSON.stringify(key)}.`,
       );

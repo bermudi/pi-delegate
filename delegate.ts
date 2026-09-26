@@ -780,10 +780,14 @@ Three sibling tools share Delegate's machinery:
 /**
  * A manual trailer listing the user's discovered Markdown profiles, or ""
  * when there are none. Re-discovered per help call so edits show up without
- * a reload.
+ * a reload — silently: a broken profile file must not scold someone who
+ * only asked for help, and this discovery never consumes the session's
+ * warn-once budget (the first dispatch still reports the file).
  */
 function customProfileSection(ctx: ExtensionContext): string {
-  const catalog = discoverProfiles(ctx.cwd, resolveAgentDir(ctx).dir);
+  const catalog = discoverProfiles(ctx.cwd, resolveAgentDir(ctx).dir, {
+    warn: () => {},
+  });
   const custom = [...catalog.profiles.values()].filter(
     (profile) => profile.source !== undefined,
   );
@@ -798,13 +802,26 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // Host-compat probes (issue #9): exercise the reaches into Pi internals
   // that dispatch depends on — the private model-runtime handle and the
   // agent-directory resolution — on the first event that carries a ctx, so
-  // a Pi upgrade that breaks either reports an extension error at session
-  // start instead of first failing inside a dispatch. A throw here routes
-  // through the host's extension-error channel; dispatch would fail with
-  // the same cause regardless.
+  // a Pi upgrade that breaks either is visible in the log at session start
+  // instead of first failing inside a dispatch. Health probe only: a throw
+  // here would route through the host's extension-error channel for every
+  // session — including chatters who never dispatch — and the model wiring
+  // may not even be final this early, so a hard failure could cry wolf. The
+  // definitive check stays at dispatch, which fails with the same cause and
+  // the same actionable message as before the probe existed.
   api.on("session_start", (_event, ctx) => {
-    parentModelRuntime(ctx);
-    resolveAgentDir(ctx);
+    const probe = (reach: string, run: () => void): void => {
+      try {
+        run();
+      } catch (error) {
+        console.error(
+          `[delegate] session-start probe failed (${reach}): ${error instanceof Error ? error.message : String(error)}. ` +
+            `The first delegate dispatch will fail with this cause; every other tool is unaffected.`,
+        );
+      }
+    };
+    probe("parent model runtime", () => parentModelRuntime(ctx));
+    probe("agent directory resolution", () => resolveAgentDir(ctx));
   });
 
   // TicketStore mutates first, visibility reads lazily — the observer arrow
@@ -849,6 +866,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // Owned by this closure: one fallback warning per extension instance, not
   // per call (see resolveAgentDir for why the fallback exists at all).
   let warnedAgentDirFallback = false;
+  // Owned by this closure: profile file paths already warned about this
+  // session — discovery re-reads the disk per dispatch, but a broken file
+  // warns once per chat, not once per run (see discoverProfiles).
+  const warnedProfilePaths = new Set<string>();
   // Shutdown latch: once the host begins teardown, new dispatches reject and
   // pending results are never delivered.
   let shuttingDown = false;
@@ -973,7 +994,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
         agentDirResolution.dir,
         () => api.getActiveTools(),
       );
-      const catalog = discoverProfiles(ctx.cwd, agentDirResolution.dir);
+      const catalog = discoverProfiles(ctx.cwd, agentDirResolution.dir, {
+        warnedPaths: warnedProfilePaths,
+      });
       const config = loadDelegateConfig(
         agentDirResolution.dir,
         catalog.globalNames,

@@ -271,7 +271,7 @@ export async function resolveTasks(
         assignment
           ? `${where}: ${assignment.origin} is configured as '${assignment.ref}' in ${configPathOf(env.agentDir)} but is not available in this session's model registry.`
           : modelRef !== undefined
-            ? `${where}: agent profile ${profile?.source} pins model '${modelRef}' but it is not available in this session's model registry.`
+            ? `${where}: agent profile ${profile?.source ?? `'${agentName}'`} pins model '${modelRef}' but it is not available in this session's model registry.`
             : agentName === "default"
               ? `${where}: no parent model is selected — inline/default tasks inherit it and are not configurable otherwise.`
               : `${where}: no model is configured for agent '${agentName}' and no parent model is selected; add models.${agentName} under "models" in ${configPathOf(env.agentDir)}.`,
@@ -280,10 +280,13 @@ export async function resolveTasks(
     // Effort: the pin's :effort wins; else the profile default; else the
     // parent's live level when the child runs the parent's model; else the
     // model's own default.
+    // Case-insensitive on purpose, like config matching: a host-set parent
+    // model whose provider/id casing differs from the registry's must not
+    // cost the child the parent's live effort level.
     const runsParentModel =
       parentModel !== undefined &&
-      model.provider === parentModel.provider &&
-      model.id === parentModel.id;
+      model.provider.toLowerCase() === parentModel.provider.toLowerCase() &&
+      model.id.toLowerCase() === parentModel.id.toLowerCase();
     const thinking =
       assignment?.thinking ??
       profile?.thinking ??

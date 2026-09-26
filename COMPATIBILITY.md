@@ -87,12 +87,15 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 
 - Actionable errors that preserve the relevant correction, even if wording
   changes.
-- Host-compatibility failures surface at session start, not first dispatch
-  (issue #9, additive): the reaches into Pi internals a dispatch depends on —
-  the parent model-runtime handle and agent-directory resolution — are
-  probed on `session_start`, so a Pi upgrade that breaks one reports an
-  extension error immediately. The dispatch-time failure and its message
-  are unchanged; the probe only moves the first observable signal earlier.
+- Host-compatibility probes at session start log, they never throw
+  (issue #9, additive): the reaches into Pi internals a dispatch depends
+  on — the parent model-runtime handle and agent-directory resolution —
+  are probed on `session_start`, and a failure there is logged with its
+  cause and a note that dispatch will fail on it. A throw (an extension
+  error) would reach every session — including chatters who never
+  dispatch — and the model wiring is not guaranteed final that early, so
+  the definitive failure stays at first dispatch with the same actionable
+  message as before the probe existed.
 - Aggregate usage on synchronous tool results where supported. Async delivered
   messages still cannot add usage to the parent total.
 - Optional duplicate-safe dispatch identity (`operationId`, issue #16): an
@@ -203,7 +206,13 @@ and migration guidance; none may arrive as silent rewrite drift.
   the unscoped entry. A configured reference's `:effort` suffix pins the
   child's thinking level; a bare pinned model runs at that model's default;
   a configured reference that does not resolve in the session's registry
-  fails the same way, naming the entry.
+  fails the same way, naming the entry. A `modelsByParent` key that could
+  never be a `provider/model-id` (extra slashes, internal whitespace, a
+  colon) and a reference still carrying `:` after its effort suffix are
+  rejected at config load — dead entries fail loudly, they do not sit
+  silently. "Running the parent's model" for effort inheritance is
+  case-insensitive, like config matching, so a host-set parent model whose
+  casing differs from the registry's keeps the parent's live level.
   Migration: move any per-task model choice into `delegate.json`
   `"models"` — e.g. `{"scout": "<provider/model-id>:high"}` with references
   taken from your actual configured models; callers stop sending `model`

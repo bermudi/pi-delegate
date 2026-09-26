@@ -28,10 +28,15 @@ export interface PublicTool {
 }
 
 export async function openDelegateBoundary(
-  options: { inMemoryAgentDir?: boolean; mockUI?: MockUIConfig } = {},
+  options: {
+    inMemoryAgentDir?: boolean;
+    mockUI?: MockUIConfig;
+    /** Extensions loaded before delegate.ts (fault injection at the host boundary). */
+    leadingExtensions?: string[];
+  } = {},
 ): Promise<TestSession> {
   const session = await createTestSession({
-    extensions: [extensionPath],
+    extensions: [...(options.leadingExtensions ?? []), extensionPath],
     propagateErrors: false,
     mockUI: options.mockUI,
   });

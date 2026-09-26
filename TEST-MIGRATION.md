@@ -483,8 +483,11 @@ gaps.
   cwd. Pi 0.87 exposes no `agentDir` on `ExtensionContext`; when it does
   (earendil-works/pi#4807), the inference and the fallback are deleted.
   Host-compat reaches (the parent model-runtime handle and this
-  resolution) are probed on `session_start` — a Pi break reports an
-  extension error at load rather than first dispatch (#9).
+  resolution) are probed on `session_start` — the probe **logs** a failure
+  and never throws (a throw would reach every session through the
+  extension-error channel, and the model wiring may not be final that
+  early); the definitive failure stays at first dispatch with the same
+  message (#9).
 - **Regression (#12):** the cwd fallback — taken by embedded/in-memory
   hosts — must not be silent: it warns once per extension instance before
   the first dispatch, naming the directory, `delegate.json`, the
@@ -501,9 +504,19 @@ gaps.
   regression: overlapping harness sessions keep configuration reads and
   pooled transcript writes in their own directories without changing the
   process environment.
-- **Gap:** the `session_start` probe's failure path is not exercised —
-  simulating a Pi internals break would require reaching below the
-  extension boundary.
+- **Regression (review of #9):** a broken host seam at session start must
+  not break or scold the chat — the probe logs a `[delegate]` line, the
+  session opens with tools registered, and the first dispatch fails
+  whole-call with the actionable runtime-grab message. Covered by
+  `tests/regression/session-start-probe.test.ts`, which loads a fault
+  extension (`tests/support/broken-runtime-fault.ts`) before delegate.ts
+  so its own `session_start` handler sabotages the registry first; the
+dispatch-time failure is separately pinned by
+`tests/regression/host-runtime.test.ts`.
+- **Retired gap:** the `session_start` probe's failure path was previously
+  listed as untestable without reaching below the extension boundary — the
+  fault extension loads through the same extension path the harness uses,
+  so no production seam was added for the test.
 
 ### Explicit dispatch identity (#16)
 
@@ -923,6 +936,12 @@ default. Recorded in SPEC.md "Dispatch" and COMPATIBILITY.md.
 - `src/config.ts` parses `provider/model[:effort]` entries (unknown suffix
   or dangling colon fails at load) and the `modelsByParent` map (keys
   normalized lowercase; a key that is not a `provider/model-id` fails).
+  Review tightening: a `modelsByParent` key that could never match — extra
+  slashes, internal whitespace, any colon — and a reference still carrying
+  `:` after its effort suffix are rejected at load with the dead-shape
+  message; covered in `tests/contract/dispatch.test.ts` along with the
+  case-insensitive parent-mirror (a pinned model equal to the parent's
+  modulo case still inherits the parent's live effort level).
 - `src/validation.ts` and the boundary layer reject `thinking` wherever it
   appears with guidance toward the config — the field left the task schema
   entirely.
@@ -966,6 +985,14 @@ config key); a malformed profile is skipped with a warning and stays
 unknown. Discovery assertions observe the provider-facing transcript
 (system message prompt/sections, `toolsAdded`, stream `reasoning`) rather
 than internals.
+
+Post-landing review additions (still in `profiles.test.ts`): an unreadable
+file (chmod 000, skipped as root) warns like any other bad profile instead
+of looking missing; a broken file warns once per session, not once per
+dispatch; same-named files in one directory resolve in filename order
+(files created in reverse order so creation order cannot masquerade);
+the manual's profile listing is silent and does not spend the session's
+warn-once budget (the first dispatch after help still warns).
 
 ## Next contract slices
 

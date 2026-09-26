@@ -95,9 +95,14 @@ profile's model pin; an explicit `thinking` wins over the suffix). Unknown
 keys are ignored. Files ending `.chain.md` are skipped. A file that is
 unreadable, has malformed frontmatter, misses a required field, or carries
 invalid `tools`/`thinking`/`model` values is skipped with a logged warning —
-a half-loaded profile is worse than none. Built-ins always win name
-collisions: a `scout.md` is ignored with a warning rather than reshaping the
-built-in. Claude Code's `.claude/agents` is not imported.
+a half-loaded profile is worse than none. A warning surfaces once per file
+path per session (discovery re-reads the disk per dispatch; the log does not
+reflood), and the manual's profile listing is silent — asking for help never
+scolds. Within one directory, files are considered in name order, so the
+first-definition-wins winner between same-named files is deterministic.
+Built-ins always win name collisions: a `scout.md` is ignored with a warning
+rather than reshaping the built-in. Claude Code's `.claude/agents` is not
+imported.
 
 Only globally defined profile names are valid `models`/`modelsByParent` keys:
 a user-global config cannot name a project-local profile — it would fail
@@ -112,9 +117,13 @@ model unconditionally. A second map, `"modelsByParent"`, scopes those pins to
 the parent's exact `provider/model-id` (case-insensitive):
 `{"modelsByParent": {"<parent provider/model-id>": {"scout": "..."}}}` — a
 scoped entry wins over the unscoped `"models"` entry for the same agent.
-Below both sits a Markdown profile's frontmatter `model:` pin: the model
-chain is parent-scoped pin → unscoped pin → profile `model:` → the parent's
-model. Callers never select models: a task `model` field is rejected before
+A `modelsByParent` key that could never be a `provider/model-id` — empty,
+extra slashes, internal whitespace, or any colon — fails at config load
+rather than sitting dead, and a model reference still containing `:` after
+its effort suffix fails the same way. Below both sits a Markdown profile's
+frontmatter `model:` pin: the model chain is parent-scoped pin → unscoped
+pin → profile `model:` → the parent's model. Callers never select models: a
+task `model` field is rejected before
 tasks start, whatever value it carries — the model registry containing a
 model is not authorization to spend on it. A configured or profile-pinned
 reference that does not resolve in the session's model registry fails the
@@ -127,7 +136,8 @@ child's thinking level; an unrecognized suffix fails at config load or skips
 the profile. Effective effort resolves as: a delegate.json `:effort` (a
 scoped pin's wins over an unscoped one's) → the profile's own thinking
 default → the parent's live thinking level when the child runs the parent's
-model → the model's default otherwise.
+model (identity compared case-insensitively, like config matching) → the
+model's default otherwise.
 
 The user-global `delegate.json` is discovered from the session's agent
 directory: the `DELEGATE_AGENT_DIR` environment variable when set, else

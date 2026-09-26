@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
@@ -283,6 +283,158 @@ describe("markdown agent profiles contract (#7)", () => {
         ),
       ).toBe(true);
       warn.mockRestore();
+    },
+  );
+
+  // Root bypasses file permissions, so an EACCES fixture would silently
+  // turn readable and pin nothing.
+  test.skipIf(process.getuid?.() === 0)(
+    "an unreadable profile file is skipped with a warning, like other bad profiles",
+    async () => {
+      // Review of #7: every other discovery failure warns; silence on an
+      // unreadable file would make a permissions problem look like a
+      // missing profile.
+      session = await openDelegateBoundary();
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      mkdirSync(globalDir(session), { recursive: true });
+      const locked = join(globalDir(session), "locked.md");
+      writeFileSync(locked, "---\nname: locked\ndescription: no access\n---\n");
+      chmodSync(locked, 0o000);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "try it", agent: "locked" }],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("unknown agent 'locked'");
+      expect(
+        warn.mock.calls.some((call) =>
+          String(call[0]).includes("locked.md") &&
+          /unreadable|denied|EACCES/i.test(String(call[0])),
+        ),
+      ).toBe(true);
+      warn.mockRestore();
+    },
+  );
+
+  test(
+    "a broken profile file warns once per session, not once per dispatch",
+    async () => {
+      // Review of #7: discovery re-reads the disk on every run; the same
+      // broken file must not flood the log with the same warning.
+      session = await openDelegateBoundary();
+      writeProfile(
+        globalDir(session),
+        "broken.md",
+        "name: broken\n", // no required `description`
+        "unreachable",
+      );
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await callDelegate(session, {
+            tasks: [{ prompt: "again", agent: "broken" }],
+          });
+        }
+        const mentions = warn.mock.calls.filter((call) =>
+          String(call[0]).includes("broken.md"),
+        );
+        expect(mentions.length).toBe(1);
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+
+  test(
+    "same-named profiles in one directory resolve in filename order",
+    async () => {
+      // Review of #7: readdir order is filesystem-dependent, so the winner
+      // between two same-named files in one directory must not be. The
+      // later-named file is created first so creation order cannot
+      // masquerade as the contract.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      writeProfile(
+        globalDir(session),
+        "zzz-late.md",
+        ["name: twin", "description: late twin"].join("\n"),
+        "LATE-TWIN",
+      );
+      writeProfile(
+        globalDir(session),
+        "aaa-early.md",
+        ["name: twin", "description: early twin"].join("\n"),
+        "EARLY-TWIN",
+      );
+      let seenPrompt: unknown;
+      subagents.respond([
+        (context) => {
+          seenPrompt = systemPromptText(
+            context.messages.find((m) => m.role === "system"),
+          );
+          return fauxAssistantMessage("TWINNED");
+        },
+      ]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "go", agent: "twin" }],
+      });
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("TWINNED");
+      expect(seenPrompt).toEqual(
+        expect.stringContaining("EARLY-TWIN"),
+      );
+    },
+  );
+
+  test(
+    "the manual lists custom profiles silently and without spending the warning budget",
+    async () => {
+      // Review of #7: help must not scold — a broken profile file stays
+      // silent in the manual's listing, which still lists healthy ones,
+      // and the silent pass must not suppress the first dispatch's
+      // warning for that file.
+      session = await openDelegateBoundary();
+      writeProfile(
+        globalDir(session),
+        "fine.md",
+        ["name: fine", "description: a healthy profile"].join("\n"),
+        "FINE.",
+      );
+      writeProfile(
+        globalDir(session),
+        "broken.md",
+        "name: broken\n", // no required `description`
+        "unreachable",
+      );
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const help = await callDelegate(session, { tasks: [] });
+
+        expect(help.isError).toBe(false);
+        expect(help.text).toContain("Delegate Manual");
+        expect(help.text).toContain("## Your agent profiles");
+        expect(help.text).toContain("`fine`");
+        expect(
+          warn.mock.calls.some((call) =>
+            String(call[0]).includes("broken.md"),
+          ),
+        ).toBe(false);
+
+        // The dispatch after help still reports the broken file once.
+        await callDelegate(session, {
+          tasks: [{ prompt: "try it", agent: "broken" }],
+        });
+        expect(
+          warn.mock.calls.some((call) =>
+            String(call[0]).includes("broken.md"),
+          ),
+        ).toBe(true);
+      } finally {
+        warn.mockRestore();
+      }
     },
   );
 });

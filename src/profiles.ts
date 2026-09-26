@@ -162,6 +162,13 @@ export function parseModelEntry(
       `${path}: ${name} must name a model before its :${suffix} suffix; got ${JSON.stringify(trimmed)}.`,
     );
   }
+  if (ref.includes(":")) {
+    // A colon surviving the effort strip can never be part of a real
+    // `provider/model-id` — reject at load instead of leaving a dead pin.
+    throw new Error(
+      `${path}: ${name} cannot contain ':' outside the effort suffix; got ${JSON.stringify(trimmed)}.`,
+    );
+  }
   return { ref, thinking: suffix as ThinkingLevel };
 }
 
@@ -219,6 +226,7 @@ function sanitizeYamlScalars(yaml: string): string {
 function parseProfileFrontmatter(
   content: string,
   filePath: string,
+  warnPath: (filePath: string, message: string) => void,
 ): { data: Record<string, string>; body: string } {
   const m = content.match(FRONTMATTER_FENCE);
   if (!m) return { data: {}, body: content.trim() };
@@ -239,7 +247,8 @@ function parseProfileFrontmatter(
       body,
     };
   } catch (error) {
-    console.warn(
+    warnPath(
+      filePath,
       `[delegate] malformed agent frontmatter (${filePath}): ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
     );
     return { data: {}, body };
@@ -255,18 +264,29 @@ function parseProfileFrontmatter(
  * ignored — model pins in particular are honored here because profile files
  * are user-authored config, on par with delegate.json.
  */
-function loadProfileFile(filePath: string): AgentProfile | null {
+function loadProfileFile(
+  filePath: string,
+  warnPath: (filePath: string, message: string) => void,
+): AgentProfile | null {
+  const warn = (problem: string): null => {
+    warnPath(
+      filePath,
+      `[delegate] ignoring agent profile ${filePath}: ${problem}`,
+    );
+    return null;
+  };
   let content: string;
   try {
     content = readFileSync(filePath, "utf8");
-  } catch {
-    return null;
+  } catch (error) {
+    // An unreadable file (permissions, races) warns like any other bad
+    // profile — silence here would make a permissions problem look like a
+    // missing profile.
+    return warn(
+      `unreadable (${error instanceof Error ? error.message : String(error)}).`,
+    );
   }
-  const { data, body } = parseProfileFrontmatter(content, filePath);
-  const warn = (problem: string): null => {
-    console.warn(`[delegate] ignoring agent profile ${filePath}: ${problem}`);
-    return null;
-  };
+  const { data, body } = parseProfileFrontmatter(content, filePath, warnPath);
   if (!data.name?.trim()) return warn("missing required `name` in frontmatter.");
   if (!data.description?.trim()) {
     return warn("missing required `description` in frontmatter.");
@@ -317,15 +337,46 @@ function loadProfileFile(filePath: string): AgentProfile | null {
   };
 }
 
+/** Options for {@link discoverProfiles}. */
+export interface ProfileDiscoveryOptions {
+  /**
+   * Sink for profile warnings; defaults to `console.warn`. The manual's
+   * profile listing passes a silent sink — asking for help must not scold.
+   */
+  readonly warn?: (message: string) => void;
+  /**
+   * File paths already warned about, owned by the caller (the extension
+   * closure holds one set per session): a broken profile file warns once
+   * per session, not once per dispatch. Omit to warn on every discovery.
+   */
+  readonly warnedPaths?: Set<string>;
+}
+
 /**
  * Discover Markdown agent profiles, first definition wins, in order:
  *   1. `<projectRoot>/.pi/agents` — nearest ancestor of `cwd` containing one
  *   2. `<agentDir>/agents`        — the user-global agent directory
  * Built-ins always win name collisions: a `scout.md` is ignored with a
  * warning rather than silently reshaping a built-in. Files ending in
- * `.chain.md` are skipped (v1 convention).
+ * `.chain.md` are skipped (v1 convention). Within one directory, files are
+ * visited in name order — readdir order is filesystem-dependent, and the
+ * winner between two same-named files must not be.
  */
-export function discoverProfiles(cwd: string, agentDir: string): ProfileCatalog {
+export function discoverProfiles(
+  cwd: string,
+  agentDir: string,
+  options: ProfileDiscoveryOptions = {},
+): ProfileCatalog {
+  const warn = options.warn ?? ((message: string) => console.warn(message));
+  const warnedPaths = options.warnedPaths;
+  /** Emit one warning per file path for the options' lifetime. */
+  const warnPath = (filePath: string, message: string): void => {
+    if (warnedPaths !== undefined) {
+      if (warnedPaths.has(filePath)) return;
+      warnedPaths.add(filePath);
+    }
+    warn(message);
+  };
   const profiles = new Map<string, AgentProfile>();
   for (const name of knownAgentNames()) {
     profiles.set(name, getBuiltinProfile(name)!);
@@ -339,6 +390,9 @@ export function discoverProfiles(cwd: string, agentDir: string): ProfileCatalog 
     } catch {
       return;
     }
+    // Deterministic first-definition-wins: sort by file name so two
+    // same-named profiles in one directory always resolve the same way.
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const entry of entries) {
       if (
         !entry.isFile() ||
@@ -348,10 +402,11 @@ export function discoverProfiles(cwd: string, agentDir: string): ProfileCatalog 
         continue;
       }
       const filePath = join(dir, entry.name);
-      const profile = loadProfileFile(filePath);
+      const profile = loadProfileFile(filePath, warnPath);
       if (!profile) continue;
       if (getBuiltinProfile(profile.name) !== undefined) {
-        console.warn(
+        warnPath(
+          filePath,
           `[delegate] ignoring agent profile ${filePath}: '${profile.name}' is a built-in agent and cannot be overridden.`,
         );
         continue;

@@ -468,6 +468,112 @@ describe("delegate dispatch contract", () => {
     },
   );
 
+  test(
+    "modelsByParent keys that could never match a parent fail at config load",
+    async () => {
+      // Review of #32: a key with an extra slash or internal whitespace can
+      // never equal a parent provider/model-id; it is rejected at load with
+      // the same message as the other dead shapes instead of sitting in the
+      // config silently never matching.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+      for (const key of [
+        "delegate-faux/faux-1/extra",
+        "delegate-faux/fa ux-1",
+      ]) {
+        configureDelegate(session, {
+          modelsByParent: { [key]: { scout: subagents.spec } },
+        });
+        const result = await callDelegate(session, {
+          tasks: [{ prompt: "look", agent: "scout" }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.text).toContain("must be an exact provider/model-id");
+        expect(result.text).toContain(key);
+      }
+      // The config never loaded, so nothing started.
+      expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "a model reference with ':' outside the effort suffix fails at config load",
+    async () => {
+      // Review of #32: a colon surviving the effort strip can never be part
+      // of a real provider/model-id — reject at load instead of leaving a
+      // dead pin that confuses later.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      configureDelegate(session, {
+        models: { scout: `${subagents.alt.spec}:x:high` },
+      });
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "look", agent: "scout" }],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(
+        "cannot contain ':' outside the effort suffix",
+      );
+      expect(subagents.state.callCount).toBe(0);
+      expect(subagents.alt.state.callCount).toBe(0);
+    },
+  );
+
+  test(
+    "a pinned model equal to the parent's modulo case still mirrors the parent's effort",
+    async () => {
+      // Review of #32: config matching is case-insensitive, so the
+      // parent-mirror comparison must be too — a host-set parent model whose
+      // provider/id casing differs from the registry's must not silently
+      // drop the parent's live effort level onto the model's default.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const host = session.session as AgentSession;
+      const canonical = host.model;
+      if (canonical === undefined) throw new Error("test session has no parent model");
+      // A case-only variant of the parent model, as an embedded host could
+      // set it. The runtime resolves providers case-sensitively, so its
+      // auth preflight is taught the shouting spelling (the same instance
+      // patch the harness applies to the registry facade); setModel would
+      // re-authenticate and rewrite the thinking level, so the state field
+      // is assigned directly (test-local host seam, like the fault
+      // injections elsewhere in this suite).
+      const runtime = host.modelRuntime;
+      const canonicalAuth = runtime.hasConfiguredAuth.bind(runtime);
+      runtime.hasConfiguredAuth = (providerId: string) =>
+        providerId.toLowerCase() === canonical.provider ||
+        canonicalAuth(providerId);
+      (host as unknown as { agent: { state: { model: unknown } } }).agent.state.model =
+        {
+          ...canonical,
+          provider: canonical.provider.toUpperCase(),
+          id: canonical.id.toUpperCase(),
+        };
+      host.setThinkingLevel("low");
+      // The pin names the registry's canonical casing; it resolves to the
+      // same model the parent runs, differing only in case.
+      configureDelegate(session, { models: { scout: subagents.spec } });
+      let seenReasoning: unknown;
+      subagents.respond([
+        (_context, options) => {
+          seenReasoning = options?.reasoning;
+          return fauxAssistantMessage("CASE-MIRROR");
+        },
+      ]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "look", agent: "scout" }],
+      });
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("CASE-MIRROR");
+      expect(seenReasoning).toBe("low"); // the parent's level survives
+    },
+  );
+
   test("normal dispatch never injects parent conversation history", async () => {
     // Issue #14: replaces the former parent-sharing contract by user decision.
     // The contract is asserted by content: the subagent sees exactly the
