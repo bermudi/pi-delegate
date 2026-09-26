@@ -440,7 +440,9 @@ describe("delegate explicit operation identity", () => {
     60_000,
   );
 
-  test(
+  // Root bypasses file permissions, so chmodSync(dir, 0o500) cannot make
+  // the journal write fail and the fixture would pin nothing.
+  test.skipIf(process.getuid?.() === 0)(
     "an async operationId retry after a storage failure returns the original failure, never a new execution",
     async () => {
       // Bug 7 regression (INVARIANTS "Dispatch identity": failure is

@@ -209,25 +209,25 @@ async function changedFiles(
 }
 
 /**
- * Blob shas for every tracked file in `commit`, as repository-relative
- * path → sha. Used to verify a proposal's expected post-apply state
- * before the source is touched: only paths whose current content matches
- * the recorded expectation may be overwritten.
+ * Blob shas for each repository-relative path in `paths`, as of `commit`.
+ * Only the proposal's files are looked up — never the whole tree — and
+ * one pathspec per call keeps every command's argument list small
+ * regardless of proposal size. Used to verify a proposal's expected
+ * post-apply state before the source is touched: only paths whose
+ * current content matches the recorded expectation may be overwritten.
  */
 async function trackedBlobs(
   root: string,
   commit: string,
+  paths: readonly string[],
 ): Promise<Map<string, string>> {
-  const output = await git(["ls-tree", "-r", "-z", commit], {
-    cwd: root,
-  });
   const blobs = new Map<string, string>();
-  for (const entry of output.stdout.split("\0")) {
-    if (!entry) continue;
-    const match = /^(\d+) (\w+) ([0-9a-f]+)\t([\s\S]*)$/.exec(entry);
-    if (!match) continue;
-    const [, , kind, sha, filePath] = match;
-    if (kind === "blob") blobs.set(filePath!, sha!);
+  for (const filePath of paths) {
+    const entry = (
+      await git(["ls-tree", commit, "--", filePath], { cwd: root })
+    ).stdout.trim();
+    const match = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(entry);
+    if (match?.[2] === "blob") blobs.set(filePath, match[3]!);
   }
   return blobs;
 }
@@ -406,6 +406,21 @@ function sameEntry(a: SourceEntry, b: SourceEntry): boolean {
   return a.content.equals(b.content);
 }
 
+/**
+ * `sameEntry` under Git's tracked semantics instead of exact filesystem
+ * modes: directories carry no recorded mode, links only their text, and
+ * files their content plus the user-execute bit (a working-tree 0o664
+ * records the same entry as a normalized 0o644). Compares a live source
+ * path against a `commitEntry`, whose mode is already normalized.
+ */
+function sameTrackedEntry(a: SourceEntry, b: SourceEntry): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "absent" || b.kind === "absent") return true;
+  if (a.kind === "dir" || b.kind === "dir") return true;
+  if (!a.content.equals(b.content)) return false;
+  return a.kind === "link" || (a.mode & 0o100) === (b.mode & 0o100);
+}
+
 async function commitEntry(root: string, commit: string, relative: string): Promise<SourceEntry> {
   const entry = (await git(["ls-tree", commit, "--", relative], { cwd: root })).stdout.trim();
   if (/^040000 tree [0-9a-f]+\t/.test(entry)) return { kind: "dir", mode: 0o755 };
@@ -427,7 +442,7 @@ async function missingProposalEffects(
   for (const relative of proposal.files) {
     const current = await sourceEntry(group.sourceRoot, relative);
     const expected = await commitEntry(group.sourceRoot, proposal.commit, relative);
-    if (!sameEntry(current, expected)) missing.push(relative);
+    if (!sameTrackedEntry(current, expected)) missing.push(relative);
   }
   return missing;
 }
@@ -694,7 +709,11 @@ async function collectProposals(
         files: proposedFiles,
         // Retain the expected blobs even after the worker is removed, for
         // verify-before-write during source application.
-        expectedBlobs: await trackedBlobs(group.sourceRoot, chainCommit),
+        expectedBlobs: await trackedBlobs(
+          group.sourceRoot,
+          chainCommit,
+          proposedFiles,
+        ),
         workerRemoved,
       });
       integratedCommit = chainCommit;

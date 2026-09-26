@@ -823,7 +823,13 @@ Three sibling tools share Delegate's machinery:
  * warn-once budget (the first dispatch still reports the file).
  */
 function customProfileSection(ctx: ExtensionContext): string {
-  const catalog = discoverProfiles(ctx.cwd, resolveAgentDir(ctx).dir, {
+  let agentDir: string;
+  try {
+    agentDir = resolveAgentDir(ctx).dir;
+  } catch {
+    return "";
+  }
+  const catalog = discoverProfiles(ctx.cwd, agentDir, {
     warn: () => {},
   });
   const custom = [...catalog.profiles.values()].filter(
