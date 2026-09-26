@@ -397,6 +397,11 @@ function parseModelsByParent(
         `${path}: modelsByParent key '${key}' must be an exact provider/model-id; got ${JSON.stringify(key)}.`,
       );
     }
+    if (Object.hasOwn(out, normalized)) {
+      throw new Error(
+        `${path}: modelsByParent key '${key}' duplicates '${normalized}' after normalization.`,
+      );
+    }
     out[normalized] = parseModels(
       inner,
       `modelsByParent.${key}`,

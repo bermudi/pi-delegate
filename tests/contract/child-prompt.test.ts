@@ -145,12 +145,22 @@ describe("composed child base prompt contract (#33)", () => {
       });
 
       expect(result.isError).toBe(false);
-      expect(seen[0]).toContain("PARENT-PERSONA");
-      expect(seen[0]).toContain("read-only investigation subagent");
-      expect(seen[0]).toContain(FRAMING);
-      expect(seen[1]).toContain("PARENT-PERSONA");
-      expect(seen[1]).toContain("implementation subagent");
-      expect(seen[1]).toContain(FRAMING);
+      // Dispatch order is not contract: identify each captured prompt by
+      // its built-in role line rather than its position in `seen`.
+      const promptFor = (role: string): string => {
+        const found = seen.find((prompt) => prompt.includes(role));
+        if (found === undefined) {
+          throw new Error(`no captured child prompt contains '${role}'`);
+        }
+        return found;
+      };
+      const scoutPrompt = promptFor("read-only investigation subagent");
+      const coderPrompt = promptFor("implementation subagent");
+      expect(seen).toHaveLength(2);
+      expect(scoutPrompt).toContain("PARENT-PERSONA");
+      expect(scoutPrompt).toContain(FRAMING);
+      expect(coderPrompt).toContain("PARENT-PERSONA");
+      expect(coderPrompt).toContain(FRAMING);
     },
   );
 

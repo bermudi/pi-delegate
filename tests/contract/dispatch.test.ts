@@ -505,6 +505,33 @@ describe("delegate dispatch contract", () => {
   );
 
   test(
+    "modelsByParent keys that collide after normalization fail at config load",
+    async () => {
+      // Keys normalize to trimmed lowercase, so spellings differing only in
+      // case or surrounding whitespace name the same parent; silently
+      // overwriting the earlier pin would pick one at random. The second
+      // key is a config error naming the normalized key.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+      configureDelegate(session, {
+        modelsByParent: {
+          "delegate-faux/faux-1": { scout: subagents.spec },
+          "DELEGATE-FAUX/FAUX-1": { scout: subagents.spec },
+        },
+      });
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "look", agent: "scout" }],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("duplicates 'delegate-faux/faux-1'");
+      expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  test(
     "a colon-bearing model id pins and matches verbatim (Ollama-style tags)",
     async () => {
       // SPEC: only a trailing KNOWN thinking level strips as :effort — any
