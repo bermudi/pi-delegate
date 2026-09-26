@@ -1,6 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  getAgentDir,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   knownAgentNames,
   parseModelEntry,
@@ -121,18 +124,27 @@ export interface AgentDirResolution {
 }
 
 const AGENT_DIR_ENV_VAR = "DELEGATE_AGENT_DIR";
+// pi-coding-agent's own agent-dir override (its ENV_AGENT_DIR constant is
+// not re-exported from the package index; keep the literal in sync).
+const PI_AGENT_DIR_ENV_VAR = "PI_CODING_AGENT_DIR";
 
 /**
- * Resolve the user-global agent directory, with provenance, from three
+ * Resolve the user-global agent directory, with provenance, from these
  * sources in order:
  *
- * 1. `DELEGATE_AGENT_DIR` — explicit operator intent; never warned about.
- * 2. The session-store layout (`<agentDir>/sessions/<cwd-slug>`), which is
+ * 1. `DELEGATE_AGENT_DIR` — delegate-specific operator intent; never
+ *    warned about.
+ * 2. `PI_CODING_AGENT_DIR` — Pi's own override, resolved through its
+ *    exported `getAgentDir()` (which expands `~`). The check is gated on
+ *    the variable being set because unset `getAgentDir()` returns Pi's
+ *    install default (`~/.pi/agent`), which would preempt the session
+ *    inference embedded hosts rely on.
+ * 3. The session-store layout (`<agentDir>/sessions/<cwd-slug>`), which is
  *    how the Pi CLI lays sessions out.
- * 3. `ctx.cwd` — the fallback for embedded hosts running in-memory
+ * 4. `ctx.cwd` — the fallback for embedded hosts running in-memory
  *    sessions, which have no session dir.
  *
- * Pi 0.84.2 does not expose `agentDir` on `ExtensionContext` (tracked
+ * Pi 0.87 does not expose `agentDir` on `ExtensionContext` (tracked
  * upstream as earendil-works/pi#4807). The cwd fallback is warned about
  * once at dispatch (see the extension in `delegate.ts`) rather than thrown,
  * because embedded hosts — including our test harness — legitimately run
@@ -144,6 +156,10 @@ export function resolveAgentDir(ctx: ExtensionContext): AgentDirResolution {
   const fromEnv = process.env[AGENT_DIR_ENV_VAR];
   if (fromEnv !== undefined && fromEnv.trim() !== "") {
     return { dir: fromEnv.trim(), source: "env" };
+  }
+  const fromPiEnv = process.env[PI_AGENT_DIR_ENV_VAR];
+  if (fromPiEnv !== undefined && fromPiEnv.trim() !== "") {
+    return { dir: getAgentDir(), source: "env" };
   }
   const sessionDir = ctx.sessionManager.getSessionDir();
   if (sessionDir && basename(dirname(sessionDir)) === "sessions") {

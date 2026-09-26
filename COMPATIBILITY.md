@@ -85,6 +85,12 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 
 - Actionable errors that preserve the relevant correction, even if wording
   changes.
+- Host-compatibility failures surface at session start, not first dispatch
+  (issue #9, additive): the reaches into Pi internals a dispatch depends on —
+  the parent model-runtime handle and agent-directory resolution — are
+  probed on `session_start`, so a Pi upgrade that breaks one reports an
+  extension error immediately. The dispatch-time failure and its message
+  are unchanged; the probe only moves the first observable signal earlier.
 - Aggregate usage on synchronous tool results where supported. Async delivered
   messages still cannot add usage to the parent total.
 - Optional duplicate-safe dispatch identity (`operationId`, issue #16): an

@@ -38,6 +38,18 @@ function withoutAgentDirEnv(): { restore: () => void } {
   };
 }
 
+/** Set an environment variable for the call, restoring it afterwards. */
+function withEnv(name: string, value: string): { restore: () => void } {
+  const previous = process.env[name];
+  process.env[name] = value;
+  return {
+    restore: () => {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    },
+  };
+}
+
 describe("regression: agentDir cwd fallback warns before proceeding (#12)", () => {
   let session: TestSession | undefined;
   let subagents: SubagentModel | undefined;
@@ -188,6 +200,49 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
         runner.sessionManager = originalSessionManager;
         restoreEnv.restore();
         warnings.restore();
+      }
+    },
+  );
+
+  test(
+    "PI_CODING_AGENT_DIR resolves through Pi's own override, ahead of session inference",
+    async () => {
+      // Issue #9: the resolution order is DELEGATE_AGENT_DIR →
+      // PI_CODING_AGENT_DIR (via pi-coding-agent's exported getAgentDir())
+      // → session-store inference → cwd. The default boundary mocks the
+      // session-store layout, which alone would resolve to the session
+      // cwd — Pi's override must still win, with no fallback warning.
+      session = await openDelegateBoundary();
+      subagents = await installSubagentModel(session);
+
+      const piAgentDir = mkdtempSync(join(tmpdir(), "delegate-pi-agentdir-"));
+      const restoreDelegateEnv = withoutAgentDirEnv();
+      const restorePiEnv = withEnv("PI_CODING_AGENT_DIR", piAgentDir);
+      const warnings = spyConsoleWarn();
+      try {
+        subagents.respond([fauxAssistantMessage("PIENV")]);
+        const result = await callDelegate(session, {
+          tasks: [
+            { prompt: "remember DELTA-MARKER", sessionId: "pi-env-check" },
+          ],
+        });
+
+        expect(result.isError).toBe(false);
+        expect(
+          warnings.lines.filter((line) =>
+            line.includes("DELEGATE_AGENT_DIR"),
+          ),
+        ).toHaveLength(0);
+        expect(existsSync(join(piAgentDir, "delegate-sessions"))).toBe(
+          true,
+        );
+        expect(existsSync(join(session.cwd, "delegate-sessions"))).toBe(
+          false,
+        );
+      } finally {
+        warnings.restore();
+        restorePiEnv.restore();
+        restoreDelegateEnv.restore();
       }
     },
   );

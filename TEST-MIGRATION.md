@@ -477,10 +477,14 @@ gaps.
 ### Agent directory resolution
 
 - **Contract:** the user-global agent directory resolves from
-  `DELEGATE_AGENT_DIR` when set, else Pi's session-store layout
-  (`<agentDir>/sessions/<slug>`), else the session cwd. Pi 0.84.2 exposes
-  no `agentDir` on `ExtensionContext`; when it does (earendil-works/pi#4807),
-  the inference and the fallback are deleted.
+  `DELEGATE_AGENT_DIR` when set, else Pi's own `PI_CODING_AGENT_DIR`
+  override (via pi-coding-agent's exported `getAgentDir()`), else Pi's
+  session-store layout (`<agentDir>/sessions/<slug>`), else the session
+  cwd. Pi 0.87 exposes no `agentDir` on `ExtensionContext`; when it does
+  (earendil-works/pi#4807), the inference and the fallback are deleted.
+  Host-compat reaches (the parent model-runtime handle and this
+  resolution) are probed on `session_start` — a Pi break reports an
+  extension error at load rather than first dispatch (#9).
 - **Regression (#12):** the cwd fallback — taken by embedded/in-memory
   hosts — must not be silent: it warns once per extension instance before
   the first dispatch, naming the directory, `delegate.json`, the
@@ -491,12 +495,15 @@ gaps.
 - **Internal:** the provenance tuple shape and the warning latch are free
   to change; only warn-once-then-proceed and source precedence are
   contract.
-- **Covered now:** `tests/regression/agent-dir-fallback.test.ts`.
+- **Covered now:** `tests/regression/agent-dir-fallback.test.ts` —
+  including `PI_CODING_AGENT_DIR` winning over session-store inference.
   `tests/regression/boundary-isolation.test.ts` covers the v2 review
   regression: overlapping harness sessions keep configuration reads and
   pooled transcript writes in their own directories without changing the
   process environment.
-- **Gap:** none.
+- **Gap:** the `session_start` probe's failure path is not exercised —
+  simulating a Pi internals break would require reaching below the
+  extension boundary.
 
 ### Explicit dispatch identity (#16)
 

@@ -127,9 +127,10 @@ default → the parent's live thinking level when the child runs the parent's
 model → the model's default otherwise.
 
 The user-global `delegate.json` is discovered from the session's agent
-directory: the `DELEGATE_AGENT_DIR` environment variable when set, else the
-session-store layout (`<agentDir>/sessions/<slug>`), else — for sessions
-with no session directory — the session cwd behind a visible warning.
+directory: the `DELEGATE_AGENT_DIR` environment variable when set, else
+Pi's own `PI_CODING_AGENT_DIR` override, else the session-store layout
+(`<agentDir>/sessions/<slug>`), else — for sessions with no session
+directory — the session cwd behind a visible warning.
 Delegate-owned trees (`delegate-sessions/`, `delegate-scratch/`,
 `delegate-isolated/`) are created under the same resolved directory.
 Project files never become delegate configuration.

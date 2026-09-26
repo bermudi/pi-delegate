@@ -29,6 +29,7 @@ import {
 } from "./src/format.ts";
 import {
   hostEnvironment,
+  parentModelRuntime,
   resolveTasks,
   type HostEnvironment,
 } from "./src/host.ts";
@@ -794,6 +795,18 @@ function customProfileSection(ctx: ExtensionContext): string {
 }
 
 export default function delegateExtension(api: ExtensionAPI): void {
+  // Host-compat probes (issue #9): exercise the reaches into Pi internals
+  // that dispatch depends on — the private model-runtime handle and the
+  // agent-directory resolution — on the first event that carries a ctx, so
+  // a Pi upgrade that breaks either reports an extension error at session
+  // start instead of first failing inside a dispatch. A throw here routes
+  // through the host's extension-error channel; dispatch would fail with
+  // the same cause regardless.
+  api.on("session_start", (_event, ctx) => {
+    parentModelRuntime(ctx);
+    resolveAgentDir(ctx);
+  });
+
   // TicketStore mutates first, visibility reads lazily — the observer arrow
   // only runs on the first mutation, long after both exist.
   const questionContexts = new Map<string, ExtensionContext>();
