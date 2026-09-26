@@ -134,7 +134,8 @@ gaps.
   cross-tool guidance asserted on result text including the example call —
   pre-split selectors and foreign dispatch/ticket/session fields on all
   three tools, a sibling tool's action value routing there, and examples
-  that clamp an invalid action instead of echoing it; flat fields never
+  that clamp an invalid action instead of echoing it; a mixed call's
+  guidance naming the fields that did not run; flat fields never
   merged into an explicit task array, with the stray field named; a
   top-level `model` beside `tasks` getting the model rejection; duplicate
   task/session ids;

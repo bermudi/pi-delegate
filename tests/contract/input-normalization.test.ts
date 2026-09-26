@@ -210,6 +210,25 @@ describe("input normalization contract", () => {
     expect(ticketAction.text).toContain("delegate_ticket");
   });
 
+  test("a mixed call's guidance names the half that did not run", async () => {
+    // The corrected example shows only the routed half; the leftover fields
+    // must be named so following the example literally does not drop them.
+    const dispatch = await call({ tasks: [{ prompt: "x" }], ticket: "t-1" });
+    expect(dispatch.isError).toBe(true);
+    expect(dispatch.text).toContain(
+      'delegate_ticket({ action: "poll", ticket: "t-1" })',
+    );
+    expect(dispatch.text).toContain("'tasks'");
+
+    const ticket = await callTicket({
+      action: "poll",
+      tasks: [{ prompt: "x" }],
+    });
+    expect(ticket.isError).toBe(true);
+    expect(ticket.text).toContain("delegate(");
+    expect(ticket.text).toContain("'action'");
+  });
+
   // ── cross-tool guidance: foreign shapes on the new tools ──────────────────
 
   test("dispatch fields on delegate_ticket point at delegate", async () => {

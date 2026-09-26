@@ -405,6 +405,23 @@ function delegateDispatchExample(args: Record<string, unknown>): string {
     : `delegate({ tasks: [{ prompt: "..." }] })`;
 }
 
+/**
+ * The rest of a mixed call, named so the corrected example does not silently
+ * drop it: foreign-field guidance shows one half, but the call fails as a
+ * whole — nothing in it ran.
+ */
+function unrunFieldsNote(
+  args: Record<string, unknown>,
+  routed: readonly string[],
+): string {
+  const rest = Object.keys(args).filter((key) => !routed.includes(key));
+  return rest.length === 0
+    ? ""
+    : ` The rest of this call did not run — resend ${rest
+        .map((key) => `'${key}'`)
+        .join(", ")} separately.`;
+}
+
 /** Run before host schema coercion so obsolete fields receive migration guidance. */
 function rejectObsoleteContext(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "context")) {
@@ -507,12 +524,21 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     args.answer !== undefined
   ) {
     throw new Error(
-      `Ticket operations moved to delegate_ticket: ${delegateTicketExample(args)}.`,
+      `Ticket operations moved to delegate_ticket: ${delegateTicketExample(args)}.` +
+        unrunFieldsNote(args, [
+          "ticketAction",
+          "ticket",
+          "force",
+          "taskId",
+          "questionId",
+          "answer",
+        ]),
     );
   }
   if (args.sessionAction !== undefined) {
     throw new Error(
-      `Session operations moved to delegate_session: ${delegateSessionExample(args)}.`,
+      `Session operations moved to delegate_session: ${delegateSessionExample(args)}.` +
+        unrunFieldsNote(args, ["sessionAction"]),
     );
   }
   if (args.timeoutMs !== undefined) {
@@ -525,7 +551,8 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   if (args.action !== undefined) {
     throw new Error(
       `delegate takes no "action" field. Ticket operations use delegate_ticket({ action: "poll", ... }); ` +
-        `session operations use delegate_session({ action: "list" }).`,
+        `session operations use delegate_session({ action: "list" }).` +
+        unrunFieldsNote(args, ["action"]),
     );
   }
   // `model` and `thinking` are invalid wherever a caller puts them — inside
@@ -597,18 +624,21 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
 
   if (args.ticketAction !== undefined) {
     throw new Error(
-      `The ticket action field is "action", not "ticketAction": ${delegateTicketExample(args)}.`,
+      `The ticket action field is "action", not "ticketAction": ${delegateTicketExample(args)}.` +
+        unrunFieldsNote(args, ["ticketAction"]),
     );
   }
   if (args.sessionAction !== undefined || args.sessionId !== undefined) {
     throw new Error(
-      `Session operations live on delegate_session, not delegate_ticket: ${delegateSessionExample(args)}.`,
+      `Session operations live on delegate_session, not delegate_ticket: ${delegateSessionExample(args)}.` +
+        unrunFieldsNote(args, ["sessionAction", "sessionId"]),
     );
   }
   for (const key of dispatchFieldNames) {
     if (args[key] !== undefined) {
       throw new Error(
-        `'${key}' is a delegate dispatch field; task dispatch lives on delegate, not delegate_ticket: ${delegateDispatchExample(args)}.`,
+        `'${key}' is a delegate dispatch field; task dispatch lives on delegate, not delegate_ticket: ${delegateDispatchExample(args)}.` +
+          unrunFieldsNote(args, dispatchFieldNames),
       );
     }
   }
@@ -619,7 +649,8 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
     SESSION_ACTIONS.includes(args.action)
   ) {
     throw new Error(
-      `"${args.action}" is a delegate_session action, not a delegate_ticket one: ${delegateSessionExample(args)}.`,
+      `"${args.action}" is a delegate_session action, not a delegate_ticket one: ${delegateSessionExample(args)}.` +
+        unrunFieldsNote(args, ["action"]),
     );
   }
   if (args.model !== undefined) {
@@ -656,20 +687,23 @@ function prepareSessionArguments(value: unknown): SessionToolArguments {
 
   if (args.sessionAction !== undefined) {
     throw new Error(
-      `The session action field is "action", not "sessionAction": ${delegateSessionExample(args)}.`,
+      `The session action field is "action", not "sessionAction": ${delegateSessionExample(args)}.` +
+        unrunFieldsNote(args, ["sessionAction"]),
     );
   }
   for (const key of ticketFieldNames) {
     if (args[key] !== undefined) {
       throw new Error(
-        `Ticket operations live on delegate_ticket, not delegate_session: ${delegateTicketExample(args)}.`,
+        `Ticket operations live on delegate_ticket, not delegate_session: ${delegateTicketExample(args)}.` +
+          unrunFieldsNote(args, ticketFieldNames),
       );
     }
   }
   for (const key of dispatchFieldNames) {
     if (args[key] !== undefined) {
       throw new Error(
-        `'${key}' is a delegate dispatch field; task dispatch lives on delegate, not delegate_session: ${delegateDispatchExample(args)}.`,
+        `'${key}' is a delegate dispatch field; task dispatch lives on delegate, not delegate_session: ${delegateDispatchExample(args)}.` +
+          unrunFieldsNote(args, dispatchFieldNames),
       );
     }
   }
@@ -680,7 +714,8 @@ function prepareSessionArguments(value: unknown): SessionToolArguments {
     TICKET_ACTIONS.includes(args.action)
   ) {
     throw new Error(
-      `"${args.action}" is a delegate_ticket action, not a delegate_session one: ${delegateTicketExample(args)}.`,
+      `"${args.action}" is a delegate_ticket action, not a delegate_session one: ${delegateTicketExample(args)}.` +
+        unrunFieldsNote(args, ["action"]),
     );
   }
   if (args.model !== undefined) {
