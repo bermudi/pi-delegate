@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
@@ -375,5 +376,304 @@ describe("delegate session contract", () => {
 
       release();
     },
+  );
+
+  test(
+    "a stalled run evicts the pooled session and a later call starts fresh",
+    async () => {
+      // INVARIANTS "Session reuse": a pooled session stalled after
+      // prompting MUST be evicted. Only cancellation-eviction was covered;
+      // the watchdog eviction follows the same pool decision but its own
+      // path (a failed outcome with a watchdog cause).
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      subagents.respond([fauxAssistantMessage("STALL-POOL-MARKER")]);
+      const first = await callDelegate(session, {
+        tasks: [{ prompt: "remember STALL-POOL-MARKER", sessionId: "conv" }],
+      });
+      expect(first.isError).toBe(false);
+
+      // The watchdog applies only to the second dispatch's config read.
+      configureDelegate(session, { stallTimeoutMs: 150 });
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const hanging: FauxResponseFactory = async () => {
+        await gate;
+        return fauxAssistantMessage("TOO-LATE");
+      };
+      subagents.respond([hanging]);
+      const dispatched = await callDelegate(session, {
+        tasks: [{ prompt: "go silent", sessionId: "conv" }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      const stalled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(stalled.text).toMatch(/stall/i);
+
+      // Eviction is decided when the worker's true settlement reaches the
+      // pool; poll until the unconfirmed note clears, then require the
+      // session to be gone.
+      release();
+      const budget = Date.now() + 5000;
+      for (;;) {
+        const view = await callDelegateTicket(session, {
+          action: "poll",
+          ticket,
+        });
+        if (!view.text.includes("unconfirmed")) break;
+        if (Date.now() > budget) throw new Error("worker never confirmed stopped");
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      const listed = await callDelegateSession(session, { action: "list" });
+      expect(listed.text).not.toContain("conv");
+
+      const inspect: FauxResponseFactory = (context) =>
+        fauxAssistantMessage(
+          JSON.stringify(context).includes("STALL-POOL-MARKER")
+            ? "CONTINUED"
+            : "FRESH",
+        );
+      subagents.respond([inspect]);
+      const reused = await callDelegate(session, {
+        tasks: [{ prompt: "again", sessionId: "conv" }],
+      });
+      expect(reused.isError).toBe(false);
+      expect(reused.text).toContain("FRESH");
+    },
+  );
+
+  test(
+    "a deadline that hits before the model is called leaves the pooled session intact and records no usage",
+    async () => {
+      // INVARIANTS "Session reuse": a deadline before prompting MAY leave
+      // the session intact and MUST record no usage. Usage without a
+      // provider call is impossible, so the unchanged callCount is the
+      // boundary witness for "no usage".
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      subagents.respond([fauxAssistantMessage("DEADLINE-POOL-MARKER")]);
+      const first = await callDelegate(session, {
+        tasks: [{ prompt: "remember DEADLINE-POOL-MARKER", sessionId: "conv" }],
+      });
+      expect(first.isError).toBe(false);
+      expect(subagents.state.callCount).toBe(1);
+
+      // 1ms expires during the dispatch's own resource loading — before a
+      // TaskExecution exists, so the checkout is never taken and no prompt
+      // is attempted.
+      const expired = await callDelegate(session, {
+        tasks: [{ prompt: "work", sessionId: "conv", deadlineMs: 1 }],
+      });
+      expect(expired.text).toMatch(/deadline exceeded/i);
+      expect(subagents.state.callCount).toBe(1);
+
+      const listed = await callDelegateSession(session, { action: "list" });
+      expect(listed.text).toContain("conv");
+
+      const inspect: FauxResponseFactory = (context) =>
+        fauxAssistantMessage(
+          JSON.stringify(context).includes("DEADLINE-POOL-MARKER")
+            ? "CONTINUED"
+            : "FRESH",
+        );
+      subagents.respond([inspect]);
+      const reused = await callDelegate(session, {
+        tasks: [{ prompt: "again", sessionId: "conv" }],
+      });
+      expect(reused.isError).toBe(false);
+      expect(reused.text).toContain("CONTINUED");
+    },
+  );
+
+  test(
+    "an ordinary failure keeps the pooled session reusable and records its attempt",
+    async () => {
+      // INVARIANTS "Session reuse": ordinary provider/task failure on an
+      // existing pooled session remains reusable.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      subagents.respond([fauxAssistantMessage("KEEP-POOL-MARKER")]);
+      const first = await callDelegate(session, {
+        tasks: [{ prompt: "remember KEEP-POOL-MARKER", sessionId: "conv" }],
+      });
+      expect(first.isError).toBe(false);
+
+      subagents.respond([
+        fauxAssistantMessage("attempt failed", {
+          stopReason: "error",
+          errorMessage: "the provider returned a malformed response",
+        }),
+      ]);
+      const failed = await callDelegate(session, {
+        tasks: [{ prompt: "fail once", sessionId: "conv" }],
+      });
+      expect(failed.isError).toBe(true);
+      expect(failed.text).toContain("malformed response");
+      // Non-transient: no whole-task retry, exactly one provider call.
+      expect(subagents.state.callCount).toBe(2);
+
+      const listed = await callDelegateSession(session, { action: "list" });
+      expect(listed.text).toContain("conv");
+
+      const inspect: FauxResponseFactory = (context) =>
+        fauxAssistantMessage(
+          JSON.stringify(context).includes("KEEP-POOL-MARKER")
+            ? "CONTINUED"
+            : "FRESH",
+        );
+      subagents.respond([inspect]);
+      const reused = await callDelegate(session, {
+        tasks: [{ prompt: "again", sessionId: "conv" }],
+      });
+      expect(reused.isError).toBe(false);
+      expect(reused.text).toContain("CONTINUED");
+    },
+  );
+
+  test(
+    "same-session calls run one at a time: busy while running, reusable after settlement",
+    async () => {
+      // INVARIANTS "Session reuse": same-ID calls serialize across
+      // acquisition, execution, and final state update. The busy rejection
+      // while a ticket owns the session is covered above; the missing half
+      // is that the busy mark clears at settlement and the next call
+      // actually continues the conversation.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      subagents.respond([fauxAssistantMessage("SERIAL-POOL-MARKER")]);
+      const first = await callDelegate(session, {
+        tasks: [{ prompt: "remember SERIAL-POOL-MARKER", sessionId: "conv" }],
+      });
+      expect(first.isError).toBe(false);
+
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const hanging: FauxResponseFactory = async () => {
+        await gate;
+        return fauxAssistantMessage("BG-DONE");
+      };
+      subagents.respond([hanging]);
+      const dispatched = await callDelegate(session, {
+        tasks: [{ prompt: "bg", sessionId: "conv" }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+
+      const busy = await callDelegate(session, {
+        tasks: [{ prompt: "now", sessionId: "conv" }],
+      });
+      expect(busy.isError).toBe(true);
+      expect(busy.text).toMatch(/conv|busy|running/i);
+
+      release();
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(settled.text).toContain("BG-DONE");
+
+      // The busy mark releases with the reservation; absorb the
+      // settle→release ordering, then require the continuation to run.
+      const inspect: FauxResponseFactory = (context) =>
+        fauxAssistantMessage(
+          JSON.stringify(context).includes("SERIAL-POOL-MARKER")
+            ? "CONTINUED"
+            : "FRESH",
+        );
+      subagents.respond([inspect]);
+      const budget = Date.now() + 3000;
+      let reused = await callDelegate(session, {
+        tasks: [{ prompt: "again", sessionId: "conv" }],
+      });
+      while (reused.isError && Date.now() < budget) {
+        await new Promise((r) => setTimeout(r, 25));
+        reused = await callDelegate(session, {
+          tasks: [{ prompt: "again", sessionId: "conv" }],
+        });
+      }
+      expect(reused.isError).toBe(false);
+      expect(reused.text).toContain("CONTINUED");
+    },
+  );
+
+  test(
+    "session shutdown disposes every pooled session, running ones after quiescence",
+    async () => {
+      // INVARIANTS "Session reuse": shutdown MUST reject new reusable
+      // sessions, request termination of active ones, avoid racing their
+      // state updates, and attempt every cleanup. The pool is empty
+      // afterwards and later sessionId dispatches refuse. (Cleanup
+      // FAILURE REPORTING is a log path: AgentSession.dispose is built
+      // not to throw, so it has no boundary-observable failure mode.)
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      subagents.respond([
+        fauxAssistantMessage("IDLE-A"),
+        fauxAssistantMessage("IDLE-B"),
+      ]);
+      await callDelegate(session, {
+        tasks: [{ prompt: "pool a", sessionId: "idle-a" }],
+      });
+      await callDelegate(session, {
+        tasks: [{ prompt: "pool b", sessionId: "idle-b" }],
+      });
+
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const hanging: FauxResponseFactory = async () => {
+        await gate;
+        return fauxAssistantMessage("BUSY-C-DONE");
+      };
+      subagents.respond([hanging]);
+      const dispatched = await callDelegate(session, {
+        tasks: [{ prompt: "busy", sessionId: "busy-c" }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      const running = Date.now() + 5000;
+      while (subagents.state.callCount < 3 && Date.now() < running) {
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(subagents.state.callCount).toBe(3);
+
+      const shutdown = (
+        session.session as AgentSession
+      ).extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+      release();
+      await Promise.race([
+        shutdown,
+        Bun.sleep(15_000).then(() => {
+          throw new Error("shutdown never settled after the busy session quiesced");
+        }),
+      ]);
+
+      const listed = await callDelegateSession(session, { action: "list" });
+      expect(listed.isError).toBe(false);
+      expect(listed.text).not.toContain("idle-a");
+      expect(listed.text).not.toContain("idle-b");
+      expect(listed.text).not.toContain("busy-c");
+      const cancelled = await callDelegateTicket(session, {
+        action: "poll",
+        ticket,
+      });
+      expect(cancelled.text).toContain("cancelled");
+      // New reusable-session dispatches are refused after shutdown.
+      const refused = await callDelegate(session, {
+        tasks: [{ prompt: "nope", sessionId: "fresh-after-shutdown" }],
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toMatch(/shut(ting)? down/i);
+    },
+    20_000,
   );
 });

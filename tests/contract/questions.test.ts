@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai";
 import {
@@ -288,4 +289,41 @@ describe("async worker questions (#17)", () => {
     expect(cancelled.text).not.toContain("MUST-NOT-CONTINUE");
     expect(model.state.callCount).toBe(2);
   });
+
+  test("session shutdown cancels a worker's pending question; late answers fail", async () => {
+    // SPEC "Worker questions": deadline, cancellation, AND shutdown
+    // interrupt unanswered questions without resurrecting terminal work.
+    // Shutdown force-cancels every ticket, which must invalidate the
+    // question, release the worker, and leave a late answer impossible.
+    session = await openDelegateBoundary();
+    const model = await installSubagentModel(session);
+    model.respond([
+      fauxAssistantMessage([fauxToolCall("ask_parent", { question: "Still there?" })]),
+      fauxAssistantMessage("MUST-NOT-CONTINUE"),
+    ]);
+    const ticket = ticketIdOf((await callDelegate(session, {
+      tasks: [{ id: "asker", prompt: "ASK" }], async: true,
+    })).text);
+    const questionId = await untilQuestion(session, ticket);
+
+    const shutdown = (session.session as AgentSession).extensionRunner.emit({
+      type: "session_shutdown",
+      reason: "quit",
+    });
+    await Promise.race([
+      shutdown,
+      Bun.sleep(15_000).then(() => {
+        throw new Error("shutdown never settled after the question was cancelled");
+      }),
+    ]);
+
+    const view = await callDelegateTicket(session, { action: "poll", ticket });
+    expect(view.text).toContain("cancelled");
+    expect(view.text).not.toContain("Waiting for parent answer");
+    expect(view.text).not.toContain("MUST-NOT-CONTINUE");
+    const late = await callDelegateTicket(session, {
+      action: "answer", ticket, taskId: "asker", questionId, answer: "too late",
+    });
+    expect(late.isError).toBe(true);
+  }, 20_000);
 });

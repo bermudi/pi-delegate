@@ -567,4 +567,69 @@ describe("delegate explicit operation identity", () => {
       expect(subagents.state.callCount).toBe(0);
     },
   );
+
+  test(
+    "an operationId does not survive a restart — the same key re-runs the work",
+    async () => {
+      // INVARIANTS "Dispatch identity": operation identity lives only as
+      // long as the host extension/session; saved tickets MUST NOT
+      // deduplicate a new dispatch by operationId. A fresh extension
+      // instance over the same agent directory must execute the keyed
+      // request again, not hand back the settled record.
+      const sessions: TestSession[] = [];
+      try {
+        const first = await openDelegateBoundary();
+        sessions.push(first);
+        const firstModel = await installSubagentModel(first);
+        firstModel.respond([fauxAssistantMessage("ORIGINAL-RUN")]);
+        const args = {
+          tasks: [{ prompt: "once per session", tools: ["read"] }],
+          async: true,
+          operationId: "op-restart",
+        } as const;
+        const dispatched = await callDelegate(first, args);
+        const originalTicket = ticketIdOf(dispatched.text);
+        const waited = await callDelegateTicket(first, {
+          action: "wait",
+          ticket: originalTicket,
+          timeoutMs: 5000,
+        });
+        expect(waited.text).toContain("ORIGINAL-RUN");
+        // The first instance stays alive: its temp cwd IS the shared agent
+        // directory, and disposing it would remove the journal underneath
+        // the next instance (same discipline as the recovery tests).
+
+        // Same agent directory (the harness session cwd), new instance:
+        // the saved journal knows the ticket, but operation identity is
+        // host-lifetime only.
+        const next = await openDelegateBoundary();
+        sessions.push(next);
+        (next.session as AgentSession).sessionManager.getSessionDir = () =>
+          join(first.cwd, "sessions", "--test--");
+        const nextModel = await installSubagentModel(next);
+        nextModel.respond([fauxAssistantMessage("RERUN-AFTER-RESTART")]);
+
+        const redispatched = await callDelegate(next, args);
+        const newTicket = ticketIdOf(redispatched.text);
+        expect(newTicket).not.toBe(originalTicket);
+        expect(nextModel.state.callCount).toBe(1);
+
+        const settled = await callDelegateTicket(next, {
+          action: "wait",
+          ticket: newTicket,
+          timeoutMs: 5000,
+        });
+        expect(settled.text).toContain("RERUN-AFTER-RESTART");
+        // The old ticket stays pollable from the saved journal — the rerun
+        // replaced nothing.
+        const oldPolled = await callDelegateTicket(next, {
+          action: "poll",
+          ticket: originalTicket,
+        });
+        expect(oldPolled.text).toContain("ORIGINAL-RUN");
+      } finally {
+        for (const s of sessions.splice(0)) s.dispose();
+      }
+    },
+  );
 });

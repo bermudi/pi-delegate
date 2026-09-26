@@ -4,6 +4,7 @@ import {
   callDelegate,
   callDelegateSession,
   callDelegateTicket,
+  installSubagentModel,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
 
@@ -318,6 +319,34 @@ describe("delegate validation contract", () => {
       expect(close.isError).toBe(true);
       expect(close.text).toMatch(/sessionId/i);
       expect(close.text).not.toContain("not implemented");
+    },
+  );
+
+  test(
+    "a custom or unknown tool name fails the whole call before any task starts",
+    async () => {
+      // INVARIANTS "Shared writes": unknown tools are mutating — admission
+      // must never narrow an unrecognized capability to read-only. The
+      // public boundary enforces the stricter form: a tool outside the
+      // known child inventory rejects the whole call during resolution,
+      // before admission or any worker exists. A caller-supplied name can
+      // never silently downgrade a writer into an unreserved reader.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            prompt: "never runs",
+            tools: ["read", "mcp__foghorn__index_the_universe"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/unknown tool 'mcp__foghorn__index_the_universe'/);
+      expect(result.text).toMatch(/Known tools/i);
+      // The provider was never reached: the rejection is pre-worker.
+      expect(subagents.state.callCount).toBe(0);
     },
   );
 });

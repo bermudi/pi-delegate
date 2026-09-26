@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   rmSync,
   symlinkSync,
@@ -22,6 +23,7 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   callDelegate,
+  callDelegateTicket,
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
@@ -33,6 +35,21 @@ function gitInit(dir: string): void {
     "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
     { cwd: dir },
   );
+}
+
+/** Directory paths under `root` (recursively) whose basename starts with `prefix`. */
+function collectDirs(root: string, prefix: string): string[] {
+  const found: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const child = join(dir, entry.name);
+      if (entry.name.startsWith(prefix)) found.push(child);
+      walk(child);
+    }
+  };
+  walk(root);
+  return found;
 }
 
 describe("delegate workspace and shared-write contract", () => {
@@ -1223,6 +1240,346 @@ exec '${realGit}' "$@"
       expect(
         readFileSync(join(session.cwd, "owned-check.txt"), "utf8"),
       ).toBe("absent");
+    },
+  );
+
+  test(
+    "cancelling the batch after an isolated worker finished keeps its proposal unapplied and recoverable",
+    async () => {
+      // INVARIANTS "Isolated application": cancellation before source
+      // apply MUST NOT apply accepted proposals and MUST retain
+      // discoverable, recoverable artifacts. Only cancellation during
+      // workspace preparation was covered before; here the worker's run
+      // has confirmed-quiescent success on record, so its proposal exists
+      // exactly when the batch cancellation lands. A still-running sibling
+      // keeps the batch (and its admission reservation) live so the cancel
+      // deterministically precedes source application.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const respond: FauxResponseFactory = async (context) => {
+        const transcript = JSON.stringify(context.messages);
+        if (transcript.includes("HOLD-SIBLING")) {
+          await gate;
+          return fauxAssistantMessage("LATE-OUTPUT");
+        }
+        // FINISHER: first turn edits the worktree, second turn completes.
+        return context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("FINISHED-OUTPUT")
+          : fauxAssistantMessage([
+              fauxToolCall("write", {
+                path: "finished.txt",
+                content: "worker edit",
+              }),
+            ]);
+      };
+      subagents.respond([respond, respond, respond, respond]);
+
+      const dispatched = await callDelegate(session, {
+        workspace: "isolated",
+        tasks: [
+          {
+            id: "finisher",
+            prompt: "FINISHER writes finished.txt",
+            cwd: dir,
+            tools: ["write"],
+          },
+          {
+            id: "hold",
+            prompt: "HOLD-SIBLING never finishes on its own",
+            cwd: dir,
+            tools: ["write"],
+          },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+
+      // Wait until the finisher's ok outcome is recorded while the ticket
+      // is still running (isolated batches hold settlement until
+      // reconciliation), then cancel before reconciliation can apply.
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const view = await callDelegateTicket(session, {
+          action: "poll",
+          ticket,
+        });
+        if (view.text.includes("### Task finisher — completed")) {
+          const cancelled = await callDelegateTicket(session, {
+            action: "cancel",
+            ticket,
+            force: true,
+          });
+          expect(cancelled.isError).toBe(false);
+          break;
+        }
+        if (Date.now() > deadline) {
+          throw new Error("finisher outcome never became visible");
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      release();
+      // The retained integration is annotated during reconciliation,
+      // which the cancellation signal routes into the retain path; the
+      // terminal status alone can precede that annotation, so poll for it.
+      const annotate = Date.now() + 5000;
+      let settledText = "";
+      for (;;) {
+        settledText = (
+          await callDelegateTicket(session, { action: "poll", ticket })
+        ).text;
+        if (
+          settledText.includes("### Task finisher") &&
+          /INTEGRATION: retained/.test(settledText)
+        ) {
+          break;
+        }
+        if (Date.now() > annotate) {
+          throw new Error(`retained integration never appeared: ${settledText}`);
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(settledText).toContain(`Ticket "${ticket}": cancelled`);
+      const finisherSection = settledText.slice(
+        settledText.indexOf("### Task finisher"),
+        settledText.indexOf("### Task hold"),
+      );
+      expect(finisherSection).toMatch(/INTEGRATION: retained/);
+      expect(finisherSection).toMatch(
+        /not applied: .*cancelled before source application/i,
+      );
+      const worktree = /recovery worktree: (\S+)/.exec(finisherSection)?.[1];
+      expect(worktree).toBeDefined();
+      // Recoverable: the proposal survives whole in its worktree, and the
+      // user's source tree never saw it.
+      expect(existsSync(worktree!)).toBe(true);
+      expect(readFileSync(join(worktree!, "finished.txt"), "utf8")).toBe(
+        "worker edit",
+      );
+      expect(existsSync(join(dir, "finished.txt"))).toBe(false);
+      expect(
+        execSync("git status --porcelain", { cwd: dir, encoding: "utf8" }),
+      ).toBe("");
+    },
+    15_000,
+  );
+
+  test(
+    "parallel isolated workers cannot see each other's edits",
+    async () => {
+      // INVARIANTS "Isolated application": each worker MUST be isolated
+      // from other workers' ordinary relative writes. Worker Y checks for
+      // worker X's file only after X's write tool has demonstrably
+      // completed — in X's worktree — and must not find it in its own.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      let xWrote!: () => void;
+      const xWrotePromise = new Promise<void>((r) => (xWrote = r));
+      const respond: FauxResponseFactory = async (context) => {
+        const transcript = JSON.stringify(context.messages);
+        const toolResultCount = context.messages.filter(
+          (m) => m.role === "toolResult",
+        ).length;
+        if (transcript.includes("WRITES-X")) {
+          if (toolResultCount > 0) {
+            xWrote();
+            return fauxAssistantMessage("X-DONE");
+          }
+          return fauxAssistantMessage([
+            fauxToolCall("write", { path: "x.txt", content: "x" }),
+          ]);
+        }
+        // WRITES-Y: first turn waits for X's write, then probes its own
+        // tree; second turn writes y.txt; third turn reports. The verdict
+        // reads the bash TOOL RESULT only — the transcript always contains
+        // the probe command's own text, so a raw search would self-match.
+        await xWrotePromise;
+        const toolResults = context.messages.filter(
+          (m) => m.role === "toolResult",
+        );
+        const probeText = toolResults
+          .map((m) =>
+            (m.content as { type: string; text?: string }[])
+              .map((block) => block.text ?? "")
+              .join(""),
+          )
+          .join("");
+        if (toolResults.length === 0) {
+          return fauxAssistantMessage([
+            fauxToolCall("bash", {
+              command: "test -f x.txt && echo X-IS-PRESENT || echo X-IS-ABSENT",
+            }),
+          ]);
+        }
+        if (toolResults.length === 1) {
+          return fauxAssistantMessage([
+            fauxToolCall("write", { path: "y.txt", content: "y" }),
+          ]);
+        }
+        return fauxAssistantMessage(
+          probeText.includes("X-IS-PRESENT") ? "SAW-X-WRONG" : "Y-DONE",
+        );
+      };
+      subagents.respond([respond, respond, respond, respond, respond, respond]);
+
+      const result = await callDelegate(session, {
+        workspace: "isolated",
+        tasks: [
+          {
+            id: "x",
+            prompt: "WRITES-X writes x.txt",
+            cwd: dir,
+            tools: ["write"],
+          },
+          {
+            id: "y",
+            prompt: "WRITES-Y checks for x.txt then writes y.txt",
+            cwd: dir,
+            tools: ["write", "bash"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // The probe answered from Y's own worktree: X's edit is invisible.
+      expect(result.text).toContain("Y-DONE");
+      expect(result.text).not.toContain("SAW-X-WRONG");
+      expect(result.text).toMatch(/INTEGRATION: applied_unverified/);
+      // Reconciliation still lands both proposals in the source tree.
+      expect(readFileSync(join(dir, "x.txt"), "utf8")).toBe("x");
+      expect(readFileSync(join(dir, "y.txt"), "utf8")).toBe("y");
+    },
+    15_000,
+  );
+
+  test(
+    "an abandoned isolated worker's edits are never applied and its worktree is cleaned up",
+    async () => {
+      // INVARIANTS "Isolated application": an abandoned worker MUST be
+      // discarded, never snapshotted or applied, and its cleanup MUST wait
+      // for safety confirmation. The worker edits its worktree and then
+      // goes silent mid-run; forced cancellation abandons it.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const respond: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          await gate;
+          return fauxAssistantMessage("LATE-OUTPUT");
+        }
+        return fauxAssistantMessage([
+          fauxToolCall("write", {
+            path: "ghost.txt",
+            content: "must never land",
+          }),
+        ]);
+      };
+      subagents.respond([respond, respond, respond]);
+
+      const dispatched = await callDelegate(session, {
+        workspace: "isolated",
+        tasks: [
+          {
+            id: "ghost",
+            prompt: "write ghost.txt then go silent",
+            cwd: dir,
+            tools: ["write"],
+          },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      // The edit happened once the second provider call is in flight.
+      const started = Date.now() + 5000;
+      while (subagents.state.callCount < 2 && Date.now() < started) {
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(subagents.state.callCount).toBe(2);
+
+      await callDelegateTicket(session, { action: "cancel", ticket, force: true });
+      release();
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(settled.text).toContain(`Ticket "${ticket}": cancelled`);
+      expect(settled.text).toMatch(/INTEGRATION: discarded/);
+      // The edit the abandoned worker already made never reaches source.
+      expect(existsSync(join(dir, "ghost.txt"))).toBe(false);
+
+      // Cleanup is deferred until quiescence is confirmed: poll until no
+      // worker worktree remains under the delegate-owned tree.
+      const isolatedTree = join(session.cwd, "delegate-isolated");
+      const clean = Date.now() + 5000;
+      for (;;) {
+        const leftovers = existsSync(isolatedTree)
+          ? collectDirs(isolatedTree, "worker-")
+          : [];
+        if (leftovers.length === 0) break;
+        if (Date.now() > clean) {
+          throw new Error(`abandoned worker worktree never cleaned: ${leftovers.join(", ")}`);
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(
+        execSync("git status --porcelain", { cwd: dir, encoding: "utf8" }),
+      ).toBe("");
+    },
+    15_000,
+  );
+
+  test(
+    "a settled ticket releases its write reservation for the next dispatch",
+    async () => {
+      // Gap: a running ticket's reservation blocks conflicting writers
+      // (tested above), but nothing pinned that the reservation is RELEASED
+      // at settlement. A leaked lock would reject every later dispatch
+      // forever while the whole suite stays green.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+
+      subagents.respond([fauxAssistantMessage("FIRST-WRITER-DONE")]);
+      const dispatched = await callDelegate(session, {
+        tasks: [{ prompt: "bg write", cwd: dir, tools: ["write"] }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(waited.text).toContain("FIRST-WRITER-DONE");
+
+      subagents.respond([fauxAssistantMessage("SECOND-WRITER-DONE")]);
+      // Absorb the settle→release ordering (release runs in the batch's
+      // finally, moments after the terminal view exists); a genuinely
+      // leaked reservation outlives the budget and fails here.
+      const budget = Date.now() + 3000;
+      let next = await callDelegate(session, {
+        tasks: [{ prompt: "write again", cwd: dir, tools: ["write"] }],
+      });
+      while (next.isError && Date.now() < budget) {
+        await new Promise((r) => setTimeout(r, 25));
+        next = await callDelegate(session, {
+          tasks: [{ prompt: "write again", cwd: dir, tools: ["write"] }],
+        });
+      }
+      expect(next.isError).toBe(false);
+      expect(next.text).toContain("SECOND-WRITER-DONE");
     },
   );
 });

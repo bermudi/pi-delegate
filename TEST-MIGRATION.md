@@ -616,9 +616,67 @@ New v2 contract — no v1 evidence; the dependency graph is an additive
   `tests/regression/cancellation.test.ts`.
 - **Internal:** graph resolution/phasing helpers (`graph.ts`) — not
   boundary-tested directly.
-- **Gap:** blocked outcomes under `async` tickets poll/delivery views;
-  cancellation racing a dep gate (superseded paths asserted by code
-  review).
+- **Gap:** blocked outcomes under `async` tickets poll/delivery views
+  (superseded paths asserted by code review; the cancellation-racing-
+  dep-gate half is now covered live — see "Invariant hardening" below).
+
+### Invariant hardening (2026-09-26, not v1-migrated)
+
+Coverage added from an INVARIANTS/SPEC gap review rather than v1 evidence:
+behavior that had no live test pinning it. Each entry names the invariant
+and the file that carries it.
+
+- **Isolated cancellation beyond preparation** (INVARIANTS "Isolated
+  application"): cancelling a batch after an isolated worker finished
+  retains its proposal unapplied with recoverable artifacts; parallel
+  isolated workers cannot see each other's edits; an abandoned worker's
+  edits are never applied and its worktree is cleaned up after confirmed
+  quiescence. `tests/contract/workspaces.test.ts` (mutation-verified:
+  cutting both the reconcile-signal and the should-apply gate fails the
+  retain test).
+- **Reservation release at settlement** (INVARIANTS "Ticket state":
+  terminal tickets do not block conflicting work): a settled async ticket
+  releases its write reservation for the next dispatch.
+  `tests/contract/workspaces.test.ts`.
+- **Session-reuse dispositions** (INVARIANTS "Session reuse"): stall
+  eviction; a pre-prompt deadline leaving the session intact with no
+  provider call (no usage possible); ordinary failure keeping the session
+  reusable; the busy-while-running/reusable-after-settle cycle; shutdown
+  disposing every pooled session — running ones after quiescence — and
+  refusing later sessionId dispatches. Cleanup-failure REPORTING is
+  log-only: `AgentSession.dispose` is built not to throw, so it has no
+  boundary-observable failure mode. `tests/contract/sessions.test.ts`.
+- **Timer rules** (INVARIANTS "Cancellation and quiescence"): omitted
+  `deadlineMs` means no wall-clock budget (watchdog disabled, worker still
+  running well past any implicit limit); explicit deadlines keep counting
+  while a ticket is paused; when deadline and stall both fire, the deadline
+  is the reported cause. `tests/regression/cancellation.test.ts`.
+- **Waiting tasks hold no concurrency slot** (INVARIANTS "Shared writes"
+  and "Dependencies"): serialized same-call writers and dependency waiters
+  hold no slot while waiting — at `maxConcurrent: 1` a slot-holding wait
+  deadlocks the batch; a dependent reached after cancellation is
+  cancelled, not blocked. `tests/contract/dependencies.test.ts`
+  (mutation-verified: acquiring capacity before the predecessor wait
+  fails both slot tests).
+- **Shutdown cancels pending questions** (SPEC "Worker questions"):
+  session shutdown invalidates a worker's unanswered question, settles the
+  ticket cancelled, and late answers error.
+  `tests/contract/questions.test.ts`.
+- **operationId is host-lifetime** (INVARIANTS "Dispatch identity"):
+  after a restart over the same agent directory the same key re-runs the
+  work under a fresh ticket while saved results stay pollable.
+  `tests/contract/operations.test.ts`.
+- **Unknown tools fail closed** (INVARIANTS "Shared writes" — unknown
+  tools are mutating): v2's stricter boundary rejects an unrecognized
+  tool name whole-call during resolution, before admission or any worker;
+  a caller-supplied name can never silently downgrade a writer into an
+  unreserved reader. `tests/contract/validation.test.ts`.
+- **Pi's per-turn auto-retry stays off in child sessions** (COMPATIBILITY
+  "Subagent Pi auto-retry is disabled…"; AGENTS.md requires rechecking on
+  every Pi bump): a retryable provider error yields exactly Delegate's
+  two whole-task attempts — one provider call each — never Pi's in-turn
+  retries. `tests/regression/child-auto-retry.test.ts` (mutation-verified
+  against `setRetryEnabled(true)`).
 
 ## First tranche
 

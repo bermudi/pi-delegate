@@ -16,10 +16,13 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   callDelegate,
+  callDelegateDetached,
+  callDelegateTicket,
   configureDelegate,
   installSubagentModel,
   objectOf,
   openDelegateBoundary,
+  ticketIdOf,
 } from "../support/pi-boundary.ts";
 
 function gitInit(dir: string): void {
@@ -431,6 +434,158 @@ describe("delegate dependency graph and handoffs", () => {
       const details = objectOf(result.details, "details");
       const results = details.results as { output?: string }[] | undefined;
       expect(results?.[0]?.output).toContain("HEAD-");
+    },
+  );
+
+  test(
+    "serialized shared writers hold no concurrency slot while waiting their turn",
+    async () => {
+      // INVARIANTS "Shared writes": serialization MUST NOT consume scarce
+      // execution capacity while no task can execute. With a global bound
+      // of 1, a successor that held the only slot while waiting for its
+      // predecessor's quiescence would deadlock the whole batch — the
+      // classic self-starvation. The default bound (3) cannot expose it.
+      session = await openDelegateBoundary();
+      configureDelegate(session, { maxConcurrent: 1 });
+      const subagents = await installSubagentModel(session);
+      const dir = mkdtempSync(join(tmpdir(), "delegate-v2-dep-"));
+      dirs.push(dir);
+
+      const timeline: string[] = [];
+      const timed = (tag: string, text: string): FauxResponseFactory =>
+        async () => {
+          timeline.push(`start:${tag}`);
+          await new Promise((r) => setTimeout(r, 30));
+          timeline.push(`end:${tag}`);
+          return fauxAssistantMessage(text);
+        };
+      subagents.respond([
+        timed("first", "W1-DONE"),
+        timed("second", "W2-DONE"),
+      ]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          { id: "w1", prompt: "write one", cwd: dir, tools: ["write"] },
+          { id: "w2", prompt: "write two", cwd: dir, tools: ["write"] },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // Both writers completed, strictly serialized in task order: the
+      // successor's interval starts only after the predecessor ends.
+      expect(timeline).toEqual([
+        "start:first",
+        "end:first",
+        "start:second",
+        "end:second",
+      ]);
+      expect(subagents.state.callCount).toBe(2);
+    },
+    10_000,
+  );
+
+  test(
+    "a dependent waiting on its prerequisite holds no concurrency slot",
+    async () => {
+      // Same invariant through the dependency gate: while the prerequisite
+      // is mid-run holding the ONLY slot, the waiting dependent must hold
+      // nothing — at a global bound of 1 a slot-holding wait would starve
+      // the batch. The dependent must not start until the prerequisite's
+      // phase fully settles (confirmed quiescence included).
+      session = await openDelegateBoundary();
+      configureDelegate(session, { maxConcurrent: 1 });
+      const subagents = await installSubagentModel(session);
+
+      let release!: () => void;
+      let started!: () => void;
+      const entered = new Promise<void>((r) => (started = r));
+      const gate = new Promise<void>((r) => (release = r));
+      const respond: FauxResponseFactory = async (context) => {
+        // Dispatch on the task's OWN first user message: the dependent's
+        // transcript mentions PREREQ too, through the handoff appendix.
+        const ownPrompt = context.messages.find((m) => m.role === "user");
+        const ownText = ownPrompt
+          ? typeof ownPrompt.content === "string"
+            ? ownPrompt.content
+            : ownPrompt.content
+                .map((c) => (c.type === "text" ? c.text : ""))
+                .join("")
+          : "";
+        if (ownText.startsWith("PREREQ")) {
+          started();
+          await gate;
+          return fauxAssistantMessage("PREREQ-OUTPUT");
+        }
+        return fauxAssistantMessage("DEPENDENT-DONE");
+      };
+      subagents.respond([respond, respond, respond]);
+
+      const pending = callDelegateDetached(session, {
+        tasks: [
+          { id: "prereq", prompt: "PREREQ runs first" },
+          { prompt: "dependent waits", dependsOn: ["prereq"] },
+        ],
+      });
+      await entered;
+      // The prerequisite is mid-run; the dependent has not started.
+      expect(subagents.state.callCount).toBe(1);
+
+      release();
+      const result = await pending;
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("PREREQ-OUTPUT");
+      expect(result.text).toContain("DEPENDENT-DONE");
+      expect(subagents.state.callCount).toBe(2);
+    },
+    10_000,
+  );
+
+  test(
+    "a dependent reached after the batch is cancelled is cancelled, not blocked",
+    async () => {
+      // SPEC "Dependencies and handoffs": cancellation supersedes blocking
+      // — a task reached while the batch is cancelled reports cancelled,
+      // never `blocked` by its (now cancelled) prerequisite.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const hanging: FauxResponseFactory = async () => {
+        await gate;
+        return fauxAssistantMessage("LATE");
+      };
+      subagents.respond([hanging, hanging]);
+
+      const dispatched = await callDelegate(session, {
+        tasks: [
+          { id: "root", prompt: "hangs" },
+          { id: "child", prompt: "waits", dependsOn: ["root"] },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      const running = Date.now() + 5000;
+      while (subagents.state.callCount < 1 && Date.now() < running) {
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(subagents.state.callCount).toBe(1);
+
+      await callDelegateTicket(session, { action: "cancel", ticket, force: true });
+      release();
+      // The terminal view must settle with the child's status before the
+      // unconfirmed note clears.
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(settled.text).toContain(`Ticket "${ticket}": cancelled`);
+      const childSection = settled.text.slice(
+        settled.text.indexOf("### Task child"),
+      );
+      expect(childSection).toMatch(/### Task child — cancelled/);
+      expect(childSection).not.toMatch(/blocked/);
     },
   );
 });

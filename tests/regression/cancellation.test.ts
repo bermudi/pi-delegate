@@ -1204,3 +1204,156 @@ test(
   },
   30_000,
 );
+
+test(
+  "omitting deadlineMs means no wall-clock budget at all",
+  async () => {
+    // INVARIANTS "Cancellation and quiescence": a task carries no
+    // wall-clock budget unless its caller supplies deadlineMs; no
+    // configuration default, host default, or implicit mechanism may add
+    // one. With the inactivity watchdog disabled too, a worker whose
+    // provider call never settles must still be running — nothing else
+    // may kill it. (The watchdog is disabled here because it is a real,
+    // configured limit — the point is that no OTHER hidden limit exists.)
+    session = await openDelegateBoundary();
+    configureDelegate(session, { stallTimeoutMs: 0 });
+    const subagents = await installSubagentModel(session);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const hanging: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("EVENTUALLY-DONE");
+    };
+    subagents.respond([hanging]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "hang indefinitely", tools: ["read"] }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    const running = Date.now() + 5000;
+    while (subagents.state.callCount < 1 && Date.now() < running) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(subagents.state.callCount).toBe(1);
+
+    // Far past any plausible internal budget; no deadline was supplied, so
+    // no implicit one may fire.
+    await new Promise((r) => setTimeout(r, 400));
+    const midFlight = await callDelegateTicket(session, {
+      action: "poll",
+      ticket,
+    });
+    expect(midFlight.text).toMatch(/running/i);
+    expect(midFlight.text).not.toMatch(/deadline|stall|cancel|failed/i);
+
+    release();
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(settled.text).toContain("EVENTUALLY-DONE");
+    expect(settled.text).toMatch(/completed/i);
+  },
+);
+
+test(
+  "an explicit deadline keeps counting while the ticket is paused",
+  async () => {
+    // SPEC "Tickets": pause is cooperative and holds queued tasks and
+    // future model turns — INVARIANTS: a paused ticket retains its
+    // deadlines. The worker's in-flight call is past the pause boundary,
+    // and the deadline must still fire while the ticket sits paused.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const hanging: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("TOO-LATE");
+    };
+    subagents.respond([hanging]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "paused deadline", deadlineMs: 250 }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    const running = Date.now() + 5000;
+    while (subagents.state.callCount < 1 && Date.now() < running) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(subagents.state.callCount).toBe(1);
+
+    const paused = await callDelegateTicket(session, {
+      action: "pause",
+      ticket,
+    });
+    expect(paused.isError).toBe(false);
+
+    await new Promise((r) => setTimeout(r, 450));
+    const whilePaused = await callDelegateTicket(session, {
+      action: "poll",
+      ticket,
+    });
+    expect(whilePaused.text).toMatch(/deadline exceeded/i);
+
+    release();
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(settled.text).toMatch(/deadline exceeded/i);
+    expect(settled.text).not.toMatch(/paused/);
+  },
+);
+
+test(
+  "when deadline and stall both fire, the deadline is the reported cause",
+  async () => {
+    // INVARIANTS: cancellation cause precedence is parent abort, then
+    // deadline, then stall. The worker is silent the whole time, so the
+    // stall watchdog fires too — both causes genuinely hit, and the
+    // caller must hear the deadline, not the stall.
+    session = await openDelegateBoundary();
+    configureDelegate(session, { stallTimeoutMs: 300 });
+    const subagents = await installSubagentModel(session);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const hanging: FauxResponseFactory = async () => {
+      await gate;
+      return fauxAssistantMessage("TOO-LATE");
+    };
+    subagents.respond([hanging]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "silent until both timers fire", deadlineMs: 150 }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+
+    // Deadline arms at ~0ms, stall at ~300ms; both fire while the worker
+    // is still winding down behind the gated provider call.
+    await new Promise((r) => setTimeout(r, 600));
+    const provisional = await callDelegateTicket(session, {
+      action: "poll",
+      ticket,
+    });
+    expect(provisional.text).toMatch(/deadline exceeded/i);
+    expect(provisional.text).not.toMatch(/stall/i);
+
+    release();
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(settled.text).toMatch(/deadline exceeded/i);
+    expect(settled.text).not.toMatch(/stall/i);
+  },
+);
