@@ -74,7 +74,9 @@ export function integrationLines(integration: TaskIntegration): string[] {
   }
   if (integration.status === "applied_unverified") {
     lines.push(
-      "Changes were applied but not verified; review or test them before relying on them.",
+      integration.appliedFiles.length === 0
+        ? "The proposal's changes were already present in the source tree; nothing further was written. Review or test them before relying on them."
+        : "Changes were applied but not verified; review or test them before relying on them.",
     );
   }
   return lines;

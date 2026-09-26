@@ -1,3 +1,5 @@
+import { chmodSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
@@ -436,6 +438,41 @@ describe("delegate explicit operation identity", () => {
       expect(subagents.state.callCount).toBe(3);
     },
     60_000,
+  );
+
+  test(
+    "an async operationId retry after a storage failure returns the original failure, never a new execution",
+    async () => {
+      // Bug 7 regression (INVARIANTS "Dispatch identity": failure is
+      // retained and never restarted). create() registers before its
+      // journal write so the operationId duplicate-protection fingerprint
+      // binds the storage failure itself: a retry after fixing storage
+      // returns the same failure without starting workers.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([fauxAssistantMessage("STORAGE-RETRY-NEVER")]);
+      const dir = join(session.cwd, "delegate-tickets");
+      mkdirSync(dir, { mode: 0o700, recursive: true });
+      chmodSync(dir, 0o500);
+      const args = {
+        tasks: [{ prompt: "storage fails first", tools: ["read"] }],
+        async: true,
+        operationId: "op-storage-failure",
+      };
+      let failed;
+      try {
+        failed = await callDelegate(session, args);
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+      expect(failed.isError).toBe(true);
+      expect(failed.text).toMatch(/ticket|storage|journal|permission|denied/i);
+      expect(subagents.state.callCount).toBe(0);
+      const retry = await callDelegate(session, args);
+      expect(retry.isError).toBe(true);
+      expect(retry.text).toBe(failed.text);
+      expect(subagents.state.callCount).toBe(0);
+    },
   );
 
   test(

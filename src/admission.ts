@@ -5,7 +5,14 @@ import type { ResolvedTask } from "./types.ts";
 /** True when canonical root `a` equals, contains, or is contained in `b`. */
 export function rootsOverlap(a: string, b: string): boolean {
   if (a === b) return true;
-  return a.startsWith(b + sep) || b.startsWith(a + sep);
+  // "/" + sep is "//", which no absolute path starts with — without
+  // this special case a writer at "/" would never overlap anything and
+  // bypass both same-call serialization and cross-call rejection.
+  if (a === sep || b === sep) return true;
+  const normA = a.length > 1 && a.endsWith(sep) ? a.slice(0, -1) : a;
+  const normB = b.length > 1 && b.endsWith(sep) ? b.slice(0, -1) : b;
+  if (normA === normB) return true;
+  return normA.startsWith(normB + sep) || normB.startsWith(normA + sep);
 }
 
 /**
@@ -96,7 +103,24 @@ export class AdmissionController {
     }
 
     // Within-call: group reserving tasks by root overlap (connected
-    // components, union-find). Mixed shared/isolated groups reject.
+    // components, union-find). An edge the dependency graph already orders
+    // is not a concurrency hazard — the pair never runs at the same time —
+    // so it must not bridge two otherwise-disjoint tasks into one group:
+    // task A under /repo/x and task C under /repo/y share no root even
+    // when task B reserves /repo itself sits between them, provided every
+    // truly-overlapping cross-kind edge is ordered. Same-kind edges always
+    // group (their writers serialize in task order regardless of phase).
+    const overlaps = (
+      a: readonly string[],
+      b: readonly string[],
+    ): boolean => a.some((ra) => b.some((rb) => rootsOverlap(ra, rb)));
+    const deps = tasks.map((task) => task.dependsOn);
+    const orderedPair = (
+      a: (typeof reserving)[number],
+      b: (typeof reserving)[number],
+    ): boolean =>
+      dependsTransitively(deps, a.index, b.index) ||
+      dependsTransitively(deps, b.index, a.index);
     const parent = reserving.map((_, i) => i);
     const find = (i: number): number => {
       while (parent[i] !== i) {
@@ -105,15 +129,13 @@ export class AdmissionController {
       }
       return i;
     };
-    const overlaps = (
-      a: readonly string[],
-      b: readonly string[],
-    ): boolean => a.some((ra) => b.some((rb) => rootsOverlap(ra, rb)));
     for (let i = 0; i < reserving.length; i++) {
       for (let j = i + 1; j < reserving.length; j++) {
-        if (overlaps(reserving[i]!.writeRoots!, reserving[j]!.writeRoots!)) {
-          parent[find(i)] = find(j);
-        }
+        const a = reserving[i]!;
+        const b = reserving[j]!;
+        if (!overlaps(a.writeRoots!, b.writeRoots!)) continue;
+        if (a.workspace !== b.workspace && orderedPair(a, b)) continue;
+        parent[find(i)] = find(j);
       }
     }
     const groups = new Map<number, typeof reserving>();
@@ -125,7 +147,6 @@ export class AdmissionController {
     const predecessors = new Map<number, number>();
     const serialized: { tasks: readonly number[]; roots: readonly string[] }[] =
       [];
-    const deps = tasks.map((task) => task.dependsOn);
     for (const group of groups.values()) {
       const kinds = new Set(group.map((task) => task.workspace));
       if (kinds.size > 1) {

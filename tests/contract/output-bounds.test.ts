@@ -382,6 +382,30 @@ describe("delegate output bounding", () => {
     expect(spillFiles(dir)).toHaveLength(0);
   });
 
+  test("whitespace-only over-threshold output still spills", async () => {
+    // Bug 9: a trim()-based emptiness exemption let 100000 spaces pass a
+    // 100-char limit. Whitespace still consumes LLM context, so only bare
+    // empty and the exact placeholder bypass bounding.
+    const dir = useSpillDir();
+    session = await openDelegateBoundary();
+    configureDelegate(session, {
+      output: { spillThresholdChars: 100, spillTailChars: 20 },
+    });
+    const subagents = await installSubagentModel(session);
+    const output = " ".repeat(500);
+    subagents.respond([fauxAssistantMessage(output)]);
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "spaces" }],
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("spilled to");
+    const filePath = spilledPathOf(result.text);
+    expect(filePath).toBeDefined();
+    expect(fs.readFileSync(filePath!, "utf8")).toBe(output);
+    expect(spillFiles(dir)).toHaveLength(1);
+  });
+
   test("malformed output bounds fail the whole call before any task starts", async () => {
     // v1 evidence: config.ts validation — "output must be an object",
     // "output.spillThresholdChars must be a positive integer",

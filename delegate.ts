@@ -1022,7 +1022,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
     // while this dispatch sits anywhere in that range must already count
     // it in the liveQuiescence snapshot, or the session boundary could
     // complete before the dispatch starts workers or releases its
-    // reservations.
+    // reservations. (Only async preparation is abortable: sync batches run
+    // on the caller's host signal, which shutdown does not abort, so a
+    // parked sync dispatch rides out the hold and runs to completion under
+    // the barrier. Async batches run on the ticket's cancellation signal,
+    // which shutdown force-cancels — their preparation aborts on its own
+    // and the catch below settles the ticket as cancelled.)
     const { barrier, relabel } = trackQuiescence(
       createTicket !== undefined
         ? "async dispatch (preparing)"
@@ -1046,6 +1051,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
         }
       | undefined;
     try {
+      // Async journal connect: async dispatch needs the saved journal and
+      // ticket creation must be durable before workers spawn, but the
+      // connect itself is synchronous filesystem setup — it runs here, in
+      // the pipeline, rather than in execute's synchronous prefix. A
+      // corrupt or inaccessible journal fails async dispatch visibly
+      // without blocking synchronous work (which never touches it).
+      if (createTicket !== undefined) {
+        tickets.connect(resolveAgentDir(ctx).dir);
+      }
       const agentDirResolution = resolveAgentDir(ctx);
       if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
         warnedAgentDirFallback = true;
@@ -1184,9 +1198,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
             .finally(() => tickets.releaseSettlement(cancelledTicket)),
         };
       }
-      if (ticket !== undefined) {
+      if (ticket !== undefined && tickets.get(ticket.id) !== undefined) {
         // A ticket whose batch never started is removed rather than
-        // exposed: the whole call fails with the cause instead.
+        // exposed: the whole call fails with the cause instead. The get
+        // guard matters because create() itself removes its registration
+        // when its own creation write throws — removing again would
+        // delete another ticket's record if the id were ever reused, and
+        // journal.remove() on an unsaved id can only throw noise.
         tickets.remove(ticket.id);
       }
       batch?.grant.release();
@@ -1327,6 +1345,19 @@ export default function delegateExtension(api: ExtensionAPI): void {
       renderResult: createResultRenderer(tickets),
 
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
+        // Synchronous prefix: everything before the first await runs in
+        // the same microtask as the host's tool dispatch, so a shutdown
+        // handler cannot interleave here. A dispatch that arrives after
+        // shutdown begins must fail on the latched value — not on a
+        // re-read after task-resolution or workspace-preparation awaits,
+        // by which time the shutdown handler would already have
+        // snapshotted the live set and missed it. The leaf/epoch stamp is
+        // likewise read here: stamping at ticket creation would name the
+        // branch navigated to mid-preparation and wake the wrong
+        // conversation on settlement.
+        const shutdownRejected = shuttingDown;
+        const dispatchLeafId = ctx.sessionManager.getLeafId();
+        const dispatchEpoch = navigationEpoch;
         const call = validateDispatchCall(params);
         // Every tool call re-arms the footer context (v1 semantics: the
         // execute context carries the full UI surface for our lifetime).
@@ -1342,16 +1373,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
             details: { mode: "help" as const },
           };
         }
-        // Only async dispatch needs the saved journal, and ticket creation
-        // must be durable before workers spawn; a corrupt or inaccessible
-        // journal must not block synchronous work.
-        if (call.async) {
-          tickets.connect(resolveAgentDir(ctx).dir);
-        }
-
         let operationTicket: Ticket | undefined;
         const executeDispatch = async () => {
-          if (shuttingDown) {
+          // Decided in execute's synchronous prefix (same microtask as
+          // the host's tool dispatch): a dispatch still preparing when
+          // shutdown begins must not start workers after the shutdown
+          // handler snapshotted the live set.
+          if (shutdownRejected) {
             throw new Error(
               "Delegate is shutting down with this session; new dispatches are not accepted. " +
                 "Existing tickets remain pollable for the rest of the session's lifetime.",
@@ -1403,7 +1431,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // on the current branch (a null origin is the root, which
               // every branch descends from). The epoch separately rules
               // out any observed transition, cancelled or not. Both are
-              // read from the ticket, which captured them at creation.
+              // read from the ticket, which latched them at dispatch (see
+              // execute's synchronous prefix).
               const sameLeaf =
                 navigationEpoch === ticket.originEpoch &&
                 (ticket.originLeafId === null ||
@@ -1502,10 +1531,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
                     // branch with no tree transition or shutdown observed
                     // since. Recorded on the ticket so delivery
                     // diagnostics can be reconstructed from the ticket
-                    // alone.
+                    // alone (stamped in execute's synchronous prefix).
                     tickets.recordOrigin(created, {
-                      leafId: ctx.sessionManager.getLeafId(),
-                      epoch: navigationEpoch,
+                      leafId: dispatchLeafId,
+                      epoch: dispatchEpoch,
                     });
                     return created;
                   },

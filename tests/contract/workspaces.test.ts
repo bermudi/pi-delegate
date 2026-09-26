@@ -664,6 +664,138 @@ describe("delegate workspace and shared-write contract", () => {
   );
 
   test(
+    "a failed apply preserves unrelated working-tree changes made after the check",
+    async () => {
+      // Bug 1: restoring a failed apply from an older snapshot erases
+      // unrelated edits. The apply path verifies each touched file against
+      // its expected pre-apply content before writing: a file the user
+      // changed after the check becomes a per-path conflict instead of
+      // being overwritten or rolled back to a stale version.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+      // victim.txt has enough context lines that appending an unrelated
+      // line does not disturb the worker hunk's --check, so the apply
+      // reaches verify-before-write rather than the drift check.
+      const lines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
+      writeFileSync(join(dir, "victim.txt"), lines.join("\n") + "\n");
+      execSync("git add -A && git commit -qm base", { cwd: dir });
+
+      let workerStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        workerStarted = resolve;
+      });
+      let releaseWorker!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseWorker = resolve;
+      });
+      const gatedWorkerWrite: FauxResponseFactory = async () => {
+        workerStarted();
+        await gate;
+        return fauxAssistantMessage([
+          fauxToolCall("write", {
+            path: "victim.txt",
+            content: ["WORKER", ...lines.slice(1)].join("\n") + "\n",
+          }),
+        ]);
+      };
+      subagents.respond([
+        gatedWorkerWrite,
+        fauxAssistantMessage("DONE"),
+      ]);
+
+      const dispatched = callDelegate(session, {
+        tasks: [
+          {
+            prompt: "change victim.txt first line",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["write"],
+          },
+        ],
+      });
+      await started;
+      // Unrelated change after the baseline: appended line far from the
+      // worker's hunk, so the forward --check still passes.
+      writeFileSync(join(dir, "victim.txt"), lines.join("\n") + "\nEXTRA\n");
+      releaseWorker();
+      const result = await dispatched;
+
+      // The unrelated edit survives verbatim and the proposal is retained
+      // as a conflict — never applied over it, never rolled back.
+      expect(readFileSync(join(dir, "victim.txt"), "utf8")).toBe(
+        lines.join("\n") + "\nEXTRA\n",
+      );
+      expect(result.text).toMatch(/conflict/i);
+      expect(result.text).toMatch(/victim\.txt/);
+    },
+  );
+
+  test(
+    "an identical second proposal is already present, not a fresh apply",
+    async () => {
+      // Bug 2: two isolated workers proposing identical changes — the
+      // first conflicts (or applies), the second must never report applied
+      // success with a non-empty appliedFiles list for changes it did not
+      // write. Both workers write the same new line to same.txt; whichever
+      // proposal lands second finds its delta already present via the
+      // reverse --check (or an empty chain edge) and reports
+      // applied_unverified with EMPTY appliedFiles, without a second write.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+      const target = join(dir, "same.txt");
+      writeFileSync(target, "base\n");
+      execSync("git add -A && git commit -qm base", { cwd: dir });
+
+      const identicalWrite: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("DONE");
+        }
+        return fauxAssistantMessage([
+          fauxToolCall("write", {
+            path: "same.txt",
+            content: "base\nSAME\n",
+          }),
+        ]);
+      };
+      subagents.respond([
+        identicalWrite,
+        identicalWrite,
+        identicalWrite,
+        identicalWrite,
+      ]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            prompt: "append SAME to same.txt (worker one)",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["write"],
+          },
+          {
+            prompt: "append SAME to same.txt (worker two)",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["write"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // Exactly one copy of the line: no double-apply, no duplicate lines.
+      expect(readFileSync(target, "utf8")).toBe("base\nSAME\n");
+      // The second proposal never claims a fresh apply: at most one task
+      // reports applied files, and the already-present wording names it.
+      const appliedSections = result.text.match(/applied 1 file\(s\)/g) ?? [];
+      expect(appliedSections.length).toBeLessThanOrEqual(1);
+      expect(result.text).toMatch(/already present/i);
+    },
+  );
+
+  test(
     "a conflicting isolated proposal is retained, not silently applied or lost",
     async () => {
       // v1 evidence: isolated-workspace.test.ts "keeps a conflicting proposal

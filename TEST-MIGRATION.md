@@ -426,7 +426,10 @@ gaps.
   candidate-worktree mechanics.
 - **Covered now:** ordered apply of two proposals with `applied_unverified`
   wording; conflict retains artifacts without clobbering a human edit while
-  an independent proposal still applies.
+  an independent proposal still applies; a failed apply preserves unrelated
+  working-tree edits as a per-path conflict (verify-before-write); an
+  identical second proposal reports `applied_unverified` with empty
+  `appliedFiles` and already-present wording, never a fresh apply.
 - **Gap:** cancellation before apply retains proposals and applies nothing;
   binary/symlink/mode reconciliation; baseline-drift refusal; worker-process
   termination guarantees.

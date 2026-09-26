@@ -208,6 +208,46 @@ async function changedFiles(
   return output.stdout.split("\0").filter(Boolean);
 }
 
+/**
+ * Blob shas for every tracked file in `commit`, as repository-relative
+ * path → sha. Used to verify a proposal's expected post-apply state
+ * before the source is touched: only paths whose current content matches
+ * the recorded expectation may be overwritten.
+ */
+async function trackedBlobs(
+  root: string,
+  commit: string,
+): Promise<Map<string, string>> {
+  const output = await git(["ls-tree", "-r", "-z", commit], {
+    cwd: root,
+  });
+  const blobs = new Map<string, string>();
+  for (const entry of output.stdout.split("\0")) {
+    if (!entry) continue;
+    const match = /^(\d+) (\w+) ([0-9a-f]+)\t([\s\S]*)$/.exec(entry);
+    if (!match) continue;
+    const [, , kind, sha, filePath] = match;
+    if (kind === "blob") blobs.set(filePath!, sha!);
+  }
+  return blobs;
+}
+
+/** Blob sha of one worktree file, or undefined when absent/unreadable. */
+async function worktreeBlob(
+  root: string,
+  relative: string,
+): Promise<string | undefined> {
+  try {
+    const stat = await fs.promises.lstat(path.join(root, relative));
+    if (!stat.isFile() && !stat.isSymbolicLink()) return undefined;
+    return (
+      await git(["hash-object", "--", relative], { cwd: root })
+    ).stdout.trim();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Full binary patch text for `from → to`, suitable for `git apply` on stdin. */
 async function diffPatch(
   root: string,
@@ -270,6 +310,14 @@ interface AcceptedProposal {
   readonly parent: string;
   readonly commit: string;
   readonly files: readonly string[];
+  /**
+   * The worker tree's exact post-run state, captured while the worker
+   * worktree still exists: path → blob sha for every tracked file in the
+   * successful proposal. The source apply verifies each entry before
+   * writing, so a failed apply restores from this snapshot — never from
+   * an older whole-file version that would erase unrelated changes.
+   */
+  readonly expectedBlobs: ReadonlyMap<string, string>;
   /** True when the worker worktree was removed during collection. */
   readonly workerRemoved: boolean;
 }
@@ -313,22 +361,40 @@ function withIntegration(
 }
 
 /**
- * Restore one failed source apply: move whatever the apply left behind into
- * a recovery directory, then restore each path's expected pre-apply content
- * from the chain-parent commit. Earlier proposals' applied content is
- * preserved because the expected state already contains it.
+ * Restore one failed source apply: move whatever the apply left behind
+ * into a recovery directory, then restore each path's expected pre-apply
+ * content from the chain-parent commit. Earlier proposals' applied content
+ * is preserved because the expected state already contains it.
+ *
+ * The recovery move runs first for every path, then the restore pass runs
+ * for every path. Each path is independent, but a move failure must not
+ * abort the loop and leave later paths unrestored — every path gets both
+ * passes, the first error is rethrown at the end, and the caller retains
+ * its recovery artifacts either way.
+ *
+ * Selective restore: a path whose current content no longer matches the
+ * verified pre-apply state was changed by someone else after verification
+ * (the failed apply itself may have partially written it, or an external
+ * edit landed mid-apply). Restoring such a path from the older snapshot
+ * would erase that unrelated edit, so it is left in place: its post-apply
+ * content stays in the recovery directory for inspection, and the path is
+ * reported back so the caller can name it instead of claiming a clean
+ * rollback. Returns the paths left unrestored.
  */
 async function restorePreApplyState(
   group: IsolatedGroup,
-  parentCommit: string,
+  proposal: AcceptedProposal,
   paths: readonly string[],
   recoveryDir: string,
-): Promise<void> {
+): Promise<string[]> {
+  const skipped: string[] = [];
+  let firstError: unknown;
   for (const relative of paths) {
     const source = path.join(group.sourceRoot, relative);
     const stat = await fs.promises.lstat(source).catch(() => null);
-    if (stat) {
-      const recovered = path.join(recoveryDir, relative);
+    if (!stat) continue;
+    const recovered = path.join(recoveryDir, relative);
+    try {
       await fs.promises.mkdir(path.dirname(recovered), { recursive: true });
       try {
         await fs.promises.rename(source, recovered);
@@ -341,36 +407,68 @@ async function restorePreApplyState(
         });
         await fs.promises.rm(source, { recursive: true, force: true });
       }
-    }
-    const entry = (
-      await git(["ls-tree", parentCommit, "--", relative], {
-        cwd: group.sourceRoot,
-      })
-    ).stdout.trim();
-    if (!entry) continue;
-    const match = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(entry);
-    if (!match) continue;
-    const [, mode, kind, sha] = match;
-    if (kind === "tree") {
-      await fs.promises.mkdir(source, { recursive: true });
-      continue;
-    }
-    if (kind !== "blob") continue;
-    const content = (
-      await git(["cat-file", "blob", sha!], {
-        cwd: group.sourceRoot,
-        buffer: true,
-      })
-    ).stdoutBuffer;
-    await fs.promises.mkdir(path.dirname(source), { recursive: true });
-    if (mode === "120000") {
-      await fs.promises.symlink(content.toString("utf8"), source);
-    } else {
-      await fs.promises.writeFile(source, content, {
-        mode: mode === "100755" ? 0o755 : 0o644,
-      });
+    } catch (error) {
+      firstError ??= error;
     }
   }
+  for (const relative of paths) {
+    try {
+      // Only restore paths still holding the verified pre-apply state:
+      // anything else changed after verification and must not be rolled
+      // back to the older snapshot. Created paths (no parent blob) are
+      // restored only when still absent; deleted paths only when still
+      // matching the parent.
+      const parentEntry = (
+        await git(["ls-tree", proposal.parent, "--", relative], {
+          cwd: group.sourceRoot,
+        })
+      ).stdout.trim();
+      const parentMatch = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(parentEntry);
+      const parentSha =
+        parentMatch?.[3] !== undefined && parentMatch[2] === "blob"
+          ? parentMatch[3]
+          : undefined;
+      const recoveredBlob = await worktreeBlob(recoveryDir, relative);
+      const expected =
+        parentSha === undefined
+          ? undefined
+          : (proposal.expectedBlobs.get(relative) ?? parentSha);
+      const stillPristine =
+        parentSha === undefined
+          ? recoveredBlob === undefined
+          : recoveredBlob === expected;
+      if (!stillPristine) {
+        skipped.push(relative);
+        continue;
+      }
+      const source = path.join(group.sourceRoot, relative);
+      if (parentMatch === null) continue;
+      const [, mode, kind, sha] = parentMatch;
+      if (kind === "tree") {
+        await fs.promises.mkdir(source, { recursive: true });
+        continue;
+      }
+      if (kind !== "blob") continue;
+      const content = (
+        await git(["cat-file", "blob", sha!], {
+          cwd: group.sourceRoot,
+          buffer: true,
+        })
+      ).stdoutBuffer;
+      await fs.promises.mkdir(path.dirname(source), { recursive: true });
+      if (mode === "120000") {
+        await fs.promises.symlink(content.toString("utf8"), source);
+      } else {
+        await fs.promises.writeFile(source, content, {
+          mode: mode === "100755" ? 0o755 : 0o644,
+        });
+      }
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError !== undefined) throw firstError;
+  return skipped;
 }
 
 /**
@@ -548,6 +646,12 @@ async function collectProposals(
         parent: integratedCommit,
         commit: chainCommit,
         files: proposedFiles,
+        // Snapshot the worker's exact post-run blobs now — the worktree
+        // may already be gone (workerRemoved) and the source may drift
+        // before Phase 2 runs. The source apply verifies each touched
+        // path against this snapshot so recovery restores the pre-apply
+        // content without clobbering unrelated working-tree changes.
+        expectedBlobs: await trackedBlobs(group.sourceRoot, chainCommit),
         workerRemoved,
       });
       integratedCommit = chainCommit;
@@ -678,7 +782,7 @@ async function applyToSource(
       results[proposal.taskIndex] = withIntegration(outcome, {
         status: "applied_unverified",
         proposedFiles: proposal.files,
-        appliedFiles: proposal.files,
+        appliedFiles: [],
         baselineRef: group.baselineRef,
         proposalRef: worker.proposalRef,
         patchPath: worker.patchPath,
@@ -710,8 +814,13 @@ async function applyToSource(
       });
       continue;
     }
-    // Read-only verification: does this proposal's expected pre-state still
-    // match the source? A mismatch is a conflict, never a partial write.
+    // Read-only verification, in both directions: the forward `--check`
+    // catches drift (the source moved under the proposal — a conflict),
+    // and the reverse `--check --reverse` catches a proposal whose change
+    // is already present in the source. The reverse check only runs after
+    // the forward check FAILED — a delta that applies cleanly forward is
+    // by definition not already present, so a passing forward check skips
+    // straight to the write. Both checks are read-only; neither writes.
     try {
       await git(["apply", "--check"], {
         cwd: group.sourceRoot,
@@ -719,6 +828,48 @@ async function applyToSource(
         signal: options.signal,
       });
     } catch (error) {
+      // The change may already be present — e.g. an earlier proposal
+      // already landed an identical change and a later write re-dirtied it
+      // back, or the source already contained it. Writing the delta again
+      // would double-apply it (duplicate lines) while reporting success
+      // for changes that never landed. An aborted reverse check is a
+      // cancellation like the forward one, not drift evidence.
+      let alreadyPresent = false;
+      try {
+        await git(["apply", "--check", "--reverse"], {
+          cwd: group.sourceRoot,
+          input: delta,
+          signal: options.signal,
+        });
+        alreadyPresent = true;
+      } catch {
+        if (options.signal?.aborted || !options.shouldApplySource()) {
+          stopped = true;
+          results[proposal.taskIndex] = withIntegration(outcome, {
+            status: "retained",
+            reason,
+            proposedFiles: proposal.files,
+            appliedFiles: [],
+            baselineRef: group.baselineRef,
+            proposalRef: worker.proposalRef,
+            patchPath: worker.patchPath,
+          });
+          continue;
+        }
+        // Genuinely inapplicable forward AND reverse: real drift below.
+      }
+      if (alreadyPresent) {
+        results[proposal.taskIndex] = withIntegration(outcome, {
+          status: "applied_unverified",
+          proposedFiles: proposal.files,
+          appliedFiles: [],
+          baselineRef: group.baselineRef,
+          proposalRef: worker.proposalRef,
+          patchPath: worker.patchPath,
+          ...(proposal.workerRemoved ? {} : { worktreePath: worker.workerRoot }),
+        });
+        continue;
+      }
       // An aborted or gated check is a cancellation, not drift evidence.
       if (options.signal?.aborted || !options.shouldApplySource()) {
         stopped = true;
@@ -750,6 +901,102 @@ async function applyToSource(
       continue;
     }
 
+    // Verify-before-write: every path this delta touches must still hold
+    // its expected pre-apply content (the chain-parent blob). A path the
+    // user or another process changed after the check is left alone and
+    // the proposal becomes a conflict — overwriting it would silently
+    // erase unrelated working-tree edits, and restoring it from an older
+    // snapshot would do the same.
+    const stalePaths: string[] = [];
+    for (const relative of deltaPaths) {
+      const expected = proposal.expectedBlobs.get(relative);
+      const parentEntry = (
+        await git(["ls-tree", proposal.parent, "--", relative], {
+          cwd: group.sourceRoot,
+        })
+      ).stdout.trim();
+      const parentMatch = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(parentEntry);
+      const parentSha =
+        parentMatch?.[3] !== undefined && parentMatch[2] === "blob"
+          ? parentMatch[3]
+          : undefined;
+      const current = await worktreeBlob(group.sourceRoot, relative);
+      // A path the proposal itself creates has no parent blob: it must
+      // still be absent. A path the proposal deletes has no expected
+      // blob: the deletion must still match the parent.
+      const matches =
+        parentSha === undefined
+          ? current === undefined
+          : expected !== undefined && current === expected
+            ? true
+            : current === parentSha;
+      if (!matches) stalePaths.push(relative);
+    }
+    if (stalePaths.length > 0) {
+      results[proposal.taskIndex] = withIntegration(outcome, {
+        status: "conflict",
+        proposedFiles: proposal.files,
+        appliedFiles: [],
+        conflicts: stalePaths.map((relative) => ({
+          path: relative,
+          reason:
+            "The source tree changed after the baseline was captured; the proposal was retained instead of applied.",
+        })),
+        baselineRef: group.baselineRef,
+        proposalRef: worker.proposalRef,
+        patchPath: worker.patchPath,
+      });
+      continue;
+    }
+
+    // Writability probe: `git apply --check` never touches the files, so
+    // without this a file made read-only after the check fails the real
+    // write mid-way — after earlier paths in the same delta already landed
+    // (partial application), forcing recovery to restore every touched
+    // path from the snapshot and erase unrelated edits. Failing here keeps
+    // the proposal a clean conflict with the source untouched.
+    const unwritable = [] as string[];
+    for (const relative of deltaPaths) {
+      try {
+        await fs.promises.access(
+          path.join(group.sourceRoot, relative),
+          fs.constants.W_OK,
+        );
+      } catch {
+        unwritable.push(relative);
+      }
+    }
+    // A path the proposal creates has nothing to probe — the check is for
+    // existing files the apply must overwrite. Filter to paths present in
+    // the chain parent (created paths are absent there).
+    if (unwritable.length > 0) {
+      const existing = [] as string[];
+      for (const relative of unwritable) {
+        const entry = (
+          await git(["ls-tree", proposal.parent, "--", relative], {
+            cwd: group.sourceRoot,
+          })
+        ).stdout.trim();
+        if (/^\d+ \w+ [0-9a-f]+\t/.test(entry)) existing.push(relative);
+      }
+      if (existing.length > 0) {
+        results[proposal.taskIndex] = withIntegration(outcome, {
+          status: "conflict",
+          proposedFiles: proposal.files,
+          appliedFiles: [],
+          conflicts: existing.map((relative) => ({
+            path: relative,
+            reason:
+              "The file is not writable; the proposal was retained instead of applied.",
+          })),
+          baselineRef: group.baselineRef,
+          proposalRef: worker.proposalRef,
+          patchPath: worker.patchPath,
+        });
+        continue;
+      }
+    }
+
     try {
       await git(["apply", "--binary"], {
         cwd: group.sourceRoot,
@@ -757,24 +1004,36 @@ async function applyToSource(
         signal: options.signal,
       });
     } catch (error) {
-      // The check passed but the write failed mid-way: move whatever the
+      // The checks passed but the write failed mid-way: move whatever the
       // apply left behind into recovery artifacts and restore the expected
-      // pre-apply content from the chain parent.
+      // pre-apply content — but only for paths that still hold the
+      // verified pre-apply state. A path whose content no longer matches
+      // was changed by someone else after verification; restoring it from
+      // the older snapshot would erase that unrelated edit, so it is
+      // left in place and named in the outcome.
       const recoveryDir = path.join(
         group.artifactRoot,
         `failed-apply-${proposal.taskIndex}`,
       );
       let rollbackSucceeded = true;
+      let unrestored: string[] = [];
       try {
-        await restorePreApplyState(
+        unrestored = await restorePreApplyState(
           group,
-          proposal.parent,
+          proposal,
           // Roll back only the paths this delta actually touched — the
           // proposal's file list can include no-ops the merge dropped, and
           // restoring those would clobber unrelated source drift.
           deltaPaths,
           recoveryDir,
         );
+        rollbackSucceeded = unrestored.length === 0;
+        if (!rollbackSucceeded) {
+          log(
+            `isolated apply rollback left ${unrestored.join(", ")} unrestored for task ${proposal.taskIndex}; unrelated edits preserved, recovery artifacts retained`,
+            "",
+          );
+        }
       } catch (rollbackError) {
         rollbackSucceeded = false;
         log(
@@ -806,6 +1065,11 @@ async function applyToSource(
             path: "(source apply)",
             reason: error instanceof Error ? error.message : String(error),
           },
+          ...unrestored.map((relative) => ({
+            path: relative,
+            reason:
+              "The file changed after verification and was left in place; its post-apply content is in the recovery directory.",
+          })),
         ],
         baselineRef: group.baselineRef,
         proposalRef: worker.proposalRef,

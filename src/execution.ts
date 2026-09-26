@@ -649,8 +649,16 @@ export async function runTask(
     hadSideEffects: false,
     quarantined: false,
   };
+  // The wall-clock budget starts when the task leaves the queue (SPEC
+  // "deadlineMs ... beginning after queueing"): runTask is entered only
+  // after pause gates, dependency gates, predecessor waits, and both
+  // concurrency semaphores, so the first Date.now() here is the queue-exit
+  // instant. It must be captured synchronously on entry — an await before
+  // it (e.g. resource-loader reload) would let slow setup eat the budget
+  // and report success past the deadline.
+  const enteredAt = Date.now();
   const deadlineAt =
-    task.deadlineMs !== undefined ? Date.now() + task.deadlineMs : undefined;
+    task.deadlineMs !== undefined ? enteredAt + task.deadlineMs : undefined;
   const deadlineExpired = (): AttemptResult => ({
     status: "failed",
     output: last.output,

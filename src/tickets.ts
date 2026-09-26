@@ -299,11 +299,23 @@ export class TicketStore {
     };
     // Isolated batches settle only after reconciliation has annotated the
     // outcomes — a terminal ticket must already show applied/conflict state.
+    // The ticket must be registered before the creation write so a
+    // storage-initialization or save failure can bind the operationId's
+    // duplicate-protection fingerprint to the original failure instead of
+    // forgetting it (a retry after fixing storage must return the
+    // failure, not start new work). Registration-before-write is safe:
+    // runDispatchPipeline removes the ticket when preparation fails, so
+    // a failed write never leaves a phantom live ticket behind.
     if (!this.journal) throw new Error("Ticket storage not initialized; async dispatch cannot start.");
-    // Creation must be durable before a worker can start.
-    this.journal.save(record);
     const rt = this.runtime(options.holdSettlement);
     this.tickets.set(record.id, { record, rt });
+    try {
+      // Creation must be durable before a worker can start.
+      this.journal.save(record);
+    } catch (error) {
+      this.tickets.delete(record.id);
+      throw error;
+    }
     this.changed();
     return record;
   }
@@ -440,9 +452,11 @@ export class TicketStore {
 
   /**
    * Record the session-tree origin at dispatch: the leaf id (null for the
-   * root) and the navigation epoch, captured by the dispatcher right after
-   * creation so delivery diagnostics can be reconstructed from the ticket
-   * alone. The sole write path for the origin fields.
+   * root) and the navigation epoch, latched in execute's synchronous prefix
+   * (before any await) so a mid-preparation navigation cannot restamp it
+   * and wake the wrong branch on settlement. Delivery diagnostics can be
+   * reconstructed from the ticket alone. The sole write path for the origin
+   * fields.
    */
   recordOrigin(
     ticket: Ticket,

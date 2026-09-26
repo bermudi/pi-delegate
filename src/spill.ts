@@ -145,8 +145,11 @@ export function renderOutputForLLM(
   label: string,
   bounds: OutputBounds,
 ): string {
-  // Skip empty / placeholder — nothing to spill, nothing to bound.
-  if (!output || !output.trim() || output === "(no output)") return output;
+  // Skip empty / placeholder — nothing to spill, nothing to bound. The
+  // check is bare-empty plus the exact placeholder: a long whitespace-only
+  // output must still spill (LLM context is consumed by chars, not by
+  // visible content), so it is never exempted via trim().
+  if (!output || output === "(no output)") return output;
 
   const decision = decideSpill(output, bounds);
   if (!decision.spill) return output;
@@ -171,7 +174,7 @@ export function renderOutputForPoll(
   output: string,
   bounds: OutputBounds,
 ): string {
-  if (!output || !output.trim() || output === "(no output)") return output;
+  if (!output || output === "(no output)") return output;
   if (output.length <= bounds.spillTailChars) return output;
   const tail = tailOf(output, bounds.spillTailChars);
   const completionNote =
