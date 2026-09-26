@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
+  chmodSync,
+  statSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -794,6 +797,295 @@ describe("delegate workspace and shared-write contract", () => {
       expect(result.text).toMatch(/already present/i);
     },
   );
+
+  test("failed git apply restores actual pre-apply mode and content without erasing a concurrent edit", async () => {
+    // Regression: an injected source apply failure after a partial write must
+    // restore actual working-tree bytes/mode, not the synthetic Git parent.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dir = tempDir();
+    gitInit(dir);
+    writeFileSync(join(dir, "a.txt"), "base\n");
+    writeFileSync(join(dir, "b.txt"), "base\n");
+    execSync("git add -A && git commit -qm base", { cwd: dir });
+    chmodSync(join(dir, "a.txt"), 0o600);
+    const shimDir = tempDir();
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    // Only the source write is faulted; preparation, merge, checks and
+    // recovery still use the real Git executable.
+    writeFileSync(join(shimDir, "git"), `#!/bin/sh
+if [ "$PWD" = '${dir}' ] && [ "$1" = apply ] && [ "$2" = --binary ]; then
+  printf 'worker\n' > a.txt
+  printf 'human-mid-apply\n' > b.txt
+  exit 1
+fi
+exec '${realGit}' "$@"
+`, { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    try {
+      process.env.PATH = `${shimDir}:${previousPath}`;
+      const write: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("DONE")
+          : fauxAssistantMessage([
+              fauxToolCall("write", { path: "a.txt", content: "worker\n" }),
+              fauxToolCall("write", { path: "b.txt", content: "worker\n" }),
+            ]);
+      subagents.respond([write, write, write]);
+      const result = await callDelegate(session, { tasks: [{ prompt: "edit both", cwd: dir, workspace: "isolated", tools: ["write"] }] });
+      expect(result.text).toMatch(/apply_failed/);
+      expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("base\n");
+      expect(statSync(join(dir, "a.txt")).mode & 0o777).toBe(0o600);
+      expect(readFileSync(join(dir, "b.txt"), "utf8")).toBe("human-mid-apply\n");
+      expect(result.text).toMatch(/b\.txt/);
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
+  test("a partial source apply that deleted a file restores it on failure", async () => {
+    // A completed deletion is absent, not a modified blob. A later failing
+    // path in the same patch must not leave that deletion in the source.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dir = tempDir();
+    gitInit(dir);
+    writeFileSync(join(dir, "a.txt"), "original\n");
+    writeFileSync(join(dir, "b.txt"), "original\n");
+    execSync("git add -A && git commit -qm base", { cwd: dir });
+    const shimDir = tempDir();
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(shimDir, "git"), `#!/bin/sh
+if [ "$PWD" = '${dir}' ] && [ "$1" = apply ] && [ "$2" = --binary ]; then
+  rm a.txt
+  exit 1
+fi
+exec '${realGit}' "$@"
+`, { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    try {
+      process.env.PATH = `${shimDir}:${previousPath}`;
+      const write: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("DONE")
+          : fauxAssistantMessage([
+              fauxToolCall("bash", { command: "rm a.txt" }),
+              fauxToolCall("write", { path: "b.txt", content: "worker\n" }),
+            ]);
+      subagents.respond([write, write]);
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "delete and edit", cwd: dir, workspace: "isolated", tools: ["bash", "write"] }],
+      });
+      expect(result.text).toMatch(/apply_failed/);
+      expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("original\n");
+      expect(readFileSync(join(dir, "b.txt"), "utf8")).toBe("original\n");
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
+  test("an empty duplicate edge cannot unblock a dependent when the source lacks its effects", async () => {
+    // Regression of v1 isolated-workspace identical proposal scenario:
+    // even an empty chain edge needs verification against the live source.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dir = tempDir();
+    gitInit(dir);
+    writeFileSync(join(dir, "same.txt"), "base\n");
+    execSync("git add -A && git commit -qm base", { cwd: dir });
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let dependentRan = false;
+    const write: FauxResponseFactory = async (context) => {
+      if (context.messages.some((m) => m.role === "toolResult")) return fauxAssistantMessage("DONE");
+      if (JSON.stringify(context.messages).includes("dependent marker")) {
+        dependentRan = true;
+        return fauxAssistantMessage("dependent ran");
+      }
+      started();
+      await gate;
+      return fauxAssistantMessage([fauxToolCall("write", { path: "same.txt", content: "worker\n" })]);
+    };
+    subagents.respond(Array(6).fill(write));
+    const otherDir = tempDir();
+    const dispatched = callDelegate(session, { tasks: [
+      { id: "first", prompt: "edit same", cwd: dir, workspace: "isolated", tools: ["write"] },
+      { id: "second", prompt: "edit same again", cwd: dir, workspace: "isolated", tools: ["write"] },
+      { id: "after", prompt: "dependent marker", cwd: otherDir, dependsOn: ["second"], tools: ["write"] },
+    ] });
+    await ready;
+    writeFileSync(join(dir, "same.txt"), "human\n");
+    release();
+    const result = await dispatched;
+    expect(result.text).toMatch(/conflict/);
+    expect(result.text).toMatch(/blocked/);
+    expect(dependentRan).toBe(false);
+    expect(readFileSync(join(dir, "same.txt"), "utf8")).toBe("human\n");
+  });
+
+  test("a partially duplicate proposal cannot claim a reverse-check success", async () => {
+    // Regression: the second worker repeats a conflicting A edit and adds B.
+    // B is already present in source, but A never applied; reverse --check on
+    // the nonempty chain edge B alone cannot establish full success.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dir = tempDir();
+    gitInit(dir);
+    writeFileSync(join(dir, "a.txt"), "base\n");
+    writeFileSync(join(dir, "b.txt"), "base\n");
+    execSync("git add -A && git commit -qm base", { cwd: dir });
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const respond: FauxResponseFactory = async (context) => {
+      if (context.messages.some((m) => m.role === "toolResult")) return fauxAssistantMessage("DONE");
+      started();
+      await gate;
+      const second = JSON.stringify(context.messages).includes("second proposal");
+      return fauxAssistantMessage([
+        fauxToolCall("write", { path: "a.txt", content: "worker\n" }),
+        ...(second ? [fauxToolCall("write", { path: "b.txt", content: "worker-b\n" })] : []),
+      ]);
+    };
+    subagents.respond(Array(6).fill(respond));
+    const dispatched = callDelegate(session, { tasks: [
+      { prompt: "first proposal", cwd: dir, workspace: "isolated", tools: ["write"] },
+      { prompt: "second proposal", cwd: dir, workspace: "isolated", tools: ["write"] },
+    ] });
+    await ready;
+    writeFileSync(join(dir, "a.txt"), "human\n");
+    writeFileSync(join(dir, "b.txt"), "worker-b\n");
+    release();
+    const result = await dispatched;
+    expect(result.text).toMatch(/conflict/);
+    expect(result.text).not.toMatch(/applied_unverified/);
+    expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("human\n");
+    expect(readFileSync(join(dir, "b.txt"), "utf8")).toBe("worker-b\n");
+  });
+
+  test("symlink source comparisons hash link text rather than its target", async () => {
+    // Regression: Git's symlink blob is the link text, not the file it names.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dir = tempDir();
+    gitInit(dir);
+    writeFileSync(join(dir, "target.txt"), "target bytes\n");
+    symlinkSync("target.txt", join(dir, "link.txt"));
+    execSync("git add -A && git commit -qm links", { cwd: dir });
+    const write: FauxResponseFactory = async (context) =>
+      context.messages.some((m) => m.role === "toolResult")
+        ? fauxAssistantMessage("DONE")
+        : fauxAssistantMessage([fauxToolCall("bash", { command: "ln -sfn next.txt link.txt" })]);
+    subagents.respond([write, write]);
+    const result = await callDelegate(session, { tasks: [{ prompt: "update symlink", cwd: dir, workspace: "isolated", tools: ["bash"] }] });
+    expect(result.text).toMatch(/applied_unverified/);
+    expect(readlinkSync(join(dir, "link.txt"))).toBe("next.txt");
+  });
+
+  test("a file can be replaced by a directory in an isolated proposal", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dir = tempDir();
+    gitInit(dir);
+    writeFileSync(join(dir, "a"), "old file\n");
+    execSync("git add -A && git commit -qm base", { cwd: dir });
+    const step: FauxResponseFactory = async (context) =>
+      context.messages.some((m) => m.role === "toolResult")
+        ? fauxAssistantMessage("DONE")
+        : fauxAssistantMessage([
+            fauxToolCall("bash", { command: "rm a && mkdir a && printf 'new file\\n' > a/new" }),
+          ]);
+    subagents.respond([step, step]);
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "replace file with directory", cwd: dir, workspace: "isolated", tools: ["bash"] }],
+    });
+    expect(result.text).toContain("applied_unverified");
+    expect(readFileSync(join(dir, "a/new"), "utf8")).toBe("new file\n");
+  });
+
+  test("a directory can be replaced by a file in an isolated proposal", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dir = tempDir();
+    gitInit(dir);
+    mkdirSync(join(dir, "a"));
+    writeFileSync(join(dir, "a/old"), "old file\n");
+    execSync("git add -A && git commit -qm base", { cwd: dir });
+    const step: FauxResponseFactory = async (context) =>
+      context.messages.some((m) => m.role === "toolResult")
+        ? fauxAssistantMessage("DONE")
+        : fauxAssistantMessage([
+            fauxToolCall("bash", { command: "rm -r a && printf 'new file\\n' > a" }),
+          ]);
+    subagents.respond([step, step]);
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "replace directory with file", cwd: dir, workspace: "isolated", tools: ["bash"] }],
+    });
+    expect(result.text).toContain("applied_unverified");
+    expect(readFileSync(join(dir, "a"), "utf8")).toBe("new file\n");
+  });
+
+  test("a failed file-to-directory apply restores the original file", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dir = tempDir();
+    gitInit(dir);
+    writeFileSync(join(dir, "a"), "original\n");
+    execSync("git add -A && git commit -qm base", { cwd: dir });
+    const shimDir = tempDir();
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(shimDir, "git"), `#!/bin/sh
+if [ "$PWD" = '${dir}' ] && [ "$1" = apply ] && [ "$2" = --binary ]; then
+  rm a
+  mkdir a
+  printf 'new file\\n' > a/new
+  exit 1
+fi
+exec '${realGit}' "$@"
+`, { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    try {
+      process.env.PATH = `${shimDir}:${previousPath}`;
+      const step: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("DONE")
+          : fauxAssistantMessage([
+              fauxToolCall("bash", { command: "rm a && mkdir a && printf 'new file\\n' > a/new" }),
+            ]);
+      subagents.respond([step, step]);
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "replace file with directory", cwd: dir, workspace: "isolated", tools: ["bash"] }],
+      });
+      expect(result.text).toContain("apply_failed");
+      expect(readFileSync(join(dir, "a"), "utf8")).toBe("original\n");
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
+  test("symlink proposals work in a SHA-256 Git repository", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dir = tempDir();
+    execSync("git init -q --object-format=sha256 && git config user.email t@t && git config user.name t", { cwd: dir });
+    writeFileSync(join(dir, "old.txt"), "old\n");
+    writeFileSync(join(dir, "new.txt"), "new\n");
+    symlinkSync("old.txt", join(dir, "link"));
+    execSync("git add -A && git commit -qm base", { cwd: dir });
+    const step: FauxResponseFactory = async (context) =>
+      context.messages.some((m) => m.role === "toolResult")
+        ? fauxAssistantMessage("DONE")
+        : fauxAssistantMessage([fauxToolCall("bash", { command: "ln -sfn new.txt link" })]);
+    subagents.respond([step, step]);
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "retarget link", cwd: dir, workspace: "isolated", tools: ["bash"] }],
+    });
+    expect(result.text).toContain("applied_unverified");
+    expect(readlinkSync(join(dir, "link"))).toBe("new.txt");
+  });
 
   test(
     "a conflicting isolated proposal is retained, not silently applied or lost",

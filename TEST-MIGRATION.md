@@ -52,6 +52,19 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
 
 ## Coverage map
 
+### Dispatch preflight races
+
+- **Contract:** An explicit deadline covers resource loading after a task
+  leaves the queue; shutdown cannot start a worker from a dispatch still
+  resolving its tasks.
+- **Covered now:** `tests/regression/preflight-races.test.ts` delays the
+  child resource loader beyond the deadline (including one that remains
+  blocked) and races shutdown against both sync and async writer-scope
+  resolution through the registered tool.
+- **Provenance:** v2 bug review: slow setup previously launched a child
+  after its deadline, and shutdown during resolution missed a ticket created
+  after the shutdown snapshot.
+
 ### Restart visibility and provider limits (#26)
 
 - **Contract:** ticket creation and outcomes survive a cold extension instance;
@@ -803,6 +816,14 @@ A fresh-context review pass then hardened the lifecycle edges:
   — `git apply` rejects empty input.
 - Apply rollback restores only the delta's touched paths, not the
   proposal's whole file list.
+- Isolated regression coverage in `tests/contract/workspaces.test.ts` now
+  faults the source `git apply` after a partial write (restoring actual
+  pre-apply bytes and mode while leaving an intervening human edit in place),
+  verifies empty and partially duplicate proposals against the live source
+  before reporting success (including dependent blocking), and exercises
+  symlink link-text blob comparisons. These are public-tool faux-provider
+  regressions of the v1 isolated-workspace ordered apply/conflict/duplicate
+  scenarios, not tests of private reconciliation helpers.
 - The artifact root is excluded from baseline snapshots when it lives
   inside the source tree, so retained artifacts and live worktrees cannot
   leak into a baseline or a later proposal.

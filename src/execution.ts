@@ -684,10 +684,37 @@ export async function runTask(
       loaderPromise = loader.reload().then(() => loader);
       loaders.set(key, loaderPromise);
     }
-    const loader = await Promise.race([
-      loaderPromise,
-      abortedSignal(controls.signal).then(() => undefined),
-    ]);
+    // A stalled resource loader must not hold a task past its explicit
+    // deadline. Race the remaining wall budget as well as parent abort;
+    // no child session exists yet, so nothing needs quiescence confirmation.
+    let loaderDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const loaderDeadline = deadlineAt === undefined
+      ? undefined
+      : new Promise<"deadline">((resolve) => {
+          loaderDeadlineTimer = setTimeout(
+            () => resolve("deadline"),
+            Math.max(0, deadlineAt - Date.now()),
+          );
+        });
+    let loaded: DefaultResourceLoader | "deadline" | undefined;
+    try {
+      loaded = await Promise.race([
+        loaderPromise,
+        abortedSignal(controls.signal).then(() => undefined),
+        ...(loaderDeadline ? [loaderDeadline] : []),
+      ]);
+    } finally {
+      if (loaderDeadlineTimer !== undefined) clearTimeout(loaderDeadlineTimer);
+    }
+    if (loaded === "deadline") {
+      // The losing reload may fail later; it no longer has a caller.
+      void loaderPromise.catch(() => undefined);
+      last = controls.isAborted()
+        ? { status: "cancelled", hadSideEffects: false, quarantined: last.quarantined }
+        : deadlineExpired();
+      break;
+    }
+    const loader = loaded;
     if (loader === undefined) {
       void loaderPromise.catch(() => undefined);
       last = {
@@ -695,6 +722,17 @@ export async function runTask(
         hadSideEffects: false,
         quarantined: last.quarantined,
       };
+      break;
+    }
+    // Resource loading is part of the post-queue wall-clock budget. The
+    // timer below only protects a live TaskExecution; if loading consumed
+    // the whole budget, do not create (much less prompt) a late worker.
+    if (controls.isAborted()) {
+      last = { status: "cancelled", hadSideEffects: false, quarantined: last.quarantined };
+      break;
+    }
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+      last = deadlineExpired();
       break;
     }
 

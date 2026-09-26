@@ -1081,6 +1081,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
         catalog.globalNames,
       );
       const tasks = await resolveTasks(requestedTasks, env, config, catalog);
+      // Shutdown may have begun while resolveTasks awaited a Git scope probe.
+      // Neither a pre-ticket async call nor a pre-admission sync call may
+      // start a worker after shutdown's snapshot of live work.
+      if (shuttingDown) {
+        throw new Error(
+          "Delegate shut down while this dispatch was preparing; no worker was started.",
+        );
+      }
       sessions.validateReuse(tasks);
       ticket = createTicket?.(tasks, relabel, config);
       let owner = ticket?.id;
