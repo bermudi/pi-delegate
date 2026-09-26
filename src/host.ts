@@ -24,6 +24,7 @@ import {
   CHILD_TOOLS,
   expandTools,
   isWriter,
+  SUBAGENT_FRAMING,
   type ProfileCatalog,
 } from "./profiles.ts";
 import { configPathOf, configuredModelFor, type DelegateConfig } from "./config.ts";
@@ -56,11 +57,32 @@ export function parentModelRuntime(ctx: ExtensionContext): ModelRuntime {
 }
 
 /** Everything task resolution and child construction need from the host. */
+/** The parent's user-authored prompt inputs, captured at each turn start. */
+export interface ParentPromptInputs {
+  readonly customPrompt: string | undefined;
+  readonly appendSystemPrompt: string | undefined;
+  /** An extension force-replaced the parent's prompt wholesale. */
+  readonly forced: boolean;
+}
+
+/**
+ * Source for the parent's prompt inputs. `inputs()` returns the latest
+ * captured values (undefined before the first turn — impossible during a
+ * dispatch, but defensive); `warnForcedInheritanceSkip()` logs once per
+ * extension instance when composition must skip inheritance because the
+ * parent's prompt was force-replaced.
+ */
+export interface ParentPromptService {
+  inputs(): ParentPromptInputs | undefined;
+  warnForcedInheritanceSkip(): void;
+}
+
 export interface HostEnvironment {
   readonly ctx: ExtensionContext;
   readonly modelRuntime: ModelRuntime;
   readonly agentDir: string;
   readonly getActiveTools: () => readonly string[];
+  readonly parentPrompt: ParentPromptService;
 }
 
 /**
@@ -72,12 +94,14 @@ export function hostEnvironment(
   ctx: ExtensionContext,
   agentDir: string,
   getActiveTools: () => readonly string[],
+  parentPrompt: ParentPromptService,
 ): HostEnvironment {
   return {
     ctx,
     modelRuntime: parentModelRuntime(ctx),
     agentDir,
     getActiveTools,
+    parentPrompt,
   };
 }
 
@@ -308,6 +332,37 @@ export async function resolveTasks(
 
     const prompt = task.prompt ?? (task.resumeFrom ? RESUME_DEFAULT_PROMPT : "");
 
+    // Child base prompt (SPEC "Child base prompt"). Authored text — an
+    // explicit task systemPrompt or a Markdown profile body — is used
+    // verbatim with nothing appended. Everything else (inline tasks and
+    // built-in profiles) composes: the parent's user-authored prompt inputs
+    // (custom base prompt replacing the stock prefix, plus user-appended
+    // text), the built-in role line, and the fixed framing. Extension-
+    // contributed sections, guidelines, and tool documentation are never
+    // inherited — the structured prompt inputs expose only the user-authored
+    // fields here, and the child session builds tool docs from its own
+    // inventory. A force-replaced parent prompt disables inheritance.
+    const authoredPrompt = task.systemPrompt ?? profile?.systemPrompt;
+    let systemPrompt: string | undefined;
+    const promptAppend: string[] = [];
+    if (authoredPrompt !== undefined) {
+      systemPrompt = authoredPrompt;
+    } else {
+      const parentInputs = env.parentPrompt.inputs();
+      if (parentInputs?.forced) {
+        env.parentPrompt.warnForcedInheritanceSkip();
+      } else if (parentInputs !== undefined) {
+        if (parentInputs.customPrompt?.trim()) systemPrompt = parentInputs.customPrompt;
+        const parentAppend = parentInputs.appendSystemPrompt?.trim()
+          ? parentInputs.appendSystemPrompt
+          : undefined;
+        if (parentAppend !== undefined) promptAppend.push(parentAppend);
+      }
+      const role = profile?.role;
+      if (role !== undefined) promptAppend.push(role);
+      promptAppend.push(SUBAGENT_FRAMING);
+    }
+
     resolved.push({
       index,
       id: task.id ?? `task-${index + 1}`,
@@ -317,7 +372,8 @@ export async function resolveTasks(
       model,
       thinking,
       tools,
-      systemPrompt: task.systemPrompt ?? profile?.systemPrompt,
+      systemPrompt,
+      appendSystemPrompt: promptAppend,
       sessionId: task.sessionId,
       resumeFrom: task.resumeFrom,
       deadlineMs: task.deadlineMs,
@@ -408,6 +464,9 @@ export function createSubagentResourceLoader(
     }),
     ...(task.systemPrompt !== undefined
       ? { systemPrompt: task.systemPrompt }
+      : {}),
+    ...(task.appendSystemPrompt.length > 0
+      ? { appendSystemPrompt: [...task.appendSystemPrompt] }
       : {}),
   });
 }

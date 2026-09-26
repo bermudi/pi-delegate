@@ -30,7 +30,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   bypasses remain rejected (all of them — see the breaking-change entry
   below).
 - `default`, `scout`, `coder`, and `reviewer` semantics; task-over-profile
-  precedence; Markdown discovery order and first-definition wins.
+  precedence; Markdown discovery order and first-definition wins — subject to
+  the model-selection, parent-history, and composed-child-base-prompt
+  departures below.
 - User-global `delegate.json` configuration. Project files do not become
   delegate configuration.
 - Parent model inheritance and project instructions and extension isolation, with children
@@ -130,6 +132,24 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   per-task duration column NULL.
 
 ## v2 deliberate breaking changes
+
+- **Child base prompt is composed, not precedence-chosen (#33, user decision
+  2026-09-26).** V1 picked one prompt by precedence — task, then agent, then a
+  string-sanitized copy of the parent's assembled prompt, then stock — so the
+  built-in role prompts beat the parent persona, and sanitization was string
+  surgery on the merged prompt. V2 composes: children without an authored
+  prompt (inline tasks and all built-in profiles) inherit the parent's
+  user-authored prompt inputs — custom base prompt and user-appended text,
+  taken from Pi's structured prompt options, never the assembled string —
+  followed by the built-in role line and a fixed subagent framing appendix
+  that carries no model identity. Extension-contributed sections, guidelines,
+  and tool documentation are never inherited, and an extension-forced parent
+  prompt disables inheritance with a logged skip. Authored prompts (explicit
+  task `systemPrompt`, Markdown profile bodies) are used verbatim with nothing
+  appended. Migration: none for callers — `default` now genuinely mirrors the
+  parent persona, and built-in children keep their role while also honoring
+  parent conventions; users who relied on built-in role prompts *overriding*
+  parent persona must switch to a named Markdown profile.
 
 - **Parent conversation sharing removed (#14, user decision).** No parent
   transcript extraction or injection remains. The task `context` field is no

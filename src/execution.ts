@@ -669,7 +669,7 @@ export async function runTask(
       last = deadlineExpired();
       break;
     }
-    const key = JSON.stringify([task.cwd, task.systemPrompt ?? null]);
+    const key = JSON.stringify([task.cwd, task.systemPrompt ?? null, task.appendSystemPrompt]);
     let loaderPromise = loaders.get(key);
     if (!loaderPromise) {
       const loader = createSubagentResourceLoader(task, controls.env);

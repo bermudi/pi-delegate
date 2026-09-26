@@ -33,12 +33,15 @@ export async function openDelegateBoundary(
     mockUI?: MockUIConfig;
     /** Extensions loaded before delegate.ts (fault injection at the host boundary). */
     leadingExtensions?: string[];
+    /** Parent session custom base prompt (the user-authored persona channel). */
+    systemPrompt?: string;
   } = {},
 ): Promise<TestSession> {
   const session = await createTestSession({
     extensions: [...(options.leadingExtensions ?? []), extensionPath],
     propagateErrors: false,
     mockUI: options.mockUI,
+    systemPrompt: options.systemPrompt,
   });
   // Model the host session-store layout without changing process.env or
   // enabling parent transcript persistence. The directory getter belongs to

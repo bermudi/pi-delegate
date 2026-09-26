@@ -994,6 +994,26 @@ dispatch; same-named files in one directory resolve in filename order
 the manual's profile listing is silent and does not spend the session's
 warn-once budget (the first dispatch after help still warns).
 
+## 2026-09-26 — composed child base prompt (issue #33)
+
+New live tests in `tests/contract/child-prompt.test.ts` (v1 evidence:
+`agents.ts` `buildSubagentSystemPrompt` / `sanitizeParentToolInventory`,
+redesigned per user decision — see V1-V2-MAP 3a): an inline child inherits
+the parent's custom persona and receives the fixed subagent framing; a
+stock parent still frames the child; built-in role lines (scout, coder)
+compose *under* the parent persona rather than beating it (deliberate
+divergence from v1 precedence, recorded in COMPATIBILITY); an explicit
+task `systemPrompt` and a Markdown profile body are verbatim with no
+framing; extension-contributed guidelines/sections (injected by a leading
+fault extension mutating `before_agent_start` prompt options) are never
+inherited; a force-replaced parent prompt skips inheritance with one
+logged warning. All assertions observe the child's provider-facing system
+message (content + sections). The harness parent's custom persona comes
+from `openDelegateBoundary({ systemPrompt })` (forwarded to
+`createTestSession`); prompt-channel fault injection lives in
+`tests/support/prompt-extension-content-fault.ts` and
+`tests/support/forced-prompt-fault.ts`.
+
 ## Next contract slices
 
 Done: mode exclusivity and validation failures; batch-before-start

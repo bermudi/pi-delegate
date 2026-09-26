@@ -67,6 +67,7 @@ These are decided, recorded, and carry migration guidance. No action needed.
 | Feature | Authority | v2 status |
 | --- | --- | --- |
 | Named Markdown agent profiles | SPEC + COMPATIBILITY preserve lists; issue #7 | **Shipped** — `discoverProfiles()` reads `<project>/.pi/agents` then `<agentDir>/agents`, first definition wins, built-ins win collisions; frontmatter `model`/`thinking`/`tools`/body honored. Narrower than v1: no `.claude/agents`, no `~/.agents`, no built-in override (COMPATIBILITY). |
+| `default`-profile sanitized base-prompt mirroring | SPEC (pre-2026-09-26) promised it; code used Pi's stock prompt | **Resolved 2026-09-26, redesigned** (issue #33, user decision): child base prompts are now *composed* — the parent's user-authored prompt inputs (custom base prompt + user-appended text, read from Pi's structured prompt options, never the assembled string) + the built-in role line + a fixed subagent framing with no model identity. Inline tasks and all built-ins compose; authored prompts (task `systemPrompt`, Markdown bodies) stay verbatim; extension-contributed prompt content is never inherited; a force-replaced parent prompt skips inheritance with a logged warning. Contract-tested in `tests/contract/child-prompt.test.ts`. |
 | `allowUnsafeSharedWrites` operator bypass | was `INVARIANTS.md` "operator-only unsafe bypass … visible warning" | **Decided out 2026-09-21** (user decision): INVARIANTS now forbids a bypass; COMPATIBILITY records the breaking change. |
 
 This bypass *is* the scoped "camp 4" door (share-the-tree, accept the risk,

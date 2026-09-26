@@ -45,30 +45,50 @@ export interface AgentProfile {
   /** File the profile was defined in, for error messages. */
   readonly source?: string;
   readonly systemPrompt: string | undefined;
+  /**
+   * Built-in role line. Unlike an authored `systemPrompt`, a role does not
+   * replace the child's base prompt: it is composed under the parent's
+   * inherited user-authored prompt inputs and the fixed subagent framing
+   * (SPEC "Child base prompt").
+   */
+  readonly role?: string;
 }
+
+/**
+ * The fixed subagent framing appended to every composed child base prompt
+ * (inline tasks and built-in profiles). Authored prompts — an explicit task
+ * `systemPrompt` or a Markdown profile body — never receive it. Carries no
+ * parent identity: never a model name.
+ */
+export const SUBAGENT_FRAMING =
+  "You are a subagent spawned by the delegate extension on behalf of a parent " +
+  "session. No user is watching this session and questions cannot be asked; " +
+  "your final message is the only result returned to the caller. Complete the " +
+  "task in your brief, then stop. Use only the tools provided.";
 
 const BUILTIN_PROFILES: Record<string, Omit<AgentProfile, "tools" | "name"> & { tools?: readonly string[] }> = {
   default: {
-    // Mirrors the parent's model, thinking, and active tools at resolution.
+    // Mirrors the parent's model, thinking, and active tools at resolution;
+    // its base prompt composes from the parent's user-authored inputs.
     thinking: undefined,
     systemPrompt: undefined,
   },
   scout: {
     tools: TOOL_GROUPS.ro,
     thinking: undefined,
-    systemPrompt:
-      "You are a read-only investigation subagent. Report findings precisely; do not modify files.",
+    systemPrompt: undefined,
+    role: "You are a read-only investigation subagent. Report findings precisely; do not modify files.",
   },
   coder: {
     thinking: undefined,
-    systemPrompt:
-      "You are an implementation subagent working directly in the source tree.",
+    systemPrompt: undefined,
+    role: "You are an implementation subagent working directly in the source tree.",
   },
   reviewer: {
     tools: TOOL_GROUPS.ro,
     thinking: undefined,
-    systemPrompt:
-      "You are a code-review subagent. Inspect the tree and report concrete findings.",
+    systemPrompt: undefined,
+    role: "You are a code-review subagent. Inspect the tree and report concrete findings.",
   },
 };
 

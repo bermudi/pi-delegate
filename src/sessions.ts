@@ -21,6 +21,7 @@ interface FrozenSessionConfig {
   readonly thinking: string | undefined;
   readonly model: string;
   readonly systemPrompt: string | undefined;
+  readonly appendSystemPrompt: readonly string[];
 }
 
 function frozenConfig(task: ResolvedTask): FrozenSessionConfig {
@@ -30,6 +31,7 @@ function frozenConfig(task: ResolvedTask): FrozenSessionConfig {
     thinking: task.thinking,
     model: `${task.model.provider}/${task.model.id}`,
     systemPrompt: task.systemPrompt,
+    appendSystemPrompt: task.appendSystemPrompt,
   };
 }
 
@@ -51,6 +53,9 @@ function mismatches(
   }
   if (frozen.systemPrompt !== actual.systemPrompt) {
     diffs.push("base prompt differs");
+  }
+  if (frozen.appendSystemPrompt.join("\n") !== actual.appendSystemPrompt.join("\n")) {
+    diffs.push("appended prompt text differs");
   }
   if (frozen.tools.join("\n") !== actual.tools.join("\n")) {
     diffs.push(

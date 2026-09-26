@@ -16,7 +16,14 @@ export interface ResolvedTask {
   readonly thinking: ThinkingLevel | undefined;
   /** Expanded built-in tool names for the child session. */
   readonly tools: readonly string[];
+  /**
+   * Base prompt: authored text (task `systemPrompt` or profile body) or the
+   * parent's custom base prompt for composed children; undefined keeps the
+   * stock prefix.
+   */
   readonly systemPrompt: string | undefined;
+  /** Appended prompt text for composed children: parent append, role, framing. */
+  readonly appendSystemPrompt: readonly string[];
   readonly sessionId: string | undefined;
   readonly resumeFrom: string | undefined;
   readonly deadlineMs: number | undefined;

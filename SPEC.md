@@ -41,7 +41,7 @@ A task accepts:
 | `prompt` | Self-contained instruction; optional only when continuing with `resumeFrom` |
 | `agent` | Named profile; omission selects an inline task |
 | `cwd` | Working directory; relative paths resolve from the parent cwd |
-| `systemPrompt` | Base prompt; project context is added separately |
+| `systemPrompt` | Authored base prompt, used verbatim — it replaces the composed child base prompt; project context is added separately |
 | `tools` | Exact capability list; `*` = read/write/edit/bash, `ro` = read/grep/find/ls |
 | `sessionId` | Key for a live reusable session |
 | `resumeFrom` | Absolute `.jsonl` transcript path |
@@ -51,11 +51,34 @@ A task accepts:
 
 Omitting `agent` creates an `inline` task with `*` by default. The built-ins are:
 
-- `default`: mirrors the live parent's model, thinking level, delegatable native
-  tools, and sanitized base prompt.
+- `default`: mirrors the live parent's model, thinking level, and delegatable
+  native tools.
 - `scout`: read-only investigation.
 - `coder`: shared-tree implementation.
 - `reviewer`: shared-tree review by default.
+
+**Child base prompt.** A child without an authored prompt — an inline task or
+any built-in profile — composes its base prompt from the parent's
+user-authored prompt inputs: the parent's custom base prompt (when one
+replaces the stock prefix) and the text the user appended to it.
+Extension-contributed prompt sections and guidelines are never inherited:
+children run extension-free, and inherited extension prose would reference
+tools they do not have. Tool documentation is never inherited either; the
+child's session builds it from the child's own inventory. The composition
+appends the profile's role line (each built-in carries one) and closes with
+the fixed subagent framing:
+
+> You are a subagent spawned by the delegate extension on behalf of a parent
+> session. No user is watching this session and questions cannot be asked;
+> your final message is the only result returned to the caller. Complete the
+> task in your brief, then stop. Use only the tools provided.
+
+The framing carries no parent identity — never a model name. An explicit
+task `systemPrompt` or a Markdown profile body is authored prompt text and
+is used verbatim: no inheritance, no framing appended. When an extension
+has force-replaced the parent's prompt wholesale, inheritance is skipped —
+the child runs on the stock base prompt plus role line and framing — and
+the skip is logged.
 
 If reading the parent's active tools throws and any `default`-profile task
 omits `tools`, the whole sync or async dispatch fails before any child starts.

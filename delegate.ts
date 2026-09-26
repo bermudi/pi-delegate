@@ -9,6 +9,7 @@ import {
   type AgentToolResult,
   type ExtensionAPI,
   type ExtensionContext,
+  type NormalizedBuildSystemPromptOptions,
 } from "@earendil-works/pi-coding-agent";
 import {
   AdmissionController,
@@ -32,6 +33,8 @@ import {
   parentModelRuntime,
   resolveTasks,
   type HostEnvironment,
+  type ParentPromptInputs,
+  type ParentPromptService,
 } from "./src/host.ts";
 import {
   dispatchFingerprint,
@@ -876,7 +879,33 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // Bumped on every observed tree transition — including a vetoed or
   // cancelled navigation attempt, which conservatively downgrades delivery.
   let navigationEpoch = 0;
-  // One "fully quiesced" barrier per live dispatch; shutdown holds until
+  // Owned by this closure: the parent's latest base system-prompt inputs,
+  // captured at each turn start. `before_agent_start` carries the normalized
+  // structured options, which separate the user-authored fields (custom
+  // prompt, appended text) from extension-contributed sections and tool
+  // docs — children inherit only the former (SPEC "Child base prompt").
+  let parentPromptOptions: NormalizedBuildSystemPromptOptions | undefined;
+  let warnedForcedPrompt = false;
+  const parentPrompt: ParentPromptService = {
+    inputs(): ParentPromptInputs | undefined {
+      if (parentPromptOptions === undefined) return undefined;
+      return {
+        customPrompt: parentPromptOptions.customPrompt,
+        appendSystemPrompt: parentPromptOptions.appendSystemPrompt,
+        forced: parentPromptOptions.forceSystemPrompt !== undefined,
+      };
+    },
+    warnForcedInheritanceSkip(): void {
+      if (warnedForcedPrompt) return;
+      warnedForcedPrompt = true;
+      console.warn(
+        "[delegate] The parent's system prompt was force-replaced by an extension; subagents cannot inherit it safely and run on the stock base prompt instead.",
+      );
+    },
+  };
+
+  // Owned by this closure: one "fully quiesced" barrier per live dispatch;
+  // shutdown holds until every one resolves (INVARIANTS "Ticket state").
   // every one resolves (INVARIANTS "Ticket state"). The value is the
   // human-facing name for the shutdown waiting status (COMPATIBILITY
   // "Blocking shutdown" names the tickets): the ticket id for a background
@@ -993,6 +1022,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         ctx,
         agentDirResolution.dir,
         () => api.getActiveTools(),
+        parentPrompt,
       );
       const catalog = discoverProfiles(ctx.cwd, agentDirResolution.dir, {
         warnedPaths: warnedProfilePaths,
@@ -1138,6 +1168,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // every live ticket and proceeds (the store's onChange observer
   // re-syncs the footer), or stay blocks the transition. Headless hosts
   // and throwing dialogs fail open.
+  // Capture the parent's structured prompt inputs at every turn start.
+  // Shallow copy: later handlers mutate the event's object in place, and
+  // the strings we read must be the values observed at this turn's start.
+  api.on("before_agent_start", (event) => {
+    parentPromptOptions = { ...event.systemPromptOptions };
+  });
   api.on("session_before_tree", (_event, ctx) => {
     navigationEpoch += 1;
     return visibility.guardTreeNavigation(ctx, () => {
