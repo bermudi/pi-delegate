@@ -485,7 +485,7 @@ async function restorePreApplyState(
         (current.kind === "file" || current.kind === "link") &&
         (proposed.kind === "file" || proposed.kind === "link") &&
         current.content.equals(proposed.content) &&
-        (current.mode === proposed.mode ||
+        (sameTrackedEntry(current, proposed) ||
           (original.kind !== "absent" && current.mode === original.mode));
       // A partial git apply may already have removed a file that this
       // proposal deletes. Restore its captured pre-apply contents too:
@@ -787,6 +787,46 @@ async function applyToSource(
   const reason = options.retainedReason ?? "Source application was cancelled.";
 
   let stopped = false;
+  // Every read-only verification call below can throw. A failure must not
+  // escape the loop and leave later proposals without an integration
+  // status: record apply_failed honestly, or retained when the failure is
+  // really cancellation.
+  const recordApplyFailure = (
+    proposal: AcceptedProposal,
+    worker: IsolatedWorker,
+    outcome: TaskOutcome,
+    error: unknown,
+  ): void => {
+    if (options.signal?.aborted || !options.shouldApplySource()) {
+      stopped = true;
+      results[proposal.taskIndex] = withIntegration(outcome, {
+        status: "retained",
+        reason,
+        proposedFiles: proposal.files,
+        appliedFiles: [],
+        baselineRef: group.baselineRef,
+        proposalRef: worker.proposalRef,
+        patchPath: worker.patchPath,
+      });
+      return;
+    }
+    results[proposal.taskIndex] = withIntegration(outcome, {
+      status: "apply_failed",
+      proposedFiles: proposal.files,
+      appliedFiles: [],
+      conflicts: [
+        {
+          path: "(source apply)",
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      ],
+      baselineRef: group.baselineRef,
+      proposalRef: worker.proposalRef,
+      patchPath: worker.patchPath,
+      ...(proposal.workerRemoved ? {} : { worktreePath: worker.workerRoot }),
+    });
+  };
+
   for (const proposal of accepted) {
     const worker = workers.get(proposal.taskIndex)!;
     const outcome = results[proposal.taskIndex]!;
@@ -843,7 +883,13 @@ async function applyToSource(
     if (!deltaPaths.length) {
       // A chain edge may be empty because an earlier proposal was identical.
       // That earlier proposal can still have conflicted with source drift.
-      const missing = await missingProposalEffects(group, proposal);
+      let missing: string[];
+      try {
+        missing = await missingProposalEffects(group, proposal);
+      } catch (error) {
+        recordApplyFailure(proposal, worker, outcome, error);
+        continue;
+      }
       if (missing.length) {
         results[proposal.taskIndex] = withIntegration(outcome, {
           status: "conflict", proposedFiles: proposal.files, appliedFiles: [],
@@ -938,7 +984,13 @@ async function applyToSource(
         // Genuinely inapplicable forward AND reverse: real drift below.
       }
       if (alreadyPresent) {
-        const missing = await missingProposalEffects(group, proposal);
+        let missing: string[];
+        try {
+          missing = await missingProposalEffects(group, proposal);
+        } catch (error) {
+          recordApplyFailure(proposal, worker, outcome, error);
+          continue;
+        }
         if (missing.length) {
           results[proposal.taskIndex] = withIntegration(outcome, {
             status: "conflict", proposedFiles: proposal.files, appliedFiles: [],
@@ -995,7 +1047,13 @@ async function applyToSource(
     // proposal) never landed. Files outside this edge must therefore
     // already match the proposal — a fresh proposal touches everything,
     // so this is vacuous for it and only fires on partial duplicates.
-    const missingAfterForward = await missingProposalEffects(group, proposal);
+    let missingAfterForward: string[];
+    try {
+      missingAfterForward = await missingProposalEffects(group, proposal);
+    } catch (error) {
+      recordApplyFailure(proposal, worker, outcome, error);
+      continue;
+    }
     const missingOutsideEdge = missingAfterForward.filter(
       (relative) => !deltaPaths.includes(relative),
     );
@@ -1014,87 +1072,44 @@ async function applyToSource(
     // the proposal becomes a conflict — overwriting it would silently
     // erase unrelated working-tree edits, and restoring it from an older
     // snapshot would do the same.
-    const stalePaths: string[] = [];
-    for (const relative of deltaPaths) {
-      const expected = proposal.expectedBlobs.get(relative);
-      const parentEntry = (
-        await git(["ls-tree", proposal.parent, "--", relative], {
-          cwd: group.sourceRoot,
-        })
-      ).stdout.trim();
-      const parentMatch = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(parentEntry);
-      const parentSha =
-        parentMatch?.[3] !== undefined && parentMatch[2] === "blob"
-          ? parentMatch[3]
-          : undefined;
-      const current = await worktreeBlob(group.sourceRoot, relative);
-      // A path the proposal itself creates has no parent blob: it must
-      // still be absent. A path the proposal deletes has no expected
-      // blob: the deletion must still match the parent.
-      const matches =
-        parentSha === undefined
-          ? current === undefined
-          : expected !== undefined && current === expected
-            ? true
-            : current === parentSha;
-      if (!matches) stalePaths.push(relative);
-    }
-    if (stalePaths.length > 0) {
-      results[proposal.taskIndex] = withIntegration(outcome, {
-        status: "conflict",
-        proposedFiles: proposal.files,
-        appliedFiles: [],
-        conflicts: stalePaths.map((relative) => ({
-          path: relative,
-          reason:
-            "The source tree changed after the baseline was captured; the proposal was retained instead of applied.",
-        })),
-        baselineRef: group.baselineRef,
-        proposalRef: worker.proposalRef,
-        patchPath: worker.patchPath,
-      });
-      continue;
-    }
-
-    // Writability probe: `git apply --check` never touches the files, so
-    // without this a file made read-only after the check fails the real
-    // write mid-way — after earlier paths in the same delta already landed
-    // (partial application), forcing recovery to restore every touched
-    // path from the snapshot and erase unrelated edits. Failing here keeps
-    // the proposal a clean conflict with the source untouched.
-    const unwritable = [] as string[];
-    for (const relative of deltaPaths) {
-      try {
-        await fs.promises.access(
-          path.join(group.sourceRoot, relative),
-          fs.constants.W_OK,
-        );
-      } catch {
-        unwritable.push(relative);
-      }
-    }
-    // A path the proposal creates has nothing to probe — the check is for
-    // existing files the apply must overwrite. Filter to paths present in
-    // the chain parent (created paths are absent there).
-    if (unwritable.length > 0) {
-      const existing = [] as string[];
-      for (const relative of unwritable) {
-        const entry = (
+    const before = new Map<string, SourceEntry>();
+    try {
+      const stalePaths: string[] = [];
+      const createdPaths = new Set<string>();
+      for (const relative of deltaPaths) {
+        const expected = proposal.expectedBlobs.get(relative);
+        const parentEntry = (
           await git(["ls-tree", proposal.parent, "--", relative], {
             cwd: group.sourceRoot,
           })
         ).stdout.trim();
-        if (/^\d+ \w+ [0-9a-f]+\t/.test(entry)) existing.push(relative);
+        const parentMatch = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(parentEntry);
+        const parentSha =
+          parentMatch?.[3] !== undefined && parentMatch[2] === "blob"
+            ? parentMatch[3]
+            : undefined;
+        if (parentSha === undefined) createdPaths.add(relative);
+        const current = await worktreeBlob(group.sourceRoot, relative);
+        // A path the proposal itself creates has no parent blob: it must
+        // still be absent. A path the proposal deletes has no expected
+        // blob: the deletion must still match the parent.
+        const matches =
+          parentSha === undefined
+            ? current === undefined
+            : expected !== undefined && current === expected
+              ? true
+              : current === parentSha;
+        if (!matches) stalePaths.push(relative);
       }
-      if (existing.length > 0) {
+      if (stalePaths.length > 0) {
         results[proposal.taskIndex] = withIntegration(outcome, {
           status: "conflict",
           proposedFiles: proposal.files,
           appliedFiles: [],
-          conflicts: existing.map((relative) => ({
+          conflicts: stalePaths.map((relative) => ({
             path: relative,
             reason:
-              "The file is not writable; the proposal was retained instead of applied.",
+              "The source tree changed after the baseline was captured; the proposal was retained instead of applied.",
           })),
           baselineRef: group.baselineRef,
           proposalRef: worker.proposalRef,
@@ -1102,12 +1117,73 @@ async function applyToSource(
         });
         continue;
       }
-    }
 
-    // Capture the actual working tree, not the synthetic chain parent: it
-    // can contain user edits or modes that Git's patch leaves untouched.
-    const before = new Map<string, SourceEntry>();
-    for (const relative of deltaPaths) before.set(relative, await sourceEntry(group.sourceRoot, relative));
+      // Writability probe: `git apply --check` never touches the files, so
+      // without this a file made read-only after the check fails the real
+      // write mid-way — after earlier paths in the same delta already landed
+      // (partial application), forcing recovery to restore every touched
+      // path from the snapshot and erase unrelated edits. Failing here keeps
+      // the proposal a clean conflict with the source untouched.
+      const unwritable = [] as string[];
+      for (const relative of deltaPaths) {
+        // Creating or deleting a path needs a writable containing
+        // directory, not a writable file — unlink and create are directory
+        // operations. A created path's leading directories may not exist
+        // yet, or may currently be a file the same delta replaces with a
+        // directory; the apply makes them, so the writable directory it
+        // needs is the nearest existing ancestor directory. Other paths
+        // must be writable themselves.
+        const directoryTarget =
+          createdPaths.has(relative) || !proposal.expectedBlobs.has(relative);
+        let target = path.join(group.sourceRoot, relative);
+        if (directoryTarget) {
+          target = path.dirname(target);
+          for (;;) {
+            try {
+              if (fs.statSync(target).isDirectory()) break;
+            } catch {
+              // Missing — keep walking upward.
+            }
+            const up = path.dirname(target);
+            if (up === target) break;
+            target = up;
+          }
+        }
+        try {
+          await fs.promises.access(
+            target,
+            directoryTarget
+              ? fs.constants.W_OK | fs.constants.X_OK
+              : fs.constants.W_OK,
+          );
+        } catch {
+          unwritable.push(relative);
+        }
+      }
+      if (unwritable.length > 0) {
+        results[proposal.taskIndex] = withIntegration(outcome, {
+          status: "conflict",
+          proposedFiles: proposal.files,
+          appliedFiles: [],
+          conflicts: unwritable.map((relative) => ({
+            path: relative,
+            reason:
+              "The file or its containing directory is not writable; the proposal was retained instead of applied.",
+          })),
+          baselineRef: group.baselineRef,
+          proposalRef: worker.proposalRef,
+          patchPath: worker.patchPath,
+        });
+        continue;
+      }
+
+      // Capture the actual working tree, not the synthetic chain parent: it
+      // can contain user edits or modes that Git's patch leaves untouched.
+      for (const relative of deltaPaths) before.set(relative, await sourceEntry(group.sourceRoot, relative));
+    } catch (error) {
+      recordApplyFailure(proposal, worker, outcome, error);
+      continue;
+    }
     try {
       await git(["apply", "--binary"], {
         cwd: group.sourceRoot,

@@ -241,8 +241,11 @@ function parseProfileFrontmatter(
   filePath: string,
   warnPath: (filePath: string, message: string) => void,
 ): { data: Record<string, string>; body: string } {
-  const m = content.match(FRONTMATTER_FENCE);
-  if (!m) return { data: {}, body: content.trim() };
+  // Windows-authored profiles arrive CRLF-ended; normalize before matching
+  // so the fence, YAML sanitization, and body all follow the LF path.
+  const normalized = content.replace(/\r\n/g, "\n");
+  const m = normalized.match(FRONTMATTER_FENCE);
+  if (!m) return { data: {}, body: normalized.trim() };
   const body = m[2]!.trim();
   // A bare `*` is an invalid YAML alias, so `tools: *` must be quoted first.
   const sanitized = sanitizeYamlScalars(
