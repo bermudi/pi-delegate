@@ -102,6 +102,12 @@ V1 is evidence for behavior, never a design source. When consulting it:
   entries may carry `:effort`), and callers never pick models or effort: the
   task `model` and `thinking` fields are rejected (#32). Registry
   resolvability is not authorization; see SPEC.md and COMPATIBILITY.md.
+- Markdown profiles (#7): `<project>/.pi/agents` then `<agentDir>/agents`,
+  first definition wins, built-ins win name collisions, `.claude/agents`
+  never imported. Frontmatter `model:`/`thinking`/`tools` are profile
+  defaults below delegate.json pins. `models`/`modelsByParent` keys may name
+  built-ins and globally defined profiles only — project profiles pin via
+  frontmatter `model:`.
 - Until a subsystem is implemented it fails loudly. Scaffold errors and
   scaffold output are not the contract — `SPEC.md` is.
 - Do not extend the scaffold to force a migrated test green; let it fail

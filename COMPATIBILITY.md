@@ -162,6 +162,22 @@ and migration guidance; none may arrive as silent rewrite drift.
   scout/coder/reviewer, and inline dispatches do not probe the inventory;
   their existing capabilities are unchanged.
 
+- **Markdown profile discovery is narrower and cannot reshape built-ins
+  (#7).** V1 searched more locations — including `.claude/agents` under both
+  scopes and the legacy `~/.agents` — and let a Markdown file override or
+  merge into a same-named built-in. V2 reads only `<project>/.pi/agents`
+  (nearest ancestor of the parent cwd) then `<agentDir>/agents`
+  (`~/.pi/agent/agents` in a normal install), first definition wins; Claude
+  Code agent directories are never imported, and a Markdown file that names
+  a built-in is ignored with a warning. V1's Claude-only frontmatter
+  (`disallowedTools`, capitalized tool names) has no v2 meaning. A profile's
+  frontmatter `model:` is honored — below `models`/`modelsByParent`, above
+  parent inheritance — but only globally defined names are valid config keys
+  (see SPEC).
+  Migration: move custom agents to one of the two supported directories,
+  rename profiles that collide with `default`/`scout`/`coder`/`reviewer`,
+  and translate `disallowedTools` into the positive `tools` list.
+
 - **Task `model` and `thinking` fields removed; model and effort are
   user-configured only (#32).** V1 resolved any registry-resolvable model
   reference (including `:thinking`-suffixed ones) the caller cared to type,
@@ -210,8 +226,8 @@ and migration guidance; none may arrive as silent rewrite drift.
   when #32 landed — model pins only, scoped by the parent's exact
   `provider/model-id`. Per-agent `thinking` is configured by the `:effort`
   suffix on those entries (#32: callers no longer set it at all);
-  per-agent `tools` preferences are task fields today and agent Markdown
-  frontmatter once named profiles land (#7). Async tickets
+  per-agent `tools` preferences are task fields or Markdown profile
+  frontmatter now that named profiles have landed (#7). Async tickets
   are uncapped in count and live for the host lifetime: `concurrency`
   bounds execution, not ticket creation, and settled tickets stay pollable
   until the host exits.

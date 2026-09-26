@@ -38,6 +38,7 @@ import {
 } from "./src/operations.ts";
 import { createActivityStore } from "./src/activity.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
+import { discoverProfiles } from "./src/profiles.ts";
 import {
   createMessageRenderer,
   createResultRenderer,
@@ -94,7 +95,7 @@ const taskSchema = Type.Object(
     agent: Type.Optional(
       Type.String({
         description:
-          "Named profile: 'default' (mirrors the parent), 'scout' (read-only investigation), 'coder' (implementation), 'reviewer' (read-only review). Omit for an inline task.",
+          "Named profile: 'default' (mirrors the parent), 'scout' (read-only investigation), 'coder' (implementation), 'reviewer' (read-only review), or a user-defined Markdown profile (.pi/agents). Omit for an inline task.",
       }),
     ),
     cwd: Type.Optional(
@@ -722,7 +723,13 @@ Three sibling tools share Delegate's machinery:
   fields are rejected. Tasks run on the parent's model at the parent's
   effort; a named agent may instead run on the model (and optional
   \`:effort\`) the user configured for it under "models"/"modelsByParent" in
-  the user-global delegate.json.
+  the user-global delegate.json, or the \`model\`/\`thinking\` frontmatter
+  of its Markdown profile.
+- Profiles: the four built-ins plus user-defined Markdown agents —
+  \`.pi/agents/*.md\` in the nearest project ancestor, then \`agents/*.md\`
+  under the user-global agent directory. A profile needs \`name\` and
+  \`description\`; \`tools\`, \`thinking\`, and \`model\` are optional
+  frontmatter, the body is its system prompt.
 - Children never inherit parent conversation history. Supply a self-contained
   brief; project instructions and child-owned pooled/resumed history still apply.
 
@@ -768,6 +775,23 @@ Three sibling tools share Delegate's machinery:
   SQLite database at telemetry.dbPath, DELEGATE_TELEMETRY_DB, or
   <agentDir>/delegate-usage.db. Failures never block work.
 `;
+
+/**
+ * A manual trailer listing the user's discovered Markdown profiles, or ""
+ * when there are none. Re-discovered per help call so edits show up without
+ * a reload.
+ */
+function customProfileSection(ctx: ExtensionContext): string {
+  const catalog = discoverProfiles(ctx.cwd, resolveAgentDir(ctx).dir);
+  const custom = [...catalog.profiles.values()].filter(
+    (profile) => profile.source !== undefined,
+  );
+  if (custom.length === 0) return "";
+  const lines = custom.map(
+    (profile) => `- \`${profile.name}\` — ${profile.description ?? ""}`,
+  );
+  return `\n## Your agent profiles\n${lines.join("\n")}\n`;
+}
 
 export default function delegateExtension(api: ExtensionAPI): void {
   // TicketStore mutates first, visibility reads lazily — the observer arrow
@@ -936,8 +960,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
         agentDirResolution.dir,
         () => api.getActiveTools(),
       );
-      const config = loadDelegateConfig(agentDirResolution.dir);
-      const tasks = await resolveTasks(requestedTasks, env, config);
+      const catalog = discoverProfiles(ctx.cwd, agentDirResolution.dir);
+      const config = loadDelegateConfig(
+        agentDirResolution.dir,
+        catalog.globalNames,
+      );
+      const tasks = await resolveTasks(requestedTasks, env, config, catalog);
       sessions.validateReuse(tasks);
       ticket = createTicket?.(tasks, relabel, config);
       let owner = ticket?.id;
@@ -1198,7 +1226,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
         visibility.captureFooterCtx(ctx);
         if (call.mode === "help") {
           return {
-            content: [{ type: "text" as const, text: help }],
+            content: [
+              {
+                type: "text" as const,
+                text: help + customProfileSection(ctx),
+              },
+            ],
             details: { mode: "help" as const },
           };
         }

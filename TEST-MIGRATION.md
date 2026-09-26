@@ -928,6 +928,38 @@ default. Recorded in SPEC.md "Dispatch" and COMPATIBILITY.md.
   bare pin does not inherit the parent's level and an unpinned task
   mirrors it (`tests/contract/dispatch.test.ts`).
 
+## Eleventh tranche (named Markdown agent profiles)
+
+Issue #7 lands user-defined profiles. `src/profiles.ts` gains
+`discoverProfiles(cwd, agentDir)`: `<project>/.pi/agents` (nearest ancestor
+of the parent cwd) then `<agentDir>/agents`, first definition wins, built-ins
+always win name collisions, `.chain.md` skipped, malformed files skipped
+with a logged warning. Frontmatter: `name` + `description` required;
+`tools` (`*`/`ro`/comma list), `thinking` (level), `model`
+(`provider/model[:effort]`) optional; the body is the system prompt.
+Claude Code directories and `disallowedTools` are not imported.
+
+The catalog is an explicit per-dispatch value threaded through the pipeline
+(no module state): `delegate.ts` discovers → `loadDelegateConfig` accepts
+`catalog.globalNames` as additional `models`/`modelsByParent` keys (only
+globally defined names — a user-global config cannot name a project-local
+profile) → `resolveTasks` looks agents up in the catalog. The model chain
+becomes parent-scoped pin → unscoped pin → profile `model:` → parent; the
+effort chain keeps profile `thinking` below a delegate.json `:effort`.
+Agent-name existence left `validateTasks` for `resolveTasks` — validating
+against built-ins alone would reject legitimate custom names — so the
+unknown-agent error now lists every discovered name.
+
+New live tests in `tests/contract/profiles.test.ts` (v1 evidence:
+`agents.test.ts` native-loader scenarios): a global profile runs with its
+own tools/prompt/thinking; a frontmatter `model[:effort]` pin routes the
+child; project wins over global; built-ins win over same-named files; a
+`models` pin beats frontmatter `model` (and proves a custom name is a valid
+config key); a malformed profile is skipped with a warning and stays
+unknown. Discovery assertions observe the provider-facing transcript
+(system message prompt/sections, `toolsAdded`, stream `reasoning`) rather
+than internals.
+
 ## Next contract slices
 
 Done: mode exclusivity and validation failures; batch-before-start
@@ -946,7 +978,10 @@ bounding with owner-only spill files, running-poll tail-only views, and
 lossless fallback (issue #25; `SPEC.md` "Output bounding",
 `tests/contract/output-bounds.test.ts`); user-configured model/effort with
 parent-scoped pins and removal of the task `thinking` field (issue #32;
-`tests/contract/dispatch.test.ts`, `tests/contract/validation.test.ts`).
+`tests/contract/dispatch.test.ts`, `tests/contract/validation.test.ts`);
+named Markdown agent profiles with project/global discovery, built-in
+collision precedence, and frontmatter model/thinking/tools (issue #7;
+`tests/contract/profiles.test.ts`).
 
 Remaining:
 

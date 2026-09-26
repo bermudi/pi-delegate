@@ -69,11 +69,37 @@ or injected. Supply a self-contained task brief. The obsolete `context` field
 is rejected before any task starts, including `context: "fresh"`; omit it.
 This does not remove a child's own pooled `sessionId` or explicit `resumeFrom` history.
 
-Task fields override profile defaults. Named Markdown profiles use
-first-definition-wins discovery. Project context is rebuilt for the task cwd;
-the parent's extension inventory, MCP tools, and user-global harness
-instructions are not inherited. Provider extensions are disabled except for
-the verified, provider-scoped allowlist.
+Task fields override profile defaults. Project context is rebuilt for the
+task cwd; the parent's extension inventory, MCP tools, and user-global
+harness instructions are not inherited. Provider extensions are disabled
+except for the verified, provider-scoped allowlist.
+
+Named agents also come from user-authored Markdown profiles, discovered per
+dispatch — edits take effect without a reload — in first-definition-wins
+order:
+
+1. `<project>/.pi/agents/*.md` — the nearest ancestor of the parent cwd that
+   contains the directory. These are user-authored project config, not
+   prompt injection.
+2. `<agentDir>/agents/*.md` — the same resolved agent directory that hosts
+   `delegate.json` (`~/.pi/agent/agents` in a normal install).
+
+A profile needs `name` and `description` frontmatter; the Markdown body is
+its system prompt. Optional frontmatter: `tools` (the `*`/`ro` groups or a
+comma list; omitted means `*`), `thinking` (a thinking level — the profile's
+effort default), and `model` (a `provider/model[:effort]` reference — the
+profile's model pin; an explicit `thinking` wins over the suffix). Unknown
+keys are ignored. Files ending `.chain.md` are skipped. A file that is
+unreadable, has malformed frontmatter, misses a required field, or carries
+invalid `tools`/`thinking`/`model` values is skipped with a logged warning —
+a half-loaded profile is worse than none. Built-ins always win name
+collisions: a `scout.md` is ignored with a warning rather than reshaping the
+built-in. Claude Code's `.claude/agents` is not imported.
+
+Only globally defined profile names are valid `models`/`modelsByParent` keys:
+a user-global config cannot name a project-local profile — it would fail
+validation in every other session — so project profiles pin their model via
+frontmatter `model:` instead.
 
 Subagents run on the parent's model. The user may override a **named agent**
 under `"models"` in the user-global `delegate.json` — an object mapping agent
@@ -83,19 +109,22 @@ model unconditionally. A second map, `"modelsByParent"`, scopes those pins to
 the parent's exact `provider/model-id` (case-insensitive):
 `{"modelsByParent": {"<parent provider/model-id>": {"scout": "..."}}}` — a
 scoped entry wins over the unscoped `"models"` entry for the same agent.
-Callers never select models: a task `model` field is rejected before tasks
-start, whatever value it carries — the model registry containing a model is
-not authorization to spend on it. A configured reference that does not
-resolve in the session's model registry fails the whole call, naming the
-config entry.
+Below both sits a Markdown profile's frontmatter `model:` pin: the model
+chain is parent-scoped pin → unscoped pin → profile `model:` → the parent's
+model. Callers never select models: a task `model` field is rejected before
+tasks start, whatever value it carries — the model registry containing a
+model is not authorization to spend on it. A configured or profile-pinned
+reference that does not resolve in the session's model registry fails the
+whole call, naming the config entry or profile file.
 
 Effort is likewise user-configured only — a task `thinking` field is rejected
-like `model`. A `"models"` or `"modelsByParent"` reference may carry a
-`:effort` suffix (`off`…`max`) pinning the child's thinking level; an
-unrecognized suffix fails at config load. Effective effort resolves as:
-configured `:effort` (a scoped pin's wins over an unscoped one's) → the
-profile's own thinking default → the parent's live thinking level when the
-child runs the parent's model → the model's default otherwise.
+like `model`. A `"models"`/`"modelsByParent"` reference or a profile's
+frontmatter `model:` may carry a `:effort` suffix (`off`…`max`) pinning the
+child's thinking level; an unrecognized suffix fails at config load or skips
+the profile. Effective effort resolves as: a delegate.json `:effort` (a
+scoped pin's wins over an unscoped one's) → the profile's own thinking
+default → the parent's live thinking level when the child runs the parent's
+model → the model's default otherwise.
 
 The user-global `delegate.json` is discovered from the session's agent
 directory: the `DELEGATE_AGENT_DIR` environment variable when set, else the

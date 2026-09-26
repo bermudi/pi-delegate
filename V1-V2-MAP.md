@@ -19,7 +19,7 @@ hooks, tool behavior). V1 internals are non-binding per `COMPATIBILITY.md`.
 | Shape | ~40 modules, grown organically | 1 entry + 23 `src/` modules, spec-first |
 | Test suite | 330 KB+ across 20+ files | 177 live tests, 20 files, **0 fail, 0 pending** |
 | Behavioral authority | README + code | `SPEC.md` / `INVARIANTS.md` / `COMPATIBILITY.md` |
-| Implemented subsystems | all (incl. TUI) | everything except named Markdown profiles (#7); visibility layer shipped (#24) 2026-09-22, output bounding shipped (#25) 2026-09-23 |
+| Implemented subsystems | all (incl. TUI) | all planned subsystems — named Markdown profiles shipped (#7); visibility layer shipped (#24) 2026-09-22, output bounding shipped (#25) 2026-09-23 |
 
 ---
 
@@ -66,7 +66,7 @@ These are decided, recorded, and carry migration guidance. No action needed.
 
 | Feature | Authority | v2 status |
 | --- | --- | --- |
-| Named Markdown agent profiles | SPEC + COMPATIBILITY preserve lists; issue #7 | **Unimplemented** — `knownAgentNames()` returns only the four built-ins (`src/profiles.ts`); a custom `agent` name fails validation today. |
+| Named Markdown agent profiles | SPEC + COMPATIBILITY preserve lists; issue #7 | **Shipped** — `discoverProfiles()` reads `<project>/.pi/agents` then `<agentDir>/agents`, first definition wins, built-ins win collisions; frontmatter `model`/`thinking`/`tools`/body honored. Narrower than v1: no `.claude/agents`, no `~/.agents`, no built-in override (COMPATIBILITY). |
 | `allowUnsafeSharedWrites` operator bypass | was `INVARIANTS.md` "operator-only unsafe bypass … visible warning" | **Decided out 2026-09-21** (user decision): INVARIANTS now forbids a bypass; COMPATIBILITY records the breaking change. |
 
 This bypass *is* the scoped "camp 4" door (share-the-tree, accept the risk,
@@ -133,9 +133,8 @@ an accepted gap, recorded in `TEST-MIGRATION.md`.
 ## 5. Confirmed carried over (spot-checked)
 
 Four modes and help; input recovery repairs; the four built-in agents
-(`default`/`scout`/`coder`/`reviewer`) and task-over-profile precedence
-(named Markdown profiles are contracted but **unimplemented** — issue #7);
-parent-model
+(`default`/`scout`/`coder`/`reviewer`) plus user-defined Markdown profiles
+and task-over-profile precedence; parent-model
 inheritance; extension/MCP/user-global-AGENTS.md isolation (skills ride
 the child's own resource loader in both); scratch and isolated workspaces
 with baseline preservation, task-order all-or-nothing reconciliation,
@@ -162,5 +161,5 @@ browser (#24).
 5. **Retry bound: no entry needed** — already covered by the may-change
    list.
 
-Still open from 3a: **named Markdown agent profiles (issue #7)** remain
-contracted-and-unimplemented — the next real 3a-style gap.
+Still open from 3a: nothing — **named Markdown agent profiles (issue #7)**
+shipped, closing the last 3a-style gap.

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { resolveDependencyGraph } from "./graph.ts";
-import { expandTools, getBuiltinProfile, knownAgentNames } from "./profiles.ts";
+import { expandTools } from "./profiles.ts";
 
 export interface TaskInput {
   readonly id?: string;
@@ -267,10 +267,11 @@ function validateTasks(tasks: readonly TaskInput[]): void {
         );
       }
     }
-    if (task.agent !== undefined && getBuiltinProfile(task.agent) === undefined) {
-      fail(
-        `${where}: unknown agent '${task.agent}'. Known agents: ${knownAgentNames().join(", ")}.`,
-      );
+    // Agent-name existence is checked at resolution (host.ts), where the
+    // discovered Markdown profile catalog is available — validating against
+    // built-ins alone here would reject legitimate custom profiles.
+    if (task.agent !== undefined && task.agent.trim() === "") {
+      fail(`${where}: agent must be a non-empty name.`);
     }
     if (task.tools !== undefined) {
       const expanded = expandTools(task.tools);

@@ -23,8 +23,8 @@ import { Type } from "typebox";
 import {
   CHILD_TOOLS,
   expandTools,
-  getBuiltinProfile,
   isWriter,
+  type ProfileCatalog,
 } from "./profiles.ts";
 import { configPathOf, configuredModelFor, type DelegateConfig } from "./config.ts";
 import { resolveDependencyGraph } from "./graph.ts";
@@ -203,6 +203,7 @@ export async function resolveTasks(
   tasks: readonly TaskInput[],
   env: HostEnvironment,
   config: DelegateConfig,
+  catalog: ProfileCatalog,
 ): Promise<ResolvedTask[]> {
   let parentActive: string[] = [];
   if (tasks.some((task) => task.agent === "default" && task.tools === undefined)) {
@@ -227,9 +228,13 @@ export async function resolveTasks(
   const resolved: ResolvedTask[] = [];
   for (const [index, task] of tasks.entries()) {
     const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
-    const profile = task.agent ? getBuiltinProfile(task.agent) : undefined;
+    const profile = task.agent
+      ? catalog.profiles.get(task.agent)
+      : undefined;
     if (task.agent && !profile) {
-      throw new Error(`${where}: unknown agent '${task.agent}'.`);
+      throw new Error(
+        `${where}: unknown agent '${task.agent}'. Known agents: ${[...catalog.profiles.keys()].join(", ")}.`,
+      );
     }
 
     let tools: string[] | string;
@@ -247,9 +252,10 @@ export async function resolveTasks(
     }
 
     // Model selection is user-only and inheritance-first: a named agent uses
-    // its configured pin (parent-scoped wins over unscoped) when one exists;
-    // inline/default tasks always mirror the parent. Caller-supplied model
-    // and thinking fields were rejected in validation.
+    // its delegate.json pin (parent-scoped wins over unscoped), else its
+    // profile's frontmatter `model`, else the parent's model; inline/default
+    // tasks always mirror the parent. Caller-supplied model and thinking
+    // fields were rejected in validation.
     const parentModel = env.ctx.model as Model<Api> | undefined;
     const parentKey =
       parentModel === undefined
@@ -257,16 +263,18 @@ export async function resolveTasks(
         : `${parentModel.provider}/${parentModel.id}`.toLowerCase();
     const agentName = task.agent ?? "default";
     const assignment = configuredModelFor(task.agent, parentKey, config);
-    const model = assignment
-      ? resolveModel(assignment.ref, env)
-      : parentModel;
+    const modelRef = assignment?.ref ?? profile?.modelPin;
+    const model =
+      modelRef !== undefined ? resolveModel(modelRef, env) : parentModel;
     if (!model) {
       throw new Error(
         assignment
           ? `${where}: ${assignment.origin} is configured as '${assignment.ref}' in ${configPathOf(env.agentDir)} but is not available in this session's model registry.`
-          : agentName === "default"
-            ? `${where}: no parent model is selected — inline/default tasks inherit it and are not configurable otherwise.`
-            : `${where}: no model is configured for agent '${agentName}' and no parent model is selected; add models.${agentName} under "models" in ${configPathOf(env.agentDir)}.`,
+          : modelRef !== undefined
+            ? `${where}: agent profile ${profile?.source} pins model '${modelRef}' but it is not available in this session's model registry.`
+            : agentName === "default"
+              ? `${where}: no parent model is selected — inline/default tasks inherit it and are not configurable otherwise.`
+              : `${where}: no model is configured for agent '${agentName}' and no parent model is selected; add models.${agentName} under "models" in ${configPathOf(env.agentDir)}.`,
       );
     }
     // Effort: the pin's :effort wins; else the profile default; else the

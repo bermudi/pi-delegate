@@ -1,8 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { knownAgentNames } from "./profiles.ts";
+import {
+  knownAgentNames,
+  parseModelEntry,
+  type ModelAssignment,
+} from "./profiles.ts";
 import type { OutputBounds } from "./types.ts";
 
 export interface ConcurrencyConfig {
@@ -17,14 +20,6 @@ export interface ConcurrencyConfig {
 export interface TelemetryConfig {
   readonly enabled: boolean;
   readonly dbPath: string | undefined;
-}
-
-/** A parsed `provider/model[:effort]` pin from `models`/`modelsByParent`. */
-export interface ModelAssignment {
-  /** Model reference with any `:effort` suffix already stripped. */
-  readonly ref: string;
-  /** Configured effort suffix, when one was given. */
-  readonly thinking: ThinkingLevel | undefined;
 }
 
 export interface DelegateConfig {
@@ -167,8 +162,15 @@ export function configPathOf(agentDir: string): string {
  * yields defaults; malformed JSON, a non-positive `maxConcurrent`, or a
  * negative `stallTimeoutMs` fails loudly — a half-applied limit is worse
  * than an error.
+ *
+ * `additionalAgentNames` extends the valid `models`/`modelsByParent` key
+ * set beyond the built-ins — pass the globally defined Markdown profile
+ * names (project-scoped names are not portable config keys).
  */
-export function loadDelegateConfig(agentDir: string): DelegateConfig {
+export function loadDelegateConfig(
+  agentDir: string,
+  additionalAgentNames: readonly string[] = [],
+): DelegateConfig {
   const path = configPathOf(agentDir);
   if (!existsSync(path)) return DEFAULT_CONFIG;
   let raw: unknown;
@@ -204,8 +206,12 @@ export function loadDelegateConfig(agentDir: string): DelegateConfig {
   return {
     maxConcurrent: (maxConcurrent as number) ?? DEFAULT_CONFIG.maxConcurrent,
     concurrency: parseConcurrency(config.concurrency, path),
-    models: parseModels(config.models, "models", path),
-    modelsByParent: parseModelsByParent(config.modelsByParent, path),
+    models: parseModels(config.models, "models", path, additionalAgentNames),
+    modelsByParent: parseModelsByParent(
+      config.modelsByParent,
+      path,
+      additionalAgentNames,
+    ),
     stallTimeoutMs:
       (stallTimeoutMs as number) ?? DEFAULT_CONFIG.stallTimeoutMs,
     telemetry: parseTelemetry(config.telemetry, path),
@@ -287,47 +293,6 @@ function parseTelemetry(value: unknown, path: string): TelemetryConfig {
   };
 }
 
-const THINKING_LEVELS: ReadonlySet<string> = new Set([
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]);
-
-/**
- * Parse one `provider/model[:effort]` reference. A trailing `:level` pins
- * the child's thinking level; a suffix that is not a known level — or a
- * dangling colon — fails loudly at load instead of silently shadowing the
- * model id it was probably meant to be part of.
- */
-function parseModelEntry(value: unknown, name: string, path: string): ModelAssignment {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(
-      `${path}: ${name} must be a non-empty model reference; got ${JSON.stringify(value)}.`,
-    );
-  }
-  const trimmed = value.trim();
-  const colon = trimmed.lastIndexOf(":");
-  if (colon === -1) return { ref: trimmed, thinking: undefined };
-  const suffix = trimmed.slice(colon + 1);
-  if (!THINKING_LEVELS.has(suffix)) {
-    throw new Error(
-      `${path}: ${name} has an unrecognized effort suffix; got ${JSON.stringify(trimmed)}. ` +
-        `Known levels: ${[...THINKING_LEVELS].join(", ")}.`,
-    );
-  }
-  const ref = trimmed.slice(0, colon);
-  if (ref === "") {
-    throw new Error(
-      `${path}: ${name} must name a model before its :${suffix} suffix; got ${JSON.stringify(trimmed)}.`,
-    );
-  }
-  return { ref, thinking: suffix as ThinkingLevel };
-}
-
 /**
  * Parse an agent → pin map (`models`, or one inner `modelsByParent` map):
  * keys must name a known non-default agent (a typo fails at load instead
@@ -341,6 +306,7 @@ function parseModels(
   value: unknown,
   name: string,
   path: string,
+  additionalAgentNames: readonly string[],
 ): Record<string, ModelAssignment> {
   if (value === undefined) return {};
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -348,7 +314,10 @@ function parseModels(
       `${path}: ${name} must be an object mapping a named agent to a model reference.`,
     );
   }
-  const known = knownAgentNames().filter((n) => n !== "default");
+  const known = [
+    ...knownAgentNames().filter((n) => n !== "default"),
+    ...additionalAgentNames,
+  ];
   const out: Record<string, ModelAssignment> = {};
   for (const [agent, entry] of Object.entries(value as Record<string, unknown>)) {
     if (agent === "default") {
@@ -377,6 +346,7 @@ function parseModels(
 function parseModelsByParent(
   value: unknown,
   path: string,
+  additionalAgentNames: readonly string[],
 ): Record<string, Record<string, ModelAssignment>> {
   if (value === undefined) return {};
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -397,7 +367,12 @@ function parseModelsByParent(
         `${path}: modelsByParent key '${key}' must be an exact provider/model-id (no effort suffix); got ${JSON.stringify(key)}.`,
       );
     }
-    out[normalized] = parseModels(inner, `modelsByParent.${key}`, path);
+    out[normalized] = parseModels(
+      inner,
+      `modelsByParent.${key}`,
+      path,
+      additionalAgentNames,
+    );
   }
   return out;
 }
