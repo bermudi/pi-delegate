@@ -91,7 +91,7 @@ serial shared batches or parallel `isolated` edits.
 | Quit trace / reload warning | **Shipped** (2026-09-22) — names tickets, not agent labels (v1 listed agents too) | issue #24 |
 | Tree-navigation consent prompt | **Shipped** (2026-09-22) — 2-way cancel/stay, a deliberate divergence (v1's third "hold" option dropped by owner decision); cancel force-cancels live tickets, stay blocks the transition | issue #24 |
 | Output spill | **Shipped** (2026-09-23) — settled/sync output over `output.spillThresholdChars` spills to an owner-only temp file with a bounded tail; running-ticket views tail-only, never write; lossless on write failure; full output in `details` | issue #25; `src/spill.ts`, `SPEC.md` "Output bounding" |
-| `agentOverrides` / `agentOverridesByParentModel` | **Partially restored** (#32) | model pins → `models`/`modelsByParent` (agent → `provider/model[:effort]`); per-agent tools → task fields today, frontmatter once #7 lands |
+| `agentOverrides` / `agentOverridesByParentModel` | **Partially restored** (#32) | model pins → `models`/`modelsByParent` (agent → `provider/model[:effort]`); per-agent tools → task fields or Markdown profile frontmatter (#7 shipped) |
 | `maxAsyncTickets` cap | **Dropped** | same entry; tickets uncapped, host-lifetime, bounded by `concurrency` on execution only |
 | Ticket TTL cleanup | Already deliberate (SPEC: host-lifetime tickets) | no action |
 | Retry bound 3 → 2 | Already covered by "retry machinery" in COMPATIBILITY's may-change list | no action |

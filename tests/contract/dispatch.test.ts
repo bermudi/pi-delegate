@@ -3,6 +3,7 @@ import type { TestSession } from "@marcfargas/pi-test-harness";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import {
   fauxAssistantMessage,
+  fauxProvider,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
 import {
@@ -498,27 +499,56 @@ describe("delegate dispatch contract", () => {
   );
 
   test(
-    "a model reference with ':' outside the effort suffix fails at config load",
+    "a colon-bearing model id pins and matches verbatim (Ollama-style tags)",
     async () => {
-      // Review of #32: a colon surviving the effort strip can never be part
-      // of a real provider/model-id — reject at load instead of leaving a
-      // dead pin that confuses later.
+      // SPEC: only a trailing KNOWN thinking level strips as :effort — any
+      // other `:segment` belongs to the model id itself
+      // (`ollama/qwen2.5:32b`, `openrouter/...:free`), so a colon-bearing
+      // pin resolves verbatim and a modelsByParent key can name a
+      // colon-bearing parent (matched case-insensitively, like elsewhere).
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
-      configureDelegate(session, {
-        models: { scout: `${subagents.alt.spec}:x:high` },
+      const tagged = fauxProvider({
+        provider: "delegate-faux-tag",
+        models: [{ id: "faux-t:32b", reasoning: true }],
       });
+      const runtime = (session.session as AgentSession).modelRuntime;
+      runtime.registerNativeProvider(tagged.provider);
+      await runtime.setRuntimeApiKey("delegate-faux-tag", "test-key");
+      const parentModel = runtime.getModel("delegate-faux-tag", "faux-t:32b");
+      if (!parentModel) {
+        throw new Error("tagged faux model did not register");
+      }
+      await (session.session as AgentSession).setModel(parentModel);
+      configureDelegate(session, {
+        // Unscoped pin to the colon id resolves verbatim; the scoped key —
+        // shouted like the other modelsByParent test — must still match the
+        // colon-bearing parent and win for scout.
+        models: { reviewer: "delegate-faux-tag/faux-t:32b" },
+        modelsByParent: {
+          "DELEGATE-FAUX-TAG/FAUX-T:32B": { scout: subagents.alt.spec },
+        },
+      });
+      subagents.alt.respond([fauxAssistantMessage("SCOPED-ALT")]);
+      tagged.setResponses([
+        fauxAssistantMessage("TAGGED-PIN"),
+        fauxAssistantMessage("TAGGED-INHERITED"),
+      ]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "look", agent: "scout" }],
+        tasks: [
+          { id: "a", prompt: "a", agent: "scout" },
+          { id: "b", prompt: "b", agent: "reviewer", dependsOn: ["a"] },
+          { id: "c", prompt: "c", dependsOn: ["b"] },
+        ],
       });
 
-      expect(result.isError).toBe(true);
-      expect(result.text).toContain(
-        "cannot contain ':' outside the effort suffix",
-      );
-      expect(subagents.state.callCount).toBe(0);
-      expect(subagents.alt.state.callCount).toBe(0);
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("SCOPED-ALT");
+      expect(result.text).toContain("TAGGED-PIN");
+      expect(result.text).toContain("TAGGED-INHERITED");
+      expect(subagents.alt.state.callCount).toBe(1); // scoped key matched
+      expect(tagged.state.callCount).toBe(2); // reviewer pin + inline inherit
     },
   );
 

@@ -356,9 +356,10 @@ function parseModels(
  * Parse the `modelsByParent` map: parent's exact `provider/model-id` → an
  * agent → pin map. Keys are normalized lowercase (matching is
  * case-insensitive, like model references elsewhere); a key that cannot be
- * a `provider/model-id` identity — empty, extra slashes, internal
- * whitespace, or any colon (e.g. a leftover effort suffix) — is a config
- * error, since it could never match a real parent model.
+ * a `provider/model-id` identity — empty, extra slashes, or internal
+ * whitespace — is a config error, since it could never match a real parent
+ * model. Colons are legal here: model ids carry them
+ * (`ollama/qwen2.5:32b`), and keys name the parent's exact id.
  */
 function parseModelsByParent(
   value: unknown,
@@ -374,9 +375,9 @@ function parseModelsByParent(
   const out: Record<string, Record<string, ModelAssignment>> = {};
   for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
     const normalized = key.trim().toLowerCase();
-    if (!/^[^/\s:]+\/[^/\s:]+$/.test(normalized)) {
+    if (!/^[^/\s]+\/[^/\s]+$/.test(normalized)) {
       throw new Error(
-        `${path}: modelsByParent key '${key}' must be an exact provider/model-id (no effort suffix); got ${JSON.stringify(key)}.`,
+        `${path}: modelsByParent key '${key}' must be an exact provider/model-id; got ${JSON.stringify(key)}.`,
       );
     }
     out[normalized] = parseModels(

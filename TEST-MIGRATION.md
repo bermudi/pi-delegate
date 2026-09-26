@@ -933,15 +933,20 @@ unscoped). Effective effort: configured `:effort` → profile default →
 parent's live level when the child runs the parent model → the model's
 default. Recorded in SPEC.md "Dispatch" and COMPATIBILITY.md.
 
-- `src/config.ts` parses `provider/model[:effort]` entries (unknown suffix
-  or dangling colon fails at load) and the `modelsByParent` map (keys
-  normalized lowercase; a key that is not a `provider/model-id` fails).
-  Review tightening: a `modelsByParent` key that could never match — extra
-  slashes, internal whitespace, any colon — and a reference still carrying
-  `:` after its effort suffix are rejected at load with the dead-shape
-  message; covered in `tests/contract/dispatch.test.ts` along with the
-  case-insensitive parent-mirror (a pinned model equal to the parent's
-  modulo case still inherits the parent's live effort level).
+- `src/config.ts` parses `provider/model[:effort]` entries and the
+  `modelsByParent` map (keys normalized lowercase; a key that is not a
+  `provider/model-id` fails). Review tightening: a `modelsByParent` key
+  that could never match — extra slashes, internal whitespace — is
+  rejected at load with the dead-shape message; covered in
+  `tests/contract/dispatch.test.ts` along with the case-insensitive
+  parent-mirror (a pinned model equal to the parent's modulo case still
+  inherits the parent's live effort level). (2026-09-25 reversal of part
+  of that tightening: model ids legitimately carry colons —
+  `ollama/qwen2.5:32b` — so only a trailing *known* level strips as
+  `:effort`; any other `:segment` stays in the reference and fails at
+  resolution, and colon-bearing `modelsByParent` keys are valid. The
+  dispatch suite covers a verbatim colon pin plus a colon-keyed scoped
+  match against a colon-id parent.)
 - `src/validation.ts` and the boundary layer reject `thinking` wherever it
   appears with guidance toward the config — the field left the task schema
   entirely.

@@ -151,10 +151,13 @@ export interface ModelAssignment {
 }
 
 /**
- * Parse one `provider/model[:effort]` reference. A trailing `:level` pins
- * the child's thinking level; a suffix that is not a known level — or a
- * dangling colon — fails loudly instead of silently shadowing the model id
- * it was probably meant to be part of. `name` names the entry in errors.
+ * Parse one `provider/model[:effort]` reference. The last `:`-segment pins
+ * the child's thinking level only when it is a known level; any other
+ * trailing colon belongs to the model id itself — ids legitimately carry
+ * colons (`ollama/qwen2.5:32b`, `openrouter/...:free`) — and stays in the
+ * reference. A reference that does not resolve fails later at dispatch,
+ * naming this entry. An id that literally ends in a known level is
+ * unexpressible: the suffix always wins. `name` names the entry in errors.
  */
 export function parseModelEntry(
   value: unknown,
@@ -171,22 +174,12 @@ export function parseModelEntry(
   if (colon === -1) return { ref: trimmed, thinking: undefined };
   const suffix = trimmed.slice(colon + 1);
   if (!THINKING_LEVELS.has(suffix)) {
-    throw new Error(
-      `${path}: ${name} has an unrecognized effort suffix; got ${JSON.stringify(trimmed)}. ` +
-        `Known levels: ${[...THINKING_LEVELS].join(", ")}.`,
-    );
+    return { ref: trimmed, thinking: undefined };
   }
   const ref = trimmed.slice(0, colon);
   if (ref === "") {
     throw new Error(
       `${path}: ${name} must name a model before its :${suffix} suffix; got ${JSON.stringify(trimmed)}.`,
-    );
-  }
-  if (ref.includes(":")) {
-    // A colon surviving the effort strip can never be part of a real
-    // `provider/model-id` — reject at load instead of leaving a dead pin.
-    throw new Error(
-      `${path}: ${name} cannot contain ':' outside the effort suffix; got ${JSON.stringify(trimmed)}.`,
     );
   }
   return { ref, thinking: suffix as ThinkingLevel };

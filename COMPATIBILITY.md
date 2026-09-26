@@ -227,10 +227,12 @@ and migration guidance; none may arrive as silent rewrite drift.
   child's thinking level; a bare pinned model runs at that model's default;
   a configured reference that does not resolve in the session's registry
   fails the same way, naming the entry. A `modelsByParent` key that could
-  never be a `provider/model-id` (extra slashes, internal whitespace, a
-  colon) and a reference still carrying `:` after its effort suffix are
-  rejected at config load — dead entries fail loudly, they do not sit
-  silently. "Running the parent's model" for effort inheritance is
+  never be a `provider/model-id` (empty, extra slashes, internal
+  whitespace) is rejected at config load — dead entries fail loudly, they
+  do not sit silently. Colons are legal in model ids
+  (`ollama/qwen2.5:32b`): only a trailing known level strips as `:effort`,
+  any other `:segment` stays in the reference, and an unresolvable pin
+  fails at dispatch naming the entry. "Running the parent's model" for effort inheritance is
   case-insensitive, like config matching, so a host-set parent model whose
   casing differs from the registry's keeps the parent's live level.
   Migration: move any per-task model choice into `delegate.json`
@@ -269,8 +271,8 @@ and migration guidance; none may arrive as silent rewrite drift.
   bounds execution, not ticket creation, and settled tickets stay pollable
   until the host exits.
   Migration: express per-agent effort as `:effort` on `models`/
-  `modelsByParent` entries and per-agent tools as task fields now
-  (frontmatter later); drop the stale keys; rely on concurrency bounds and
+  `modelsByParent` entries and per-agent tools as task fields or Markdown
+  profile frontmatter; drop the stale keys; rely on concurrency bounds and
   polling rather than a ticket cap or TTL sweep.
 
 - **One `delegate` tool split into three (#27).** V1's kitchen-sink schema

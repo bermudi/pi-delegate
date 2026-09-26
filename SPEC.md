@@ -141,9 +141,9 @@ the parent's exact `provider/model-id` (case-insensitive):
 `{"modelsByParent": {"<parent provider/model-id>": {"scout": "..."}}}` — a
 scoped entry wins over the unscoped `"models"` entry for the same agent.
 A `modelsByParent` key that could never be a `provider/model-id` — empty,
-extra slashes, internal whitespace, or any colon — fails at config load
-rather than sitting dead, and a model reference still containing `:` after
-its effort suffix fails the same way. Below both sits a Markdown profile's
+extra slashes, or internal whitespace — fails at config load rather than
+sitting dead; colons are legal because model ids carry them
+(`ollama/qwen2.5:32b`) and keys name the parent's exact id. Below both sits a Markdown profile's
 frontmatter `model:` pin: the model chain is parent-scoped pin → unscoped
 pin → profile `model:` → the parent's model. Callers never select models: a
 task `model` field is rejected before
@@ -155,8 +155,11 @@ whole call, naming the config entry or profile file.
 Effort is likewise user-configured only — a task `thinking` field is rejected
 like `model`. A `"models"`/`"modelsByParent"` reference or a profile's
 frontmatter `model:` may carry a `:effort` suffix (`off`…`max`) pinning the
-child's thinking level; an unrecognized suffix fails at config load or skips
-the profile. Effective effort resolves as: a delegate.json `:effort` (a
+child's thinking level. Only the last `:segment` is a suffix candidate and
+only when it names a known level — any other colon is part of the model id
+itself, and a reference that then does not resolve fails at dispatch naming
+the entry (the profile is skipped only on parse-level errors, not on an
+unresolvable id). Effective effort resolves as: a delegate.json `:effort` (a
 scoped pin's wins over an unscoped one's) → the profile's own thinking
 default → the parent's live thinking level when the child runs the parent's
 model (identity compared case-insensitively, like config matching) → the
