@@ -355,10 +355,13 @@ function parseModels(
 /**
  * Parse the `modelsByParent` map: parent's exact `provider/model-id` → an
  * agent → pin map. Keys are normalized lowercase (matching is
- * case-insensitive, like model references elsewhere); a key that cannot be
- * a `provider/model-id` identity — empty, extra slashes, or internal
- * whitespace — is a config error, since it could never match a real parent
- * model. Colons are legal here: model ids carry them
+ * case-insensitive, like model references elsewhere); a key that could
+ * never match — empty, missing the slash, an empty provider or model id,
+ * doubled slashes, or internal whitespace — is a config error, since it
+ * could never match a real parent model. Slashes inside the model id are
+ * legal (e.g. OpenRouter's `openrouter/anthropic/claude-sonnet-4`): keys
+ * name the provider before the first slash plus the full model id.
+ * Colons are legal here: model ids carry them
  * (`ollama/qwen2.5:32b`), and keys name the parent's exact id.
  */
 function parseModelsByParent(
@@ -375,7 +378,21 @@ function parseModelsByParent(
   const out: Record<string, Record<string, ModelAssignment>> = {};
   for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
     const normalized = key.trim().toLowerCase();
-    if (!/^[^/\s]+\/[^/\s]+$/.test(normalized)) {
+    // Keys are provider + "/" + full model id; the id itself may contain
+    // slashes (e.g. OpenRouter's openrouter/anthropic/claude-sonnet-4).
+    // Split on the first slash and validate provider and id separately.
+    const slash = normalized.indexOf("/");
+    const provider = slash === -1 ? "" : normalized.slice(0, slash);
+    const modelId = slash === -1 ? "" : normalized.slice(slash + 1);
+    const bad =
+      slash <= 0 ||
+      /\s/.test(provider) ||
+      modelId === "" ||
+      /\s/.test(modelId) ||
+      modelId.startsWith("/") ||
+      modelId.endsWith("/") ||
+      modelId.includes("//");
+    if (bad) {
       throw new Error(
         `${path}: modelsByParent key '${key}' must be an exact provider/model-id; got ${JSON.stringify(key)}.`,
       );

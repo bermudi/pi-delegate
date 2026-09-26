@@ -226,8 +226,12 @@ and migration guidance; none may arrive as silent rewrite drift.
   the unscoped entry. A configured reference's `:effort` suffix pins the
   child's thinking level; a bare pinned model runs at that model's default;
   a configured reference that does not resolve in the session's registry
-  fails the same way, naming the entry. A `modelsByParent` key that could
-  never be a `provider/model-id` (empty, extra slashes, internal
+  fails the same way, naming the entry. A `modelsByParent` key names the
+  parent's exact `provider/model-id` (provider before the first slash plus
+  the full model id, which may itself contain slashes, e.g.
+  `openrouter/anthropic/claude-sonnet-4`); a key that could
+  never match (empty, missing the slash, an empty provider or model id,
+  doubled slashes, internal
   whitespace) is rejected at config load — dead entries fail loudly, they
   do not sit silently. Colons are legal in model ids
   (`ollama/qwen2.5:32b`): only a trailing known level strips as `:effort`,

@@ -257,6 +257,53 @@ describe("markdown agent profiles contract (#7)", () => {
   );
 
   test(
+    "a project-shadowed global profile name stays a valid `models` key",
+    async () => {
+      // Review: the project profile wins execution (first definition wins)
+      // but the shadowed global definition still makes the name globally
+      // defined — a `models` pin for it must validate and dispatch must
+      // succeed on the project's prompt.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      writeProfile(
+        projectDir(session),
+        "navigator.md",
+        ["name: navigator", "description: project navigator"].join("\n"),
+        "PROJECT-NAVIGATOR",
+      );
+      writeProfile(
+        globalDir(session),
+        "navigator.md",
+        ["name: navigator", "description: global navigator"].join("\n"),
+        "GLOBAL-NAVIGATOR",
+      );
+      configureDelegate(session, {
+        models: { navigator: subagents.spec },
+      });
+      let seenPrompt: unknown;
+      subagents.respond([
+        (context) => {
+          seenPrompt = systemPromptText(
+            context.messages.find((m) => m.role === "system"),
+          );
+          return fauxAssistantMessage("NAVIGATED");
+        },
+      ]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "navigate", agent: "navigator" }],
+      });
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("NAVIGATED");
+      expect(seenPrompt).toEqual(
+        expect.stringContaining("PROJECT-NAVIGATOR"),
+      );
+      expect(subagents.state.callCount).toBe(1);
+    },
+  );
+
+  test(
     "a malformed profile is skipped with a warning and its name stays unknown",
     async () => {
       // SPEC: discovery failures surface as warnings, never a half-loaded

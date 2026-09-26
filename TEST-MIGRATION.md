@@ -971,7 +971,12 @@ default. Recorded in SPEC.md "Dispatch" and COMPATIBILITY.md.
   `:effort`; any other `:segment` stays in the reference and fails at
   resolution, and colon-bearing `modelsByParent` keys are valid. The
   dispatch suite covers a verbatim colon pin plus a colon-keyed scoped
-  match against a colon-id parent.)
+  match against a colon-id parent. A later review reversal: slash-bearing
+  model ids are valid too — OpenRouter keys are provider + "/" + the
+  full id (`openrouter/anthropic/claude-sonnet-4`), split on the first
+  slash — while empty halves, doubled slashes, and internal whitespace
+  still fail at load; covered by a key-load test plus the extended dead-
+  shape cases in `tests/contract/dispatch.test.ts`.)
 - `src/validation.ts` and the boundary layer reject `thinking` wherever it
   appears with guidance toward the config — the field left the task schema
   entirely.
@@ -1023,6 +1028,21 @@ dispatch; same-named files in one directory resolve in filename order
 (files created in reverse order so creation order cannot masquerade);
 the manual's profile listing is silent and does not spend the session's
 warn-once budget (the first dispatch after help still warns).
+
+Post-landing review fix (still in `profiles.test.ts`): a global profile
+name shadowed by a same-named project profile stays a valid `models` key
+— first-definition-wins decides execution, but the shadowed global
+definition still counts as globally defined — so a `models` pin for it
+validates and the dispatch runs the project's prompt.
+
+Review fix in `src/isolated.ts` (covered by the existing
+"partially duplicate proposal" regression in
+`tests/contract/workspaces.test.ts`): a successful forward `--check`
+proves only the chain edge, so files the merge dropped from the edge
+(identical to an earlier, since-conflicted proposal) are verified against
+the live source before the verify-before-write/write — a partial
+duplicate becomes a conflict instead of claiming `applied_unverified`
+with `appliedFiles` for files that never landed.
 
 ## 2026-09-26 — composed child base prompt (issue #33)
 

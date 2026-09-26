@@ -472,15 +472,21 @@ describe("delegate dispatch contract", () => {
   test(
     "modelsByParent keys that could never match a parent fail at config load",
     async () => {
-      // Review of #32: a key with an extra slash or internal whitespace can
-      // never equal a parent provider/model-id; it is rejected at load with
-      // the same message as the other dead shapes instead of sitting in the
-      // config silently never matching.
+      // Review of #32: a key that could never match a parent provider /
+      // full model id — empty halves, doubled slashes, or internal
+      // whitespace (a single extra slash is now legal: slash-bearing model
+      // ids like openrouter/anthropic/claude-sonnet-4) — is rejected at
+      // load with the same message as the other dead shapes instead of
+      // sitting in the config silently never matching.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
       for (const key of [
-        "delegate-faux/faux-1/extra",
+        "delegate-faux/faux-1//extra",
+        "delegate-faux//faux-1",
+        "delegate-faux//",
+        "/faux-1",
+        "delegate-faux/",
         "delegate-faux/fa ux-1",
       ]) {
         configureDelegate(session, {
@@ -549,6 +555,34 @@ describe("delegate dispatch contract", () => {
       expect(result.text).toContain("TAGGED-INHERITED");
       expect(subagents.alt.state.callCount).toBe(1); // scoped key matched
       expect(tagged.state.callCount).toBe(2); // reviewer pin + inline inherit
+    },
+  );
+
+  test(
+    "a modelsByParent key names provider plus a slash-bearing model id (OpenRouter-style)",
+    async () => {
+      // Regression: real OpenRouter ids are provider + "/" + an id that
+      // itself contains a slash (openrouter/anthropic/claude-sonnet-4), so
+      // the key must split on the FIRST slash; a single-slash-only shape
+      // rejects it at config load and blocks dispatch.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      configureDelegate(session, {
+        modelsByParent: {
+          "openrouter/anthropic/claude-sonnet-4": {
+            scout: subagents.spec,
+          },
+        },
+      });
+      subagents.respond([fauxAssistantMessage("SLASH-ID-KEY-LOADS")]);
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "look", agent: "scout" }],
+      });
+      // The scoped key simply never matches this parent; dispatch
+      // succeeds and the task inherits the parent model.
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("SLASH-ID-KEY-LOADS");
+      expect(subagents.state.callCount).toBe(1);
     },
   );
 

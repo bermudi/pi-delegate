@@ -888,6 +888,12 @@ async function applyToSource(
       // would double-apply it (duplicate lines) while reporting success
       // for changes that never landed. An aborted reverse check is a
       // cancellation like the forward one, not drift evidence.
+      // The reverse check only diagnoses a forward failure: when the
+      // delta already landed, only part of the proposal may be present
+      // (a partial duplicate). The later full-proposal checks after a
+      // successful forward check and after a successful reverse check
+      // below establish that without depending on this probe, so no
+      // check is needed here before running it.
       let alreadyPresent = false;
       try {
         await git(["apply", "--check", "--reverse"], {
@@ -960,6 +966,25 @@ async function applyToSource(
         baselineRef: group.baselineRef,
         proposalRef: worker.proposalRef,
         patchPath: worker.patchPath,
+      });
+      continue;
+    }
+
+    // A forward check that SUCCEEDS still proves only the delta: a
+    // partial duplicate's edge can apply cleanly while a sibling file
+    // the merge dropped (identical to an earlier, since-conflicted
+    // proposal) never landed. Files outside this edge must therefore
+    // already match the proposal — a fresh proposal touches everything,
+    // so this is vacuous for it and only fires on partial duplicates.
+    const missingAfterForward = await missingProposalEffects(group, proposal);
+    const missingOutsideEdge = missingAfterForward.filter(
+      (relative) => !deltaPaths.includes(relative),
+    );
+    if (missingOutsideEdge.length) {
+      results[proposal.taskIndex] = withIntegration(outcome, {
+        status: "conflict", proposedFiles: proposal.files, appliedFiles: [],
+        conflicts: missingOutsideEdge.map((relative) => ({ path: relative, reason: "Only part of the proposal is present in the source tree; retained instead of claiming an apply." })),
+        baselineRef: group.baselineRef, proposalRef: worker.proposalRef, patchPath: worker.patchPath,
       });
       continue;
     }

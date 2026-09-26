@@ -140,8 +140,9 @@ model unconditionally. A second map, `"modelsByParent"`, scopes those pins to
 the parent's exact `provider/model-id` (case-insensitive):
 `{"modelsByParent": {"<parent provider/model-id>": {"scout": "..."}}}` — a
 scoped entry wins over the unscoped `"models"` entry for the same agent.
-A `modelsByParent` key that could never be a `provider/model-id` — empty,
-extra slashes, or internal whitespace — fails at config load rather than
+A `modelsByParent` key names the parent's exact `provider/model-id`
+(provider before the first slash, then the full model id — which may itself
+contain slashes, e.g. OpenRouter's `openrouter/anthropic/claude-sonnet-4`). A key that could never match — empty, missing the slash, an empty provider or model id, doubled slashes, or internal whitespace — fails at config load rather than
 sitting dead; colons are legal because model ids carry them
 (`ollama/qwen2.5:32b`) and keys name the parent's exact id. Below both sits a Markdown profile's
 frontmatter `model:` pin: the model chain is parent-scoped pin → unscoped

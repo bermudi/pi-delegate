@@ -424,9 +424,13 @@ export function discoverProfiles(
         );
         continue;
       }
+      // Globally defined even when shadowed: a project profile winning
+      // first-definition-wins must not erase the global definition from
+      // the models/modelsByParent key set (SPEC: only globally defined
+      // names are valid keys — a shadowed name is still globally defined).
+      if (global) globalNames.add(profile.name);
       if (profiles.has(profile.name)) continue; // first definition wins
       profiles.set(profile.name, profile);
-      if (global) globalNames.add(profile.name);
     }
   };
 
