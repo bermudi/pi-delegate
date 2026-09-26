@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   existsSync,
   mkdtempSync,
@@ -8,6 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
@@ -229,6 +230,102 @@ describe("delegate dependency graph and handoffs", () => {
       // The leaf's block names its own prerequisite, keeping the chain
       // inspectable edge by edge.
       expect(result.text).toMatch(/'b'/);
+    },
+  );
+
+  test(
+    "a blocked dependent stays visible in async wait, poll, and delivery views",
+    async () => {
+      // SPEC "Dependencies and handoffs": a blocked task is a caller-
+      // visible terminal status naming its blocking prerequisites and
+      // their reasons. The sync result path proves it above; the async
+      // ticket surfaces — wait, settled poll, and the delivered
+      // `delegate-result` message — render from the same recorded
+      // outcomes and must carry it too. This was the remaining half of
+      // the issue #18 coverage gap: the 2026-09-26 hardening review
+      // covered cancellation superseding the gate, but no async view of
+      // a blocked outcome existed.
+      session = await openDelegateBoundary();
+      const host = session.session as AgentSession;
+      const subagents = await installSubagentModel(session);
+
+      const turn: FauxResponseFactory = async (context) => {
+        if (JSON.stringify(context.messages).includes("FAILER")) {
+          return fauxAssistantMessage("", {
+            stopReason: "error",
+            errorMessage: "usage limit exceeded; upgrade your plan",
+          });
+        }
+        return fauxAssistantMessage("FREE-OUTPUT");
+      };
+      subagents.respond([turn, turn]);
+
+      const sends = spyOn(host, "sendCustomMessage");
+      const dispatched = await callDelegate(session, {
+        tasks: [
+          { id: "free", prompt: "FREE independent" },
+          { id: "failer", prompt: "FAILER task" },
+          { id: "dependent", prompt: "depends", dependsOn: ["failer"] },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(waited.isError).toBe(false);
+      // The blocked dependent consumed no worker: after settlement only
+      // the free branch and the failer ever reached the provider.
+      expect(subagents.state.callCount).toBe(2);
+      // One ok, one failed, one blocked → partial settlement.
+      expect(waited.text).toContain("partial");
+      expect(waited.text).toContain("blocked");
+      expect(waited.text).toMatch(/'failer'/);
+      const waitResults = objectOf(waited.details).results as
+        | { id: string; status: string; error?: string; blockedBy?: string[] }[]
+        | undefined;
+      const byId = new Map(waitResults?.map((r) => [r.id, r]));
+      expect(byId.get("free")?.status).toBe("ok");
+      expect(byId.get("failer")?.status).toBe("failed");
+      const dependent = byId.get("dependent");
+      expect(dependent?.status).toBe("blocked");
+      expect(dependent?.blockedBy).toEqual(["failer"]);
+      expect(dependent?.error).toMatch(/'failer'/);
+
+      // Settled polls keep the same visibility.
+      const poll = await callDelegateTicket(session, {
+        action: "poll",
+        ticket,
+      });
+      expect(poll.text).toContain("blocked");
+      const pollResults = objectOf(poll.details).results as
+        | { id: string; status: string; blockedBy?: string[] }[]
+        | undefined;
+      expect(
+        pollResults?.find((r) => r.id === "dependent")?.status,
+      ).toBe("blocked");
+
+      // The delivered delegate-result message carries the blocked
+      // outcome: its content names the block, its details keep the
+      // structured record.
+      const end = Date.now() + 2000;
+      while (sends.mock.calls.length === 0) {
+        if (Date.now() > end) throw new Error("delivery never fired");
+        await Bun.sleep(5);
+      }
+      const [message] = sends.mock.calls[0]!;
+      expect(message.customType).toBe("delegate-result");
+      expect(message.content).toContain("blocked");
+      expect(message.content).toMatch(/'failer'/);
+      const delivered = objectOf(message.details).results as
+        | { id: string; status: string; blockedBy?: string[] }[]
+        | undefined;
+      const deliveredDependent = delivered?.find((r) => r.id === "dependent");
+      expect(deliveredDependent?.status).toBe("blocked");
+      expect(deliveredDependent?.blockedBy).toEqual(["failer"]);
     },
   );
 

@@ -348,8 +348,9 @@ gaps.
   and a silent in-flight turn still stalls under a paused ticket. v2 gates
   queued tasks before slot acquisition and parks between-turn continuations
   via the core `prepareNextTurnWithContext` hook.
-- **Gap:** mid-turn pause semantics (current turn finishes); deadline-during-
-  pause; pause unavailability on terminal tickets.
+- **Gap:** mid-turn pause semantics (current turn finishes); pause
+  unavailability on terminal tickets. Deadline-during-pause is covered —
+  "Timer rules" under "Invariant hardening" below.
 
 ### Session reuse and lifecycle
 
@@ -375,9 +376,14 @@ gaps.
   `resumeFrom` without a prompt rehydrates the transcript and sends the
   default continuation instruction (live test with a real `.jsonl`
   fixture); empty `sessionId` rejected.
-- **Gap:** eviction after stalled/deadline-exceeded runs; shutdown cleanup;
-  usage recorded for ordinary failures on pooled sessions; pre-prompt
-  deadline leaving the session intact.
+- **Gap:** eviction after a deadline-exceeded *prompted* run — stalled and
+  cancelled eviction are covered (stall under "Invariant hardening" below;
+  the pool settles both watchdog causes through one branch, but only the
+  stall variant is named by a test); shutdown cleanup and the pre-prompt
+  deadline leaving the session intact are covered (same section and the
+  live tests above). Usage recorded for ordinary failures on pooled
+  sessions remains open: the "records its attempt" test witnesses the
+  single provider call, not usage.
 
 ### Admission and shared writes
 
@@ -443,9 +449,16 @@ gaps.
   working-tree edits as a per-path conflict (verify-before-write); an
   identical second proposal reports `applied_unverified` with empty
   `appliedFiles` and already-present wording, never a fresh apply.
-- **Gap:** cancellation before apply retains proposals and applies nothing;
-  binary/symlink/mode reconciliation; baseline-drift refusal; worker-process
-  termination guarantees.
+- **Gap:** binary-content proposals end-to-end — patches always carry
+  `--binary` and the failed-apply tests fault that invocation, but no test
+  pushes actual non-text content through a live proposal; index/branch
+  invariance asserted on refused paths — the success-path test asserts the
+  staged index survived, the conflict/failed-apply tests assert file bytes
+  only. Cancellation before apply, baseline-drift refusal (same-file
+  mid-flight edits, drift between check and write, partial duplicates),
+  symlink/mode reconciliation, and abandoned-worker cleanup are covered
+  above and under "Invariant hardening"; worker termination itself is
+  cooperative by contract (see "Cancellation and quiescence").
 
 ### Failure propagation and retries
 
@@ -616,9 +629,9 @@ New v2 contract — no v1 evidence; the dependency graph is an additive
   `tests/regression/cancellation.test.ts`.
 - **Internal:** graph resolution/phasing helpers (`graph.ts`) — not
   boundary-tested directly.
-- **Gap:** blocked outcomes under `async` tickets poll/delivery views
-  (superseded paths asserted by code review; the cancellation-racing-
-  dep-gate half is now covered live — see "Invariant hardening" below).
+- **Gap:** none — blocked outcomes under `async` wait/poll/delivery views
+  are covered live (see "Invariant hardening" below), as is cancellation
+  superseding the dependency gate.
 
 ### Invariant hardening (2026-09-26, not v1-migrated)
 
@@ -677,6 +690,16 @@ and the file that carries it.
   two whole-task attempts — one provider call each — never Pi's in-turn
   retries. `tests/regression/child-auto-retry.test.ts` (mutation-verified
   against `setRetryEnabled(true)`).
+- **Blocked outcomes in async views** (INVARIANTS "Dependencies and
+  handoffs"; SPEC "Dependencies and handoffs" — the issue #18 gap's
+  remaining half after the cancellation-supersession tests): a blocked
+  dependent's terminal outcome — status, blocking prerequisites, reason —
+  appears in the async ticket's settled `wait` and `poll` views (text and
+  `details.results`) and in the delivered `delegate-result` message
+  (content and `details`), under the `partial` settlement header, with no
+  provider call ever made for the blocked task.
+  `tests/contract/dependencies.test.ts` (mutation-verified: recording
+  blocked outcomes as `failed` fails the view assertions).
 
 ## First tranche
 
