@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import {
@@ -47,6 +49,37 @@ describe("delegate dispatch contract", () => {
       const beta = result.text.indexOf("OUTPUT-BETA");
       expect(alpha).toBeGreaterThanOrEqual(0);
       expect(beta).toBeGreaterThan(alpha);
+    },
+  );
+
+  test(
+    "a tilde cwd expands against the home directory",
+    async () => {
+      // v1 evidence: delegate.test.ts resolveCwd "expands tilde to homedir",
+      // "bare tilde resolves to homedir", "tilde with trailing slash";
+      // SPEC Dispatch field table: a leading ~ expands against the home
+      // directory and ignores the parent cwd.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([fauxAssistantMessage("HOME-CWD-OK")]);
+
+      // Bare `~` resolves to the home directory, which exists everywhere:
+      // the child runs there and the call succeeds.
+      const ok = await callDelegate(session, {
+        tasks: [{ prompt: "run from home", cwd: "~" }],
+      });
+      expect(ok.isError).toBe(false);
+      expect(ok.text).toContain("HOME-CWD-OK");
+
+      // A tilde path that does not exist fails naming the EXPANDED path —
+      // without expansion the error would carry `<parent cwd>/~/missing…`.
+      const home = homedir();
+      const missing = await callDelegate(session, {
+        tasks: [{ prompt: "run from a missing home path", cwd: "~/missing-delegate-probe" }],
+      });
+      expect(missing.isError).toBe(true);
+      expect(missing.text).toContain(join(home, "missing-delegate-probe"));
+      expect(missing.text).not.toContain("~/missing-delegate-probe");
     },
   );
 

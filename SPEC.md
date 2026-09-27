@@ -40,7 +40,7 @@ A task accepts:
 | `id` | Optional correlation key: 1–64 ASCII letters, digits, `.`, `_`, or `-`; unique in the batch |
 | `prompt` | Self-contained instruction; optional only when continuing with `resumeFrom` |
 | `agent` | Named profile; omission selects an inline task |
-| `cwd` | Working directory; relative paths resolve from the parent cwd |
+| `cwd` | Working directory; relative paths resolve from the parent cwd. A leading `~` expands against the home directory (`~`, `~/x`) and, like absolute paths, ignores the parent cwd |
 | `systemPrompt` | Authored base prompt, used verbatim — it replaces the composed child base prompt; project context is added separately |
 | `tools` | Exact capability list; `*` = read/write/edit/bash, `ro` = read/grep/find/ls |
 | `sessionId` | Key for a live reusable session |

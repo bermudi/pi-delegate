@@ -181,6 +181,19 @@ function isGlobalContextFile(filePath: string, agentDir: string): boolean {
   return false;
 }
 
+/**
+ * Resolve a task `cwd` against the parent cwd, with v1 tilde parity: any
+ * `~`-prefixed path expands against the home directory first (`~`, `~/`,
+ * `~/x` all resolve under home; tilde paths ignore the parent cwd, like
+ * absolute paths).
+ */
+function resolveTaskCwd(input: string, base: string): string {
+  const expanded = input.startsWith("~")
+    ? join(homedir(), input.slice(1))
+    : input;
+  return resolve(base, expanded);
+}
+
 function resolveModel(
   spec: string,
   env: HostEnvironment,
@@ -316,7 +329,7 @@ export async function resolveTasks(
       profile?.thinking ??
       (runsParentModel ? env.ctx.thinkingLevel : undefined);
 
-    const cwd = task.cwd ? resolve(env.ctx.cwd, task.cwd) : env.ctx.cwd;
+    const cwd = task.cwd ? resolveTaskCwd(task.cwd, env.ctx.cwd) : env.ctx.cwd;
     if (!existsSync(cwd)) {
       throw new Error(`${where}: cwd does not exist: '${cwd}'.`);
     }
