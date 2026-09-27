@@ -249,6 +249,15 @@ describe("delegate dependency graph and handoffs", () => {
       const host = session.session as AgentSession;
       const subagents = await installSubagentModel(session);
 
+      // The per-view `details.results` item shape: wait, poll, and the
+      // delivered message all render from the same recorded outcomes.
+      type ResultItem = {
+        id: string;
+        status: string;
+        error?: string;
+        blockedBy?: string[];
+      };
+
       const turn: FauxResponseFactory = async (context) => {
         if (JSON.stringify(context.messages).includes("FAILER")) {
           return fauxAssistantMessage("", {
@@ -285,7 +294,7 @@ describe("delegate dependency graph and handoffs", () => {
       expect(waited.text).toContain("blocked");
       expect(waited.text).toMatch(/'failer'/);
       const waitResults = objectOf(waited.details).results as
-        | { id: string; status: string; error?: string; blockedBy?: string[] }[]
+        | ResultItem[]
         | undefined;
       const byId = new Map(waitResults?.map((r) => [r.id, r]));
       expect(byId.get("free")?.status).toBe("ok");
@@ -295,18 +304,21 @@ describe("delegate dependency graph and handoffs", () => {
       expect(dependent?.blockedBy).toEqual(["failer"]);
       expect(dependent?.error).toMatch(/'failer'/);
 
-      // Settled polls keep the same visibility.
+      // Settled polls keep the same visibility: status, blocking
+      // prerequisites, and reason — the full parity the migration map
+      // claims for both views.
       const poll = await callDelegateTicket(session, {
         action: "poll",
         ticket,
       });
       expect(poll.text).toContain("blocked");
       const pollResults = objectOf(poll.details).results as
-        | { id: string; status: string; blockedBy?: string[] }[]
+        | ResultItem[]
         | undefined;
-      expect(
-        pollResults?.find((r) => r.id === "dependent")?.status,
-      ).toBe("blocked");
+      const pollDependent = pollResults?.find((r) => r.id === "dependent");
+      expect(pollDependent?.status).toBe("blocked");
+      expect(pollDependent?.blockedBy).toEqual(["failer"]);
+      expect(pollDependent?.error).toMatch(/'failer'/);
 
       // The delivered delegate-result message carries the blocked
       // outcome: its content names the block, its details keep the
@@ -316,12 +328,15 @@ describe("delegate dependency graph and handoffs", () => {
         if (Date.now() > end) throw new Error("delivery never fired");
         await Bun.sleep(5);
       }
+      // Delivery wakes once — duplicate delivery is its own regression
+      // class elsewhere in this suite.
+      expect(sends).toHaveBeenCalledTimes(1);
       const [message] = sends.mock.calls[0]!;
       expect(message.customType).toBe("delegate-result");
       expect(message.content).toContain("blocked");
       expect(message.content).toMatch(/'failer'/);
       const delivered = objectOf(message.details).results as
-        | { id: string; status: string; blockedBy?: string[] }[]
+        | ResultItem[]
         | undefined;
       const deliveredDependent = delivered?.find((r) => r.id === "dependent");
       expect(deliveredDependent?.status).toBe("blocked");
