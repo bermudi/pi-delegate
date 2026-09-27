@@ -1,5 +1,25 @@
 # Delegate v2 compatibility contract
 
+## v2 → v3 changes (SPEC v3, ratified 2026-09-27)
+
+v3 is a contract layer on the same engine. Caller-visible changes:
+
+- **BREAKING — multi-task batches default to async.** A `delegate` call
+  with two or more tasks now returns a ticket immediately and
+  auto-delivers the settled result, instead of blocking. Callers that
+  relied on the v2 blanket sync default must pass `async: false`.
+  Single-task calls still block inline by default; `async: true`
+  overrides either way.
+- **Additive — agent-name aliases.** `general`, `general-purpose`,
+  `worker` resolve to `default`; `explore`, `plan` to `scout`;
+  `implement` to `coder`. Exact case-sensitive match; expansion is
+  visible in results; unknown names still error with the available
+  list. Config model pins key on the canonical name.
+- **Additive — misfire telemetry.** Dispatches rejected before
+  execution record a telemetry row. No behavior change.
+- Deferred to a later v3 unit: steering receipts (grammar fixed in
+  SPEC v3, not yet implemented).
+
 ## Status and rule
 
 This is the v2 rewrite boundary extracted from v1's README, schemas, ADR,
