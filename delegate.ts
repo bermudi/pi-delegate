@@ -99,7 +99,7 @@ const taskSchema = Type.Object(
     agent: Type.Optional(
       Type.String({
         description:
-          "Named profile: 'default' (mirrors the parent), 'scout' (read-only investigation), 'coder' (implementation), 'reviewer' (read-only review), or a user-defined Markdown profile (.pi/agents). Omit for an inline task.",
+          "Named profile: 'default' (mirrors the parent), 'scout' (read-only investigation), 'coder' (implementation), 'reviewer' (review with read + bash — runs focused checks; serializes with writers), or a user-defined Markdown profile (.pi/agents). Omit for an inline task.",
       }),
     ),
     cwd: Type.Optional(
@@ -1341,7 +1341,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate",
       label: "Delegate to Subagents",
       description:
-        "Run subagent tasks. Sync returns results in input order; async: true returns a ticket (inspect or control it with delegate_ticket) and delivers the settled result automatically; tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; read-only tasks never serialize — parallel read-side fan-outs want 'ro' tools or the scout/reviewer agents; 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
+        "Run subagent tasks. Sync returns results in input order; async: true returns a ticket (inspect or control it with delegate_ticket) and delivers the settled result automatically; tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; read-only tasks never serialize — parallel read-side fan-outs want 'ro' tools or the scout agent (the reviewer runs bash, so it serializes as a writer); 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
       parameters: delegateSchema,
       promptSnippet:
         "Run subagent tasks: synchronous, or async tickets whose results arrive automatically",

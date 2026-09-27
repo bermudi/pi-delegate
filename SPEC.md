@@ -53,9 +53,12 @@ Omitting `agent` creates an `inline` task with `*` by default. The built-ins are
 
 - `default`: mirrors the live parent's model, thinking level, and delegatable
   native tools.
-- `scout`: read-only investigation.
-- `coder`: shared-tree implementation.
-- `reviewer`: shared-tree review by default.
+- `scout`: read-only investigation (`ro` tools — never serializes with
+  writers).
+- `coder`: shared-tree implementation (writer tools).
+- `reviewer`: shared-tree review with `read` + `bash` — it can run focused
+  checks, and admission treats it as a writer: it serializes with other
+  writers on the same roots.
 
 **Child base prompt.** A child without an authored prompt — an inline task or
 any built-in profile — composes its base prompt from the parent's

@@ -85,7 +85,10 @@ const BUILTIN_PROFILES: Record<string, Omit<AgentProfile, "tools" | "name"> & { 
     role: "You are an implementation subagent working directly in the source tree.",
   },
   reviewer: {
-    tools: TOOL_GROUPS.ro,
+    // v1 parity: read + bash — a reviewer that cannot run focused checks
+    // is materially weaker, and bash makes it a writer for shared-write
+    // admission, exactly as v1 treated it.
+    tools: ["read", "bash"],
     thinking: undefined,
     systemPrompt: undefined,
     role: "You are a code-review subagent. Inspect the tree and report concrete findings.",
