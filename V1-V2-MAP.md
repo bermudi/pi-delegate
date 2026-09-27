@@ -2,7 +2,9 @@
 
 Snapshot generated 2026-09-21 by comparing `../pi-delegate` @ `e17a23c`
 against this repo @ `d180a89`; updated 2026-09-23 against `3e316ab`
-(v1 HEAD `6b194ae`, prose-only). **Not a behavioral
+(v1 HEAD `6b194ae`, prose-only). **Refreshed 2026-09-27** against v1 @
+`3644723` / v2 @ `017d166`, incorporating a full per-test classification
+pass (§3d and §5). **Not a behavioral
 authority** — `SPEC.md`, `INVARIANTS.md`, and `COMPATIBILITY.md` remain
 the contracts. This map organizes what differs, what is missing, and what
 still needs a decision.
@@ -14,10 +16,10 @@ hooks, tool behavior). V1 internals are non-binding per `COMPATIBILITY.md`.
 
 ## At a glance
 
-| | v1 (`e17a23c`) | v2 (`56e6a14`) |
+| | v1 (`e17a23c`) | v2 (`017d166`) |
 | --- | --- | --- |
 | Shape | ~40 modules, grown organically | 1 entry + 23 `src/` modules, spec-first |
-| Test suite | 330 KB+ across 20+ files | 177 live tests, 20 files, **0 fail, 0 pending** |
+| Test suite | 330 KB+ across 20+ files | 306 live tests, 31 files, **0 fail, 0 pending** |
 | Behavioral authority | README + code | `SPEC.md` / `INVARIANTS.md` / `COMPATIBILITY.md` |
 | Implemented subsystems | all (incl. TUI) | all planned subsystems — named Markdown profiles shipped (#7); visibility layer shipped (#24) 2026-09-22, output bounding shipped (#25) 2026-09-23 |
 
@@ -103,21 +105,49 @@ remove them when upgrading.
 
 ### 3c. Test-coverage gaps (implementation may exist; tests don't)
 
-`TEST-MIGRATION.md` still lists "Usage properties" as a remaining slice
-(sync-result aggregate usage is wired in `details.usage` but untested at
-the boundary), plus the per-subsystem **Gap** entries: overlap warnings
-on results, per-provider limit variants, abort-of-queued-while-parked,
-aborted-worker-completes-ok, delivered-result suppression after waiter
-consumption, mid-turn pause semantics, eviction after stalled/deadline
-runs, read-only+writer parallelism, nested-repo gitdirs, cancel-before-apply
-retention, retry-count visibility, stall structured outcomes,
-async-no-usage.
+Reconciled 2026-09-27: the "blocked outcome async views" entries were
+covered by commits `0b755c7`/`017d166`, and 19 invariant-coverage holes were
+closed by `da14612`. `TEST-MIGRATION.md`'s per-subsystem **Gap** entries and
+its "Next contract slices → Remaining" list are now the live record of
+untested-but-implemented behavior (usage properties; per-provider limit
+variants; abort-of-queued-while-parked; aborted-worker-completes-ok;
+delivered-result suppression after waiter consumption; mid-turn pause
+semantics; eviction after stalled/deadline runs; read-only+writer
+parallelism; nested-repo gitdirs; cancel-before-apply retention;
+retry-count visibility; stall structured outcomes; async-no-usage;
+scratch-suggestion rejection prose; prompt-preview sanitization;
+cancel-on-settled wording).
 
-New with the visibility layer: footer lifecycle, pause/resume footer,
+With the visibility layer: footer lifecycle, pause/resume footer,
 multi-ticket merge, and the once-per-activation settle warning are
 contract-tested (`tests/contract/visibility.test.ts`); the browser's TUI
 surface and the switch/fork guards cannot be driven through the harness —
 an accepted gap, recorded in `TEST-MIGRATION.md`.
+
+### 3d. Found by the 2026-09-27 gap audit — pending disposition
+
+A full per-test classification of all 1,093 v1 test cases (see §5) found
+v1 behaviors with no v2 coverage **and no recorded drop decision**. Each
+needs an explicit keep/restore-or-record decision before this section can
+close:
+
+| # | v1 behavior | v2 status |
+| --- | --- | --- |
+| 1 | Touched-file attribution: results/views named the physical files each task touched (symlink-resolved, conservative "uncertain" flags, external-write reporting through worker links) and warned when tasks shared files | No touched-file data exists in v2 outcomes; TEST-MIGRATION lists only the overlap-warning *wish* — the attribution surface itself was never dispositioned |
+| 2 | `reviewer` built-in had `read`+`bash` ("run focused checks") | v2 pins reviewer read-only; COMPATIBILITY's preserve-list still says "reviewer semantics" — contradiction either way |
+| 3 | Task `cwd` expanded `~` to the home directory | v2 resolves it as a relative literal → "cwd does not exist" failure; unrecorded |
+| 4 | Malformed `maxConcurrent`/`stallTimeoutMs`/`concurrency` numbers kept the previous valid config and warned | v2 fails the whole call at config load; SPEC states fail-loudly only for `output` bounds; unrecorded for the numeric knobs |
+| 5 | A failed fresh run left a resumable session `.jsonl` on disk plus a retry hint | v2 fresh runs are in-memory-transcript only — nothing survives to resume; COMPATIBILITY does not pre-authorize session-persistence changes |
+| 6 | `resumeFrom` of a transcript with a live/abandoned worker was rejected (quarantine, incl. symlink aliases) | v2 rehydrates any `.jsonl`; reservations guard scopes, not transcripts |
+| 7 | Poll/cancel-preview views marked resumed tasks with ↻ (revival provenance) | Dropped silently; no v2 view shows resume provenance |
+| 8 | Running-ticket polls showed live activity: current/last tool, tool+token counts, activity age, finalized/active/queued/failed split | v2 running poll is "N/M finished" + recorded outputs; footer/browser cover operators but the LLM-facing poll lost the signal; unrecorded |
+| 9 | Sync usage flagged lower bounds ("token usage and cost are lower bounds") when a worker's accounting was incomplete | v2 sums usage unconditionally |
+| 10 | Pooled `default` sessions followed the parent's live thinking level on reuse | v2 compares frozen thinking and rejects on mismatch for every profile — likely deliberate (INVARIANTS freeze wording) but the v1 default-exception drop is not named anywhere |
+
+Items already recorded elsewhere and **not** re-raised: pause
+resume-then-repause leak test (open issue #31), scratch-viability prose and
+per-provider limit variants (TEST-MIGRATION Gap entries), prompt-preview
+sanitization and cancel-on-settled wording (implemented; Gap entries above).
 
 ## 4. Same feature, different behavior
 
@@ -128,6 +158,13 @@ an accepted gap, recorded in `TEST-MIGRATION.md`.
 | Provider extensions | allowlist | children run extension-free; provider registration and auth come from the parent's shared model runtime (verified live 2026-09-26, issue #5) |
 | Scratch vs shared writer | (v1 scratch reserved on source) | scratch holds no source reservation — runs beside a shared writer |
 | Config surface | `maxConcurrent`, `concurrency{providers}`, `agentOverrides{,ByParentModel}`, `allowUnsafeSharedWrites`, `stallTimeoutMs`, `telemetry{enabled}`, `maxAsyncTickets`, `output.spill{Threshold,Tail}Chars` | `maxConcurrent`, `concurrency{default,providers,models}`, `stallTimeoutMs`, `models`, `modelsByParent`, `telemetry{enabled,dbPath}`, `output.spill{Threshold,Tail}Chars` |
+
+Audit note (2026-09-27): SPEC names only `models`/`modelsByParent`,
+`telemetry`, and `output.spill*` as config keys. `maxConcurrent`, the
+`concurrency` maps, and `stallTimeoutMs` — their defaults (3, 15 min) and
+fail-loudly semantics — exist in `src/config.ts` but in no contract
+document; an implementer reading SPEC could not derive them. README
+guidance is telemetry-only (open issue #20).
 | Stall watchdog | 15 min default | 15 min default (parity) |
 | Package | published `@bermudi/pi-delegate` 0.1.21, esbuild bundle step | no bundle, `files: [delegate.ts, README]` |
 
@@ -148,6 +185,21 @@ pooled sessions; telemetry with v1 database migration; and, since
 switch/fork consent guards, quit/reload traces, and the live subagent
 browser (#24).
 
+**2026-09-27 per-test classification pass:** all 1,093 v1 test cases were
+classified against the v2 contracts, live tests, and migration records
+(covered / dropped-recorded / internal / gap) by fresh per-cluster
+reviewers, with spot-verification of the highest-impact findings.
+Outcome: ~37% covered by live v2 tests or contract, ~19% deliberate
+recorded drops, ~39% internal (v1 helpers/decomposition — non-binding by
+rule), and 55 rows (≈5%) clustering into the ten findings in §3d. No
+un dispositioned behavior remains outside §3d; module-level dispositions
+follow their test files (v1 tests are organized per module). The obligation
+side was checked independently: 259 normative sentences extracted from
+SPEC/INVARIANTS/COMPATIBILITY joined against the test suite — every
+no-signal obligation resolved to an existing test, an accepted-gap record,
+or non-obligation prose, except the SPEC config-key documentation gap
+below.
+
 ## 6. Decisions (2026-09-21) and what remains
 
 1. **`allowUnsafeSharedWrites`: kept out** (user decision) — INVARIANTS now
@@ -164,3 +216,9 @@ browser (#24).
 
 Still open from 3a: nothing — **named Markdown agent profiles (issue #7)**
 shipped, closing the last 3a-style gap.
+
+Still open from §3d (2026-09-27 audit): the ten pending-disposition items
+await keep/restore-or-record decisions; item 2 (reviewer tools) also
+contradicts COMPATIBILITY's preserve-list as written and must be resolved
+one way or the other. The SPEC config-key documentation gap (§4 audit
+note) needs a SPEC addition regardless of the §3d outcomes.
