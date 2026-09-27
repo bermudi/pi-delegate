@@ -31,10 +31,56 @@ type Writable<T> = { -readonly [K in keyof T]: T[K] };
  * reach it only through the store's methods, so the caller-visible `Ticket`
  * stays free of it.
  */
+/**
+ * SPEC v3 "Interaction grammar — Steering" receipt outcomes. `steered`:
+ * the message is on a live run's steering queue and merges at the next
+ * turn boundary. `activated`: no run was live, so the message is parked
+ * and opens the task's next turn. `duplicate`: an idempotent replay of a
+ * recorded steerId. `not-applied`: nothing could or can receive it.
+ */
+export type SteerStatus = "activated" | "steered" | "duplicate" | "not-applied";
+
+/** Machine-readable half of a steer receipt, attached as details.steer. */
+export interface SteerDetails {
+  readonly steerId: string;
+  readonly ticket: string;
+  readonly taskId: string;
+  readonly status: SteerStatus;
+  /** On a duplicate receipt: the status the original call returned. */
+  readonly replayed?: SteerStatus;
+}
+
+interface SteerRecord {
+  readonly taskIndex: number;
+  readonly taskId: string;
+  readonly message: string;
+  /** Set once the message has been handed to a run's steering queue. */
+  delivered: boolean;
+  receipt: { status: Exclude<SteerStatus, "duplicate">; text: string };
+}
+
+interface PendingSteer {
+  readonly steerId: string;
+  readonly message: string;
+}
+
 interface TicketRuntime {
   questionSeq: number;
   readonly pendingQuestions: Map<string, { taskIndex: number; resolve: (answer: string) => void; reject: (error: Error) => void }>;
   readonly answeredQuestions: Map<string, { taskIndex: number; answer: string }>;
+  /**
+   * steerId → the recorded attempt, for idempotent replay and conflict
+   * detection (operationId discipline). Entries are written only once a
+   * target task resolved — malformed calls consume no id.
+   */
+  readonly steers: Map<string, SteerRecord>;
+  /**
+   * Steer messages parked while their task has no live run, by task
+   * index. Drained by the task's next attempt just before prompt();
+   * voided when the task settles (the receipt flips to not-applied, so
+   * a duplicate retry reports the truth rather than a stale "activated").
+   */
+  readonly pendingSteers: Map<number, PendingSteer[]>;
   /** Aborts in-flight executions when force-cancelled. */
   readonly cancellation: AbortController;
   /**
@@ -355,6 +401,8 @@ export class TicketStore {
       questionSeq: 0,
       pendingQuestions: new Map(),
       answeredQuestions: new Map(),
+      steers: new Map(),
+      pendingSteers: new Map(),
       holdSettlement,
       pauseGate: undefined,
       settledGate: new Deferred(),
@@ -498,6 +546,9 @@ export class TicketStore {
     const outcomes = this.entry(ticket).record
       .outcomes as (TaskOutcome | undefined)[];
     outcomes[outcome.index] = outcome;
+    // A settled task can never drain a parked steer — void them so a
+    // retry of that steerId reports not-applied, not a stale activated.
+    this.voidPendingSteers(ticket, outcome.index);
     this.save(this.entry(ticket).record);
     this.changed();
     this.maybeSettle(ticket);
@@ -557,6 +608,216 @@ export class TicketStore {
     console.info(`[delegate] ticket ${ticket.id} task ${taskId} answered question ${questionId}`);
     pending!.resolve(answer);
     return `Answer ${questionId} recorded for task ${taskId}; worker will resume when capacity is available.`;
+  }
+
+  /**
+   * SPEC v3 "Interaction grammar — Steering": a steer is a message with a
+   * delivery receipt, idempotent on retry. The receipt names what the
+   * child will observe: `steered` — queued on a live run, merged at its
+   * next turn boundary; `activated` — parked until the task's next run
+   * starts, which the message opens. `duplicate` replays the recorded
+   * receipt verbatim (a parked steer whose task settled unflipped reports
+   * `not-applied` instead — the stored record was corrected when it
+   * voided). `steerId` reuse with a different message or target is a
+   * conflict error naming both attempts.
+   */
+  steer(
+    ticket: Ticket,
+    callTaskId: string | undefined,
+    steerId: string,
+    message: string,
+  ): TicketRpcResult {
+    const { record, rt } = this.entry(ticket);
+    const seen = rt.steers.get(steerId);
+    if (seen !== undefined) {
+      // The id binds message + resolved target; an omitted taskId re-aims
+      // at the original task. Anything else under the same id is a
+      // different operation — conflict, naming both attempts.
+      const resolvedIndex =
+        callTaskId === undefined
+          ? seen.taskIndex
+          : record.tasks.findIndex((task) => task.id === callTaskId);
+      if (seen.message !== message || resolvedIndex !== seen.taskIndex) {
+        const sameTarget = resolvedIndex === seen.taskIndex;
+        const attempted = sameTarget
+          ? `task "${seen.taskId}"`
+          : resolvedIndex >= 0
+            ? `task "${record.tasks[resolvedIndex]!.id}"`
+            : `task "${callTaskId ?? ""}" (not on this ticket)`;
+        return {
+          text:
+            `Steer id "${steerId}" conflict on ticket "${ticket.id}": first used for task "${seen.taskId}"; ` +
+            `this attempt targets ${attempted}` +
+            `${seen.message !== message ? " and carries a different message" : ""}. ` +
+            `steerIds are single-use; retry with a new steerId.`,
+          isError: true,
+          ticket,
+        };
+      }
+      return {
+        text: seen.receipt.text,
+        isError: false,
+        ticket,
+        steer: {
+          steerId,
+          ticket: ticket.id,
+          taskId: seen.taskId,
+          status: "duplicate",
+          replayed: seen.receipt.status,
+        },
+      };
+    }
+    const notApplied = (
+      text: string,
+      taskId?: string,
+      taskIndex?: number,
+    ): TicketRpcResult => {
+      if (taskId !== undefined && taskIndex !== undefined) {
+        rt.steers.set(steerId, {
+          taskIndex,
+          taskId,
+          message,
+          delivered: false,
+          receipt: { status: "not-applied", text },
+        });
+      }
+      return {
+        text,
+        isError: false,
+        ticket,
+        steer: { steerId, ticket: ticket.id, taskId: taskId ?? "", status: "not-applied" },
+      };
+    };
+    if (record.status !== "running") {
+      return notApplied(
+        ticket.recovered
+          ? `Steer "${steerId}": not-applied — ticket "${ticket.id}" is a recovered ${record.status} result; recovery never resumes it. Poll it for the final outcome.`
+          : `Steer "${steerId}": not-applied — ticket "${ticket.id}" is already ${record.status}; nothing is running. Poll it for the final result.`,
+      );
+    }
+    let taskIndex: number;
+    if (callTaskId !== undefined) {
+      taskIndex = record.tasks.findIndex((task) => task.id === callTaskId);
+      if (taskIndex < 0) {
+        return notApplied(
+          `Steer "${steerId}": not-applied — ticket "${ticket.id}" has no task "${callTaskId}". Its tasks: ${record.tasks.map((t) => `"${t.id}"`).join(", ")}.`,
+        );
+      }
+    } else {
+      const unsettled = record.tasks
+        .map((_, index) => index)
+        .filter((index) => record.outcomes[index] === undefined);
+      if (unsettled.length === 0) {
+        return notApplied(
+          `Steer "${steerId}": not-applied — ticket "${ticket.id}" has no running task left; poll it for the final results.`,
+        );
+      }
+      if (unsettled.length > 1) {
+        return {
+          text:
+            `action "steer" needs taskId on ticket "${ticket.id}" — ${unsettled.length} tasks are still running: ` +
+            `${unsettled.map((i) => `"${record.tasks[i]!.id}"`).join(", ")}.`,
+          isError: true,
+          ticket,
+        };
+      }
+      taskIndex = unsettled[0]!;
+    }
+    const taskId = record.tasks[taskIndex]!.id;
+    const outcome = record.outcomes[taskIndex];
+    if (outcome !== undefined) {
+      return notApplied(
+        `Steer "${steerId}": not-applied — task "${taskId}" on ticket "${ticket.id}" already settled (${outcome.status}); its outcome is final. Poll the ticket for it.`,
+        taskId,
+        taskIndex,
+      );
+    }
+    const pausedNote = record.paused
+      ? " The ticket is paused — the message merges when work resumes."
+      : "";
+    // Live run → the steering queue merges the message at the next turn
+    // boundary. No live run (queued, preparing, between retries) → park
+    // it; the task's next prompt drains it into turn one.
+    const handle = rt.executions.get(taskIndex);
+    const steered = handle?.steer?.(message) === true;
+    const receipt = steered
+      ? {
+          status: "steered" as const,
+          text:
+            `Steer "${steerId}" for task "${taskId}" on ticket "${ticket.id}": steered — ` +
+            `queued on the live run; the child sees it as a user message at its next turn boundary (not a mid-turn interrupt).` +
+            pausedNote,
+        }
+      : {
+          status: "activated" as const,
+          text:
+            `Steer "${steerId}" for task "${taskId}" on ticket "${ticket.id}": activated — ` +
+            `the task has no live turn right now (queued, preparing, or between attempts); the message opens its next turn.` +
+            pausedNote,
+        };
+    if (!steered) {
+      const queue = rt.pendingSteers.get(taskIndex);
+      if (queue === undefined) rt.pendingSteers.set(taskIndex, [{ steerId, message }]);
+      else queue.push({ steerId, message });
+    }
+    rt.steers.set(steerId, {
+      taskIndex,
+      taskId,
+      message,
+      delivered: steered,
+      receipt,
+    });
+    console.info(
+      `[delegate] ticket ${ticket.id} task ${taskId} steer ${steerId}: ${receipt.status}`,
+    );
+    return {
+      text: receipt.text,
+      isError: false,
+      ticket,
+      steer: { steerId, ticket: ticket.id, taskId, status: receipt.status },
+    };
+  }
+
+  /**
+   * Drain the parked steers for one task — the run loop calls this just
+   * before prompt() so each message merges at turn one. Records flip to
+   * delivered; a task that settles with steers still parked voids them
+   * (receipt → not-applied) via recordOutcome/settle.
+   */
+  takePendingSteers(ticket: Ticket, taskIndex: number): readonly string[] {
+    const { rt } = this.entry(ticket);
+    const pending = rt.pendingSteers.get(taskIndex);
+    if (pending === undefined || pending.length === 0) return [];
+    rt.pendingSteers.delete(taskIndex);
+    for (const steer of pending) {
+      const record = rt.steers.get(steer.steerId);
+      if (record !== undefined) record.delivered = true;
+    }
+    return pending.map((steer) => steer.message);
+  }
+
+  /**
+   * A settled task can never receive a parked steer — drop the queue and
+   * correct the stored receipts to not-applied, so a duplicate retry
+   * tells the truth (SPEC "Steering": receipts, never polling).
+   */
+  private voidPendingSteers(ticket: Ticket, taskIndex: number): void {
+    const { rt } = this.entry(ticket);
+    const pending = rt.pendingSteers.get(taskIndex);
+    if (pending === undefined) return;
+    rt.pendingSteers.delete(taskIndex);
+    const taskId = ticket.tasks[taskIndex]?.id ?? `#${taskIndex}`;
+    for (const steer of pending) {
+      const stored = rt.steers.get(steer.steerId);
+      if (stored !== undefined && !stored.delivered) {
+        stored.receipt = {
+          status: "not-applied",
+          text:
+            `Steer "${steer.steerId}": not-applied — task "${taskId}" on ticket "${ticket.id}" ` +
+            `settled before the message could be delivered; its outcome is final. Poll the ticket for it.`,
+        };
+      }
+    }
   }
 
   /**
@@ -622,6 +883,9 @@ export class TicketStore {
     for (const [id, question] of rt.pendingQuestions) {
       console.info(`[delegate] ticket ${ticket.id} invalidated question ${id}: ${status}`);
       question.reject(new Error(`Question ${id} cancelled: ticket ${status}.`));
+    }
+    for (const index of [...rt.pendingSteers.keys()]) {
+      this.voidPendingSteers(ticket, index);
     }
     this.changed();
     rt.pauseGate?.resolve();
@@ -845,18 +1109,29 @@ export interface TicketRpcResult {
    * attach its complete (unbounded) outcomes to result details.
    */
   readonly ticket?: Ticket;
+  /** The steer receipt's machine-readable half (action "steer" only). */
+  readonly steer?: SteerDetails;
 }
 
 /** delegate_ticket actions against the store. */
 export async function handleTicketRpc(
   call: {
-    action: "poll" | "wait" | "cancel" | "pause" | "resume" | "answer";
+    action:
+      | "poll"
+      | "wait"
+      | "cancel"
+      | "pause"
+      | "resume"
+      | "answer"
+      | "steer";
     ticket: string | undefined;
     force: boolean;
     timeoutMs: number | undefined;
     taskId: string | undefined;
     questionId: string | undefined;
     answer: string | undefined;
+    message: string | undefined;
+    steerId: string | undefined;
   },
   store: TicketStore,
   signal: AbortSignal | undefined,
@@ -865,6 +1140,26 @@ export async function handleTicketRpc(
     return { text: rosterView(store.list()), isError: false };
   }
   const ticket = call.ticket !== undefined ? store.get(call.ticket) : undefined;
+  // Steering is receipt-shaped end to end (SPEC v3 "Steering"): an
+  // unknown, terminal, or recovered target answers not-applied, not a
+  // generic refusal.
+  if (call.action === "steer") {
+    if (ticket === undefined) {
+      return {
+        text:
+          `Steer "${call.steerId ?? ""}": not-applied — ticket '${call.ticket ?? ""}' ` +
+          `is unknown; nothing was sent. Poll with no ticket to list the live ones.`,
+        isError: false,
+        steer: {
+          steerId: call.steerId ?? "",
+          ticket: call.ticket ?? "",
+          taskId: call.taskId ?? "",
+          status: "not-applied",
+        },
+      };
+    }
+    return store.steer(ticket, call.taskId, call.steerId!, call.message!);
+  }
   if (!ticket) {
     return {
       text: `Ticket '${call.ticket ?? ""}' not found.`,

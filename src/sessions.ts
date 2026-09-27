@@ -225,6 +225,15 @@ export class SessionPool {
         `Session '${task.sessionId}' is already running a task; wait for it to finish.`,
       );
     }
+    // A steer or follow-up queued in the previous run's tail window (after
+    // the loop's last queue poll but before settle) must not leak into this
+    // reuse — while pooled, nothing can queue anything, so clearing here
+    // once covers every park path.
+    try {
+      entry.session.agent.clearAllQueues();
+    } catch (error) {
+      log(`clearing message queues on pooled session '${task.sessionId}' failed`, error);
+    }
     entry.checkedOut = true;
     return entry;
   }

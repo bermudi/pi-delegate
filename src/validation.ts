@@ -30,13 +30,22 @@ export type DispatchCall =
 
 /** Post-schema delegate_ticket arguments. */
 export interface TicketArguments {
-  readonly action: "poll" | "wait" | "cancel" | "pause" | "resume" | "answer";
+  readonly action:
+    | "poll"
+    | "wait"
+    | "cancel"
+    | "pause"
+    | "resume"
+    | "answer"
+    | "steer";
   readonly ticket?: string;
   readonly timeoutMs?: number;
   readonly force?: boolean;
   readonly taskId?: string;
   readonly questionId?: string;
   readonly answer?: string;
+  readonly message?: string;
+  readonly steerId?: string;
 }
 
 /** Post-schema delegate_session arguments. */
@@ -56,13 +65,22 @@ export interface DispatchArguments {
 
 /** A validated delegate_ticket call; blank optionals normalized to absent. */
 export interface TicketCall {
-  readonly action: "poll" | "wait" | "cancel" | "pause" | "resume" | "answer";
+  readonly action:
+    | "poll"
+    | "wait"
+    | "cancel"
+    | "pause"
+    | "resume"
+    | "answer"
+    | "steer";
   readonly ticket: string | undefined;
   readonly force: boolean;
   readonly timeoutMs: number | undefined;
   readonly taskId: string | undefined;
   readonly questionId: string | undefined;
   readonly answer: string | undefined;
+  readonly message: string | undefined;
+  readonly steerId: string | undefined;
 }
 
 /** A validated delegate_session call. */
@@ -103,32 +121,45 @@ export const THINKING_FIELD_REJECTION =
 /**
  * Within-tool rules for `delegate_ticket`: `ticket` is required for every
  * action except `poll` (bare poll is the roster), `force` only accompanies
- * `cancel`, `timeoutMs` only `wait`, and `taskId`/`questionId`/`answer`
- * belong to `answer` alone — which requires all three. Conditional carries
- * are reported before missing requirements, matching the historical
- * precedence; blank values count as missing.
+ * `cancel`, `timeoutMs` only `wait`, `taskId` belongs to `answer` and
+ * `steer`, `questionId`/`answer` belong to `answer` alone — which requires
+ * all three — and `message`/`steerId` belong to `steer`, which requires
+ * both. Conditional carries are reported before missing requirements,
+ * matching the historical precedence; blank values count as missing.
  */
 export function validateTicketCall(args: TicketArguments): TicketCall {
   const ticket = isBlank(args.ticket) ? undefined : args.ticket;
   const taskId = isBlank(args.taskId) ? undefined : args.taskId;
   const questionId = isBlank(args.questionId) ? undefined : args.questionId;
   const answer = isBlank(args.answer) ? undefined : args.answer;
+  const message = isBlank(args.message) ? undefined : args.message;
+  const steerId = isBlank(args.steerId) ? undefined : args.steerId;
   if (args.force === true && args.action !== "cancel") {
     fail(`force is valid only with action "cancel".`);
   }
   if (args.timeoutMs !== undefined && args.action !== "wait") {
     fail(`timeoutMs is valid only with action "wait".`);
   }
+  if (taskId !== undefined && args.action !== "answer" && args.action !== "steer") {
+    fail(`taskId is valid only with actions "answer" and "steer".`);
+  }
   for (const [name, value] of [
-    ["taskId", taskId],
     ["questionId", questionId],
     // `answer` uses raw presence: an out-of-place blank reply is a
     // malformed call, not an absent field. Blank = missing only inside
-    // action "answer", where it fails the nonempty requirement.
+    // action "answer", where it fails the nonempty requirement. `message`
+    // and `steerId` follow the same convention for action "steer".
     ["answer", args.answer],
+    ["message", args.message],
+    ["steerId", args.steerId],
   ] as const) {
-    if (args.action !== "answer" && value !== undefined) {
-      fail(`${name} is valid only with action "answer".`);
+    const belongs =
+      name === "questionId" || name === "answer"
+        ? args.action === "answer"
+        : args.action === "steer";
+    if (!belongs && value !== undefined) {
+      const action = name === "questionId" || name === "answer" ? "answer" : "steer";
+      fail(`${name} is valid only with action "${action}".`);
     }
   }
   if (args.action === "answer") {
@@ -136,6 +167,20 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     if (questionId === undefined) fail(`action "answer" requires questionId.`);
     if (answer === undefined) {
       fail(`action "answer" requires a nonempty answer.`);
+    }
+  }
+  if (args.action === "steer") {
+    if (message === undefined) {
+      fail(`action "steer" requires a nonempty message.`);
+    }
+    if (steerId === undefined) {
+      fail(`action "steer" requires steerId — a caller-chosen idempotency key for safe retry.`);
+    }
+    // Same charset and length as task correlation ids.
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(steerId)) {
+      fail(
+        `steerId '${steerId}' is outside the id charset (letters, digits, '.', '_', '-', at most 64 chars).`,
+      );
     }
   }
   if (args.action !== "poll" && ticket === undefined) {
@@ -149,6 +194,8 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     taskId,
     questionId,
     answer,
+    message,
+    steerId,
   };
 }
 

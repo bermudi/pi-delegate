@@ -60,11 +60,27 @@ mid-flight the parent can steer. The grammar:
   work for read-only tasks (they hold no write claims); for overlapping
   writers they reject before execution with teaching, never serialize
   across calls.
-- **Steering (later phase; grammar fixed now).** Steering is a message
-  with a delivery receipt, idempotent on retry — never polling.
-  Outcome vocabulary adopted from the field: `queued` / `applied` /
-  `not-applied` (fx) and `activated` / `steered` / `duplicate`
-  (minimax).
+- **Steering.** Steering is a message with a delivery receipt,
+  idempotent on retry — never polling. Outcome vocabulary adopted
+  from the field: `queued` / `applied` / `not-applied` (fx) and
+  `activated` / `steered` / `duplicate` (minimax).
+
+  `delegate_ticket steer` carries `message`, a caller-chosen
+  `steerId`, and an optional `taskId` (default: the single
+  still-running task; an ambiguous omission errors naming the
+  running ids). Pi delivers steers at turn boundaries — never
+  mid-turn — so the receipts map: `steered` = queued on the live
+  child run, observed as a user message at its next turn boundary;
+  `activated` = no turn in flight (queued, preparing, between
+  attempts), the parked message opens the task's next turn;
+  `duplicate` = same `steerId`, byte-identical message, same
+  target — the original receipt replays verbatim, nothing
+  re-injects; `not-applied` = the target settled, is unknown, or
+  is a recovered ticket, with teaching toward poll. Reusing a
+  `steerId` with a different message or target is a conflict error
+  naming both attempts. A parked steer whose task settles before
+  delivery voids to `not-applied` on retry — nothing delivers into
+  a dead session.
 - **Wake delivery.** Settled results inject as follow-up turns,
   leaf-aware; simultaneous settlements batch into one wake.
 

@@ -89,6 +89,45 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     }
   });
 
+  test("steering a cold-recovered ticket receipts not-applied — recovery never resumes", async () => {
+    // SPEC v3 "Steering": a recovered ticket is terminal evidence; steer
+    // answers a not-applied receipt rather than reviving dead work.
+    const first = await openAt();
+    const provider = await installSubagentModel(first);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let started!: () => void;
+    const entered = new Promise<void>((r) => { started = r; });
+    provider.respond([async () => {
+      started();
+      await gate;
+      return fauxAssistantMessage("LATE-OUTPUT");
+    }]);
+    try {
+      const dispatched = await callDelegate(first, {
+        tasks: [{ prompt: "long task" }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      await entered;
+
+      const next = await openAt(first.cwd);
+      const steered = await callDelegateTicket(next, {
+        action: "steer",
+        ticket,
+        message: "wake up",
+        steerId: "s-cold",
+      });
+      expect(steered.isError).toBe(false);
+      expect(steered.text).toContain("not-applied");
+      expect(steered.text).toMatch(/recovered|interrupted/);
+      const steer = (steered.details as { steer?: { status?: string } }).steer;
+      expect(steer?.status).toBe("not-applied");
+    } finally {
+      release?.();
+    }
+  });
+
   test("insecure or malformed storage fails visibly before workers start", async () => {
     const first = await openAt();
     const provider = await installSubagentModel(first);

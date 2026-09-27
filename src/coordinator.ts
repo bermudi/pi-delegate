@@ -674,6 +674,12 @@ export class DispatchCoordinator {
                   : undefined,
               waitWhilePaused: (runSignal) =>
                 ticket ? this.waitWhilePaused(ticket, runSignal ?? signal) : Promise.resolve(),
+              // Steers parked while the task had no live run ride its
+              // next prompt's first turn (SPEC v3 "Steering").
+              consumeSteers:
+                ticket === undefined
+                  ? undefined
+                  : () => this.tickets.takePendingSteers(ticket, task.index),
               askQuestion: ticket === undefined ? undefined : async (question, toolSignal) => {
                 const combined = combineSignals(signal, toolSignal);
                 try {

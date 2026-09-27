@@ -86,7 +86,9 @@ describe("delegate public tool contract", () => {
         "action",
         "answer",
         "force",
+        "message",
         "questionId",
+        "steerId",
         "taskId",
         "ticket",
         "timeoutMs",
@@ -120,6 +122,7 @@ describe("delegate public tool contract", () => {
       "pause",
       "resume",
       "answer",
+      "steer",
     ]);
     const sessionSchema = objectOf(
       registeredTool(session, "delegate_session").parameters,

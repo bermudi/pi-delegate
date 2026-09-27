@@ -826,6 +826,35 @@ New v3 contract — no v1 evidence; SPEC.md "Interaction grammar",
   `prepareArguments` recoveries such as `ticketAction`→`delegate_ticket`)
   have no context to locate the telemetry config and record no row.
 
+### Steering with delivery receipts (v3, #37, 2026-09-27)
+
+New v3 contract — no v1 evidence; SPEC.md "Interaction grammar —
+Steering" defines the surface. Pi 0.87 delivers steers at turn
+boundaries only (`pi-agent-core` agent-loop.js drains the steering
+queue at `turn_end` and at run start), so `steered` means queued on a
+live run — never a mid-turn merge.
+
+- **Contract:** `delegate_ticket steer` takes `message`, `steerId`, and
+  optional `taskId` (defaults to the single running task; ambiguous
+  omissions error naming the running ids). Receipts — `steered`,
+  `activated`, `duplicate`, `not-applied` — ride the tool result text
+  and `details.steer`. Reusing a `steerId` with the same message and
+  target replays the original receipt verbatim; with a different
+  message or target it is a conflict error. A parked steer whose task
+  settles first voids to `not-applied`; recovered tickets refuse.
+- **Covered now:** `tests/contract/steering.test.ts` — a steer on a
+  live run receipts `steered` and lands exactly once in the child's
+  provider-visible transcript on its next turn; a steer for a
+  queued-behind-`maxConcurrent` task receipts `activated` and opens
+  its first turn; duplicate replay returns the original text and
+  `replayed` status; not-applied on settled tickets, unknown tickets,
+  and unknown task ids (which lists the real ids); the ambiguous
+  omission error names both running ids without consuming the
+  `steerId`; message- and target-conflict errors; a parked steer
+  voided by cancellation replays `not-applied` and the never-started
+  child receives nothing. Cold-recovered tickets refuse with
+  `not-applied` in `tests/contract/recovery.test.ts`.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |
@@ -1297,7 +1326,11 @@ defaults, agent-name aliases, and misfire telemetry (issue #35;
 `tests/contract/grammar.test.ts`, `tests/contract/telemetry.test.ts`);
 wake coalescing — simultaneous settlements batch into one followUp wake
 grouped by leaf routing (issue #36; `SPEC.md` "Wake delivery",
-`tests/contract/delivery.test.ts`).
+`tests/contract/delivery.test.ts`); task steering with delivery
+receipts — turn-boundary `steered`, parked `activated`, idempotent
+`duplicate`, and `not-applied` on settled/unknown/recovered targets
+(issue #37; `SPEC.md` "Steering", `tests/contract/steering.test.ts`,
+`tests/contract/recovery.test.ts`).
 
 Remaining:
 

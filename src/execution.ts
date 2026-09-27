@@ -51,6 +51,15 @@ export interface RunControls {
    * turn writes into it.
    */
   readonly holdTranscript?: (path: string) => void;
+  /**
+   * Steer messages parked while no run was live (SPEC v3 "Steering").
+   * Drained just before prompt(): each message is queued on the child's
+   * steering queue, where the agent loop merges it at run start — so a
+   * steer parked during queueing or between retry attempts opens the
+   * task's next turn. The callback consumes the queue; a late drain
+   * after cancellation is dropped with the session, never delivered.
+   */
+  readonly consumeSteers?: () => readonly string[];
 }
 
 export interface AttemptResult {
@@ -289,6 +298,36 @@ export class TaskExecution implements ExecutionHandle {
       // never release its write reservations.
       this.quarantined = true;
       log(`abort of task ${this.task.id} failed; session left undisposed`, error);
+    }
+  }
+
+  /**
+   * SPEC v3 "Interaction grammar — Steering": a steer is a message with a
+   * delivery receipt. Queue it on the child agent's steering queue — the
+   * loop merges it into the transcript as a user message at the next turn
+   * boundary (after the in-flight turn's tool calls, before the next
+   * model request; pi-agent-core agent-loop.js drains the queue at turn
+   * boundaries). Synchronous so the receipt is exact: the message is on
+   * the live run's queue when we claim "steered". Returns false when no
+   * run is live — no session yet (creation in flight), wound down, or a
+   * non-streaming gap — so the caller parks it for the next attempt
+   * rather than writing into a dead or pooled session's queue.
+   */
+  steer(message: string): boolean {
+    const session = this.session;
+    if (this.finished || session === undefined || !session.isStreaming) {
+      return false;
+    }
+    try {
+      session.agent.steer({
+        role: "user",
+        content: [{ type: "text", text: message }],
+        timestamp: Date.now(),
+      });
+      return true;
+    } catch (error) {
+      log(`steer of task ${this.task.id} failed`, error);
+      return false;
     }
   }
 
@@ -560,6 +599,17 @@ export class TaskExecution implements ExecutionHandle {
       this.noteActivity();
 
       usageBefore = usageOf(session);
+      // Steers parked while no run was live ride the first turn: the
+      // agent loop drains its steering queue before the first model
+      // request, so these merge alongside the task prompt. Synchronous
+      // queue pushes, before prompt() starts the run.
+      for (const steer of this.controls.consumeSteers?.() ?? []) {
+        session.agent.steer({
+          role: "user",
+          content: [{ type: "text", text: steer }],
+          timestamp: Date.now(),
+        });
+      }
       try {
         this.prompted = true;
         await session.prompt(this.task.prompt, {

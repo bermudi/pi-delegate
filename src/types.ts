@@ -198,6 +198,15 @@ export interface ExecutionHandle {
    * block on it.
    */
   abort(reason: string): Promise<void>;
+  /**
+   * Queue a steering message on the live run — Pi merges it into the
+   * transcript as a user message at the next turn boundary, before the
+   * next model request. Returns false when the execution has no live run
+   * (session still being created, already wound down, or disposed); the
+   * caller then parks the message for the task's next attempt instead of
+   * injecting into a dead or pooled session.
+   */
+  steer?(message: string): boolean;
 }
 
 export class Deferred {

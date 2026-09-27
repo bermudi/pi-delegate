@@ -191,9 +191,9 @@ const delegateSchema = Type.Object(
 
 const ticketSchema = Type.Object(
   {
-    action: stringEnum(["poll", "wait", "cancel", "pause", "resume", "answer"], {
+    action: stringEnum(["poll", "wait", "cancel", "pause", "resume", "answer", "steer"], {
       description:
-        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. pause/resume: hold and release queued work. answer: reply to a worker's pending question.",
+        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. pause/resume: hold and release queued work. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied.",
     }),
     ticket: Type.Optional(
       Type.String({
@@ -215,7 +215,8 @@ const ticketSchema = Type.Object(
     ),
     taskId: Type.Optional(
       Type.String({
-        description: "Only with action 'answer': the task that asked.",
+        description:
+          "Only with actions 'answer' and 'steer': the task to target. With 'steer' it defaults to the ticket's only still-running task.",
       }),
     ),
     questionId: Type.Optional(
@@ -228,6 +229,18 @@ const ticketSchema = Type.Object(
       Type.String({
         description:
           "Only with action 'answer': the nonempty reply sent to the waiting worker.",
+      }),
+    ),
+    message: Type.Optional(
+      Type.String({
+        description:
+          "Only with action 'steer': the nonempty instruction merged into the task's run.",
+      }),
+    ),
+    steerId: Type.Optional(
+      Type.String({
+        description:
+          "Only with action 'steer': caller-chosen idempotency key — same id + same message + same target replays the original receipt instead of injecting twice; same id + different content is an error.",
       }),
     ),
   },
@@ -305,6 +318,8 @@ const ticketFieldNames = [
   "taskId",
   "questionId",
   "answer",
+  "message",
+  "steerId",
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -351,7 +366,7 @@ function normalizeTools(value: string): unknown {
   return token !== "" && !/[\s,]/.test(token) ? [token] : value;
 }
 
-const TICKET_ACTIONS = ["poll", "wait", "cancel", "pause", "resume", "answer"];
+const TICKET_ACTIONS = ["poll", "wait", "cancel", "pause", "resume", "answer", "steer"];
 const SESSION_ACTIONS = ["list", "close"];
 
 /** A `delegate_ticket` example call built from the fields the caller sent. */
@@ -364,13 +379,15 @@ function delegateTicketExample(args: Record<string, unknown>): string {
       ? args.ticketAction
       : typeof args.action === "string" && TICKET_ACTIONS.includes(args.action)
         ? args.action
-        : isGiven(args.taskId) ||
-            isGiven(args.questionId) ||
-            isGiven(args.answer)
-          ? "answer"
-          : args.force === true
-            ? "cancel"
-            : "poll";
+        : isGiven(args.message) || isGiven(args.steerId)
+          ? "steer"
+          : isGiven(args.taskId) ||
+              isGiven(args.questionId) ||
+              isGiven(args.answer)
+            ? "answer"
+            : args.force === true
+              ? "cancel"
+              : "poll";
   const fields = [`action: ${JSON.stringify(action)}`];
   if (typeof args.ticket === "string" && !isBlank(args.ticket)) {
     fields.push(`ticket: ${JSON.stringify(args.ticket)}`);
@@ -381,6 +398,13 @@ function delegateTicketExample(args: Record<string, unknown>): string {
   }
   if (action === "answer") {
     for (const key of ["taskId", "questionId", "answer"] as const) {
+      if (typeof args[key] === "string" && !isBlank(args[key])) {
+        fields.push(`${key}: ${JSON.stringify(args[key])}`);
+      }
+    }
+  }
+  if (action === "steer") {
+    for (const key of ["taskId", "message", "steerId"] as const) {
       if (typeof args[key] === "string" && !isBlank(args[key])) {
         fields.push(`${key}: ${JSON.stringify(args[key])}`);
       }
@@ -537,7 +561,9 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     args.force !== undefined ||
     args.taskId !== undefined ||
     args.questionId !== undefined ||
-    args.answer !== undefined
+    args.answer !== undefined ||
+    args.message !== undefined ||
+    args.steerId !== undefined
   ) {
     throw new Error(
       `Ticket operations moved to delegate_ticket: ${delegateTicketExample(args)}.` +
@@ -548,6 +574,8 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
           "taskId",
           "questionId",
           "answer",
+          "message",
+          "steerId",
         ]),
     );
   }
@@ -634,9 +662,11 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
 
   const args = { ...value };
   stripNulls(args);
-  // Blank `answer` survives: only validation may tell a present-but-empty
-  // reply from a missing one — a non-answer action must still reject it.
-  stripBlank(args, ["ticket", "taskId", "questionId"]);
+  // Blank `answer`/`message` survive: only validation may tell a
+  // present-but-empty reply or steer from a missing one — a non-owning
+  // action must still reject them. `steerId` is an identifier: blank
+  // means absent, like `ticket`/`taskId`.
+  stripBlank(args, ["ticket", "taskId", "questionId", "steerId"]);
 
   if (args.ticketAction !== undefined) {
     throw new Error(
@@ -749,7 +779,7 @@ const help = `# Delegate Manual
 Three sibling tools share Delegate's machinery:
 - \`delegate\` dispatches subagent tasks, synchronously or on an async ticket.
 - \`delegate_ticket\` operates on async tickets: poll, wait, cancel, pause,
-  resume, answer.
+  resume, answer, steer.
 - \`delegate_session\` lists and closes pooled subagent sessions.
 
 ## delegate — dispatch
@@ -817,6 +847,13 @@ Three sibling tools share Delegate's machinery:
 - \`{ action: "answer", ticket, taskId, questionId, answer }\` — answer a
   worker's pending \`ask_parent\` question (all four fields required).
   Poll to see outstanding questions. Only async workers can ask.
+- \`{ action: "steer", ticket, taskId, message, steerId }\` — send a
+  message into a running task: \`taskId\` defaults to the only still-
+  running task; \`steerId\` makes it retry-safe (same id + same message +
+  same target replays the original receipt; same id + different content
+  is an error). The receipt says what happened: \`steered\` (merged at
+  the child's next turn boundary), \`activated\` (queued, opens the next
+  turn), \`duplicate\`, or \`not-applied\` (settled/unknown target).
 
 ## delegate_session — sessions
 - A task with \`sessionId\` keeps its session live after it finishes; a later
@@ -1919,10 +1956,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate_ticket",
       label: "Delegate Tickets",
       description:
-        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, or answer a worker question. Dispatch new work with delegate; manage pooled sessions with delegate_session.",
+        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, answer a worker question, or steer a running task with a message + steerId (idempotent; the receipt reports steered/activated/duplicate/not-applied). Dispatch new work with delegate; manage pooled sessions with delegate_session.",
       parameters: ticketSchema,
       promptSnippet:
-        "Poll, wait on, cancel, pause/resume, or answer questions for async delegate tickets",
+        "Poll, wait on, cancel, pause/resume, answer questions, or steer running tasks for async delegate tickets",
       prepareArguments: prepareTicketArguments,
       renderCall: renderTicketCall,
       renderResult: createResultRenderer(tickets),
@@ -1955,6 +1992,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
             ...(call.action === "poll" || call.action === "wait"
               ? { questions: result.ticket?.questions }
               : {}),
+            // SPEC v3 "Steering": the receipt's machine half rides
+            // details.steer (status, taskId, replayed original status).
+            ...(result.steer !== undefined ? { steer: result.steer } : {}),
           },
           isError: result.isError,
         };
