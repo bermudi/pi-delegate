@@ -21,14 +21,14 @@ import {
   callDelegateTicket,
 } from "../support/pi-boundary.ts";
 
-function gate() {
+function gate(message = "DELIVERED-OUTPUT") {
   let release!: () => void;
   const promise = new Promise<void>((resolve) => {
     release = resolve;
   });
   const step: FauxResponseFactory = async () => {
     await promise;
-    return fauxAssistantMessage("DELIVERED-OUTPUT");
+    return fauxAssistantMessage(message);
   };
   return { release, step };
 }
@@ -462,5 +462,247 @@ describe("async result delivery", () => {
     const content = String(sends.mock.calls[0]![0].content);
     expect(content).toContain("failed");
     expect(content).toContain("401 unauthorized delivery-test");
+  });
+
+  test("two tickets settling inside the flush window deliver one merged wake", async () => {
+    // SPEC v3 "Interaction grammar — Wake delivery": "simultaneous
+    // settlements batch into one wake." Two async tickets released
+    // together settle within the window and produce ONE delivered
+    // message whose content names both tickets and whose details carry
+    // both ids and both outcome sets.
+    session = await openDelegateBoundary();
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const first = gate("COALESCED-A");
+    const second = gate("COALESCED-B");
+    model.respond([first.step, second.step]);
+    const sends = spyOn(host, "sendCustomMessage");
+
+    const dispatchA = await callDelegate(session, {
+      tasks: [{ prompt: "batch a", tools: [] }],
+      async: true,
+    });
+    const ticketA = ticketIdOf(dispatchA.text);
+    const dispatchB = await callDelegate(session, {
+      tasks: [{ prompt: "batch b", tools: [] }],
+      async: true,
+    });
+    const ticketB = ticketIdOf(dispatchB.text);
+
+    first.release();
+    second.release();
+    await until(() => sends.mock.calls.length === 1);
+    // The window already flushed once; prove no second delivery arrives.
+    await Bun.sleep(300);
+    await host.agent.waitForIdle();
+
+    expect(sends).toHaveBeenCalledTimes(1);
+    const [message, options] = sends.mock.calls[0]!;
+    expect(options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+    expect(String(message.content)).toContain(ticketA);
+    expect(String(message.content)).toContain(ticketB);
+    expect(String(message.content)).toContain("COALESCED-A");
+    expect(String(message.content)).toContain("COALESCED-B");
+    const details = objectOf(message.details, "message.details");
+    expect(details.tickets).toEqual([ticketA, ticketB]);
+    const results = details.results as { output?: string }[];
+    expect(results.map((r) => r.output)).toEqual([
+      "COALESCED-A",
+      "COALESCED-B",
+    ]);
+  });
+
+  test("tickets settling beyond the flush window deliver separate wakes", async () => {
+    // SPEC v3 "Wake delivery": only simultaneous settlements coalesce —
+    // a second batch landing after the flush is its own wake.
+    session = await openDelegateBoundary();
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const first = gate("EARLY-ONE");
+    const second = gate("LATE-TWO");
+    model.respond([first.step, second.step]);
+    const sends = spyOn(host, "sendCustomMessage");
+
+    const dispatchA = await callDelegate(session, {
+      tasks: [{ prompt: "early", tools: [] }],
+      async: true,
+    });
+    const ticketA = ticketIdOf(dispatchA.text);
+    first.release();
+    await until(() => sends.mock.calls.length === 1);
+
+    const dispatchB = await callDelegate(session, {
+      tasks: [{ prompt: "late", tools: [] }],
+      async: true,
+    });
+    const ticketB = ticketIdOf(dispatchB.text);
+    second.release();
+    await until(() => sends.mock.calls.length === 2);
+    await host.agent.waitForIdle();
+
+    expect(sends).toHaveBeenCalledTimes(2);
+    const firstDetails = objectOf(
+      sends.mock.calls[0]![0].details,
+      "first.details",
+    );
+    const secondDetails = objectOf(
+      sends.mock.calls[1]![0].details,
+      "second.details",
+    );
+    expect(firstDetails.ticket).toBe(ticketA);
+    expect(secondDetails.ticket).toBe(ticketB);
+    expect(String(sends.mock.calls[0]![0].content)).toContain("EARLY-ONE");
+    expect(String(sends.mock.calls[1]![0].content)).toContain("LATE-TWO");
+  });
+
+  test("mixed routing in one window sends one wake AND one append plus notify", async () => {
+    // SPEC v3 "Wake delivery": grouping is by routing decision — a
+    // same-leaf ticket wakes, a moved-leaf ticket appends + notifies,
+    // and a window containing both emits one of each.
+    session = await openDelegateBoundary({
+      mockUI: {
+        select: () => {
+          throw new Error("simulated broken dialog");
+        },
+      },
+    });
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const first = gate("MOVED-RESULT");
+    const second = gate("SAME-LEAF-RESULT");
+    model.respond([first.step, second.step]);
+    const sends = spyOn(host, "sendCustomMessage");
+
+    const dispatchA = await callDelegate(session, {
+      tasks: [{ prompt: "before navigation", tools: [] }],
+      async: true,
+    });
+    const ticketA = ticketIdOf(dispatchA.text);
+
+    // Navigate while A is in flight: the consent guard fails open, the
+    // epoch bumps, and A's delivery will route as a moved-leaf append.
+    const root = host.sessionManager
+      .getEntries()
+      .find((entry) => entry.type === "message");
+    if (!root) throw new Error("Missing navigation target");
+    const navigation = await host.navigateTree(root.id);
+    expect(navigation.cancelled).toBe(false);
+
+    // B dispatches after the transition and stamps the new leaf/epoch —
+    // its delivery stays a same-leaf wake.
+    const dispatchB = await callDelegate(session, {
+      tasks: [{ prompt: "after navigation", tools: [] }],
+      async: true,
+    });
+    const ticketB = ticketIdOf(dispatchB.text);
+
+    first.release();
+    second.release();
+    await until(() => sends.mock.calls.length === 2);
+    await host.agent.waitForIdle();
+
+    expect(sends).toHaveBeenCalledTimes(2);
+    const [wake, append] = sends.mock.calls;
+    expect(wake![1]).toEqual({
+      deliverAs: "followUp",
+      triggerTurn: true,
+    });
+    expect(String(wake![0].content)).toContain(ticketB);
+    expect(String(wake![0].content)).toContain("SAME-LEAF-RESULT");
+    expect(String(wake![0].content)).not.toContain(ticketA);
+    expect(append![1]).toEqual({ triggerTurn: false });
+    expect(String(append![0].content)).toContain(ticketA);
+    expect(String(append![0].content)).toContain("MOVED-RESULT");
+    // One notify names the moved ticket(s).
+    expect(
+      session.events.ui.some(
+        (entry) =>
+          JSON.stringify(entry).includes("appended") &&
+          JSON.stringify(entry).includes(ticketA),
+      ),
+    ).toBe(true);
+  });
+
+  test("a settled ticket enqueues and delivers at most once", async () => {
+    // SPEC "Background delivery" once-ness + v3 "Wake delivery": the
+    // enqueue is idempotent for the ticket's lifetime — settle, poll,
+    // and wait cycles never produce a second delivered message.
+    session = await openDelegateBoundary();
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    model.respond([fauxAssistantMessage("ONCE-RESULT")]);
+    const sends = spyOn(host, "sendCustomMessage");
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "once", tools: [] }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    await until(() => sends.mock.calls.length === 1);
+    await host.agent.waitForIdle();
+
+    await callDelegateTicket(session, { action: "poll", ticket });
+    await callDelegateTicket(session, {
+      action: "wait",
+      ticket,
+      timeoutMs: 1000,
+    });
+    // Well past the flush window: a second enqueue would have sent.
+    await Bun.sleep(300);
+    expect(sends).toHaveBeenCalledTimes(1);
+  });
+
+  test("shutdown inside the flush window suppresses delivery and leaves tickets pollable", async () => {
+    // SPEC v3 "Wake delivery" + INVARIANTS "Ticket state": a settlement
+    // queued but not yet flushed when teardown begins delivers nothing;
+    // the suppression is logged and the settled result stays pollable.
+    session = await openDelegateBoundary();
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const blocked = gate();
+    model.respond([blocked.step]);
+    const sends = spyOn(host, "sendCustomMessage");
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "suppressed", tools: [] }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    try {
+      blocked.release();
+      // Wait for terminal status, then let the settle→enqueue microtasks
+      // land while staying inside the 100ms flush window.
+      const deadline = Date.now() + 2000;
+      let view = "";
+      while (Date.now() < deadline) {
+        view = (
+          await callDelegateTicket(session, { action: "poll", ticket })
+        ).text;
+        if (/completed|failed|cancelled|partial/.test(view)) break;
+      }
+      expect(view).toContain("completed");
+      await Bun.sleep(25);
+      const shutdown = host.extensionRunner.emit({
+        type: "session_shutdown",
+        reason: "quit",
+      });
+      await shutdown;
+      // Past any timer that could have been armed: nothing may deliver.
+      await Bun.sleep(300);
+      expect(sends).not.toHaveBeenCalled();
+      expect(
+        errors.mock.calls.some((args) =>
+          args.join(" ").includes(`delivery for ticket ${ticket} suppressed during shutdown`),
+        ),
+      ).toBe(true);
+      const poll = await callDelegateTicket(session, {
+        action: "poll",
+        ticket,
+      });
+      expect(poll.text).toContain("DELIVERED-OUTPUT");
+    } finally {
+      errors.mockRestore();
+    }
   });
 });

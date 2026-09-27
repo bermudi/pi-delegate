@@ -258,6 +258,15 @@ type DelegateResult = AgentToolResult<DelegateDetails>;
 
 /** customType of the custom message that delivers a settled async batch. */
 const DELIVERED_MESSAGE_TYPE = "delegate-result";
+/**
+ * SPEC v3 "Interaction grammar — Wake delivery": "simultaneous
+ * settlements batch into one wake." Settled tickets enqueue here and the
+ * first enqueue arms one flush — this window trades a small delivery
+ * delay for one wake per settlement cluster instead of one turn per
+ * ticket. Deliberately not configurable: SPEC "Surface rules" keeps
+ * internal timing out of caller reach.
+ */
+const DELIVERY_FLUSH_MS = 100;
 
 type TaskSchemaArguments = Static<typeof taskSchema>;
 
@@ -931,6 +940,193 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // Bumped on every observed tree transition — including a vetoed or
   // cancelled navigation attempt, which conservatively downgrades delivery.
   let navigationEpoch = 0;
+
+  /**
+   * SPEC v3 "Interaction grammar — Wake delivery": settled results
+   * inject as follow-up turns, leaf-aware, and simultaneous settlements
+   * batch into one wake. `deliver` used to send one message per ticket
+   * the moment it settled — a fan-out produced one parent turn per
+   * ticket. Now settlement enqueues here; the first enqueue arms one
+   * flush timer (DELIVERY_FLUSH_MS), and the flush groups the queued
+   * tickets by routing decision and emits one DELIVERED_MESSAGE_TYPE
+   * message per group.
+   *
+   * Once-ness: `enqueuedDeliveries` makes enqueue idempotent for the
+   * extension's lifetime — settlement, not delivery, is the source of
+   * truth, and a settled ticket stays pollable regardless of what
+   * delivery did with it. Entries are never removed: a ticket must
+   * never enqueue twice, even across a flush boundary.
+   */
+  interface QueuedDelivery {
+    readonly ticket: Ticket;
+    /** The dispatch's own ctx — owner of the leaf check and UI notify. */
+    readonly ctx: ExtensionContext;
+  }
+  const deliveryQueue: QueuedDelivery[] = [];
+  const enqueuedDeliveries = new Set<string>();
+  let deliveryFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * "Same leaf" means same branch: the parent's own turn appends entries
+   * after dispatch, so the current leaf is a descendant of the origin
+   * leaf — the origin must still lie on the current branch (a null origin
+   * is the root, which every branch descends from). The epoch separately
+   * rules out any observed transition, cancelled or not. Both are read
+   * from the ticket, which latched them at dispatch (see execute's
+   * synchronous prefix). Computed per ticket at flush time, exactly as
+   * the old per-ticket deliver did at settle time.
+   */
+  const sameLeaf = ({ ticket, ctx }: QueuedDelivery): boolean =>
+    navigationEpoch === ticket.originEpoch &&
+    (ticket.originLeafId === null ||
+      ctx.sessionManager
+        .getBranch()
+        .some((entry) => entry.id === ticket.originLeafId));
+
+  /**
+   * The delivered message for one settlement group: content is the
+   * concatenation of the group's ticket views (each names its ticket and
+   * carries its own spill-bounded sections), details merge the per-ticket
+   * ids, the complete outcomes, and the notices. A single-ticket group
+   * keeps the historical `ticket`/`originLeafId` shape so the expanded
+   * renderer can serve the live `fullView`.
+   */
+  const deliveredMessage = (group: readonly QueuedDelivery[]) => {
+    const anyCancelled = group.some(
+      ({ ticket }) => ticket.status === "cancelled",
+    );
+    const details: Record<string, unknown> =
+      group.length === 1
+        ? {
+            ticket: group[0]!.ticket.id,
+            originLeafId: group[0]!.ticket.originLeafId,
+            results: group[0]!.ticket.outcomes,
+          }
+        : {
+            tickets: group.map(({ ticket }) => ticket.id),
+            originLeafIds: group.map(({ ticket }) => ticket.originLeafId),
+            results: group.flatMap(({ ticket }) => ticket.outcomes),
+          };
+    const notices = group.flatMap(({ ticket }) => ticket.notices);
+    if (notices.length > 0) details.notices = notices;
+    return {
+      customType: DELIVERED_MESSAGE_TYPE,
+      content:
+        group.map(({ ticket }) => tickets.view(ticket)).join("\n\n") +
+        (anyCancelled
+          ? "\nCancellation is cooperative; worker cleanup may still be pending."
+          : ""),
+      display: true,
+      details,
+    };
+  };
+
+  /**
+   * api.sendMessage is fire-and-forget on the stock ExtensionAPI (returns
+   * void): async send rejections surface through the host's
+   * extension-error channel, never here. Only synchronous throws — e.g.
+   * a torn-down runtime failing assertActive — reach the catch below.
+   * Either way, settlement stands and the results stay pollable.
+   */
+  const flushDeliveries = (): void => {
+    deliveryFlushTimer = undefined;
+    const batch = deliveryQueue.splice(0);
+    if (batch.length === 0) return;
+    if (shuttingDown) {
+      for (const { ticket } of batch) {
+        console.error(
+          `[delegate] delivery for ticket ${ticket.id} suppressed during shutdown (result remains pollable)`,
+        );
+      }
+      return;
+    }
+    const wake: QueuedDelivery[] = [];
+    const moved: QueuedDelivery[] = [];
+    for (const queued of batch) {
+      try {
+        (sameLeaf(queued) ? wake : moved).push(queued);
+      } catch {
+        // The leaf check reads guarded ctx accessors; a stale ctx means
+        // the owning session was replaced or disposed between settlement
+        // and flush — every replacement path that keeps the extension
+        // alive fires session_shutdown first, which drains this queue, so
+        // reaching here means the session is gone outright. Delivering a
+        // computed-wrong or dead message is worse than none: the settled
+        // result stays pollable (and journal-recoverable) either way.
+        console.error(
+          `[delegate] delivery for ticket ${queued.ticket.id} skipped: the dispatch context is no longer active (result remains pollable)`,
+        );
+      }
+    }
+    if (wake.length === 0 && moved.length === 0) return;
+    const ids = (group: readonly QueuedDelivery[]) =>
+      group.map(({ ticket }) => `"${ticket.id}"`).join(", ");
+    try {
+      if (wake.length > 0) {
+        // Same leaf, no transition observed: a follow-up wakes an idle
+        // parent and queues behind a busy one's tool calls. One wake per
+        // settlement group, not per ticket (SPEC "Wake delivery").
+        api.sendMessage(deliveredMessage(wake), {
+          deliverAs: "followUp",
+          triggerTurn: true,
+        });
+      }
+      if (moved.length > 0) {
+        // Leaf moved or a transition is in flight: append durably at the
+        // current leaf without triggering a turn — it enters model
+        // context on the next user turn.
+        api.sendMessage(deliveredMessage(moved), { triggerTurn: false });
+        try {
+          moved[0]!.ctx.ui.notify(
+            moved.length === 1
+              ? `Delegate ticket ${ids(moved)} settled on a different branch; its result was appended to the current branch for the next turn.`
+              : `Delegate tickets ${ids(moved)} settled on a different branch; their results were appended to the current branch for the next turn.`,
+            "info",
+          );
+        } catch {
+          // The UI may already be gone; the append itself landed.
+        }
+      }
+    } catch (error) {
+      // Delivery failure never undoes settlement: the tickets stay
+      // terminal and pollable.
+      console.error(
+        `[delegate] delivering ticket(s) ${ids(batch)} failed (results remain pollable): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      try {
+        batch[0]!.ctx.ui.notify(
+          `Delegate ticket(s) ${ids(batch)} settled but their results could not be delivered; poll them for the results.`,
+          "error",
+        );
+      } catch {
+        // A stale ctx cannot show the notice; the log line stands.
+      }
+    }
+  };
+
+  /**
+   * Settlement → delivery edge: enqueue and arm the one flush timer.
+   * A shutdown already latched suppresses at enqueue (the queued-at-
+   * shutdown case is handled by the shutdown path draining the queue
+   * and by the flush's own re-check).
+   */
+  const enqueueDelivery = (ticket: Ticket, ctx: ExtensionContext): void => {
+    if (shuttingDown) {
+      console.error(
+        `[delegate] delivery for ticket ${ticket.id} suppressed during shutdown (result remains pollable)`,
+      );
+      return;
+    }
+    if (enqueuedDeliveries.has(ticket.id)) return;
+    enqueuedDeliveries.add(ticket.id);
+    deliveryQueue.push({ ticket, ctx });
+    if (deliveryFlushTimer === undefined) {
+      deliveryFlushTimer = setTimeout(flushDeliveries, DELIVERY_FLUSH_MS);
+      // The flush must never hold a dying process open.
+      deliveryFlushTimer.unref?.();
+    }
+  };
+
   // Owned by this closure: the parent's latest base system-prompt inputs,
   // captured at each turn start. `before_agent_start` carries the normalized
   // structured options, which separate the user-authored fields (custom
@@ -1400,6 +1596,19 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
   api.on("session_shutdown", async (event, ctx) => {
     shuttingDown = true;
+    // A delivery flush armed before the latch must not fire after
+    // teardown: cancel the timer and drain the queue with the same
+    // suppression log the flush itself would have emitted — settlement
+    // is the source of truth, and those results stay pollable.
+    if (deliveryFlushTimer !== undefined) {
+      clearTimeout(deliveryFlushTimer);
+      deliveryFlushTimer = undefined;
+    }
+    for (const { ticket } of deliveryQueue.splice(0)) {
+      console.error(
+        `[delegate] delivery for ticket ${ticket.id} suppressed during shutdown (result remains pollable)`,
+      );
+    }
     // v1's quit/reload traces: name the live work being killed before the
     // force-cancel makes it invisible (quit → stderr; reload → notify).
     visibility.shutdownTrace(
@@ -1529,97 +1738,16 @@ export default function delegateExtension(api: ExtensionAPI): void {
           // settlement AND the finished gate, so the delivered view always
           // carries the safe-to-expose outcome: finalized isolated
           // integrations, retained errors, and (on cancellation) partial
-          // results rather than a bare status.
-          const deliver = (ticket: Ticket): void => {
-            if (shuttingDown) {
-              console.error(
-                `[delegate] delivery for ticket ${ticket.id} suppressed during shutdown (result remains pollable)`,
-              );
-              return;
-            }
-            const cancelled = ticket.status === "cancelled";
-            const message = {
-              customType: DELIVERED_MESSAGE_TYPE,
-              content:
-                tickets.view(ticket) +
-                (cancelled
-                  ? "\nCancellation is cooperative; worker cleanup may still be pending."
-                  : ""),
-              display: true,
-              details: {
-                ticket: ticket.id,
-                originLeafId: ticket.originLeafId,
-                // Complete outcomes — delivery text is spill-bounded.
-                results: ticket.outcomes,
-                ...(ticket.notices.length > 0
-                  ? { notices: ticket.notices }
-                  : {}),
-              },
-            };
-            // api.sendMessage is fire-and-forget on the stock
-            // ExtensionAPI (returns void): async send rejections surface
-            // through the host's extension-error channel, never here.
-            // Only synchronous throws — e.g. a torn-down runtime failing
-            // assertActive — reach the catch below. Either way,
-            // settlement stands and the result stays pollable.
-            try {
-              // "Same leaf" means same branch: the parent's own turn
-              // appends entries after dispatch, so the current leaf is a
-              // descendant of the origin leaf — the origin must still lie
-              // on the current branch (a null origin is the root, which
-              // every branch descends from). The epoch separately rules
-              // out any observed transition, cancelled or not. Both are
-              // read from the ticket, which latched them at dispatch (see
-              // execute's synchronous prefix).
-              const sameLeaf =
-                navigationEpoch === ticket.originEpoch &&
-                (ticket.originLeafId === null ||
-                  ctx.sessionManager
-                    .getBranch()
-                    .some((entry) => entry.id === ticket.originLeafId));
-              if (sameLeaf) {
-                // Same leaf, no transition observed: a follow-up wakes an
-                // idle parent and queues behind a busy one's tool calls.
-                api.sendMessage(message, {
-                  deliverAs: "followUp",
-                  triggerTurn: true,
-                });
-              } else {
-                // Leaf moved or a transition is in flight: append durably
-                // at the current leaf without triggering a turn — it
-                // enters model context on the next user turn.
-                api.sendMessage(message, { triggerTurn: false });
-                try {
-                  ctx.ui.notify(
-                    `Delegate ticket "${ticket.id}" settled on a different branch; its result was appended to the current branch for the next turn.`,
-                    "info",
-                  );
-                } catch {
-                  // The UI may already be gone; the append itself landed.
-                }
-              }
-            } catch (error) {
-              // Delivery failure never undoes settlement: the ticket stays
-              // terminal and pollable.
-              console.error(
-                `[delegate] delivering ticket ${ticket.id} failed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
-              );
-              try {
-                ctx.ui.notify(
-                  `Delegate ticket "${ticket.id}" settled but its result could not be delivered; poll it for the result.`,
-                  "error",
-                );
-              } catch {
-                // A stale ctx cannot show the notice; the log line stands.
-              }
-            }
-          };
+          // results rather than a bare status. Delivery itself is the
+          // closure-level coalescing queue (SPEC v3 "Wake delivery"):
+          // the ticket joins the current flush window rather than
+          // sending alone.
           const armDelivery = (ticket: Ticket): void => {
             void Promise.all([
               tickets.settledPromise(ticket),
               tickets.finishedPromise(ticket),
             ])
-              .then(() => deliver(ticket))
+              .then(() => enqueueDelivery(ticket, ctx))
               .catch((error: unknown) => {
                 console.error(
                   `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,

@@ -252,22 +252,30 @@ gaps.
   tool count, and an `active now`/`active Ns ago` age, queued tasks read
   `waiting…`, and the header totals active/queued tasks and tool calls.
 - **Covered now (`tests/contract/delivery.test.ts`, `SPEC.md` "Background
-  delivery"):** same-leaf follow-up wake of an idle parent (`deliverAs:
-  "followUp"` + `triggerTurn: true`), including after a prior navigation;
-  durable no-wake append plus "appended" notice after `/tree` navigation
-  (`triggerTurn: false` — the custom message lands in the session at the
-  current leaf); delivery held until isolated reconciliation applies and
-  final annotations land; delivery failure (throw or async rejection) is
-  logged/surfaced and leaves the ticket settled and pollable; failed and
-  cancelled batches deliver their safe partial results; pause holds
-  delivery until the whole batch finishes; `session_shutdown`
-  force-cancels tickets, resolves waiters, performs no delivery, and holds
-  until worker quiescence is actually confirmed and through the batch's
-  finalization — when shutdown completes, the pollable view already
-  carries the integration annotations, so a replacement session never
-  starts into a tree the old batch is still reconciling; the visible
-  waiting status names the awaited ticket id; new dispatches reject
-  once shutdown begins while ticket RPCs still answer.
+  delivery" and "Wake delivery"):** same-leaf follow-up wake of an idle
+  parent (`deliverAs: "followUp"` + `triggerTurn: true`), including after
+  a prior navigation; durable no-wake append plus "appended" notice
+  after `/tree` navigation (`triggerTurn: false` — the custom message
+  lands in the session at the current leaf); delivery held until
+  isolated reconciliation applies and final annotations land; delivery
+  failure (throw or async rejection) is logged/surfaced and leaves the
+  ticket settled and pollable; failed and cancelled batches deliver
+  their safe partial results; pause holds delivery until the whole
+  batch finishes; `session_shutdown` force-cancels tickets, resolves
+  waiters, performs no delivery, and holds until worker quiescence is
+  actually confirmed and through the batch's finalization — when
+  shutdown completes, the pollable view already carries the integration
+  annotations, so a replacement session never starts into a tree the
+  old batch is still reconciling; the visible waiting status names the
+  awaited ticket id; new dispatches reject once shutdown begins while
+  ticket RPCs still answer. Wake coalescing (#36): settlements inside
+  the ~100ms flush window emit ONE followUp message whose content names
+  every settled ticket and whose details carry the merged ids and
+  outcomes; settlements past the window wake separately; a window
+  mixing same-leaf and moved-leaf tickets emits one wake plus one
+  append + one notify naming the moved tickets; a ticket enqueues at
+  most once ever; a settlement queued at shutdown is suppressed, logged,
+  and stays pollable.
 - **Gap:** delivered-result suppression when a waiter already consumed it;
   progress/onUpdate frames; roster wording details; replacement-session
   non-inheritance (no real session replacement is expressible through the
@@ -1286,7 +1294,10 @@ collision precedence, and frontmatter model/thinking/tools (issue #7;
 `tests/contract/profiles.test.ts`); v3 interaction grammar — cardinality
 defaults, agent-name aliases, and misfire telemetry (issue #35;
 `SPEC.md` "Interaction grammar"/"Reflex meeting"/"Observability",
-`tests/contract/grammar.test.ts`, `tests/contract/telemetry.test.ts`).
+`tests/contract/grammar.test.ts`, `tests/contract/telemetry.test.ts`);
+wake coalescing — simultaneous settlements batch into one followUp wake
+grouped by leaf routing (issue #36; `SPEC.md` "Wake delivery",
+`tests/contract/delivery.test.ts`).
 
 Remaining:
 

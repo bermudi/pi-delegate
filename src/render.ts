@@ -75,6 +75,23 @@ function expandedText(
     // Only a replayed transcript misses the store; fall through to the
     // outcomes recorded on the result itself.
   }
+  // A coalesced wake (SPEC "Wake delivery": simultaneous settlements
+  // batch into one message) renders each live ticket's full view in
+  // order; a store miss on any of them falls through to the merged
+  // recorded outcomes below — the replayed transcript path.
+  if (Array.isArray(details.tickets)) {
+    const views = (details.tickets as unknown[])
+      .filter((id): id is string => typeof id === "string")
+      .map((id) => tickets.get(id));
+    if (
+      views.length > 0 &&
+      views.every((ticket) => ticket !== undefined)
+    ) {
+      return views
+        .map((ticket) => tickets.fullView(ticket))
+        .join("\n\n");
+    }
+  }
   if (!Array.isArray(details.results)) return undefined;
   const outcomes = details.results.filter(isOutcome);
   if (outcomes.length === 0) return undefined;
@@ -251,11 +268,17 @@ export function createMessageRenderer(tickets: TicketStore): MessageRenderer {
     if (body === undefined) return undefined;
     // Mirror the delivery text's cancelled-ticket suffix — fullView renders
     // the ticket document, not the delivery annotation.
-    if (
+    const anyCancelled =
       isRecord(details) &&
-      typeof details.ticket === "string" &&
-      tickets.get(details.ticket)?.status === "cancelled"
-    ) {
+      ((typeof details.ticket === "string" &&
+        tickets.get(details.ticket)?.status === "cancelled") ||
+        (Array.isArray(details.tickets) &&
+          (details.tickets as unknown[]).some(
+            (id) =>
+              typeof id === "string" &&
+              tickets.get(id)?.status === "cancelled",
+          )));
+    if (anyCancelled) {
       body += "\nCancellation is cooperative; worker cleanup may still be pending.";
     }
     const label = theme.fg(
