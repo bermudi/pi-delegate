@@ -341,6 +341,7 @@ test(
     // it records a quarantined failure while the worker may still run.
     // The dependent must block off that record — not wait on quiescence.
     const result = await callDelegate(session, {
+      async: false,
       tasks: [
         { id: "stuck", prompt: "hang", tools: ["write"], deadlineMs: 500 },
         {
@@ -534,6 +535,7 @@ test(
     subagents.respond([gated, gated]);
 
     const pending = callDelegateDetached(session, {
+      async: false,
       tasks: [
         { prompt: "hang one", tools: ["read"] },
         { prompt: "hang two", tools: ["read"] },

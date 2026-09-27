@@ -140,6 +140,7 @@ describe("delegate telemetry contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { id: "corr-alpha", prompt: "first", tools: ["read"] },
           { prompt: "second" },
@@ -150,7 +151,7 @@ describe("delegate telemetry contract", () => {
       expect(result.isError).toBe(false);
       const db = new DatabaseSync(dbPath);
       try {
-        expect(userVersionOf(db)).toBe(4);
+        expect(userVersionOf(db)).toBe(5);
         const calls = rowsOf(db, "calls");
         const tasks = rowsOf(db, "tasks").sort(
           (a, b) => Number(a.idx) - Number(b.idx),
@@ -462,7 +463,7 @@ describe("delegate telemetry contract", () => {
 
       const db = new DatabaseSync(dbPath);
       try {
-        expect(userVersionOf(db)).toBe(4);
+        expect(userVersionOf(db)).toBe(5);
         const columns = (db.prepare("PRAGMA table_info(tasks)").all() as {
           name?: unknown;
         }[]).map((row) => row.name);
@@ -558,7 +559,7 @@ describe("delegate telemetry contract", () => {
       }
       expect(callCount).toBe(8);
       expect(taskCount).toBe(8);
-      expect(version).toBe(4);
+      expect(version).toBe(5);
       expect(journal).toBe("wal");
     },
     120_000,
@@ -915,6 +916,221 @@ describe("delegate telemetry contract", () => {
         const tasks = rowsOf(db, "tasks");
         expect(tasks).toHaveLength(1);
         expect(tasks[0]?.integration).toBe("applied_unverified");
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test(
+    "a validation rejection records a misfire row with the verbatim message and post-alias batch shape",
+    async () => {
+      // SPEC v3 "Observability": a dispatch ending before execution
+      // leaves a misfire row — phase, the caller-visible message, and the
+      // requested batch shape. The unknown agent lands after alias
+      // expansion, so the row's agents are the canonical names the
+      // caller's names resolved to ("explore" → "scout").
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "misfires.db");
+      configureDelegate(session, {
+        telemetry: { enabled: true, dbPath },
+      });
+      subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          { prompt: "x", agent: "explore", tools: ["read"] },
+          { prompt: "y", agent: "bogus-agent" },
+        ],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("unknown agent 'bogus-agent'");
+      expect(subagents.state.callCount).toBe(0);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const misfires = rowsOf(db, "misfires");
+        expect(misfires).toHaveLength(1);
+        const row = misfires[0];
+        expect(row?.phase).toBe("validation");
+        expect(row?.message).toContain("unknown agent 'bogus-agent'");
+        expect(row?.task_count).toBe(2);
+        expect(JSON.parse(String(row?.agents))).toEqual([
+          "scout",
+          "bogus-agent",
+        ]);
+        expect(JSON.parse(String(row?.workspaces))).toEqual([
+          "shared",
+          "shared",
+        ]);
+        // Two tasks → the v3 cardinality default made this call async.
+        expect(row?.async).toBe(1);
+        expect(row?.parent_cwd).toBe(session.cwd);
+        expect(typeof row?.ts).toBe("number");
+        // Nothing ran: no dispatch rows accompany the misfire.
+        expect(rowsOf(db, "calls")).toHaveLength(0);
+        expect(rowsOf(db, "tasks")).toHaveLength(0);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test(
+    "an admission rejection records a misfire row",
+    async () => {
+      // SPEC v3 "Observability": a mixed shared/isolated same-repo batch
+      // rejects at admission — the row carries both workspace selections.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const repo = trackedTempDir();
+      gitInit(repo);
+      const dbPath = join(trackedTempDir(), "misfires.db");
+      configureDelegate(session, {
+        telemetry: { enabled: true, dbPath },
+      });
+      subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          {
+            prompt: "shared writer",
+            cwd: repo,
+            tools: ["write"],
+            workspace: "shared",
+          },
+          {
+            prompt: "isolated writer",
+            cwd: repo,
+            tools: ["write"],
+            workspace: "isolated",
+          },
+        ],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(subagents.state.callCount).toBe(0);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const misfires = rowsOf(db, "misfires");
+        expect(misfires).toHaveLength(1);
+        const row = misfires[0];
+        expect(row?.phase).toBe("admission");
+        expect(String(row?.message)).toBe(result.text);
+        expect(JSON.parse(String(row?.workspaces))).toEqual([
+          "shared",
+          "isolated",
+        ]);
+        expect(row?.async).toBe(1);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test(
+    "a config-load failure records a misfire row through the raw-file telemetry salvage",
+    async () => {
+      // SPEC v3 "Observability": the config load is itself the failure,
+      // so the telemetry block is read defensively from the file — a
+      // malformed maxConcurrent beside a well-formed telemetry block
+      // still records its row.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "misfires.db");
+      configureDelegate(session, {
+        maxConcurrent: 0,
+        telemetry: { enabled: true, dbPath },
+      });
+      subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "x" }],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("maxConcurrent");
+      expect(subagents.state.callCount).toBe(0);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const misfires = rowsOf(db, "misfires");
+        expect(misfires).toHaveLength(1);
+        const row = misfires[0];
+        expect(row?.phase).toBe("config");
+        expect(row?.message).toContain("maxConcurrent");
+        expect(row?.task_count).toBe(1);
+        expect(JSON.parse(String(row?.agents))).toEqual(["inline"]);
+        expect(row?.async).toBe(0);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test(
+    "a call-shape rejection records a misfire row through the same store",
+    async () => {
+      // SPEC v3 "Observability": call-shape validation rejects in
+      // execute's synchronous prefix — before any config load — so this
+      // exercises the salvaged-hint path with a well-formed config.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "misfires.db");
+      configureDelegate(session, {
+        telemetry: { enabled: true, dbPath },
+      });
+      subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "x", deadlineMs: -5 }],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/deadlineMs must be positive/);
+      expect(subagents.state.callCount).toBe(0);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const misfires = rowsOf(db, "misfires");
+        expect(misfires).toHaveLength(1);
+        const row = misfires[0];
+        expect(row?.phase).toBe("validation");
+        expect(row?.message).toContain("deadlineMs must be positive");
+        expect(row?.task_count).toBe(1);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test(
+    "a successful dispatch records no misfire row",
+    async () => {
+      // SPEC v3 "Observability": misfires exist only for dispatches that
+      // end before execution — a completed call writes its normal rows
+      // and nothing else.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "usage.db");
+      configureDelegate(session, {
+        telemetry: { enabled: true, dbPath },
+      });
+      subagents.respond([fauxAssistantMessage("CLEAN-RUN")]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "x" }],
+      });
+      expect(result.isError).toBe(false);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        expect(rowsOf(db, "misfires")).toHaveLength(0);
+        expect(rowsOf(db, "calls")).toHaveLength(1);
+        expect(rowsOf(db, "tasks")).toHaveLength(1);
       } finally {
         db.close();
       }

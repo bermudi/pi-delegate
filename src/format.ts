@@ -131,6 +131,15 @@ function statusWord(outcome: TaskOutcome): string {
 }
 
 /**
+ * The alias-expansion note for a task section (SPEC v3 "Reflex
+ * meeting"): `agent "general" → "default"`. Visible expansion is the
+ * teaching channel — the caller sees which canonical name ran.
+ */
+export function aliasNote(aliasedFrom: string | undefined, agent: string): string {
+  return aliasedFrom !== undefined ? `agent "${aliasedFrom}" → "${agent}"` : "";
+}
+
+/**
  * The isolated-workspace reconciliation line(s) for one task: status, file
  * counts, recovery pointers, and the applied_unverified disclaimer. A clean
  * apply is never presented as verified or tested.
@@ -192,8 +201,10 @@ export function formatDispatchResult(
   bounds: OutputBounds,
 ): string {
   const sections = outcomes.map((outcome) => {
-    const tag = tasks[outcome.index]?.resumeTag;
-    const head = `### Task ${outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${statusWord(outcome)}`;
+    const task = tasks[outcome.index];
+    const tag = task?.resumeTag;
+    const aliased = task !== undefined ? aliasNote(task.aliasedFrom, task.agent) : "";
+    const head = `### Task ${outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${statusWord(outcome)}${aliased !== "" ? `\n${aliased}` : ""}`;
     const quarantined = outcome.quarantined
       ? "\nWorker termination is unconfirmed; its write scope stays reserved. Recorded output and token usage are lower bounds — its accounting is incomplete."
       : "";

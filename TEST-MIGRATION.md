@@ -166,9 +166,12 @@ gaps.
 
 ### Synchronous dispatch
 
-- **Contract:** sync default; input-ordered per-task results; per-task
-  outcomes; aggregate usage where the host supports it; caller task ids
-  echoed for correlation.
+- **Contract:** v3 cardinality default — a single-task call is
+  synchronous unless `async: true`; input-ordered per-task results;
+  per-task outcomes; aggregate usage where the host supports it; caller
+  task ids echoed for correlation. (v3 "Interaction grammar" supersedes
+  the blanket v1/v2 sync default: multi-task calls are async unless
+  `async: false`.)
 - **Regression:** failed task does not fail siblings or destroy index
   alignment; partial output/usage preserved on failure (v1 additionally
   preserved touched-file lists — that surface was dropped by user decision
@@ -227,7 +230,8 @@ gaps.
 
 ### Async tickets
 
-- **Contract:** `async: true` returns a ticket immediately; auto-delivery;
+- **Contract:** `async: true` — and a multi-task call under the v3
+  cardinality default — returns a ticket immediately; auto-delivery;
   poll roster and single-ticket views; wait blocks to settlement or timeout;
   tickets stay pollable after settlement; natural settlement is `completed`
   (every task ok), `partial` (at least one ok and at least one not),
@@ -579,7 +583,11 @@ gaps.
   retries after the identity changes; isolated integration status records only
   after reconciliation; an unfinished span is dropped when the destination
   changes before its batch finishes; task rows whose workers have unconfirmed
-  quiescence are marked provisional.
+  quiescence are marked provisional; a dispatch rejected before execution —
+  config load, call-shape/semantic validation (agents recorded post-alias),
+  or admission — writes a `misfires` row with the phase, the verbatim
+  caller-visible message, and the batch shape, and a completed dispatch
+  writes none (#35, `SPEC.md` "Observability").
 - **Gap:** async-no-usage property; TUI/status rendering is
   intentionally out of scope for boundary tests.
 
@@ -779,6 +787,36 @@ and the file that carries it.
   provider call ever made for the blocked task.
   `tests/contract/dependencies.test.ts` (mutation-verified: recording
   blocked outcomes as `failed` fails the view assertions).
+
+### Interaction grammar (v3, #35, 2026-09-27)
+
+New v3 contract — no v1 evidence; SPEC.md "Interaction grammar",
+"Reflex meeting", and "Observability" define the surface.
+
+- **Contract:** single-task calls are synchronous unless `async: true`,
+  multi-task calls return a ticket unless `async: false`, and an explicit
+  `async` overrides both defaults; the tool description teaches the rule.
+  Agent-name aliases expand exact, case-sensitively —
+  `general`/`general-purpose`/`worker` → `default`, `explore`/`plan` →
+  `scout`, `implement` → `coder` — before unknown-agent errors, surface a
+  `agent "x" → "y"` note in results and ticket views, and resolve
+  `models`/`modelsByParent` pins against the canonical name; unknown
+  names still error naming the available built-ins. Dispatches rejected
+  at config load, validation (including post-expansion unknown agents),
+  or admission record a `misfires` row — timestamp, phase, verbatim
+  caller-visible message, and batch shape — in the same store and
+  retention policy as dispatch rows.
+- **Covered now:** `tests/contract/grammar.test.ts` — all four
+  cardinality cases, the description text, all six aliases, the
+  expansion note in sync results and settled ticket views, a canonical
+  model pin resolving on the aliased name, the unknown-agent built-in
+  list, and case sensitivity (`General` errors). Misfire rows for
+  validation, admission, config-load, and call-shape rejections plus the
+  successful-dispatch no-row case live in
+  `tests/contract/telemetry.test.ts`.
+- **Gap:** pre-`execute` rejections (host schema validation and
+  `prepareArguments` recoveries such as `ticketAction`→`delegate_ticket`)
+  have no context to locate the telemetry config and record no row.
 
 ## First tranche
 
@@ -1245,7 +1283,10 @@ parent-scoped pins and removal of the task `thinking` field (issue #32;
 `tests/contract/dispatch.test.ts`, `tests/contract/validation.test.ts`);
 named Markdown agent profiles with project/global discovery, built-in
 collision precedence, and frontmatter model/thinking/tools (issue #7;
-`tests/contract/profiles.test.ts`).
+`tests/contract/profiles.test.ts`); v3 interaction grammar — cardinality
+defaults, agent-name aliases, and misfire telemetry (issue #35;
+`SPEC.md` "Interaction grammar"/"Reflex meeting"/"Observability",
+`tests/contract/grammar.test.ts`, `tests/contract/telemetry.test.ts`).
 
 Remaining:
 

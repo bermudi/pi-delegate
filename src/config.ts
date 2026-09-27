@@ -174,6 +174,43 @@ export function configPathOf(agentDir: string): string {
 }
 
 /**
+ * A defensive raw read of `delegate.json`'s `telemetry` block for the
+ * config-load misfire path (SPEC v3 "Observability"): when the load
+ * itself threw, this is the only way a malformed `maxConcurrent` (say)
+ * still records its row. The `telemetry` block must itself be
+ * well-formed for its `enabled` flag to count; when the file is
+ * unparseable or the block is malformed, status is unknowable and this
+ * returns the disabled default — identical to telemetry off.
+ */
+export function telemetryConfigHint(agentDir: string): TelemetryConfig {
+  try {
+    const raw: unknown = JSON.parse(readFileSync(configPathOf(agentDir), "utf8"));
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return DEFAULT_CONFIG.telemetry;
+    }
+    const telemetry = (raw as Record<string, unknown>).telemetry;
+    if (telemetry === null || typeof telemetry !== "object" || Array.isArray(telemetry)) {
+      return DEFAULT_CONFIG.telemetry;
+    }
+    const block = telemetry as Record<string, unknown>;
+    if (block.enabled !== true) return DEFAULT_CONFIG.telemetry;
+    const dbPath = block.dbPath;
+    if (
+      dbPath !== undefined &&
+      (typeof dbPath !== "string" || dbPath.trim() === "" || !isAbsolute(dbPath.trim()))
+    ) {
+      return DEFAULT_CONFIG.telemetry;
+    }
+    return {
+      enabled: true,
+      dbPath: typeof dbPath === "string" ? dbPath.trim() : undefined,
+    };
+  } catch {
+    return DEFAULT_CONFIG.telemetry;
+  }
+}
+
+/**
  * Load `delegate.json` from a resolved agent directory. A missing file
  * yields defaults; malformed JSON, a non-positive `maxConcurrent`, or a
  * negative `stallTimeoutMs` fails loudly — a half-applied limit is worse

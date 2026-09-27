@@ -38,7 +38,10 @@ describe("delegate dispatch contract", () => {
         fauxAssistantMessage("OUTPUT-BETA"),
       ]);
 
+      // async: false — this pins synchronous input-order results; the
+      // bare multi-task default is async since v3 grammar unit 1.
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "first" },
           { prompt: "second" },
@@ -100,6 +103,7 @@ describe("delegate dispatch contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "fine" },
           { prompt: "doomed" },
@@ -231,6 +235,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([gated, gated, gated]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [0, 1, 2].map((n) => ({
           prompt: `task ${n}`,
           tools: ["read"],
@@ -264,6 +269,7 @@ describe("delegate dispatch contract", () => {
 
       subagents.respond([gated, gated, gated]);
       await callDelegate(session, {
+        async: false,
         tasks: [0, 1, 2].map((n) => ({
           prompt: `low ${n}`,
           tools: ["read"],
@@ -276,6 +282,7 @@ describe("delegate dispatch contract", () => {
       maxActive = 0;
       subagents.respond([gated, gated, gated, gated]);
       await callDelegate(session, {
+        async: false,
         tasks: [0, 1, 2, 3].map((n) => ({
           prompt: `high ${n}`,
           tools: ["read"],
@@ -309,6 +316,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([gated, gated, gated]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [0, 1, 2].map((n) => ({
           prompt: `task ${n}`,
           tools: ["read"],
@@ -359,6 +367,7 @@ describe("delegate dispatch contract", () => {
       subagents.alt.respond([fauxAssistantMessage("SCOUT-RUNS-CONFIGURED")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "look around", agent: "scout" },
           { prompt: "plain work" },
@@ -484,6 +493,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([capture("INLINE-PARENT")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { id: "a", prompt: "a", agent: "scout" },
           { id: "b", prompt: "b", agent: "reviewer", dependsOn: ["a"] },
@@ -603,6 +613,7 @@ describe("delegate dispatch contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { id: "a", prompt: "a", agent: "scout" },
           { id: "b", prompt: "b", agent: "reviewer", dependsOn: ["a"] },

@@ -126,6 +126,7 @@ describe("delegate dependency graph and handoffs", () => {
       subagents.respond([turn, turn, turn]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           // No explicit id: the generated 'task-1' is a valid reference.
           { prompt: "BUILD the thing" },
@@ -169,6 +170,7 @@ describe("delegate dependency graph and handoffs", () => {
       subagents.respond([turn, turn]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { id: "failer", prompt: "FAILER task" },
           { id: "dependent", prompt: "depends", dependsOn: ["failer"] },
@@ -211,6 +213,7 @@ describe("delegate dependency graph and handoffs", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { id: "a", prompt: "FAILER first" },
           { id: "b", prompt: "mid", dependsOn: ["a"] },
@@ -370,6 +373,7 @@ describe("delegate dependency graph and handoffs", () => {
       subagents.respond([turn, turn, turn]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             id: "probe",
@@ -427,6 +431,7 @@ describe("delegate dependency graph and handoffs", () => {
       subagents.respond([turn, turn, turn]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             id: "build",
@@ -481,6 +486,7 @@ describe("delegate dependency graph and handoffs", () => {
       subagents.respond([turn, turn, turn, turn]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             id: "first",
@@ -531,6 +537,7 @@ describe("delegate dependency graph and handoffs", () => {
       subagents.respond([turn, turn]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { id: "loud", prompt: "LOUD producer" },
           { prompt: "DEPENDENT consumer", dependsOn: ["loud"] },
@@ -577,6 +584,7 @@ describe("delegate dependency graph and handoffs", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { id: "w1", prompt: "write one", cwd: dir, tools: ["write"] },
           { id: "w2", prompt: "write two", cwd: dir, tools: ["write"] },
@@ -633,6 +641,7 @@ describe("delegate dependency graph and handoffs", () => {
       subagents.respond([respond, respond, respond]);
 
       const pending = callDelegateDetached(session, {
+        async: false,
         tasks: [
           { id: "prereq", prompt: "PREREQ runs first" },
           { prompt: "dependent waits", dependsOn: ["prereq"] },

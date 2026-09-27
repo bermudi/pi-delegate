@@ -94,6 +94,7 @@ describe("regression: failure propagation and retries", () => {
       subagents.respond([fail, succeed]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "w1", cwd,  tools: ["write"] },
           { prompt: "w2", cwd,  tools: ["write"] },

@@ -7,7 +7,7 @@ import type { TelemetryConfig } from "./config.ts";
 import type { DispatchOutcome } from "./coordinator.ts";
 import type { ResolvedTask, TaskOutcome, TicketStatus } from "./types.ts";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const BUSY_TIMEOUT_MS = 100;
 const BUSY_WINDOW_MS = 500;
 const BUSY_RETRY_BASE_MS = 10;
@@ -76,7 +76,47 @@ const TABLES = [
       ["provisional", "INTEGER"],
     ],
   },
+  {
+    // SPEC v3 "Observability" — one row per dispatch that ends before
+    // execution (validation, config-load, or admission rejection).
+    // Misfires are the only feedback channel against trained-reflex
+    // collisions; they ride the same store, destination, and retention
+    // as completed dispatch rows.
+    name: "misfires",
+    create: `CREATE TABLE IF NOT EXISTS misfires(
+      id TEXT PRIMARY KEY, ts INTEGER, version TEXT, pi_version TEXT,
+      phase TEXT, message TEXT, task_count INTEGER,
+      agents TEXT, workspaces TEXT, async INTEGER, parent_cwd TEXT)`,
+    columns: [
+      ["id", "TEXT PRIMARY KEY"],
+      ["ts", "INTEGER"],
+      ["version", "TEXT"],
+      ["pi_version", "TEXT"],
+      ["phase", "TEXT"],
+      ["message", "TEXT"],
+      ["task_count", "INTEGER"],
+      ["agents", "TEXT"],
+      ["workspaces", "TEXT"],
+      ["async", "INTEGER"],
+      ["parent_cwd", "TEXT"],
+    ],
+  },
 ] as const;
+
+/** The batch shape a misfire row carries — what the caller asked for. */
+export interface MisfireShape {
+  readonly phase: "config" | "validation" | "admission";
+  /** The caller-visible rejection message, verbatim. */
+  readonly message: string;
+  readonly taskCount: number;
+  /** Requested agents, post-alias canonical names ("inline" when omitted). */
+  readonly agents: readonly string[];
+  /** Effective workspace per requested task. */
+  readonly workspaces: readonly string[];
+  /** The effective sync/async mode the rejected call resolved to. */
+  readonly async: boolean;
+  readonly parentCwd: string;
+}
 
 function report(operation: string, destination: string, error: unknown): void {
   console.error(
@@ -261,6 +301,75 @@ export class TelemetryStore {
         this.writeSpan(destination, callId, input, result, ticketStatus);
       },
     };
+  }
+
+  /**
+   * Record one misfire row (SPEC v3 "Observability"): a dispatch that
+   * ended before execution. Telemetry config may come from the loaded
+   * config, or — when the load itself is what failed — a defensive raw
+   * read of delegate.json's `telemetry` block; when the file is
+   * unparseable, telemetry status is unknowable and nothing is written
+   * (identical to disabled).
+   */
+  recordMisfire(
+    config: TelemetryConfig,
+    agentDir: string,
+    row: MisfireShape,
+  ): void {
+    const destination = config.enabled
+      ? destinationOf(config, agentDir)
+      : undefined;
+    if (destination !== this.destination) {
+      this.closeBackend();
+      this.destination = destination;
+      this.failedDestination = undefined;
+      this.generation += 1;
+    }
+    if (
+      destination === undefined ||
+      this.closed ||
+      destination === this.failedDestination
+    ) {
+      return;
+    }
+    const db = this.backend(destination);
+    if (db === undefined) return;
+    const generation = this.generation;
+    try {
+      withBusyRetry(() => {
+        transact(db, () => {
+          db.prepare(
+            `INSERT INTO misfires(id, ts, version, pi_version, phase,
+               message, task_count, agents, workspaces, async, parent_cwd)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+          ).run(
+            randomUUID(),
+            Date.now(),
+            null,
+            null,
+            row.phase,
+            row.message,
+            row.taskCount,
+            JSON.stringify(row.agents),
+            JSON.stringify(row.workspaces),
+            row.async ? 1 : 0,
+            row.parentCwd,
+          );
+        });
+      });
+    } catch (error) {
+      this.fail(destination, "write", error);
+      return;
+    }
+    // Same owner-only hardening as dispatch rows — best-effort after the
+    // rows already landed.
+    if (generation === this.generation) {
+      try {
+        tightenPermissions(destination);
+      } catch (error) {
+        report("chmod", destination, error);
+      }
+    }
   }
 
   close(): void {

@@ -99,6 +99,44 @@ export function knownAgentNames(): string[] {
   return [...Object.keys(BUILTIN_PROFILES)];
 }
 
+/**
+ * Trained-incumbent agent names → built-ins (SPEC v3 "Reflex meeting").
+ * Exact case-sensitive match only — the reflex names arrive lowercase.
+ * Expansion happens at resolution, before the unknown-agent error, so a
+ * trained name lands on a real agent instead of an error round-trip;
+ * the expansion is echoed back in the task's result section as
+ * `agent "<raw>" → "<canonical>"` so the caller learns the real name.
+ * Aliases shadow same-named user profiles, consistent with built-ins
+ * winning name collisions.
+ */
+export const AGENT_ALIASES: Readonly<Record<string, string>> = {
+  general: "default",
+  "general-purpose": "default",
+  worker: "default",
+  explore: "scout",
+  plan: "scout",
+  implement: "coder",
+};
+
+/** The canonical agent name for a requested name — alias-expanded. */
+export function canonicalAgentName(name: string): string {
+  return AGENT_ALIASES[name] ?? name;
+}
+
+/**
+ * `name` with its alias targets annotated, for the unknown-agent error's
+ * available list — `default (aliases: general, general-purpose, worker)`.
+ * Built-ins carrying aliases teach both directions in one round-trip.
+ */
+export function agentListEntry(name: string): string {
+  const aliases = Object.entries(AGENT_ALIASES)
+    .filter(([, canonical]) => canonical === name)
+    .map(([alias]) => alias);
+  return aliases.length === 0
+    ? name
+    : `${name} (aliases: ${aliases.join(", ")})`;
+}
+
 export function getBuiltinProfile(name: string): AgentProfile | undefined {
   const profile = BUILTIN_PROFILES[name];
   return profile ? { name, ...profile } : undefined;

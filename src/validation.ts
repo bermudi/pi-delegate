@@ -198,7 +198,10 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
   return {
     mode: "dispatch",
     tasks: effectiveTasks,
-    async: args.async === true,
+    // SPEC v3 "Interaction grammar" — cardinality defaults: a single task
+    // runs sync inline; a multi-task batch returns a ticket and
+    // auto-delivers. `async` overrides in both directions.
+    async: args.async ?? effectiveTasks.length > 1,
     operationId: args.operationId,
   };
 }

@@ -18,7 +18,9 @@ import {
 import {
   loadDelegateConfig,
   resolveAgentDir,
+  telemetryConfigHint,
   type DelegateConfig,
+  type TelemetryConfig,
 } from "./src/config.ts";
 import {
   DispatchCoordinator,
@@ -42,7 +44,7 @@ import {
 } from "./src/operations.ts";
 import { createActivityStore } from "./src/activity.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
-import { discoverProfiles } from "./src/profiles.ts";
+import { canonicalAgentName, discoverProfiles } from "./src/profiles.ts";
 import {
   createMessageRenderer,
   createResultRenderer,
@@ -66,6 +68,7 @@ import {
   validateDispatchCall,
   validateSessionCall,
   validateTicketCall,
+  type DispatchCall,
   type TaskInput,
 } from "./src/validation.ts";
 import {
@@ -166,7 +169,7 @@ const delegateSchema = Type.Object(
     async: Type.Optional(
       Type.Boolean({
         description:
-          "Run the whole batch in the background (default false): returns a ticket immediately and delivers the settled result automatically. Inspect or control it with delegate_ticket.",
+          "Default depends on cardinality: one task runs synchronously and returns inline; a multi-task batch returns a ticket immediately and delivers the settled result automatically. Pass true to background a single task, false to block on a batch. Inspect or control tickets with delegate_ticket.",
       }),
     ),
     workspace: Type.Optional(
@@ -742,9 +745,11 @@ Three sibling tools share Delegate's machinery:
 
 ## delegate — dispatch
 - \`tasks\` (required): a non-empty array dispatches work; \`[]\` shows this
-  manual. Sync calls wait for every task and return results in input order;
-  \`async: true\` returns a ticket immediately — the settled result is
-  delivered automatically, so do not poll in a loop.
+  manual. The default depends on cardinality: a single task waits and
+  returns its result inline; a multi-task batch returns a ticket
+  immediately and delivers the settled result automatically, so do not
+  poll in a loop. \`async\` overrides both ways: \`true\` backgrounds a
+  single task, \`false\` blocks on a batch (results in input order).
 - Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
   key), \`agent\` (\`default\`/\`scout\`/\`coder\`/\`reviewer\`; omit for
   inline), \`cwd\`, \`systemPrompt\`, \`tools\` (\`*\` writer group, \`ro\`
@@ -981,6 +986,49 @@ export default function delegateExtension(api: ExtensionAPI): void {
   };
 
   /**
+   * Misfire telemetry (SPEC v3 "Observability"): one row per dispatch
+   * that ends before execution — validation rejections (including
+   * unknown agent names after alias expansion), config-load failures,
+   * and admission rejections. The row carries the verbatim
+   * caller-visible message and the requested batch shape (post-alias
+   * canonical agent names, effective workspaces, the resolved
+   * sync/async mode). Telemetry failures must never mask the rejection
+   * being recorded — a throw here would rewrite the caller-visible
+   * error, so this helper swallows nothing silently but reports and
+   * returns.
+   */
+  const noteMisfire = (
+    ctx: ExtensionContext,
+    agentDir: string,
+    config: TelemetryConfig,
+    phase: "config" | "validation" | "admission",
+    error: unknown,
+    tasks: readonly TaskInput[] | undefined,
+    batchWorkspace: "shared" | "scratch" | "isolated" | undefined,
+    async: boolean,
+  ): void => {
+    try {
+      telemetry.recordMisfire(config, agentDir, {
+        phase,
+        message: error instanceof Error ? error.message : String(error),
+        taskCount: tasks?.length ?? 0,
+        agents: (tasks ?? []).map((task) =>
+          task.agent === undefined ? "inline" : canonicalAgentName(task.agent),
+        ),
+        workspaces: (tasks ?? []).map(
+          (task) => task.workspace ?? batchWorkspace ?? "shared",
+        ),
+        async,
+        parentCwd: ctx.cwd,
+      });
+    } catch (recordError) {
+      console.error(
+        `[delegate] misfire telemetry failed (the dispatch rejection stands): ${recordError instanceof Error ? recordError.message : String(recordError)}`,
+      );
+    }
+  };
+
+  /**
    * The one dispatch pipeline, from barrier tracking to the coordinator
    * handoff, for sync and async batches alike — the optional ticket is the
    * only mode input, and the batch runs on `signal ?? the ticket's
@@ -1088,11 +1136,37 @@ export default function delegateExtension(api: ExtensionAPI): void {
       const catalog = discoverProfiles(ctx.cwd, agentDirResolution.dir, {
         warnedPaths: warnedProfilePaths,
       });
-      const config = loadDelegateConfig(
-        agentDirResolution.dir,
-        catalog.globalNames,
-      );
-      const tasks = await resolveTasks(requestedTasks, env, config, catalog);
+      // Misfire phases (SPEC v3 "Observability"): config-load failures
+      // record under "config" (telemetry status salvaged from the raw
+      // file — the load itself just failed); task-resolution and
+      // pooled-session reuse rejections record under "validation";
+      // admission rejections record under "admission".
+      let config: DelegateConfig;
+      try {
+        config = loadDelegateConfig(
+          agentDirResolution.dir,
+          catalog.globalNames,
+        );
+      } catch (error) {
+        noteMisfire(
+          ctx, agentDirResolution.dir,
+          telemetryConfigHint(agentDirResolution.dir),
+          "config", error, requestedTasks, undefined,
+          createTicket !== undefined,
+        );
+        throw error;
+      }
+      let tasks: readonly ResolvedTask[];
+      try {
+        tasks = await resolveTasks(requestedTasks, env, config, catalog);
+      } catch (error) {
+        noteMisfire(
+          ctx, agentDirResolution.dir, config.telemetry,
+          "validation", error, requestedTasks, undefined,
+          createTicket !== undefined,
+        );
+        throw error;
+      }
       // Shutdown may have begun while resolveTasks awaited a Git scope probe.
       // Neither a pre-ticket async call nor a pre-admission sync call may
       // start a worker after shutdown's snapshot of live work.
@@ -1101,7 +1175,16 @@ export default function delegateExtension(api: ExtensionAPI): void {
           "Delegate shut down while this dispatch was preparing; no worker was started.",
         );
       }
-      sessions.validateReuse(tasks);
+      try {
+        sessions.validateReuse(tasks);
+      } catch (error) {
+        noteMisfire(
+          ctx, agentDirResolution.dir, config.telemetry,
+          "validation", error, requestedTasks, undefined,
+          createTicket !== undefined,
+        );
+        throw error;
+      }
       ticket = createTicket?.(tasks, relabel, config);
       let owner = ticket?.id;
       if (owner === undefined) {
@@ -1111,9 +1194,19 @@ export default function delegateExtension(api: ExtensionAPI): void {
       }
       const dispatchSignal = signal ??
         (ticket ? tickets.cancellationSignal(ticket) : undefined);
-      const grant = admission.admit(tasks, owner, {
-        sessionFileOf: (sessionId) => sessions.transcriptFileOf(sessionId),
-      });
+      let grant: AdmissionGrant;
+      try {
+        grant = admission.admit(tasks, owner, {
+          sessionFileOf: (sessionId) => sessions.transcriptFileOf(sessionId),
+        });
+      } catch (error) {
+        noteMisfire(
+          ctx, agentDirResolution.dir, config.telemetry,
+          "admission", error, requestedTasks, undefined,
+          createTicket !== undefined,
+        );
+        throw error;
+      }
       const notices = serializedNotices(tasks, grant.serialized);
       if (ticket) tickets.setNotices(ticket, notices);
       batch = { tasks, env, config, grant, dispatchSignal, notices };
@@ -1349,10 +1442,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate",
       label: "Delegate to Subagents",
       description:
-        "Run subagent tasks. Sync returns results in input order; async: true returns a ticket (inspect or control it with delegate_ticket) and delivers the settled result automatically; tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; read-only tasks never serialize — parallel read-side fan-outs want 'ro' tools or the scout agent (the reviewer runs bash, so it serializes as a writer); 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
+        "Run subagent tasks. A single task runs synchronously and returns its result inline; a multi-task batch returns a ticket immediately (inspect or control it with delegate_ticket) and delivers the settled result automatically — pass async: false to block on a batch. tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; read-only tasks never serialize — parallel read-side fan-outs want 'ro' tools or the scout agent (the reviewer runs bash, so it serializes as a writer); 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
       parameters: delegateSchema,
       promptSnippet:
-        "Run subagent tasks: synchronous, or async tickets whose results arrive automatically",
+        "Run subagent tasks: one task sync inline, batches backgrounded with automatic results",
       promptGuidelines: [
         "Subagents never see this conversation — give each delegate task a self-contained brief.",
         "Async delegate results arrive automatically — do not poll in a loop; only wait on a ticket when the next step needs its result.",
@@ -1383,7 +1476,27 @@ export default function delegateExtension(api: ExtensionAPI): void {
         const shutdownRejected = shuttingDown;
         const dispatchLeafId = ctx.sessionManager.getLeafId();
         const dispatchEpoch = navigationEpoch;
-        const call = validateDispatchCall(params);
+        // Call-shape validation is the earliest rejection phase; its
+        // misfire row uses the salvaged telemetry hint because no config
+        // has been loaded yet (SPEC v3 "Observability"). The recording
+        // path is itself wrapped so a telemetry problem can never mask
+        // the caller-visible rejection.
+        let call: DispatchCall;
+        try {
+          call = validateDispatchCall(params);
+        } catch (error) {
+          try {
+            const agentDir = resolveAgentDir(ctx).dir;
+            noteMisfire(
+              ctx, agentDir, telemetryConfigHint(agentDir),
+              "validation", error, params.tasks, params.workspace,
+              params.async ?? params.tasks.length > 1,
+            );
+          } catch {
+            // The original rejection stands; nothing here may throw.
+          }
+          throw error;
+        }
         // Every tool call re-arms the footer context (v1 semantics: the
         // execute context carries the full UI surface for our lifetime).
         visibility.captureFooterCtx(ctx);
@@ -1642,15 +1755,33 @@ export default function delegateExtension(api: ExtensionAPI): void {
         };
 
         if (call.operationId === undefined) return executeDispatch();
-        return operations.run(
-          call.operationId,
-          dispatchFingerprint({ async: call.async, tasks: call.tasks }),
-          executeDispatch,
-          () =>
-            operationTicket
-              ? tickets.finishedPromise(operationTicket)
-              : Promise.resolve(),
-        );
+        // An operationId/fingerprint conflict rejects synchronously —
+        // a dispatch that ends before execution, so it records a
+        // validation misfire. `run` returns a promise for the dispatch
+        // itself; this catch sees only the synchronous conflict throw,
+        // never an execution-phase rejection.
+        try {
+          return operations.run(
+            call.operationId,
+            dispatchFingerprint({ async: call.async, tasks: call.tasks }),
+            executeDispatch,
+            () =>
+              operationTicket
+                ? tickets.finishedPromise(operationTicket)
+                : Promise.resolve(),
+          );
+        } catch (error) {
+          try {
+            const agentDir = resolveAgentDir(ctx).dir;
+            noteMisfire(
+              ctx, agentDir, telemetryConfigHint(agentDir),
+              "validation", error, call.tasks, undefined, call.async,
+            );
+          } catch {
+            // The original rejection stands; nothing here may throw.
+          }
+          throw error;
+        }
       },
     }),
   );

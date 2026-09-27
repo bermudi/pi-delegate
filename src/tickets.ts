@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   activityAge,
+  aliasNote,
   integrationLines,
   recoveryLines,
   resumeMarker,
@@ -109,8 +110,10 @@ function taskSection(
   whole: boolean,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
 ): string {
-  const tag = ticket.tasks[outcome.index]?.resumeTag;
-  const head = `### Task ${outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${outcome.status === "ok" ? "completed" : outcome.status}`;
+  const record = ticket.tasks[outcome.index];
+  const tag = record?.resumeTag;
+  const aliased = record !== undefined ? aliasNote(record.aliasedFrom, record.agent) : "";
+  const head = `### Task ${outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${outcome.status === "ok" ? "completed" : outcome.status}${aliased !== "" ? `\n${aliased}` : ""}`;
   const quarantined = outcome.quarantined
     ? ticket.recovered
       ? "\n(worker termination was unconfirmed; no live reservation was restored — inspect the workspace before new writes; recorded output and usage are lower bounds)"
@@ -327,6 +330,7 @@ export class TicketStore {
           id: task.id,
           agent: task.agent,
           resumeTag: task.resumeTag,
+          aliasedFrom: task.aliasedFrom,
         })),
         totalTasks: item.tasks.length,
         outcomes: item.outcomes.map((outcome) => outcome ?? undefined),

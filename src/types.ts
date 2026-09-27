@@ -9,7 +9,15 @@ export interface ResolvedTask {
   /** Caller-provided correlation id, or `task-<n>`. */
   readonly id: string;
   readonly prompt: string;
+  /** Canonical agent name (alias-expanded — SPEC v3 "Reflex meeting"). */
   readonly agent: string;
+  /**
+   * The raw agent name the caller wrote when it was an alias (e.g.
+   * "general" for "default"); undefined when the name was already
+   * canonical or omitted. Rendered as `agent "<raw>" → "<canonical>"` in
+   * task sections so the expansion teaches the real name.
+   */
+  readonly aliasedFrom: string | undefined;
   /** Absolute, canonicalized working directory for the task. */
   readonly cwd: string;
   readonly model: Model<Api>;
@@ -148,8 +156,8 @@ export interface Ticket {
   readonly totalTasks: number;
   /** Index-aligned per-task outcomes; entries appear as tasks finish. */
   readonly outcomes: readonly (TaskOutcome | undefined)[];
-  /** Only labels, correlation ids, and resume tags are required to render saved tickets. */
-  readonly tasks: readonly Pick<ResolvedTask, "id" | "agent" | "resumeTag">[];
+  /** Only labels, correlation ids, resume tags, and alias notes are required to render saved tickets. */
+  readonly tasks: readonly Pick<ResolvedTask, "id" | "agent" | "resumeTag" | "aliasedFrom">[];
   /** Unanswered worker questions (never persisted across host shutdown). */
   readonly questions: readonly WorkerQuestion[];
   /**

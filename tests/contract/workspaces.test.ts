@@ -94,6 +94,7 @@ describe("delegate workspace and shared-write contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "w1", cwd: dir,  tools: ["write"] },
           { prompt: "w2", cwd: dir,  tools: ["write"] },
@@ -164,6 +165,7 @@ describe("delegate workspace and shared-write contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         workspace: "isolated",
         tasks: [
           {
@@ -426,6 +428,7 @@ describe("delegate workspace and shared-write contract", () => {
       let result: Awaited<ReturnType<typeof callDelegate>> | undefined;
       try {
         result = await callDelegate(session, {
+          async: false,
           tasks: [
             {
               prompt: "write left",
@@ -485,6 +488,7 @@ describe("delegate workspace and shared-write contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "write scratch-marker.txt",
@@ -539,6 +543,7 @@ describe("delegate workspace and shared-write contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "write shared-file.txt",
@@ -646,6 +651,7 @@ describe("delegate workspace and shared-write contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "write a.txt",
@@ -789,6 +795,7 @@ describe("delegate workspace and shared-write contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "append SAME to same.txt (worker one)",
@@ -927,7 +934,7 @@ exec '${realGit}' "$@"
     };
     subagents.respond(Array(6).fill(write));
     const otherDir = tempDir();
-    const dispatched = callDelegate(session, { tasks: [
+    const dispatched = callDelegate(session, { async: false, tasks: [
       { id: "first", prompt: "edit same", cwd: dir, workspace: "isolated", tools: ["write"] },
       { id: "second", prompt: "edit same again", cwd: dir, workspace: "isolated", tools: ["write"] },
       { id: "after", prompt: "dependent marker", cwd: otherDir, dependsOn: ["second"], tools: ["write"] },
@@ -968,7 +975,7 @@ exec '${realGit}' "$@"
       ]);
     };
     subagents.respond(Array(6).fill(respond));
-    const dispatched = callDelegate(session, { tasks: [
+    const dispatched = callDelegate(session, { async: false, tasks: [
       { prompt: "first proposal", cwd: dir, workspace: "isolated", tools: ["write"] },
       { prompt: "second proposal", cwd: dir, workspace: "isolated", tools: ["write"] },
     ] });
@@ -1150,6 +1157,7 @@ exec '${realGit}' "$@"
       ]);
 
       const dispatched = callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "change conflict.txt",
@@ -1217,6 +1225,7 @@ exec '${realGit}' "$@"
       let result: Awaited<ReturnType<typeof callDelegate>> | undefined;
       try {
         result = await callDelegate(session, {
+          async: false,
           tasks: [
             {
               prompt: "scratch work",
@@ -1431,6 +1440,7 @@ exec '${realGit}' "$@"
       subagents.respond([respond, respond, respond, respond, respond, respond]);
 
       const result = await callDelegate(session, {
+        async: false,
         workspace: "isolated",
         tasks: [
           {

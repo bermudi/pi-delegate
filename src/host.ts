@@ -21,6 +21,8 @@ import {
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
+  agentListEntry,
+  canonicalAgentName,
   CHILD_TOOLS,
   expandTools,
   isWriter,
@@ -244,7 +246,9 @@ export async function resolveTasks(
   catalog: ProfileCatalog,
 ): Promise<ResolvedTask[]> {
   let parentActive: string[] = [];
-  if (tasks.some((task) => task.agent === "default" && task.tools === undefined)) {
+  // Explicit `default` (or an alias for it) mirrors the parent's active
+  // tools; an omitted agent is an inline task with the standard tool set.
+  if (tasks.some((task) => task.agent !== undefined && canonicalAgentName(task.agent) === "default" && task.tools === undefined)) {
     try {
       parentActive = env
         .getActiveTools()
@@ -266,19 +270,24 @@ export async function resolveTasks(
   const resolved: ResolvedTask[] = [];
   for (const [index, task] of tasks.entries()) {
     const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
-    const profile = task.agent
-      ? catalog.profiles.get(task.agent)
-      : undefined;
-    if (task.agent && !profile) {
+    // SPEC v3 "Reflex meeting": exact, case-sensitive alias expansion
+    // happens before any unknown-agent error — trained names land on
+    // built-ins; the raw name stays on `aliasedFrom` for the teaching
+    // note in the result.
+    const agent = task.agent === undefined ? undefined : canonicalAgentName(task.agent);
+    const aliasedFrom =
+      agent !== undefined && agent !== task.agent ? task.agent : undefined;
+    const profile = agent ? catalog.profiles.get(agent) : undefined;
+    if (agent && !profile) {
       throw new Error(
-        `${where}: unknown agent '${task.agent}'. Known agents: ${[...catalog.profiles.keys()].join(", ")}.`,
+        `${where}: unknown agent '${agent}'. Known agents: ${[...catalog.profiles.keys()].map(agentListEntry).join(", ")}.`,
       );
     }
 
     let tools: string[] | string;
     if (task.tools !== undefined) {
       tools = expandTools(task.tools);
-    } else if (task.agent === "default") {
+    } else if (agent === "default") {
       tools = parentActive;
     } else if (profile?.tools) {
       tools = [...profile.tools];
@@ -299,8 +308,10 @@ export async function resolveTasks(
       parentModel === undefined
         ? undefined
         : `${parentModel.provider}/${parentModel.id}`.toLowerCase();
-    const agentName = task.agent ?? "default";
-    const assignment = configuredModelFor(task.agent, parentKey, config);
+    // The config pin resolves against the CANONICAL name: a models.scout
+    // entry applies to agent "explore" just as it does to "scout".
+    const agentName = agent ?? "default";
+    const assignment = configuredModelFor(agent, parentKey, config);
     const modelRef = assignment?.ref ?? profile?.modelPin;
     const model =
       modelRef !== undefined ? resolveModel(modelRef, env) : parentModel;
@@ -389,8 +400,9 @@ export async function resolveTasks(
       id: task.id ?? `task-${index + 1}`,
       prompt,
       agent:
-        task.agent ??
+        agent ??
         (resumeTag !== undefined ? `resume:${resumeTag}` : "inline"),
+      aliasedFrom,
       cwd: canonicalPath(cwd),
       model,
       thinking,

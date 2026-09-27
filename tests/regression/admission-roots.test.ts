@@ -42,6 +42,7 @@ describe("admission root overlap (bugs 4+8)", () => {
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [
         { prompt: "root writer", cwd: "/", tools: ["write"] },
         { prompt: "subdir writer", cwd: dir, tools: ["write"] },

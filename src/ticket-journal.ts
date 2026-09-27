@@ -55,6 +55,7 @@ const savedTicket = Type.Object({
   tasks: Type.Array(Type.Object({
     id: Type.String(), agent: Type.String(),
     resumeTag: Type.Optional(Type.String()),
+    aliasedFrom: Type.Optional(Type.String()),
   }), { minItems: 1 }),
   outcomes: Type.Array(Type.Union([outcome, Type.Null()])),
   outputBounds: Type.Object({
@@ -119,7 +120,7 @@ export class TicketJournal {
       version: 1,
       id: ticket.id,
       status: ticket.status,
-      tasks: ticket.tasks.map(({ id, agent, resumeTag }) => ({ id, agent, resumeTag })),
+      tasks: ticket.tasks.map(({ id, agent, resumeTag, aliasedFrom }) => ({ id, agent, resumeTag, aliasedFrom })),
       outcomes: ticket.outcomes.map((item) => item ?? null),
       outputBounds: ticket.outputBounds,
       createdAt: ticket.createdAt,
