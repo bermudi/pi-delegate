@@ -44,7 +44,7 @@ A task accepts:
 | `systemPrompt` | Authored base prompt, used verbatim — it replaces the composed child base prompt; project context is added separately |
 | `tools` | Exact capability list; `*` = read/write/edit/bash, `ro` = read/grep/find/ls |
 | `sessionId` | Key for a live reusable session |
-| `resumeFrom` | Absolute `.jsonl` transcript path |
+| `resumeFrom` | Absolute `.jsonl` transcript path; a transcript owned by a live worker rejects (symlinks canonicalize) |
 | `deadlineMs` | Positive wall-clock budget beginning after queueing; omission means no deadline |
 | `workspace` | `shared`, `scratch`, or `isolated` |
 | `dependsOn` | Ids of tasks in this batch that must succeed first; their outputs are handed off |
@@ -530,6 +530,16 @@ Later calls with that ID serialize and continue it. Its cwd, tools, thinking,
 model, base prompt, and provider-extension configuration are frozen; incompatible
 reuse is rejected. `resumeFrom` rehydrates a durable transcript and may then be
 pooled under a new `sessionId`.
+
+A transcript file has one owner at a time. A task resuming a transcript
+(`resumeFrom`), or pointing at a live pooled session's durable file, rejects
+while the owning worker is live — children write into resumed transcripts,
+so a second owner would interleave writes into one file. Symlink aliases
+canonicalize, so a link to a busy transcript rejects too. Two tasks in one
+call never share a transcript: chain the work in separate calls or hand off
+through the task prompt. The exclusivity lasts until the owning worker is
+confirmed quiescent — not merely caller-settled — and releases with the
+same reservation retention as every other admission conflict.
 
 Transient whole-task failures may retry. Temporary rate limits without a
 provider reset window can receive one short retry only before side effects;

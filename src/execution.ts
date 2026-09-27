@@ -43,6 +43,13 @@ export interface RunControls {
   readonly stallTimeoutMs: number;
   /** Optional per-event sink (visibility/activity); never errors into the run. */
   readonly observe?: (event: AgentSessionEvent) => void;
+  /**
+   * Claim the child session's transcript file for exclusive ownership
+   * (transcript exclusivity); undefined when the run carries no grant
+   * context. Called once the concrete file is known — before the first
+   * turn writes into it.
+   */
+  readonly holdTranscript?: (path: string) => void;
 }
 
 export interface AttemptResult {
@@ -404,6 +411,14 @@ export class TaskExecution implements ExecutionHandle {
           this.task, this.controls.env, loader,
           (question, signal) => this.controls.sessions.askQuestion(session!, question, signal),
         ));
+      // Transcript exclusivity: claim the concrete file before the first
+      // turn writes into it. resumeFrom paths were reserved at admission;
+      // this also covers a pooled session's first run, whose file did not
+      // exist when the call was admitted. Idempotent per task+path.
+      const transcriptFile = session.sessionFile;
+      if (typeof transcriptFile === "string") {
+        this.controls.holdTranscript?.(transcriptFile);
+      }
       this.controls.sessions.bindQuestion(session, this.controls.askQuestion === undefined
         ? undefined
         : async (question, signal) => {

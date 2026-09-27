@@ -111,6 +111,17 @@ export interface SessionSettle {
  */
 export class SessionPool {
   private readonly entries = new Map<string, PooledSession>();
+
+  /**
+   * Transcript file of a pooled session, when one is pooled — admission
+   * resolves it for transcript exclusivity (a `resumeFrom` pointing at a
+   * live pooled session's file must reject).
+   */
+  transcriptFileOf(sessionId: string): string | undefined {
+    const file = this.entries.get(sessionId)?.session.sessionFile;
+    return typeof file === "string" ? file : undefined;
+  }
+
   /** Active invocation of the delegate-owned tool; never part of frozen tools. */
   private readonly questionHandlers = new WeakMap<AgentSession, (question: string, signal: AbortSignal) => Promise<string>>();
 

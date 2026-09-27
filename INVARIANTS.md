@@ -71,6 +71,11 @@ use any design that makes these properties true and testable.
   Explicitly incompatible reuse MUST fail.
 - Fresh or resumed sessions enter the pool only after a successful,
   non-cancelled, non-stalled run and only when a durable session file exists.
+- A transcript file MUST have one owner at a time: a `resumeFrom` (or a
+  symlink to it, or a pooled session's durable file) owned by a live worker
+  MUST reject, holding the exclusivity until the worker is confirmed
+  quiescent — never released by caller settlement alone. Two tasks in one
+  call MUST NOT share a transcript.
 - A pooled session cancelled, stalled, or deadline-exceeded after prompting
   MUST be evicted. A deadline before prompting may leave it intact and MUST
   record no usage.

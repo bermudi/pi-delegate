@@ -1,4 +1,5 @@
-import { sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { dependsTransitively } from "./graph.ts";
 import type { ResolvedTask } from "./types.ts";
 
@@ -24,6 +25,20 @@ export function rootsOverlap(a: string, b: string): boolean {
  */
 const GIT_REDIRECTS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as const;
 
+/**
+ * Canonical transcript path for exclusivity matching: realpath defeats
+ * symlink aliases (v1 quarantined canonical aliases too). Falls back to a
+ * lexical resolve when the file is not on disk — matching must stay
+ * symmetric for a path that exists on one side only.
+ */
+function canonicalTranscript(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 interface Reservation {
   readonly root: string;
   readonly owner: string;
@@ -45,6 +60,14 @@ export interface AdmissionGrant {
     tasks: readonly number[];
     roots: readonly string[];
   }[];
+  /**
+   * Claim exclusive ownership of a transcript file for one task, once the
+   * concrete file is known — used for a pooled session's first run, whose
+   * file does not exist at admission time. Throws when another live owner
+   * holds the canonical path (a narrow admit-vs-hold race surfacing as a
+   * visible task failure). Idempotent per (task, path).
+   */
+  readonly holdTranscript: (taskIndex: number, path: string) => void;
   /**
    * Release every reservation taken by this call. Task indexes in `retain`
    * keep their reservations and busy-session marks: those tasks could not
@@ -71,6 +94,12 @@ export interface AdmissionGrant {
 export class AdmissionController {
   private readonly reservations: Reservation[] = [];
   private readonly busySessions = new Map<string, { owner: string; taskIndex: number }>();
+  /** Canonical transcript files owned by live work (resumeFrom or a pooled
+   * session's file). One transcript, one owner at a time. */
+  private readonly busyTranscripts = new Map<
+    string,
+    { owner: string; taskIndex: number }
+  >();
 
   /** True while a live call or ticket holds this sessionId. */
   isSessionBusy(sessionId: string): boolean {
@@ -80,8 +109,15 @@ export class AdmissionController {
   /**
    * Check then reserve. Throws an actionable error on any conflict; on
    * success the caller owns the reservations until `release()`.
+   * `live.sessionFileOf` resolves a pooled session's transcript file when
+   * the pool already knows it (a first run's file is claimed later through
+   * the grant's `holdTranscript`).
    */
-  admit(tasks: readonly ResolvedTask[], owner: string): AdmissionGrant {
+  admit(
+    tasks: readonly ResolvedTask[],
+    owner: string,
+    live?: { sessionFileOf?: (sessionId: string) => string | undefined },
+  ): AdmissionGrant {
     const reserving = tasks.filter((task) => task.writeRoots !== undefined);
 
     // Inherited Git redirects: a scrubbed probe can still name the real
@@ -220,6 +256,44 @@ export class AdmissionController {
       }
     }
 
+    // Transcripts: a resumeFrom file, and a pooled session's file when the
+    // pool knows it, are exclusive while their worker is live — one writer
+    // per transcript (children write into resumed transcripts, and a pooled
+    // session's file is its durable state). Symlink aliases canonicalize,
+    // like v1's quarantine. Within one call two tasks never share one
+    // transcript; across calls the current owner blocks until it settles
+    // (retained under quarantine, like every other reservation).
+    const transcriptOf = (task: ResolvedTask): string | undefined => {
+      if (task.resumeFrom !== undefined) {
+        return canonicalTranscript(task.resumeFrom);
+      }
+      if (task.sessionId !== undefined) {
+        const file = live?.sessionFileOf?.(task.sessionId);
+        return file === undefined ? undefined : canonicalTranscript(file);
+      }
+      return undefined;
+    };
+    const heldTranscripts: { path: string; taskIndex: number }[] = [];
+    const seenInCall = new Map<string, string>();
+    for (const task of tasks) {
+      const path = transcriptOf(task);
+      if (path === undefined) continue;
+      const sibling = seenInCall.get(path);
+      if (sibling !== undefined) {
+        throw new Error(
+          `Tasks '${sibling}' and '${task.id}' resume the same transcript (${path}); a transcript has one owner at a time. Chain the work in separate calls, or hand off through the task prompt.`,
+        );
+      }
+      seenInCall.set(path, task.id);
+      const holder = this.busyTranscripts.get(path);
+      if (holder !== undefined && holder.owner !== owner) {
+        throw new Error(
+          `Transcript '${path}' is still in use by work running for ${holder.owner}; wait for it to finish or cancel it.`,
+        );
+      }
+      heldTranscripts.push({ path, taskIndex: task.index });
+    }
+
     // Reserve.
     const taken: Reservation[] = reserving.flatMap((task) =>
       task.writeRoots!.map((root) => ({
@@ -239,6 +313,9 @@ export class AdmissionController {
         taskIndex: held.taskIndex,
       });
     }
+    for (const held of heldTranscripts) {
+      this.busyTranscripts.set(held.path, { owner, taskIndex: held.taskIndex });
+    }
 
     let released = false;
     const allIndexes = new Set(tasks.map((task) => task.index));
@@ -255,10 +332,35 @@ export class AdmissionController {
           this.busySessions.delete(held.sessionId);
         }
       }
+      for (const held of heldTranscripts) {
+        if (!indexes.has(held.taskIndex)) continue;
+        const current = this.busyTranscripts.get(held.path);
+        if (current?.owner === owner) {
+          this.busyTranscripts.delete(held.path);
+        }
+      }
     };
     return {
       predecessors,
       serialized,
+      holdTranscript: (taskIndex: number, rawPath: string): void => {
+        const path = canonicalTranscript(rawPath);
+        if (
+          heldTranscripts.some(
+            (held) => held.path === path && held.taskIndex === taskIndex,
+          )
+        ) {
+          return; // idempotent re-claim by the same task
+        }
+        const holder = this.busyTranscripts.get(path);
+        if (holder !== undefined && holder.owner !== owner) {
+          throw new Error(
+            `Transcript '${path}' is in use by work running for ${holder.owner}; this task cannot run until that work finishes or is cancelled.`,
+          );
+        }
+        heldTranscripts.push({ path, taskIndex });
+        this.busyTranscripts.set(path, { owner, taskIndex });
+      },
       release: (retain?: ReadonlySet<number>) => {
         if (released) return;
         released = true;

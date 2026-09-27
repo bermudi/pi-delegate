@@ -391,6 +391,31 @@ gaps.
   sessions remains open: the "records its attempt" test witnesses the
   single provider call, not usage.
 
+### Transcript exclusivity (2026-09-27)
+
+- **Contract:** one transcript, one live owner. A `resumeFrom` (or symlink
+  alias) whose transcript is owned by a running worker rejects before any
+  child starts; a live pooled session's durable file rejects the same way
+  (discovered at admission through the pool, and for a pooled first run at
+  execution through the grant's `holdTranscript`); two tasks in one call
+  never share a transcript; exclusivity releases on confirmed quiescence,
+  retaining through quarantine like every other reservation (INVARIANTS
+  "Session reuse").
+- **Covered now:** `tests/contract/transcripts.test.ts` — same-call
+  duplicates reject the whole call naming both tasks with zero provider
+  calls; a gated async worker's transcript rejects cross-call resume naming
+  the owning ticket, then resumes cleanly once the ticket settles; a
+  symlink alias rejects with the canonical path in the error; a pooled
+  session checked out by a gated run rejects `resumeFrom` at its durable
+  file, then resumes after the run settles.
+- **Provenance:** v1 `task-resolution.test.ts` "rejects a canonical alias of
+  a quarantined resumeFrom transcript" and v1 `session-quarantine.ts` —
+  v2 dropped the quarantine in the rewrite (2026-09-27 gap audit,
+  V1-V2-MAP §3d item 6); user decision restored the live-worker half.
+  v1's abandoned-transcript quarantine (workers that died mid-run) was
+  **not** restored: a dead writer no longer mutates the file, and v2
+  reservations cannot outlive the process that held them.
+
 ### Admission and shared writes
 
 - **Contract:** fail closed on ambiguous Git/cwd scope; canonical equal /

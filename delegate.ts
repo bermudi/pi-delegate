@@ -1105,7 +1105,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
       }
       const dispatchSignal = signal ??
         (ticket ? tickets.cancellationSignal(ticket) : undefined);
-      const grant = admission.admit(tasks, owner);
+      const grant = admission.admit(tasks, owner, {
+        sessionFileOf: (sessionId) => sessions.transcriptFileOf(sessionId),
+      });
       const notices = serializedNotices(tasks, grant.serialized);
       if (ticket) tickets.setNotices(ticket, notices);
       batch = { tasks, env, config, grant, dispatchSignal, notices };

@@ -138,7 +138,7 @@ close:
 | 3 | Task `cwd` expanded `~` to the home directory | **Fixed 2026-09-27** — tilde expansion restored (host resolution + SPEC + contract test) |
 | 4 | Malformed `maxConcurrent`/`stallTimeoutMs`/`concurrency` numbers kept the previous valid config and warned | v2 fails the whole call at config load; SPEC states fail-loudly only for `output` bounds; unrecorded for the numeric knobs |
 | 5 | A failed fresh run left a resumable session `.jsonl` on disk plus a retry hint | v2 fresh runs are in-memory-transcript only — nothing survives to resume; COMPATIBILITY does not pre-authorize session-persistence changes |
-| 6 | `resumeFrom` of a transcript with a live/abandoned worker was rejected (quarantine, incl. symlink aliases) | v2 rehydrates any `.jsonl`; reservations guard scopes, not transcripts |
+| 6 | `resumeFrom` of a transcript with a live/abandoned worker was rejected (quarantine, incl. symlink aliases) | **Fixed 2026-09-27 (live-worker half)** — transcript exclusivity restored in admission (resumeFrom + pooled session files, symlink canonicalization, quiescence-scoped release); v1's abandoned-transcript quarantine deliberately not restored (a dead writer no longer mutates the file) — recorded in TEST-MIGRATION "Transcript exclusivity" |
 | 7 | Poll/cancel-preview views marked resumed tasks with ↻ (revival provenance) | Dropped silently; no v2 view shows resume provenance |
 | 8 | Running-ticket polls showed live activity: current/last tool, tool+token counts, activity age, finalized/active/queued/failed split | v2 running poll is "N/M finished" + recorded outputs; footer/browser cover operators but the LLM-facing poll lost the signal; unrecorded |
 | 9 | Sync usage flagged lower bounds ("token usage and cost are lower bounds") when a worker's accounting was incomplete | v2 sums usage unconditionally |
@@ -217,8 +217,8 @@ below.
 Still open from 3a: nothing — **named Markdown agent profiles (issue #7)**
 shipped, closing the last 3a-style gap.
 
-Still open from §3d (2026-09-27 audit): the ten pending-disposition items
-await keep/restore-or-record decisions; item 2 (reviewer tools) also
-contradicts COMPATIBILITY's preserve-list as written and must be resolved
-one way or the other. The SPEC config-key documentation gap (§4 audit
-note) needs a SPEC addition regardless of the §3d outcomes.
+Still open from §3d (2026-09-27 audit): items 1, 2, 3, and 6 are decided
+and closed (documented drop; reviewer bash restored; tilde restored;
+transcript exclusivity restored for live workers). The remaining six items
+(4, 5, 7–10) await keep/restore-or-record decisions; none contradict a
+contract document as written.

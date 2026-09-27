@@ -660,6 +660,7 @@ export class DispatchCoordinator {
               sessions: options.sessions,
               signal,
               stallTimeoutMs: options.config.stallTimeoutMs,
+              holdTranscript: (path) => grant.holdTranscript(task.index, path),
               isAborted: () => signal.aborted,
               observe:
                 this.activity !== undefined && ticket !== undefined
