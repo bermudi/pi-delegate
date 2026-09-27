@@ -2,9 +2,14 @@
 
 A [Pi](https://github.com/earendil-works/pi) extension providing the
 `delegate`, `delegate_ticket`, and `delegate_session` tools: subagent
-dispatch, async tickets, pooled sessions, and
-workspace isolation. This is a specification-first rewrite; the v1 repository
-at `../pi-delegate` is the behavioral oracle.
+dispatch, async tickets, pooled sessions, and workspace isolation.
+This is a specification-first project. `SPEC.md` (v3) is the sole
+behavioral authority; `SPEC-V2.md` is the engine-as-built contract v3
+inherits. The v1 repository at `../pi-delegate` is **retired as an
+oracle** — consulted only as historical evidence for restorations —
+and v1→v2 migration guidance lives in `COMPATIBILITY.md`. v3 is owned
+by the project agent (stewardship delegated 2026-09-27; decisions per
+SPEC.md's ratification record).
 
 Before implementing or changing behavior, read `SPEC.md`, `INVARIANTS.md`,
 and `COMPATIBILITY.md` — they are authoritative and describe outcomes, not
