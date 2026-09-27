@@ -111,6 +111,16 @@ mid-flight the parent can steer. The grammar:
 
 ## Observability
 
+- **Completion evidence.** A settled task's record carries the file
+  changes attributed to it: paths observed in its write/edit tool
+  calls, with changes sourced from bash marked uncertain. The inline
+  result, delivered wake, and ticket views show each task's attributed
+  files beside its claim, and `details.attributedFiles` carries them
+  machine-readably; when two tasks in one batch are attributed the
+  same file, the result says so. Attribution is evidence, not
+  confinement — it reports what tools touched and claims nothing
+  about paths it could not observe.
+
 - **Misfire rows.** Rejected and failed dispatches — validation errors,
   admission rejects, unknown names — record telemetry. v2's SPEC
   recorded nothing for rejected calls; v3 reverses this deliberately:
