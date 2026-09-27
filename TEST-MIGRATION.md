@@ -170,7 +170,10 @@ gaps.
   outcomes; aggregate usage where the host supports it; caller task ids
   echoed for correlation.
 - **Regression:** failed task does not fail siblings or destroy index
-  alignment; partial output/usage/touched files preserved on failure.
+  alignment; partial output/usage preserved on failure (v1 additionally
+  preserved touched-file lists — that surface was dropped by user decision
+  2026-09-27; see COMPATIBILITY "Touched-file attribution reporting
+  removed").
 - **Internal:** `formatCompletedTask`/`formatFailedTask` rendering, header
   markers, `fmt*`/`trunc*` helpers, touched-file extraction helpers.
 - **Covered now:** ordered results; sibling failure isolation — a mixed
@@ -197,7 +200,10 @@ gaps.
   delegate tool. The original AgentSession fault seam also broke the wrapper
   before delegate ran; its verifier commit is retained, with one explicitly
   user-authorized correction commit (#13 exception comment).
-- **Gap:** overlap warnings on results.
+- **Gap:** overlap warnings on results — **decided out 2026-09-27** with the
+  whole touched-file attribution surface (user decision; recorded in
+  COMPATIBILITY as a deliberate breaking change, possible future
+  restoration). Not a coverage target unless it returns.
 
 ### Multi-task / concurrent dispatch
 

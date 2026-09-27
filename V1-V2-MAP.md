@@ -133,9 +133,9 @@ close:
 
 | # | v1 behavior | v2 status |
 | --- | --- | --- |
-| 1 | Touched-file attribution: results/views named the physical files each task touched (symlink-resolved, conservative "uncertain" flags, external-write reporting through worker links) and warned when tasks shared files | No touched-file data exists in v2 outcomes; TEST-MIGRATION lists only the overlap-warning *wish* — the attribution surface itself was never dispositioned |
-| 2 | `reviewer` built-in had `read`+`bash` ("run focused checks") | v2 pins reviewer read-only; COMPATIBILITY's preserve-list still says "reviewer semantics" — contradiction either way |
-| 3 | Task `cwd` expanded `~` to the home directory | v2 resolves it as a relative literal → "cwd does not exist" failure; unrecorded |
+| 1 | Touched-file attribution: results/views named the physical files each task touched (symlink-resolved, conservative "uncertain" flags, external-write reporting through worker links) and warned when tasks shared files | **Decided out 2026-09-27** — recorded as a deliberate breaking change in COMPATIBILITY with migration guidance; possible future restoration |
+| 2 | `reviewer` built-in had `read`+`bash` ("run focused checks") | **Fixed 2026-09-27** — reviewer restored to read+bash; SPEC/manual now state it serializes as a writer |
+| 3 | Task `cwd` expanded `~` to the home directory | **Fixed 2026-09-27** — tilde expansion restored (host resolution + SPEC + contract test) |
 | 4 | Malformed `maxConcurrent`/`stallTimeoutMs`/`concurrency` numbers kept the previous valid config and warned | v2 fails the whole call at config load; SPEC states fail-loudly only for `output` bounds; unrecorded for the numeric knobs |
 | 5 | A failed fresh run left a resumable session `.jsonl` on disk plus a retry hint | v2 fresh runs are in-memory-transcript only — nothing survives to resume; COMPATIBILITY does not pre-authorize session-persistence changes |
 | 6 | `resumeFrom` of a transcript with a live/abandoned worker was rejected (quarantine, incl. symlink aliases) | v2 rehydrates any `.jsonl`; reservations guard scopes, not transcripts |

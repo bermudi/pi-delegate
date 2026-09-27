@@ -133,6 +133,22 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 
 ## v2 deliberate breaking changes
 
+- **Touched-file attribution reporting removed (user decision 2026-09-27;
+  possible future restoration).** V1 reported which physical files each
+  task touched — resolved through symlinks with conservative `uncertain`
+  flags, external writes through worker links reported at their physical
+  paths — in results and poll/cancel/wait views, warned when tasks touched
+  the same files (`details.overlapWarning`), and preserved touched-file
+  lists on partial failure. V2 outcomes carry no touched-file data at all.
+  Callers must not rely on touched-file reporting, overlap warnings, or
+  file-level attribution in any v2 result or view. Migration: derive file
+  lists from the task briefs or the underlying Git state; overlap between
+  same-call shared writers is still prevented by admission (serialization
+  notices name the serialized tasks), and cross-call conflicts still
+  reject — only the *reporting* of touched files is gone. Decided during
+  the 2026-09-27 gap audit (V1-V2-MAP §3d item 1); a future restoration
+  would reintroduce file-tracking machinery and is not promised.
+
 - **Child base prompt is composed, not precedence-chosen (#33, user decision
   2026-09-26).** V1 picked one prompt by precedence — task, then agent, then a
   string-sanitized copy of the parent's assembled prompt, then stock — so the
