@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { integrationLines } from "./format.ts";
+import {
+  activityAge,
+  integrationLines,
+  recoveryLines,
+  resumeMarker,
+  truncateLine,
+} from "./format.ts";
+import type { ActivityRow, ActivityStore } from "./activity.ts";
 import { TicketJournal } from "./ticket-journal.ts";
 import { renderOutputForLLM, renderOutputForPoll } from "./spill.ts";
 import type {
@@ -102,11 +109,12 @@ function taskSection(
   whole: boolean,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
 ): string {
-  const head = `### Task ${outcome.id} — ${outcome.status === "ok" ? "completed" : outcome.status}`;
+  const tag = ticket.tasks[outcome.index]?.resumeTag;
+  const head = `### Task ${outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${outcome.status === "ok" ? "completed" : outcome.status}`;
   const quarantined = outcome.quarantined
     ? ticket.recovered
-      ? "\n(worker termination was unconfirmed; no live reservation was restored — inspect the workspace before new writes)"
-      : "\n(worker termination unconfirmed — its write scope stays reserved)"
+      ? "\n(worker termination was unconfirmed; no live reservation was restored — inspect the workspace before new writes; recorded output and usage are lower bounds)"
+      : "\n(worker termination unconfirmed — its write scope stays reserved; recorded output and usage are lower bounds — its accounting is incomplete)"
     : "";
   const integration = outcome.integration
     ? `\n${integrationLines(outcome.integration).join("\n")}`
@@ -136,8 +144,96 @@ function taskSection(
     return `${head}\n${render(outcome.output ?? "")}${quarantined}${integration}`;
   }
   const detail = outcome.error ?? "no output";
+  const session =
+    outcome.sessionFile !== undefined
+      ? `\n${recoveryLines(outcome.sessionFile).join("\n")}`
+      : "";
   const partial = outcome.output ? `\n${render(outcome.output)}` : "";
-  return `${head}\n${detail}${partial}${quarantined}${integration}`;
+  return `${head}\n${detail}${session}${partial}${quarantined}${integration}`;
+}
+
+/**
+ * Live state the running-ticket views read: the activity rows the
+ * coordinator feeds and the execution registry that proves a task is
+ * truly in flight (an activity row alone can lag session creation).
+ */
+interface LiveState {
+  readonly activity: ActivityStore | undefined;
+  readonly executions: ReadonlyMap<number, ExecutionHandle>;
+}
+
+/** `<agent><↻tag> #<id>` — the identity prefix shared by every task row. */
+function taskLabel(ticket: Ticket, index: number): string {
+  const task = ticket.tasks[index];
+  const agent = task?.agent ?? "inline";
+  const marker = resumeMarker(agent, task?.resumeTag);
+  return `${agent}${marker} #${task?.id ?? `task-${index + 1}`}`;
+}
+
+/**
+ * One-line activity label for a running task: the in-flight call when one
+ * is executing, else the last completed call, else "thinking" — v1's
+ * poll-row contract, fed by the activity store.
+ */
+function activityLabel(row: ActivityRow): string {
+  const open = [...row.toolCalls].reverse().find((call) => call.inFlight);
+  const last = row.toolCalls.at(-1);
+  const call = open ?? last;
+  if (call === undefined) return "thinking";
+  const args = call.argPreview !== "" ? ` ${call.argPreview}` : "";
+  const line = truncateLine(`${call.tool}${args}`, 120);
+  return call.inFlight ? line : `last: ${line}`;
+}
+
+/**
+ * A running ticket's per-task poll line (v1's formatInFlightTaskLine /
+ * formatQueuedTaskLine): the task's current or last tool, its tool count,
+ * and seconds since the last observed event. Queued tasks read
+ * `waiting…`; a paused ticket's unfinished tasks read `paused`.
+ */
+function liveTaskLine(ticket: Ticket, index: number, live: LiveState | undefined): string {
+  const task = ticket.tasks[index];
+  const label = taskLabel(ticket, index);
+  const row =
+    live?.activity !== undefined && task !== undefined
+      ? live.activity.taskRow(ticket.id, task.id)
+      : undefined;
+  const inFlight = live?.executions.has(index) === true;
+  if (row === undefined || row.status === "queued") {
+    if (inFlight) return `⏳ ${label} · running`;
+    return ticket.paused ? `Ⅱ ${label} · paused` : `○ ${label} · waiting…`;
+  }
+  if (row.status === "paused" || (ticket.paused && !inFlight && row.status !== "running")) {
+    return `Ⅱ ${label} · paused between turns`;
+  }
+  const parts = [activityLabel(row)];
+  if (row.toolCalls.length > 0) {
+    parts.push(`${row.toolCalls.length} tool${row.toolCalls.length === 1 ? "" : "s"}`);
+  }
+  const age = activityAge(row.lastEventAt);
+  if (age !== "") parts.push(age);
+  return `⏳ ${label} · ${parts.join(" · ")}`;
+}
+
+/**
+ * Live counts for a running ticket's header: in-flight tasks, queued
+ * tasks, and observed tool calls — a polling caller's health readout, the
+ * v1 header's compact remainder.
+ */
+function liveCounts(ticket: Ticket, live: LiveState | undefined): string {
+  const parts: string[] = [];
+  let tools = 0;
+  for (const task of ticket.tasks) {
+    tools +=
+      live?.activity?.taskRow(ticket.id, task.id)?.toolCalls.length ?? 0;
+  }
+  const active = live?.executions.size ?? 0;
+  const unfinished = ticket.totalTasks - completedCount(ticket);
+  const queued = Math.max(0, unfinished - active);
+  if (active > 0) parts.push(`${active} active`);
+  if (queued > 0) parts.push(`${queued} queued`);
+  if (tools > 0) parts.push(`${tools} tool${tools === 1 ? "" : "s"}`);
+  return parts.length > 0 ? ` — ${parts.join(" · ")}` : "";
 }
 
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */
@@ -145,18 +241,25 @@ function ticketView(
   ticket: Ticket,
   whole = false,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
+  live?: LiveState,
 ): string {
   const warning = recoveryWarning(ticket);
   const lines = [
-    `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished.`,
+    `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished${isTerminal(ticket.status) ? "" : liveCounts(ticket, live)}.`,
     ...(warning ? [warning] : []),
     ...ticket.notices,
     ...ticket.questions.map((q) =>
       `Waiting for parent answer: task ${q.taskId}, question ${q.id}: ${q.question}\nReply with delegate_ticket({ action: "answer", ticket: "${ticket.id}", taskId: "${q.taskId}", questionId: "${q.id}", answer: "..." }).`),
   ];
-  for (const outcome of ticket.outcomes) {
-    if (outcome)
+  for (let index = 0; index < ticket.outcomes.length; index++) {
+    const outcome = ticket.outcomes[index];
+    if (outcome) {
       lines.push("", taskSection(ticket, outcome, whole, renderedOutputs));
+    } else if (!isTerminal(ticket.status)) {
+      // A running ticket shows each unfinished task's live line — a
+      // polling caller can tell a healthy worker from a spinning one.
+      lines.push(liveTaskLine(ticket, index, live));
+    }
   }
   return lines.join("\n");
 }
@@ -196,6 +299,9 @@ export class TicketStore {
   constructor(
     private readonly onChange?: () => void,
     private readonly onQuestion?: (ticket: Ticket, question: WorkerQuestion) => void,
+    /** Optional live-activity sink shared with the coordinator; running
+     * polls render per-task activity rows from it when present. */
+    private readonly activity?: ActivityStore,
   ) {}
 
   private changed(): void {
@@ -217,7 +323,11 @@ export class TicketStore {
         id: item.id,
         status: item.status === "running" ? "interrupted" : item.status,
         paused: false,
-        tasks: item.tasks,
+        tasks: item.tasks.map((task) => ({
+          id: task.id,
+          agent: task.agent,
+          resumeTag: task.resumeTag,
+        })),
         totalTasks: item.tasks.length,
         outcomes: item.outcomes.map((outcome) => outcome ?? undefined),
         questions: [],
@@ -338,15 +448,16 @@ export class TicketStore {
    */
   view(ticket: Ticket): string {
     const { record, rt } = this.entry(ticket);
+    const live: LiveState = { activity: this.activity, executions: rt.executions };
     if (
       isTerminal(record.status) &&
       rt.finishedGate.resolved &&
       rt.executions.size === 0
     ) {
-      rt.settledView ??= ticketView(record, false, rt.renderedOutputs);
+      rt.settledView ??= ticketView(record, false, rt.renderedOutputs, live);
       return rt.settledView;
     }
-    return ticketView(record, false, rt.renderedOutputs);
+    return ticketView(record, false, rt.renderedOutputs, live);
   }
 
   /**
@@ -356,7 +467,11 @@ export class TicketStore {
    * touches the filesystem: no spill files, no frozen terminal render.
    */
   fullView(ticket: Ticket): string {
-    return ticketView(this.entry(ticket).record, true);
+    const { record, rt } = this.entry(ticket);
+    return ticketView(record, true, undefined, {
+      activity: this.activity,
+      executions: rt.executions,
+    });
   }
 
   /** Drop a ticket that never started (e.g. admission failed after create). */
@@ -555,10 +670,28 @@ export class TicketStore {
     }
     if (!force) {
       const inFlight = rt.executions.size;
+      const live: LiveState = {
+        activity: this.activity,
+        executions: rt.executions,
+      };
+      // The preview names every task's current state (v1's cancel
+      // preview): settled tasks keep their icon and error, unfinished
+      // ones show the same live line a poll would.
+      const taskLines = record.tasks.map((task, index) => {
+        const outcome = record.outcomes[index];
+        if (outcome === undefined) return liveTaskLine(record, index, live);
+        const icon = outcome.status === "ok" ? "✓" : "✗";
+        const what =
+          outcome.status === "ok"
+            ? "completed"
+            : (outcome.error ?? outcome.status);
+        return `${icon} ${task.agent}${resumeMarker(task.agent, task.resumeTag)} #${task.id} · ${what}`;
+      });
       return (
         `Ticket "${ticket.id}" is ${statusWord(record)} with ${inFlight} task(s) in flight. ` +
         `Cancellation is cooperative: in-flight work is asked to stop and queued tasks are dropped; ` +
-        `completed writes and commands are not rolled back. Re-run with force: true to cancel.`
+        `completed writes and commands are not rolled back. Re-run with force: true to cancel.` +
+        (taskLines.length > 0 ? `\n${taskLines.join("\n")}` : "")
       );
     }
     rt.cancellation.abort();

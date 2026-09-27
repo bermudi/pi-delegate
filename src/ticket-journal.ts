@@ -43,6 +43,7 @@ const outcome = Type.Object({
   integration: Type.Optional(integration),
   blockedBy: Type.Optional(Type.Array(Type.String())),
   quarantined: Type.Optional(Type.Boolean()),
+  sessionFile: Type.Optional(Type.String()),
 });
 const savedTicket = Type.Object({
   version: Type.Literal(1),
@@ -51,7 +52,10 @@ const savedTicket = Type.Object({
     Type.Literal("running"), Type.Literal("completed"),
     Type.Literal("partial"), Type.Literal("failed"), Type.Literal("cancelled"),
   ]),
-  tasks: Type.Array(Type.Object({ id: Type.String(), agent: Type.String() }), { minItems: 1 }),
+  tasks: Type.Array(Type.Object({
+    id: Type.String(), agent: Type.String(),
+    resumeTag: Type.Optional(Type.String()),
+  }), { minItems: 1 }),
   outcomes: Type.Array(Type.Union([outcome, Type.Null()])),
   outputBounds: Type.Object({
     spillThresholdChars: Type.Integer({ minimum: 0 }),
@@ -115,7 +119,7 @@ export class TicketJournal {
       version: 1,
       id: ticket.id,
       status: ticket.status,
-      tasks: ticket.tasks.map(({ id, agent }) => ({ id, agent })),
+      tasks: ticket.tasks.map(({ id, agent, resumeTag }) => ({ id, agent, resumeTag })),
       outcomes: ticket.outcomes.map((item) => item ?? null),
       outputBounds: ticket.outputBounds,
       createdAt: ticket.createdAt,

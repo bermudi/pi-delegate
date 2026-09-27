@@ -12,6 +12,7 @@ import {
   callDelegate,
   configureDelegate,
   installSubagentModel,
+  objectOf,
   openDelegateBoundary,
   ticketIdOf,
   callDelegateTicket,
@@ -757,4 +758,37 @@ describe("delegate dispatch contract", () => {
       expect(subagents.state.callCount).toBe(0);
     }
   });
+
+  test(
+    "incomplete accounting marks usage totals as lower bounds",
+    async () => {
+      // v1 evidence: format.ts — incomplete-quiescence results rendered
+      // "≥N tokens (incomplete)" and warned that output, token usage, and
+      // cost were lower bounds. v2 keeps TaskOutcome.quarantined and must
+      // mark the semantics: a gated provider + task deadline makes the
+      // worker's termination unconfirmable, so its accounting is partial.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const gated: FauxResponseFactory = async () => {
+        await gate;
+        return fauxAssistantMessage("TOO-LATE");
+      };
+      subagents.respond([gated]);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "hang", tools: ["write"], deadlineMs: 300 }],
+      });
+      expect(result.text).toMatch(/deadline/i);
+      // Per-task and aggregate wording: the caller cannot mistake a
+      // partial accounting for the full total.
+      expect(result.text).toMatch(/lower bound/i);
+      const details = objectOf(result.details, "result.details");
+      expect(details.usageLowerBound).toBe(true);
+
+      // Let the abandoned worker wind down so its reservation releases.
+      release();
+    },
+  );
 });

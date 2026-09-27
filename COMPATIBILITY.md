@@ -295,6 +295,41 @@ and migration guidance; none may arrive as silent rewrite drift.
   profile frontmatter; drop the stale keys; rely on concurrency bounds and
   polling rather than a ticket cap or TTL sweep.
 
+- **Malformed numeric configuration fails loudly instead of keeping the
+  last good snapshot (§3d item 4, recorded 2026-09-27).** V1 re-read
+  `delegate.json` at the start of every tool call and, on a parse or
+  validation error — a non-integer `maxConcurrent`, a negative
+  `stallTimeoutMs`, a malformed `concurrency` entry — kept the previously
+  loaded snapshot and warned (`could not reload … keeping current
+  config`); on a bad first read it ran on the compiled defaults. A broken
+  edit could therefore run on stale bounds indefinitely, surfaced only in
+  the console. V2 has no retained snapshot: every dispatch reloads the
+  file, and a malformed value fails the whole call before any task
+  starts, naming the offending key — the same rule `output`, `models`,
+  `modelsByParent`, and `telemetry` already follow. A silently weakened
+  limit is worse than a visible error.
+  Migration: fix the reported key; dispatch does not proceed on a
+  partially valid `delegate.json`.
+
+- **Pooled-session thinking freeze now applies to every profile
+  (§3d item 10, recorded 2026-09-27).** V1 carried a `default`-profile
+  exception in its reuse validation: a pooled `default` session demanded
+  the parent's *live* thinking level on reuse — the frozen level was only
+  a fallback for a parent with no level — so a changed parent level
+  surfaced as an explicit reuse mismatch rather than silently continuing
+  at the stale one. Every other profile demanded its own frozen level,
+  so a named-agent session could keep running at its old thinking level
+  no matter how the parent moved. V2 drops the split: reuse resolves the
+  task's thinking from the current dispatch (pin → profile → parent) and
+  requires equality with the frozen level for every profile — a changed
+  effective level rejects reuse with the same actionable mismatch for
+  `default` (parity with v1) and for named agents (stricter than v1,
+  which silently continued). This is the same freeze
+  `INVARIANTS.md` "Session reuse" mandates for every other frozen field.
+  Migration: none — reuse that now fails was already configuration drift;
+  close the pooled session (`delegate_session({ action: "close", … })`)
+  or return to the matching level and retry.
+
 - **One `delegate` tool split into three (#27).** V1's kitchen-sink schema
   advertised dispatch, ticket, and session fields together, and the largest
   observed caller failure was combining them. V2 registers three tools —

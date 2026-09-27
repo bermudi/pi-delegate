@@ -19,7 +19,7 @@ hooks, tool behavior). V1 internals are non-binding per `COMPATIBILITY.md`.
 | | v1 (`e17a23c`) | v2 (`017d166`) |
 | --- | --- | --- |
 | Shape | ~40 modules, grown organically | 1 entry + 23 `src/` modules, spec-first |
-| Test suite | 330 KB+ across 20+ files | 306 live tests, 31 files, **0 fail, 0 pending** |
+| Test suite | 330 KB+ across 20+ files | 320 live tests, 32 files, **0 fail, 0 pending** |
 | Behavioral authority | README + code | `SPEC.md` / `INVARIANTS.md` / `COMPATIBILITY.md` |
 | Implemented subsystems | all (incl. TUI) | all planned subsystems — named Markdown profiles shipped (#7); visibility layer shipped (#24) 2026-09-22, output bounding shipped (#25) 2026-09-23 |
 
@@ -136,13 +136,13 @@ close:
 | 1 | Touched-file attribution: results/views named the physical files each task touched (symlink-resolved, conservative "uncertain" flags, external-write reporting through worker links) and warned when tasks shared files | **Decided out 2026-09-27** — recorded as a deliberate breaking change in COMPATIBILITY with migration guidance; possible future restoration |
 | 2 | `reviewer` built-in had `read`+`bash` ("run focused checks") | **Fixed 2026-09-27** — reviewer restored to read+bash; SPEC/manual now state it serializes as a writer |
 | 3 | Task `cwd` expanded `~` to the home directory | **Fixed 2026-09-27** — tilde expansion restored (host resolution + SPEC + contract test) |
-| 4 | Malformed `maxConcurrent`/`stallTimeoutMs`/`concurrency` numbers kept the previous valid config and warned | v2 fails the whole call at config load; SPEC states fail-loudly only for `output` bounds; unrecorded for the numeric knobs |
-| 5 | A failed fresh run left a resumable session `.jsonl` on disk plus a retry hint | v2 fresh runs are in-memory-transcript only — nothing survives to resume; COMPATIBILITY does not pre-authorize session-persistence changes |
+| 4 | Malformed `maxConcurrent`/`stallTimeoutMs`/`concurrency` numbers kept the previous valid config and warned | **Decided out 2026-09-27** — v2's fail-the-whole-call at config load is recorded as deliberate in COMPATIBILITY (a silently weakened bound is worse than a visible error); SPEC now names all numeric keys, their defaults, and the fail-loudly rule |
+| 5 | A failed fresh run left a resumable session `.jsonl` on disk plus a retry hint | **Restored 2026-09-27** — fresh shared-workspace tasks are file-backed under `<agentDir>/delegate-sessions/` (scratch/isolated stay memory-only); failed and cancelled outcomes report `session: <abs path>` plus a `→ To retry:` resume hint when the transcript carries messages; a never-prompted header-only transcript reports "no prior messages" with no hint. Contract-tested in `tests/contract/transcripts.test.ts` and `tests/contract/recovery.test.ts` |
 | 6 | `resumeFrom` of a transcript with a live/abandoned worker was rejected (quarantine, incl. symlink aliases) | **Fixed 2026-09-27 (live-worker half)** — transcript exclusivity restored in admission (resumeFrom + pooled session files, symlink canonicalization, quiescence-scoped release); v1's abandoned-transcript quarantine deliberately not restored (a dead writer no longer mutates the file) — recorded in TEST-MIGRATION "Transcript exclusivity" |
-| 7 | Poll/cancel-preview views marked resumed tasks with ↻ (revival provenance) | Dropped silently; no v2 view shows resume provenance |
-| 8 | Running-ticket polls showed live activity: current/last tool, tool+token counts, activity age, finalized/active/queued/failed split | v2 running poll is "N/M finished" + recorded outputs; footer/browser cover operators but the LLM-facing poll lost the signal; unrecorded |
-| 9 | Sync usage flagged lower bounds ("token usage and cost are lower bounds") when a worker's accounting was incomplete | v2 sums usage unconditionally |
-| 10 | Pooled `default` sessions followed the parent's live thinking level on reuse | v2 compares frozen thinking and rejects on mismatch for every profile — likely deliberate (INVARIANTS freeze wording) but the v1 default-exception drop is not named anywhere |
+| 7 | Poll/cancel-preview views marked resumed tasks with ↻ (revival provenance) | **Restored 2026-09-27** — `↻<tag>` (8-char tail of the transcript filename stem) marks resumed tasks in sync result sections, running/settled ticket views, and cancel previews; the tag persists in the ticket journal so cold polls keep it. Contract-tested in `tests/contract/transcripts.test.ts` |
+| 8 | Running-ticket polls showed live activity: current/last tool, tool+token counts, activity age, finalized/active/queued/failed split | **Restored 2026-09-27** — running polls render each unfinished task's live row (in-flight tool name, or `last: <tool>` when between calls; running tool count; `active now` / `active Ns ago` age) and a header with active/queued/tool totals. Token counts and the finalized/failed split are covered by per-task usage lines and status counts already in the views. Contract-tested in `tests/contract/tickets.test.ts` |
+| 9 | Sync usage flagged lower bounds ("token usage and cost are lower bounds") when a worker's accounting was incomplete | **Restored 2026-09-27** — a quarantined outcome marks its output "at least" and appends the lower-bounds sentence; `details.usageLowerBound` flags the batch for programmatic readers. Contract-tested in `tests/contract/dispatch.test.ts` |
+| 10 | Pooled `default` sessions followed the parent's live thinking level on reuse | **Decided out 2026-09-27** — the `default`-profile exception deliberately dropped; the uniform freeze is recorded in COMPATIBILITY as the same INVARIANTS freeze every other field already follows |
 
 Items already recorded elsewhere and **not** re-raised: pause
 resume-then-repause leak test (open issue #31), scratch-viability prose and
@@ -159,12 +159,13 @@ sanitization and cancel-on-settled wording (implemented; Gap entries above).
 | Scratch vs shared writer | (v1 scratch reserved on source) | scratch holds no source reservation — runs beside a shared writer |
 | Config surface | `maxConcurrent`, `concurrency{providers}`, `agentOverrides{,ByParentModel}`, `allowUnsafeSharedWrites`, `stallTimeoutMs`, `telemetry{enabled}`, `maxAsyncTickets`, `output.spill{Threshold,Tail}Chars` | `maxConcurrent`, `concurrency{default,providers,models}`, `stallTimeoutMs`, `models`, `modelsByParent`, `telemetry{enabled,dbPath}`, `output.spill{Threshold,Tail}Chars` |
 
-Audit note (2026-09-27): SPEC names only `models`/`modelsByParent`,
-`telemetry`, and `output.spill*` as config keys. `maxConcurrent`, the
-`concurrency` maps, and `stallTimeoutMs` — their defaults (3, 15 min) and
-fail-loudly semantics — exist in `src/config.ts` but in no contract
-document; an implementer reading SPEC could not derive them. README
-guidance is telemetry-only (open issue #20).
+Audit note (2026-09-27): SPEC named only `models`/`modelsByParent`,
+`telemetry`, and `output.spill*` as config keys. **Closed 2026-09-27** —
+SPEC now documents `maxConcurrent` (default 3), the `concurrency` maps
+(`models` → `providers` → `default`, below the global cap), and
+`stallTimeoutMs` (default 15 min, `0` disables), with the fail-loudly
+load rule for malformed values. README guidance is telemetry-only (open
+issue #20).
 | Stall watchdog | 15 min default | 15 min default (parity) |
 | Package | published `@bermudi/pi-delegate` 0.1.21, esbuild bundle step | no bundle, `files: [delegate.ts, README]` |
 
@@ -217,8 +218,10 @@ below.
 Still open from 3a: nothing — **named Markdown agent profiles (issue #7)**
 shipped, closing the last 3a-style gap.
 
-Still open from §3d (2026-09-27 audit): items 1, 2, 3, and 6 are decided
-and closed (documented drop; reviewer bash restored; tilde restored;
-transcript exclusivity restored for live workers). The remaining six items
-(4, 5, 7–10) await keep/restore-or-record decisions; none contradict a
-contract document as written.
+Still open from §3d (2026-09-27 audit): **nothing** — all ten items are
+dispositioned. Items 1, 4, and 10 are recorded deliberate drops in
+COMPATIBILITY; items 2, 3, and 6 were fixed on audit day; items 5, 7, 8,
+and 9 are restored in v2 (file-backed fresh shared transcripts with
+resume hints, the ↻ marker, live poll activity rows, and lower-bound
+usage flags) with public-boundary contract tests. The companion §4
+config-key hole is closed in SPEC.

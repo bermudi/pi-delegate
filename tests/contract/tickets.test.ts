@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
+  fauxToolCall,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
 import {
   callDelegate,
+  configureDelegate,
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
@@ -21,6 +25,12 @@ function gate() {
     return fauxAssistantMessage("OUTPUT-RELEASED");
   };
   return { release, step };
+}
+
+/** Poll until true, bounded — keeps in-flight ordering assertions stable. */
+async function waitFor(probe: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 250 && !probe(); i++) await Bun.sleep(20);
+  expect(probe(), `${what} (timed out waiting)`).toBeTrue();
 }
 
 describe("delegate ticket contract", () => {
@@ -321,4 +331,122 @@ describe("delegate ticket contract", () => {
     expect(waited.text).toContain(`Ticket "${ticket}": failed`);
     expect(waited.text).toContain("provider blew up");
   });
+
+  test(
+    "a running poll shows each task's live tool line and the ticket's counts",
+    async () => {
+      // v1 evidence: ticket-format.ts formatInFlightTaskLine /
+      // formatQueuedTaskLine — a running task showed its current or last
+      // tool, tool count, and activity age; a queued task read waiting;
+      // the header carried active/queued/tool totals.
+      session = await openDelegateBoundary();
+      // One slot so task-2 provably stays queued behind task-1.
+      configureDelegate(session, { maxConcurrent: 1 });
+      const subagents = await installSubagentModel(session);
+      const probeFile = join(session.cwd, "probe-target.txt");
+      writeFileSync(probeFile, "probe\n");
+
+      const { release, step } = gate();
+      subagents.respond([
+        // task-1 completes one real read call, then parks in the provider.
+        fauxAssistantMessage([fauxToolCall("read", { path: probeFile })]),
+        step,
+        fauxAssistantMessage("QUEUED-OUTPUT"),
+      ]);
+
+      const dispatched = await callDelegate(session, {
+        tasks: [
+          { prompt: "read then wait", tools: ["read"] },
+          { prompt: "queued behind the gate", tools: ["read"] },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      // callCount >= 2 proves task-1's read call already completed: the
+      // child's loop only re-enters the provider after its tools return.
+      await waitFor(
+        () => subagents.state.callCount >= 2,
+        "task-1 parked in its second provider call",
+      );
+
+      const polled = await callDelegateTicket(session, {
+        action: "poll",
+        ticket,
+      });
+      // The running task names its last completed tool, its call count,
+      // and how long since it was last heard from.
+      expect(polled.text).toMatch(/⏳ .*#task-1 · last: read\b/);
+      expect(polled.text).toMatch(/#task-1 .*· 1 tool · active/);
+      // The queued task waits behind the slot, and the header totals it.
+      expect(polled.text).toMatch(/○ .*#task-2 · waiting…/);
+      expect(polled.text).toContain("1 active");
+      expect(polled.text).toContain("1 queued");
+      expect(polled.text).toMatch(/· 1 tool\b/);
+
+      release();
+      await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+    },
+  );
+
+  test(
+    "a running poll names the in-flight tool a worker is parked inside",
+    async () => {
+      // v1 evidence: ticket-format.ts — the in-flight (current) tool
+      // rendered without the "last:" prefix. A worker parked inside
+      // ask_parent is deterministically in that state: its tool call has
+      // started and cannot end until the parent answers.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([
+        fauxAssistantMessage([
+          fauxToolCall("ask_parent", { question: "Which path?" }),
+        ]),
+        fauxAssistantMessage("ANSWERED-CONTINUE"),
+      ]);
+
+      const dispatched = await callDelegate(session, {
+        tasks: [{ prompt: "ask then finish", tools: ["read"] }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+
+      // Poll until the worker is parked inside its question — the live
+      // row and the question id surface together.
+      let polled = await callDelegateTicket(session, {
+        action: "poll",
+        ticket,
+      });
+      for (let i = 0; i < 100 && !polled.text.includes("ask_parent"); i++) {
+        await Bun.sleep(20);
+        polled = await callDelegateTicket(session, {
+          action: "poll",
+          ticket,
+        });
+      }
+      expect(polled.text).toMatch(/⏳ .*#task-1 · ask_parent\b/);
+      expect(polled.text).toMatch(/#task-1 .*· 1 tool · active/);
+      expect(polled.text).not.toContain("last: ask_parent");
+      const questionId = /question (q-\d+)/.exec(polled.text)?.[1] ?? "";
+      expect(questionId).not.toBe("");
+
+      const answered = await callDelegateTicket(session, {
+        action: "answer",
+        ticket,
+        taskId: "task-1",
+        questionId,
+        answer: "the left one",
+      });
+      expect(answered.isError).toBe(false);
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(settled.text).toContain("ANSWERED-CONTINUE");
+    },
+  );
 });

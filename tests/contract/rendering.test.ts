@@ -14,6 +14,7 @@ import {
   delegateTool,
   installSubagentModel,
   openDelegateBoundary,
+  registeredTool,
   ticketIdOf,
   callDelegateTicket,
 } from "../support/pi-boundary.ts";
@@ -45,6 +46,14 @@ interface ResultRenderingTool {
   ): RenderedComponent;
 }
 
+interface CallRenderingTool {
+  renderCall(
+    args: unknown,
+    theme: unknown,
+    context: { lastComponent?: unknown },
+  ): RenderedComponent;
+}
+
 const plainTheme = {
   fg: (_color: string, text: string) => text,
   bold: (text: string) => text,
@@ -65,6 +74,21 @@ function renderToolResult(
     )
     // Wide enough that Text's word-wrap never splits a rendered output.
     .render(8192)
+    .join("\n");
+}
+
+function renderToolCall(
+  session: TestSession,
+  toolName: string,
+  args: unknown,
+): string {
+  const tool = registeredTool(session, toolName) as unknown as CallRenderingTool;
+  return tool
+    .renderCall(args, plainTheme, { lastComponent: undefined })
+    .render(8192)
+    // Text pads each rendered line to the requested width; the contract is
+    // the content, not the trailing fill.
+    .map((line) => line.replace(/\s+$/, ""))
     .join("\n");
 }
 
@@ -261,5 +285,71 @@ test(
     const help = await callDelegate(session, { tasks: [] });
     const expanded = renderToolResult(session, help, true);
     expect(expanded).toContain("Delegate Manual");
+  },
+);
+
+test(
+  "the delegate call row is a static count plus up to four prompt previews",
+  async () => {
+    // Work-order §3d.8: `delegate N tasks`, one line per task showing its
+    // id-or-index and the first ~60 chars of its prompt, `… and K more`
+    // past four, `delegate manual` for an empty list — and deliberately
+    // static: no spinner, timers, or live state.
+    session = await openDelegateBoundary();
+    const render = (args: unknown) => renderToolCall(session!, "delegate", args);
+
+    expect(render({ tasks: [] })).toBe("delegate manual");
+    expect(render({ tasks: [{ prompt: "hello world" }] })).toBe(
+      "delegate 1 task\n  task-1  hello world",
+    );
+    // A caller-provided id replaces the positional label.
+    expect(render({ tasks: [{ id: "alpha", prompt: "x" }] })).toBe(
+      "delegate 1 task\n  alpha  x",
+    );
+    const four = render({
+      tasks: [1, 2, 3, 4].map((n) => ({ prompt: `prompt ${n}` })),
+    });
+    expect(four).toContain("delegate 4 tasks");
+    expect(four).toContain("  task-4  prompt 4");
+    expect(four).not.toContain("… and");
+    const six = render({
+      tasks: [1, 2, 3, 4, 5, 6].map((n) => ({ prompt: `prompt ${n}` })),
+    });
+    expect(six).toContain("  … and 2 more");
+    expect(six).not.toContain("prompt 5");
+    // A ~60-char preview with an ellipsis; long prompts stay one line.
+    const long = render({ tasks: [{ prompt: "p".repeat(200) }] });
+    const previewLine = long.split("\n")[1]!;
+    expect(previewLine.length).toBeLessThanOrEqual(2 + 6 + 2 + 60);
+    expect(previewLine).toContain("…");
+    // A resume-only task shows its revival tag instead of a prompt.
+    const resumed = render({
+      tasks: [{ resumeFrom: "/tmp/x/sess_ab12cd34ef.jsonl" }],
+    });
+    expect(resumed).toContain("↻ab12cd34");
+  },
+);
+
+test(
+  "delegate_ticket and delegate_session call rows are static one-liners",
+  async () => {
+    // Same issue as the delegate call row: the slot names the operation
+    // and its target without spinners or live state.
+    session = await openDelegateBoundary();
+    expect(
+      renderToolCall(session, "delegate_ticket", {
+        action: "poll",
+        ticket: "t-abc123",
+      }),
+    ).toBe("delegate_ticket poll #t-abc123");
+    expect(
+      renderToolCall(session, "delegate_session", {
+        action: "close",
+        sessionId: "s-9",
+      }),
+    ).toBe("delegate_session close #s-9");
+    expect(renderToolCall(session, "delegate_session", { action: "list" })).toBe(
+      "delegate_session list",
+    );
   },
 );

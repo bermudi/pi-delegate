@@ -28,6 +28,11 @@ export interface ActivityToolCall {
   tool: string;
   /** Short one-line arg/result preview, ANSI-sanitized, capped at 512 chars. */
   preview: string;
+  /** The call's own argument one-liner, kept after the merged arg→result
+   * preview lands, so a poll row can show `last: <tool> <args>`. */
+  argPreview: string;
+  /** True while the call has started but not ended (the current tool). */
+  inFlight: boolean;
   isError: boolean;
 }
 
@@ -79,6 +84,8 @@ export interface ActivityStore {
     endedAt: number;
     summary: string;
   }): void;
+  /** One task's live row, for running-ticket poll lines. */
+  taskRow(ticketId: string, taskId: string): ActivityRow | undefined;
   snapshot(): readonly ActivityRow[];
 }
 
@@ -410,9 +417,11 @@ export function createActivityStore(): ActivityStore {
     at: number,
     tool: string,
     preview: string,
+    argPreview: string,
+    inFlight: boolean,
     isError: boolean,
   ): void => {
-    entry.toolCalls.push({ at, tool, preview, isError });
+    entry.toolCalls.push({ at, tool, preview, argPreview, inFlight, isError });
     shiftOpenTools(entry.openTools, trimToolCalls(entry.toolCalls));
   };
 
@@ -480,7 +489,7 @@ export function createActivityStore(): ActivityStore {
 
       if (event.type === "tool_execution_start") {
         const preview = truncateHead(argPreview(event.args), PREVIEW_LIMIT);
-        appendCall(entry, now, sanitizeLine(event.toolName) || "tool", preview, false);
+        appendCall(entry, now, sanitizeLine(event.toolName) || "tool", preview, preview, true, false);
         entry.openTools.set(event.toolCallId, {
           index: entry.toolCalls.length - 1,
           argPreview: preview,
@@ -495,6 +504,7 @@ export function createActivityStore(): ActivityStore {
           const call = entry.toolCalls[open.index];
           if (call) {
             call.preview = preview;
+            call.inFlight = false;
             call.isError = event.isError;
           }
         } else {
@@ -505,6 +515,8 @@ export function createActivityStore(): ActivityStore {
             now,
             sanitizeLine(event.toolName) || "tool",
             preview,
+            "",
+            false,
             event.isError,
           );
         }
@@ -572,6 +584,11 @@ export function createActivityStore(): ActivityStore {
         });
       }
       pruneSettled("sync", RETAINED_SYNC_LIMIT);
+    },
+
+    taskRow(ticketId, taskId): ActivityRow | undefined {
+      const entry = entries.get(`${normalizeTicketId(ticketId) ?? "sync"}:${taskId}`);
+      return entry === undefined ? undefined : rowOf(entry);
     },
 
     snapshot(): readonly ActivityRow[] {

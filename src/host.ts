@@ -28,6 +28,7 @@ import {
   type ProfileCatalog,
 } from "./profiles.ts";
 import { configPathOf, configuredModelFor, type DelegateConfig } from "./config.ts";
+import { resumeTagOf } from "./format.ts";
 import { resolveDependencyGraph } from "./graph.ts";
 import type { TaskInput } from "./validation.ts";
 import type { ResolvedTask, Workspace } from "./types.ts";
@@ -376,11 +377,20 @@ export async function resolveTasks(
       promptAppend.push(SUBAGENT_FRAMING);
     }
 
+    // Display identity for a resume: the tag derives from the path the
+    // caller wrote (before admission canonicalizes it), so every view
+    // agrees and symlink aliases read identically. An omitted agent label
+    // carries the resume identity itself (`resume:<tag>`), mirroring v1.
+    const resumeTag =
+      task.resumeFrom !== undefined ? resumeTagOf(task.resumeFrom) : undefined;
+
     resolved.push({
       index,
       id: task.id ?? `task-${index + 1}`,
       prompt,
-      agent: task.agent ?? "inline",
+      agent:
+        task.agent ??
+        (resumeTag !== undefined ? `resume:${resumeTag}` : "inline"),
       cwd: canonicalPath(cwd),
       model,
       thinking,
@@ -389,6 +399,7 @@ export async function resolveTasks(
       appendSystemPrompt: promptAppend,
       sessionId: task.sessionId,
       resumeFrom: task.resumeFrom,
+      resumeTag,
       deadlineMs: task.deadlineMs,
       workspace,
       writeRoots: reserves ? await writeRootsOf(cwd) : undefined,
@@ -401,13 +412,15 @@ export async function resolveTasks(
 
 /**
  * Create a subagent session for one resolved task. Subagents are headless
- * workers: no extensions, no user-global context files. One-shot tasks use
- * an in-memory transcript; a `sessionId` task needs a durable session file
- * to be poolable (a `resumeFrom` transcript already is one), so it gets a
- * file under `<agentDir>/delegate-sessions/`. Evicted or failed sessions
- * leave their transcripts on disk as the recovery record for `resumeFrom`.
- * The session streams through the parent session's model runtime so
- * provider registrations and auth are inherited.
+ * workers: no extensions, no user-global context files. One-shot scratch
+ * and isolated tasks use an in-memory transcript — a discarded filesystem
+ * must not advertise a resumable conversation. Shared-workspace one-shots
+ * and `sessionId` tasks get a durable file under
+ * `<agentDir>/delegate-sessions/` (a `resumeFrom` transcript already is
+ * one): a failed fresh run leaves its transcript on disk as the recovery
+ * record `resumeFrom` can continue. The session streams through the
+ * parent session's model runtime so provider registrations and auth are
+ * inherited.
  */
 export async function createSubagentSession(
   task: ResolvedTask,
@@ -415,14 +428,15 @@ export async function createSubagentSession(
   resourceLoader: DefaultResourceLoader,
   askParent: (question: string, signal: AbortSignal) => Promise<string>,
 ): Promise<AgentSession> {
-  const sessionManager = task.resumeFrom
-    ? SessionManager.open(task.resumeFrom)
-    : task.sessionId !== undefined
-      ? SessionManager.create(
-          task.cwd,
-          join(env.agentDir, DELEGATE_TREES.sessions),
-        )
-      : SessionManager.inMemory(task.cwd);
+  const sessionManager =
+    task.resumeFrom !== undefined
+      ? SessionManager.open(task.resumeFrom)
+      : task.sessionId !== undefined || task.workspace === "shared"
+        ? SessionManager.create(
+            task.cwd,
+            join(env.agentDir, DELEGATE_TREES.sessions),
+          )
+        : SessionManager.inMemory(task.cwd);
   // Pi's default per-turn retry (three attempts with a two-second backoff)
   // runs before Delegate can inspect the final error. In particular it would
   // immediately retry a provider-supplied hour-long reset window. This is

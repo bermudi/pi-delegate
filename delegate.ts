@@ -46,6 +46,9 @@ import { discoverProfiles } from "./src/profiles.ts";
 import {
   createMessageRenderer,
   createResultRenderer,
+  renderDelegateCall,
+  renderSessionCall,
+  renderTicketCall,
 } from "./src/render.ts";
 import { VisibilitySignals } from "./src/visibility.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
@@ -870,8 +873,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
   });
 
   // TicketStore mutates first, visibility reads lazily — the observer arrow
-  // only runs on the first mutation, long after both exist.
+  // only runs on the first mutation, long after both exist. The activity
+  // store is created before tickets so running polls can read live
+  // per-task rows from the same sink the coordinator feeds.
   const questionContexts = new Map<string, ExtensionContext>();
+  const activity = createActivityStore();
   const tickets = new TicketStore(() => {
     visibility.sync();
     for (const id of questionContexts.keys()) {
@@ -899,11 +905,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
     } catch (error) {
       console.error(`[delegate] notifying question ${ticket.id}/${question.id} failed (poll it with delegate_ticket): ${error instanceof Error ? error.message : String(error)}`);
     }
-  });
+  }, activity);
   const visibility = new VisibilitySignals(() => tickets.list());
   const admission = new AdmissionController();
   const sessions = new SessionPool();
-  const activity = createActivityStore();
   const coordinator = new DispatchCoordinator(tickets, activity);
   const telemetry = new TelemetryStore();
   const operations = new OperationStore<DelegateResult>();
@@ -1355,6 +1360,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
         "Split very large task batches across delegate calls; overlong tool calls get truncated.",
       ],
       prepareArguments: prepareDispatchArguments,
+      // The call row is static by contract: `delegate N tasks` plus up
+      // to four prompt previews — no spinner or live state.
+      renderCall: renderDelegateCall,
       // The stock renderer only displays `content` — which is the
       // spill-bounded projection — so expansion never showed the whole
       // output. This renderer keeps the collapsed preview but renders the
@@ -1620,6 +1628,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // The rendered content is spill-bounded; details keep the
               // complete outcomes for the expanded view and recovery.
               results: result.outcomes,
+              // When any worker's accounting is incomplete the usage total
+              // below is a lower bound — the flag lets a machine caller see
+              // what the result text's note says in prose.
+              ...(result.outcomes.some((outcome) => outcome.quarantined)
+                ? { usageLowerBound: true }
+                : {}),
               ...(notices.length > 0 ? { notices } : {}),
             },
             usage: result.usage,
@@ -1651,6 +1665,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       promptSnippet:
         "Poll, wait on, cancel, pause/resume, or answer questions for async delegate tickets",
       prepareArguments: prepareTicketArguments,
+      renderCall: renderTicketCall,
       renderResult: createResultRenderer(tickets),
 
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -1697,6 +1712,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       parameters: sessionSchema,
       promptSnippet: "List or close pooled delegate subagent sessions",
       prepareArguments: prepareSessionArguments,
+      renderCall: renderSessionCall,
       renderResult: createResultRenderer(tickets),
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

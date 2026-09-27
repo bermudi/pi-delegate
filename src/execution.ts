@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -18,7 +19,7 @@ import {
   limitHint,
   sleep,
 } from "./retry.ts";
-import type { PooledSession, SessionPool } from "./sessions.ts";
+import { persistSessionHeader, type PooledSession, type SessionPool } from "./sessions.ts";
 import {
   Deferred,
   type ExecutionHandle,
@@ -63,6 +64,11 @@ export interface AttemptResult {
    * Its write reservations must stay held; retrying is unsafe.
    */
   readonly quarantined: boolean;
+  /**
+   * The session transcript confirmed on disk — the path a `resumeFrom`
+   * retry opens. Undefined for in-memory sessions or when no file exists.
+   */
+  readonly sessionFile?: string;
 }
 
 function abortedSignal(signal: AbortSignal): Promise<void> {
@@ -172,6 +178,28 @@ function preferredReason(
     (ABORT_PRECEDENCE[existing] ?? 99)
     ? incoming
     : existing;
+}
+
+/**
+ * The transcript path to report on an outcome, or undefined when none
+ * exists on disk. `flushHeader` asks the session manager to write its
+ * buffered entries first: a file-backed SessionManager defers the first
+ * write until an assistant message lands, so a first-call failure leaves
+ * the planned path uncreated — flushing makes the reported path real.
+ * Only a file confirmed on disk is ever reported; the caller must never
+ * chase a nonexistent resume target. Flush only once the session has
+ * wound down — a still-live worker could interleave appends with the
+ * rewrite, so provisional paths report whatever already exists.
+ */
+function reportableTranscript(
+  session: AgentSession | undefined,
+  flushHeader: boolean,
+): string | undefined {
+  if (session === undefined) return undefined;
+  const file = session.sessionFile;
+  if (typeof file !== "string") return undefined;
+  if (flushHeader) persistSessionHeader(session.sessionManager);
+  return existsSync(file) ? file : undefined;
 }
 
 /**
@@ -296,6 +324,7 @@ export class TaskExecution implements ExecutionHandle {
         error: watchdog,
         hadSideEffects: this.hadSideEffects,
         quarantined: true,
+        sessionFile: reportableTranscript(session, false),
       };
     }
     return {
@@ -303,6 +332,7 @@ export class TaskExecution implements ExecutionHandle {
       output: partial.text || undefined,
       hadSideEffects: this.hadSideEffects,
       quarantined: true,
+      sessionFile: reportableTranscript(session, false),
     };
   }
 
@@ -461,12 +491,14 @@ export class TaskExecution implements ExecutionHandle {
             error: watchdog,
             hadSideEffects: false,
             quarantined: this.quarantined,
+            sessionFile: reportableTranscript(session, true),
           };
         }
         return {
           status: "cancelled",
           hadSideEffects: false,
           quarantined: this.quarantined,
+          sessionFile: reportableTranscript(session, true),
         };
       }
 
@@ -551,6 +583,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
+          sessionFile: reportableTranscript(session, true),
         };
       }
       if (this.abortReason || this.controls.isAborted() || stopReason === "aborted") {
@@ -560,6 +593,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
+          sessionFile: reportableTranscript(session, true),
         };
       }
       if (stopReason === "error") {
@@ -576,6 +610,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
+          sessionFile: reportableTranscript(session, true),
         };
       }
       return {
@@ -584,6 +619,7 @@ export class TaskExecution implements ExecutionHandle {
         usage,
         hadSideEffects: this.hadSideEffects,
         quarantined: this.quarantined,
+        sessionFile: reportableTranscript(session, false),
       };
     } catch (error) {
       // A throw after prompt() consumed tokens still owes the caller the
@@ -600,6 +636,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
+          sessionFile: reportableTranscript(session, true),
         };
       }
       if (this.abortReason || this.controls.isAborted()) {
@@ -608,6 +645,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
+          sessionFile: reportableTranscript(session, true),
         };
       }
       return {
@@ -616,6 +654,7 @@ export class TaskExecution implements ExecutionHandle {
         usage,
         hadSideEffects: this.hadSideEffects,
         quarantined: this.quarantined,
+        sessionFile: reportableTranscript(session, true),
       };
     } finally {
       this.controls.signal.removeEventListener("abort", onAbort);
@@ -681,6 +720,7 @@ export async function runTask(
     usage: last.usage,
     hadSideEffects: last.hadSideEffects,
     quarantined: last.quarantined,
+    sessionFile: last.sessionFile,
   });
 
   for (;;) {
@@ -793,6 +833,7 @@ export async function runTask(
                 retries,
                 usage: addUsage(usageBeforeAttempt, real.usage),
                 quarantined: real.quarantined || undefined,
+                sessionFile: real.sessionFile,
               },
         );
       })
@@ -833,5 +874,6 @@ export async function runTask(
     retries,
     usage,
     quarantined: last.quarantined || undefined,
+    sessionFile: last.sessionFile,
   };
 }

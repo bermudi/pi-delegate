@@ -165,6 +165,62 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     }
   });
 
+  test("a recovered failed task names its transcript; a header-only one is not advertised as resumable", async () => {
+    // v1 evidence: v1's failure output carried `session: <path>` and a
+    // `→ To retry:` resume hint, but header-only transcripts — flushed so
+    // the planned path was real — were never offered as resume targets
+    // (an empty conversation would pretend continuity). The saved
+    // outcome's sessionFile renders the same live or cold; this exercises
+    // the cold poll both ways through the public boundary.
+    const first = await openAt();
+    const model = await installSubagentModel(first);
+    model.respond([
+      fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: "provider blew up",
+      }),
+    ]);
+    const dispatched = await callDelegate(first, {
+      tasks: [{ prompt: "fail in the background" }], async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    const settled = await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
+    const sessionLine = /^session: (\S+\.jsonl)$/m.exec(settled.text)?.[1];
+    expect(sessionLine).toBeDefined();
+    expect(settled.text).toContain("→ To retry:");
+
+    // Cold reader: the saved outcome renders the same session path and
+    // retry hint — the transcript has real messages, so it IS resumable.
+    const next = await openAt(first.cwd);
+    const polled = await callDelegateTicket(next, { action: "poll", ticket });
+    expect(polled.text).toContain(`session: ${sessionLine}`);
+    expect(polled.text).toContain("→ To retry:");
+
+    // Rewrite the outcome's sessionFile to a header-only transcript —
+    // the on-disk shape a never-prompted failure leaves (header flushed,
+    // no message entries). The poll must not advertise it as resumable.
+    const headerOnly = join(first.cwd, "sess_headeronly1234.jsonl");
+    writeFileSync(
+      headerOnly,
+      JSON.stringify({
+        type: "session", version: 3, id: "header-only",
+        timestamp: new Date().toISOString(), cwd: first.cwd,
+      }) + "\n",
+    );
+    const path = join(first.cwd, "delegate-tickets", `${ticket}.json`);
+    const saved = JSON.parse(readFileSync(path, "utf8")) as {
+      outcomes: ({ sessionFile?: string } | null)[];
+    };
+    saved.outcomes[0] = { ...saved.outcomes[0]!, sessionFile: headerOnly };
+    writeFileSync(path, JSON.stringify(saved));
+
+    const cold = await openAt(first.cwd);
+    const headerPoll = await callDelegateTicket(cold, { action: "poll", ticket });
+    expect(headerPoll.text).toContain(`session: ${headerOnly}`);
+    expect(headerPoll.text).toContain("no prior messages");
+    expect(headerPoll.text).not.toContain("→ To retry:");
+  });
+
   test("a fully recorded quarantined cancellation warns on the recovered roster", async () => {
     const first = await openAt();
     const model = await installSubagentModel(first);

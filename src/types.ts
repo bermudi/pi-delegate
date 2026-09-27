@@ -26,6 +26,13 @@ export interface ResolvedTask {
   readonly appendSystemPrompt: readonly string[];
   readonly sessionId: string | undefined;
   readonly resumeFrom: string | undefined;
+  /**
+   * Compact display tag for a resumed transcript (derived from the
+   * caller-supplied `resumeFrom` path, before any canonicalization, so
+   * symlink aliases show the same identity the caller wrote). Rendered
+   * as `↻<tag>` in task views; undefined on non-resume tasks.
+   */
+  readonly resumeTag: string | undefined;
   readonly deadlineMs: number | undefined;
   readonly workspace: Workspace;
   /**
@@ -94,6 +101,12 @@ export interface TaskOutcome {
    * still be mutating shared roots.
    */
   readonly quarantined?: boolean;
+  /**
+   * The worker's session transcript on disk, when one exists — the path a
+   * `resumeFrom` retry would open. Set only for outcomes of tasks whose
+   * session was file-backed; reported in failure views for recovery.
+   */
+  readonly sessionFile?: string;
 }
 
 export type TicketStatus =
@@ -135,8 +148,8 @@ export interface Ticket {
   readonly totalTasks: number;
   /** Index-aligned per-task outcomes; entries appear as tasks finish. */
   readonly outcomes: readonly (TaskOutcome | undefined)[];
-  /** Only labels and correlation ids are required to render saved tickets. */
-  readonly tasks: readonly Pick<ResolvedTask, "id" | "agent">[];
+  /** Only labels, correlation ids, and resume tags are required to render saved tickets. */
+  readonly tasks: readonly Pick<ResolvedTask, "id" | "agent" | "resumeTag">[];
   /** Unanswered worker questions (never persisted across host shutdown). */
   readonly questions: readonly WorkerQuestion[];
   /**

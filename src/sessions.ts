@@ -72,6 +72,46 @@ function incompatibleReuse(sessionId: string, diffs: readonly string[]): Error {
   );
 }
 
+/**
+ * Force-flush a session's recorded entries (header plus any buffered
+ * prompt/message lines) to its `.jsonl`.
+ *
+ * Pi's SessionManager intentionally does not write the file until the
+ * first assistant message lands (its `_persist()` gates the first write
+ * behind that check — an upstream contract). When a subagent's *first*
+ * model call dies before producing one — e.g. a provider error — no file
+ * is ever created, yet the planned path is already recorded. Reporting
+ * that path as a resume target would send the caller to a nonexistent
+ * file.
+ *
+ * The flush goes through upstream's `_rewriteFile()` — a private method,
+ * the same seam upstream itself uses to recover empty/corrupt session
+ * files — so the reported path becomes real on disk. Call this only on a
+ * session that has wound down (never while a worker may still write, or
+ * the rewrite could interleave with its appends). Idempotent: no-op when
+ * the file already exists or the manager has no sessionFile.
+ *
+ * Returns true when a transcript file exists on return (whether this
+ * call wrote it or it pre-existed), false otherwise.
+ */
+export function persistSessionHeader(sm: unknown): boolean {
+  const inner = sm as {
+    getSessionFile?: () => string | undefined;
+    _rewriteFile?: () => void;
+  };
+  const file = inner.getSessionFile?.();
+  if (file === undefined) return false;
+  if (existsSync(file)) return true;
+  try {
+    inner._rewriteFile?.();
+  } catch (error) {
+    // Best effort — the caller reports no sessionFile when this fails,
+    // but the failure itself must not vanish silently.
+    log("session transcript flush failed", error);
+  }
+  return existsSync(file);
+}
+
 /** A live pooled session. `checkedOut` marks a run currently owning it. */
 export interface PooledSession {
   readonly sessionId: string;

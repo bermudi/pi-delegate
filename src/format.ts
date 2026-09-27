@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { renderOutputForLLM } from "./spill.ts";
 import type {
   OutputBounds,
@@ -5,6 +6,102 @@ import type {
   TaskIntegration,
   TaskOutcome,
 } from "./types.ts";
+
+/**
+ * Short identity tag for a resumed transcript, derived from its session
+ * file path (Pi names sessions `<timestamp>_<uuid>.jsonl`, so the tail is
+ * the stable part). Best-effort display identity only — never parsed back.
+ */
+export function resumeTagOf(transcriptPath: string): string {
+  const stem = transcriptPath
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .replace(/\.jsonl$/i, "");
+  const base = stem.split("/").pop() ?? stem;
+  const unique = base.includes("_") ? (base.split("_").pop() ?? base) : base;
+  return (unique.slice(0, 8) || "resumed").trim();
+}
+
+/**
+ * The `↻<tag>` revival marker for a task row. Empty for non-resume tasks,
+ * and also when the agent label already carries the resume identity
+ * (`resume:<tag>`, assigned at resolution to an omitted-agent resume) —
+ * the marker must not duplicate it.
+ */
+export function resumeMarker(
+  agent: string,
+  tag: string | undefined,
+): string {
+  return tag !== undefined && agent !== `resume:${tag}` ? ` ↻${tag}` : "";
+}
+
+/** Human-readable activity age ("active now", "active 5s ago", …). */
+export function activityAge(lastEventAt: number | undefined): string {
+  if (lastEventAt === undefined) return "";
+  const ago = Math.max(0, Date.now() - lastEventAt);
+  if (ago < 1000) return "active now";
+  if (ago < 60_000) return `active ${Math.floor(ago / 1000)}s ago`;
+  return `active ${Math.floor(ago / 60_000)}m ago`;
+}
+
+/** Truncate a string to at most `limit` chars, ending with an ellipsis. */
+export function truncateLine(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+/**
+ * A transcript is *resumable* iff `resumeFrom` opens a conversation with
+ * restorable history: the file exists and holds at least one
+ * message-bearing entry. A header-only `.jsonl` — produced when a
+ * subagent's first model call dies before emitting an assistant message
+ * and the failure path force-flushes the header — is real on disk but
+ * gives a resume no prior context, so the hint would send the caller to
+ * an empty conversation pretending continuity.
+ *
+ * Reads the file but short-circuits at the first restorable entry; on the
+ * failure path these files are tiny (header-only or near-empty).
+ */
+function isResumableTranscript(sessionFile: string): boolean {
+  if (!existsSync(sessionFile)) return false;
+  try {
+    for (const line of readFileSync(sessionFile, "utf8").split("\n")) {
+      if (line === "") continue;
+      try {
+        const entry = JSON.parse(line) as { type?: string };
+        if (entry.type === "message" || entry.type === "custom_message") {
+          return true;
+        }
+      } catch {
+        // Skip malformed or trailing lines — a torn write must not kill
+        // the resumability check itself.
+      }
+    }
+  } catch {
+    // Unreadable — treat as not resumable.
+  }
+  return false;
+}
+
+/**
+ * The recovery lines for a failed or cancelled task that left a session
+ * transcript: the `session:` path and either a copy-pasteable resume hint
+ * or an explicit note that the saved transcript holds no prior messages —
+ * so the caller re-dispatches fresh rather than chasing an empty resume.
+ */
+export function recoveryLines(sessionFile: string | undefined): string[] {
+  if (sessionFile === undefined) return [];
+  const lines = [`session: ${sessionFile}`];
+  if (isResumableTranscript(sessionFile)) {
+    lines.push(
+      `→ To retry: delegate({ tasks: [{ resumeFrom: ${JSON.stringify(sessionFile)}, prompt: "continue" }] })`,
+    );
+  } else {
+    lines.push(
+      "[saved transcript holds no prior messages — re-dispatch as a fresh task]",
+    );
+  }
+  return lines;
+}
 
 /**
  * One advisory line per serialized shared-writer group: which tasks, which
@@ -94,24 +191,34 @@ export function formatDispatchResult(
   tasks: readonly ResolvedTask[],
   bounds: OutputBounds,
 ): string {
-  return outcomes
-    .map((outcome) => {
-      const head = `### Task ${outcome.id} — ${statusWord(outcome)}`;
-      const quarantined = outcome.quarantined
-        ? "\nWorker termination is unconfirmed; its write scope stays reserved."
+  const sections = outcomes.map((outcome) => {
+    const tag = tasks[outcome.index]?.resumeTag;
+    const head = `### Task ${outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${statusWord(outcome)}`;
+    const quarantined = outcome.quarantined
+      ? "\nWorker termination is unconfirmed; its write scope stays reserved. Recorded output and token usage are lower bounds — its accounting is incomplete."
+      : "";
+    const integration = outcome.integration
+      ? `\n${integrationLines(outcome.integration).join("\n")}`
+      : "";
+    const label = tasks[outcome.index]?.agent ?? outcome.id;
+    if (outcome.status === "ok") {
+      return `${head}\n${renderOutputForLLM(outcome.output ?? "", label, bounds)}${quarantined}${integration}`;
+    }
+    const detail = outcome.error ?? "no output";
+    const session =
+      outcome.sessionFile !== undefined
+        ? `\n${recoveryLines(outcome.sessionFile).join("\n")}`
         : "";
-      const integration = outcome.integration
-        ? `\n${integrationLines(outcome.integration).join("\n")}`
-        : "";
-      const label = tasks[outcome.index]?.agent ?? outcome.id;
-      if (outcome.status === "ok") {
-        return `${head}\n${renderOutputForLLM(outcome.output ?? "", label, bounds)}${quarantined}${integration}`;
-      }
-      const detail = outcome.error ?? "no output";
-      const partial = outcome.output
-        ? `\n\nPartial output:\n${renderOutputForLLM(outcome.output, label, bounds)}`
-        : "";
-      return `${head}\n${detail}${partial}${quarantined}${integration}`;
-    })
-    .join("\n\n");
+    const partial = outcome.output
+      ? `\n\nPartial output:\n${renderOutputForLLM(outcome.output, label, bounds)}`
+      : "";
+    return `${head}\n${detail}${partial}${session}${quarantined}${integration}`;
+  });
+  // The result's aggregate usage rides `details.usage`; when any worker's
+  // accounting is incomplete that total is a lower bound, not a sum — the
+  // flag must ride the text so a caller reading only the body knows it.
+  const lowerBound = outcomes.some((outcome) => outcome.quarantined)
+    ? "\n\nNote: token usage and cost totals are lower bounds — at least one worker's accounting is incomplete (termination unconfirmed)."
+    : "";
+  return sections.join("\n\n") + lowerBound;
 }

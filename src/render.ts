@@ -26,13 +26,20 @@ import type {
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
-import { formatDispatchResult } from "./format.ts";
+import {
+  formatDispatchResult,
+  resumeTagOf,
+  truncateLine,
+} from "./format.ts";
 import { UNBOUNDED_OUTPUT } from "./spill.ts";
 import type { TicketStore } from "./tickets.ts";
 import type { TaskOutcome } from "./types.ts";
+import type { SessionArguments, TicketArguments } from "./validation.ts";
 
 /** Matches the stock tool-result fallback's collapsed preview budget. */
 const COLLAPSED_PREVIEW_LINES = 10;
+/** How many task previews a delegate call line lists before summarizing. */
+const CALL_PREVIEW_TASKS = 4;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -85,6 +92,101 @@ function styled(text: string, theme: Theme): string {
     .split("\n")
     .map((line) => theme.fg("toolOutput", line))
     .join("\n");
+}
+
+/** Collapse a prompt to a single ~60-char line for the call row. */
+function promptPreview(prompt: string): string {
+  return truncateLine(prompt.replace(/\s+/g, " ").trim(), 60);
+}
+
+function textOf(component: Component | undefined): Text {
+  return component instanceof Text ? component : new Text("", 0, 0);
+}
+
+/**
+ * The `delegate` tool's call row: a static `delegate N tasks` header plus
+ * up to four task previews (`<id>  <~60 chars of prompt>`; a resume-only
+ * task shows its `↻` tag instead). Empty task lists render
+ * `delegate manual`. Deliberately stateless — no spinner, timers, or live
+ * state: the row reads identically while the call streams and after it
+ * settles, so a human scanning the transcript sees the same call the
+ * model made.
+ */
+export function renderDelegateCall(
+  args: {
+    readonly tasks?: readonly {
+      readonly id?: string;
+      readonly prompt?: string;
+      readonly resumeFrom?: string;
+    }[];
+  },
+  theme: Theme,
+  context: { lastComponent: Component | undefined },
+): Component {
+  const component = textOf(context.lastComponent);
+  const tasks = args.tasks ?? [];
+  if (tasks.length === 0) {
+    component.setText(theme.fg("toolTitle", theme.bold("delegate manual")));
+    return component;
+  }
+  const lines = [
+    theme.fg(
+      "toolTitle",
+      theme.bold(`delegate ${tasks.length} task${tasks.length === 1 ? "" : "s"}`),
+    ),
+  ];
+  tasks.slice(0, CALL_PREVIEW_TASKS).forEach((task, index) => {
+    const label = task.id ?? `task-${index + 1}`;
+    const preview =
+      task.prompt !== undefined && task.prompt.trim() !== ""
+        ? promptPreview(task.prompt)
+        : task.resumeFrom !== undefined
+          ? `↻${resumeTagOf(task.resumeFrom)}`
+          : "(no prompt)";
+    lines.push(theme.fg("muted", `  ${label}  ${preview}`));
+  });
+  const rest = tasks.length - CALL_PREVIEW_TASKS;
+  if (rest > 0) {
+    lines.push(theme.fg("muted", `  … and ${rest} more`));
+  }
+  component.setText(lines.join("\n"));
+  return component;
+}
+
+/**
+ * The `delegate_ticket` tool's call row: the static `delegate_ticket
+ * <action>` line plus its target ticket when the call names one.
+ */
+export function renderTicketCall(
+  args: TicketArguments,
+  theme: Theme,
+  context: { lastComponent: Component | undefined },
+): Component {
+  const component = textOf(context.lastComponent);
+  const target = args.ticket !== undefined ? ` #${args.ticket}` : "";
+  component.setText(
+    theme.fg("toolTitle", theme.bold(`delegate_ticket ${args.action}`)) +
+      theme.fg("muted", target),
+  );
+  return component;
+}
+
+/**
+ * The `delegate_session` tool's call row: the static `delegate_session
+ * <action>` line plus the session id a `close` names.
+ */
+export function renderSessionCall(
+  args: SessionArguments,
+  theme: Theme,
+  context: { lastComponent: Component | undefined },
+): Component {
+  const component = textOf(context.lastComponent);
+  const target = args.sessionId !== undefined ? ` #${args.sessionId}` : "";
+  component.setText(
+    theme.fg("toolTitle", theme.bold(`delegate_session ${args.action}`)) +
+      theme.fg("muted", target),
+  );
+  return component;
 }
 
 function contentText(result: AgentToolResult<unknown>): string {

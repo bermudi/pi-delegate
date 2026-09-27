@@ -185,7 +185,11 @@ gaps.
   deadline/stall outcomes visible in result text (cancellation suite);
   a sabotaged model-runtime grab (truthy impostor injected through the raw
   harness session) fails the whole call with the actionable error before any
-  task starts (`tests/regression/host-runtime.test.ts`, issue #11).
+  task starts (`tests/regression/host-runtime.test.ts`, issue #11);
+  incomplete accounting marks usage totals as lower bounds (§3d item 9):
+  a quarantined outcome prints "at least" output/usage wording and the
+  result carries `details.usageLowerBound`
+  (`tests/contract/dispatch.test.ts`).
 - **Covered now (#13, v2 regression evidence):** throwing parent active-tool
   probes reject mixed sync/async batches before any child starts, preserving
   cause, guidance, and logging; explicit tools (including `[]`), built-in
@@ -238,7 +242,11 @@ gaps.
 - **Covered now:** empty roster; error-valued unknown-ticket handling for
   all singular actions; wait-to-settlement; timeout detach; cancel preview
   vs force; explicit `partial` mixed-batch and `failed` all-failure
-  settlement; cancelled-ticket retains completed results; pause/resume.
+  settlement; cancelled-ticket retains completed results; pause/resume;
+  live activity in running polls (§3d item 8) — each unfinished task's
+  row names the in-flight tool or the `last:` completed one, the running
+  tool count, and an `active now`/`active Ns ago` age, queued tasks read
+  `waiting…`, and the header totals active/queued tasks and tool calls.
 - **Covered now (`tests/contract/delivery.test.ts`, `SPEC.md` "Background
   delivery"):** same-leaf follow-up wake of an idle parent (`deliverAs:
   "followUp"` + `triggerTurn: true`), including after a prior navigation;
@@ -293,6 +301,20 @@ gaps.
   pairs, file contract, write-failure degrade, poll no-file) replayed at
   the public boundary; v1 `config.ts` `output` validation wording
   preserved.
+- **Gap:** none identified.
+
+### Static call rows (tool `renderCall`, 2026-09-27)
+
+- **Contract:** all three delegate tools render a static call row — the
+  line the host shows while the tool call is outstanding. `delegate`
+  renders `delegate N task(s)` plus up to four prompt previews (`↻<tag>`
+  on resume-only tasks, caller ids where given) and `… and K more`;
+  an empty call reads `delegate manual`. `delegate_ticket` and
+  `delegate_session` render `action target` one-liners. No timers,
+  spinners, or live state.
+- **Covered now:** `tests/contract/rendering.test.ts` — the registered
+  tools' `renderCall` return `Text` components whose lines match the
+  contract for empty, single, four-plus, and resume-only calls.
 - **Gap:** none identified.
 
 ### Cancellation
@@ -415,6 +437,32 @@ gaps.
   v1's abandoned-transcript quarantine (workers that died mid-run) was
   **not** restored: a dead writer no longer mutates the file, and v2
   reservations cannot outlive the process that held them.
+
+### Failed-run transcripts and resume visibility (§3d items 5+7, 2026-09-27)
+
+- **Contract:** a failed fresh shared-workspace task leaves its session
+  `.jsonl` under the agent directory; the result names `session:
+  <abs path>` and, when the transcript carries messages, a `→ To retry:`
+  hint whose `resumeFrom` round-trips. Scratch/isolated failures stay
+  memory-only and print no `session:` line. A transcript without messages
+  (header flushed, never prompted) reports "no prior messages" with no
+  resume hint. Resumed tasks carry the `↻<tag>` marker in sync result
+  sections, running/settled ticket views, and cancel previews; the tag
+  survives journal reload so a cold poll shows the same marker.
+- **Covered now:** `tests/contract/transcripts.test.ts` — fresh shared
+  failure leaves a real resumable transcript and its hint's `resumeFrom`
+  completes a second provider call; scratch failure prints nothing and
+  leaves no file; the ↻ tag appears in every v1-covered view (sync
+  section, running poll row, cancel preview, settled view) and is not
+  duplicated when the agent label already carries it.
+  `tests/contract/recovery.test.ts` — a recovered failed ticket renders
+  the same session path and hint cold; a saved outcome whose sessionFile
+  is header-only reports "no prior messages" and no hint.
+- **Provenance:** v1 `format.ts`/`task-format.ts` resume-tag formatting
+  and v1's failure-output `session:`/`→ To retry:` lines (§3d items 5
+  and 7). The header-only cold case is exercised through journal seeding
+  because no deterministic public seam exists for aborting between
+  session creation and the first prompt (see "Cancellation" Gap).
 
 ### Admission and shared writes
 

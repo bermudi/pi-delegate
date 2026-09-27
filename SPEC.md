@@ -27,7 +27,11 @@ delegate({ tasks: [task, ...], async?: boolean, workspace?: "shared" | "scratch"
 Dispatch is synchronous by default. `async: true` applies to the whole batch,
 returns a ticket immediately, and later auto-delivers the batch result.
 Synchronous results preserve task input order and include aggregate usage when
-the Pi host supports it. A top-level `workspace` is the default for every task
+the Pi host supports it. When a task's worker could not be confirmed stopped
+(a quarantined outcome), its recorded output and usage are labelled as lower
+bounds — "at least" what was observed — and the result's details carry
+`usageLowerBound: true`; totals that omit an unknown remainder must say so.
+A top-level `workspace` is the default for every task
 that does not name its own. A synchronous result is error-valued only when
 every task failed or was blocked — a partially failed batch is a normal
 result carrying each task's own status, mirroring an async ticket's
@@ -178,7 +182,26 @@ Delegate-owned trees (`delegate-sessions/`, `delegate-scratch/`,
 `delegate-isolated/`) are created under the same resolved directory.
 Project files never become delegate configuration.
 
-Tasks run concurrently subject to global and per-model limits. Overlapping
+The recognized top-level keys are `maxConcurrent`, `concurrency`,
+`stallTimeoutMs`, `models`, `modelsByParent`, `telemetry`, and `output`;
+unknown keys are silently ignored. The file is re-read on every call, and
+a malformed value — a non-integer or non-positive `maxConcurrent`, a
+negative or non-integer `stallTimeoutMs`, a `concurrency` block or bound
+of the wrong shape, or a malformed `output`/`models`/`modelsByParent`/
+`telemetry` entry — fails the whole call at load, before any task starts,
+naming the offending key. There is no keep-last-good fallback: dispatch
+does not proceed on a partially valid `delegate.json` (deliberate — see
+`COMPATIBILITY.md`).
+
+Tasks run concurrently subject to a global bound and per-model bounds.
+`maxConcurrent` (positive integer, default 3) caps the total number of
+tasks executing at once. The `concurrency` block holds the per-model
+bounds: `concurrency.models` maps an exact `provider/model-id` to a
+positive integer, `concurrency.providers` maps a provider name to one,
+and `concurrency.default` is the per-model fallback. A task's per-model
+bound resolves `models` → `providers` → `default` → `maxConcurrent`; the
+global cap always applies on top. Each call applies the bounds from its
+own loaded config. Overlapping
 same-call shared writers serialize in task order, and the result names the
 serialized tasks and scope with the `isolated` remedy — independent same-repo
 edits are meant to run in parallel worktrees. Overlap with active work, or
@@ -304,6 +327,14 @@ delegate_ticket({ action: "answer", ticket, taskId, questionId, answer })
   and does not undo completed writes or commands.
 
 Tickets remain pollable after settlement.
+
+A poll on a running ticket shows live activity, not just a count of finished
+tasks: each unfinished task's row names the tool call currently in flight —
+or the `last:` completed one when between calls — its running tool count,
+and how long ago it last emitted an event (`active now` / `active Ns ago`).
+Queued tasks read `waiting…`; the view header totals active and queued
+tasks and the tool calls recorded so far. Settled views show each task's
+terminal state instead of live rows.
 
 ### Restart visibility
 
@@ -531,6 +562,24 @@ model, base prompt, and provider-extension configuration are frozen; incompatibl
 reuse is rejected. `resumeFrom` rehydrates a durable transcript and may then be
 pooled under a new `sessionId`.
 
+Fresh tasks in the shared workspace — and pooled `sessionId` sessions — write
+their transcripts to `<agentDir>/delegate-sessions/` from the start, so a
+failure does not lose the conversation. A failed or cancelled task that left
+a durable transcript names it in the result as `session: <absolute path>`.
+When the transcript carries messages, the failure also prints a copy-pasteable
+`→ To retry:` hint whose `resumeFrom` continues that transcript; when it has
+none (a worker that failed before its first prompt), the result reports
+"no prior messages" instead and offers no hint — resuming an empty
+conversation would pretend continuity that does not exist. Scratch and
+isolated one-shot tasks keep memory-only transcripts: their filesystem is
+disposable, so nothing is advertised as resumable.
+
+Tasks dispatched with `resumeFrom` are marked `↻<tag>` — an 8-character tag
+derived from the transcript filename — wherever tasks are listed: sync
+result sections, running and settled ticket views, and cancel previews. The
+tag is recorded on the ticket, so a cold-recovered poll shows the same
+marker.
+
 A transcript file has one owner at a time. A task resuming a transcript
 (`resumeFrom`), or pointing at a live pooled session's durable file, rejects
 while the owning worker is live — children write into resumed transcripts,
@@ -554,7 +603,10 @@ reset hint. It does not promise an exact reset time or auto-resume. Callers
 cannot select a different model.
 
 Stall timeouts measure inactivity; deadlines measure wall-clock time.
-Deadlines exist only when the caller passes `deadlineMs`. Omission means no
+The inactivity watchdog reads `stallTimeoutMs` from `delegate.json` — a
+non-negative integer of milliseconds, default 900000 (15 minutes); `0`
+disables detection. Deadlines exist only when the caller passes
+`deadlineMs`. Omission means no
 deadline: no configuration key, host default, or implicit budget may
 introduce a wall-clock time limit.
 Cancellation does not promise rollback or immediate termination. Delegate does
