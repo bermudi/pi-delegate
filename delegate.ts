@@ -117,7 +117,7 @@ const taskSchema = Type.Object(
     tools: Type.Optional(
       Type.Array(Type.String(), {
         description:
-          "Exact capabilities. '*' = the writer group (read, bash, edit, write); 'ro' = the read-only group (read, grep, find, ls); other entries name one child tool each.",
+          "Exact capabilities. '*' = the writer group (read, bash, edit, write); 'ro' = the read-only group (read, grep, find, ls) — read-only tasks admit concurrently, never serialized as writers; other entries name one child tool each.",
       }),
     ),
     sessionId: Type.Optional(
@@ -1341,7 +1341,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate",
       label: "Delegate to Subagents",
       description:
-        "Run subagent tasks. Sync returns results in input order; async: true returns a ticket (inspect or control it with delegate_ticket) and delivers the settled result automatically; tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
+        "Run subagent tasks. Sync returns results in input order; async: true returns a ticket (inspect or control it with delegate_ticket) and delivers the settled result automatically; tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; read-only tasks never serialize — parallel read-side fan-outs want 'ro' tools or the scout/reviewer agents; 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
       parameters: delegateSchema,
       promptSnippet:
         "Run subagent tasks: synchronous, or async tickets whose results arrive automatically",
