@@ -157,7 +157,8 @@ const delegateSchema = Type.Object(
   {
     tasks: Type.Array(taskSchema, {
       minItems: 0,
-      description: "Subagent tasks to run; pass [] for the manual.",
+      description:
+        "Subagent tasks to run; pass [] for the manual. Batch every task in one call — separate concurrent dispatches from one session share admission, and overlapping writers reject.",
     }),
     async: Type.Optional(
       Type.Boolean({

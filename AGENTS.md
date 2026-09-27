@@ -10,6 +10,36 @@ Before implementing or changing behavior, read `SPEC.md`, `INVARIANTS.md`,
 and `COMPATIBILITY.md` — they are authoritative and describe outcomes, not
 mechanisms. Before migrating or writing tests, read `TEST-MIGRATION.md`.
 
+## Guiding principle: the weights are the platform
+
+The models calling this extension were RL-trained on the incumbent
+professional harnesses (Claude Code's Task tool, codex's spawn agents,
+letta's general-purpose, background-default fan-outs). Their reflexes —
+agent names, fan-out shapes, expected semantics — arrive pre-baked in the
+weights, and we have no RL flywheel to retrain them. Every design decision
+on the model-facing surface answers to this first:
+
+- Meet trained reflexes: accept pro-shaped attempts (alias common agent
+  names like `general`/`general-purpose` → `default`, `explore` → `scout`)
+  rather than erroring on them.
+- Converge where the idiom is arbitrary (names, argument shapes, defaults);
+  differentiate only where the difference IS the product (admission,
+  workspaces, tickets). Unjustified divergence is a permanent error-rate
+  tax on every caller.
+- Teach the delta at the boundary: every contract that differs from the
+  incumbent default must be legible in the tool description — it is the
+  only channel that reaches trained weights.
+- Watch for collisions: where a trained reflex hits our walls, prefer
+  bending the surface over blaming the model.
+
+Origin: 2026-09-27, the `general` first-call error in a v1 dispatch — a
+trained Claude-Code reflex colliding with our registry — and the
+17-repo comparison in `~/build/testing/subagents` (no other surface pays
+this tax; the pros ARE the training distribution). Candidate applications
+on record: agent-name aliases, batch-in-one-call description teaching
+(landed), misfire telemetry for rejected calls (blocked: SPEC currently
+records nothing on rejects — needs reconciliation).
+
 ## Stack
 
 TypeScript (strict), Bun, TypeBox. Our `typebox` pin must mirror Pi's
