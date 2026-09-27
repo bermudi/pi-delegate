@@ -44,6 +44,10 @@ const outcome = Type.Object({
   blockedBy: Type.Optional(Type.Array(Type.String())),
   quarantined: Type.Optional(Type.Boolean()),
   sessionFile: Type.Optional(Type.String()),
+  // Completion evidence (SPEC v3 "Observability"): optional so records
+  // written before attribution existed still parse unchanged.
+  attributedFiles: Type.Optional(Type.Array(Type.String())),
+  uncertainFiles: Type.Optional(Type.Boolean()),
 });
 const savedTicket = Type.Object({
   version: Type.Literal(1),
@@ -56,6 +60,9 @@ const savedTicket = Type.Object({
     id: Type.String(), agent: Type.String(),
     resumeTag: Type.Optional(Type.String()),
     aliasedFrom: Type.Optional(Type.String()),
+    // Optional: records written before file attribution have no cwd —
+    // their attributed paths render absolute instead of relative.
+    cwd: Type.Optional(Type.String()),
   }), { minItems: 1 }),
   outcomes: Type.Array(Type.Union([outcome, Type.Null()])),
   outputBounds: Type.Object({
@@ -120,7 +127,7 @@ export class TicketJournal {
       version: 1,
       id: ticket.id,
       status: ticket.status,
-      tasks: ticket.tasks.map(({ id, agent, resumeTag, aliasedFrom }) => ({ id, agent, resumeTag, aliasedFrom })),
+      tasks: ticket.tasks.map(({ id, agent, resumeTag, aliasedFrom, cwd }) => ({ id, agent, resumeTag, aliasedFrom, cwd })),
       outcomes: ticket.outcomes.map((item) => item ?? null),
       outputBounds: ticket.outputBounds,
       createdAt: ticket.createdAt,

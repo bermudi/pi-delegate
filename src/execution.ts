@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -78,6 +79,14 @@ export interface AttemptResult {
    * retry opens. Undefined for in-memory sessions or when no file exists.
    */
   readonly sessionFile?: string;
+  /**
+   * This attempt's file-attribution evidence (SPEC v3 "Observability —
+   * Completion evidence"): write/edit call targets resolved against the
+   * task cwd. The task-level outcome merges every attempt's evidence.
+   */
+  readonly attributedFiles?: readonly string[];
+  /** True when the attempt ran a bash/exec call — unobservable file effects. */
+  readonly uncertainFiles?: boolean;
 }
 
 function abortedSignal(signal: AbortSignal): Promise<void> {
@@ -149,6 +158,32 @@ function addUsage(a: Usage | undefined, b: Usage | undefined): Usage | undefined
 }
 
 const SIDE_EFFECT_TOOLS = new Set(["write", "edit", "bash"]);
+
+/** Tools whose calls mutate files at a path named in their arguments. */
+const FILE_PATH_TOOLS = new Set(["write", "edit"]);
+/**
+ * Shell tools: they can mutate any path and name none reliably, so a task
+ * that ran one carries unobservable file effects (SPEC v3 "Observability —
+ * Completion evidence": bash-sourced changes are marked uncertain; bash
+ * output is never parsed for paths).
+ */
+const SHELL_TOOLS = new Set(["bash", "exec"]);
+
+/**
+ * The path a write/edit call targets: `path`, `file_path`, or `filePath`
+ * (v1's file-tracking.ts:10-17 accepted the same aliases across tool
+ * versions). Narrowed from the event's `any` args — a missing or empty
+ * path yields no attribution for that call, never a throw.
+ */
+function toolCallPath(args: unknown): string | undefined {
+  if (typeof args !== "object" || args === null) return undefined;
+  const bag = args as Record<string, unknown>;
+  for (const key of ["path", "file_path", "filePath"] as const) {
+    const value = bag[key];
+    if (typeof value === "string" && value !== "") return value;
+  }
+  return undefined;
+}
 
 function lastAssistantText(session: AgentSession): {
   text: string;
@@ -239,6 +274,18 @@ export class TaskExecution implements ExecutionHandle {
   private disposed = false;
   private quarantined = false;
   private hadSideEffects = false;
+  /**
+   * SPEC v3 "Observability — Completion evidence": write/edit call
+   * targets observed on this run, resolved against the task cwd, in
+   * first-observed order (Set insertion), deduplicated. Attribution
+   * records the call's claimed path — a write that later errors or is
+   * cancelled still may have mutated, so `tool_execution_start` is the
+   * observation point (v1 file-tracking.ts:301-323 attributed on the
+   * call for the same reason).
+   */
+  private readonly attributed = new Set<string>();
+  /** True once a bash/exec call ran — shell file effects are unobservable. */
+  private uncertainFiles = false;
   /** The pooled session this run checked out, when the task reused one. */
   private poolEntry: PooledSession | undefined;
   /** True once session.prompt() was attempted this run. */
@@ -262,14 +309,15 @@ export class TaskExecution implements ExecutionHandle {
   ) {
     this.done = this.run(loader).then((outcome) => {
       this.settleSession(outcome);
-      return outcome;
+      return this.withAttribution(outcome);
     });
   }
 
   result(): Promise<AttemptResult> {
     return Promise.race([
       this.done,
-      this.abortRequested.promise.then(() => this.provisionalOutcome()),
+      this.abortRequested.promise.then(() =>
+        this.withAttribution(this.provisionalOutcome())),
     ]);
   }
 
@@ -328,6 +376,43 @@ export class TaskExecution implements ExecutionHandle {
     } catch (error) {
       log(`steer of task ${this.task.id} failed`, error);
       return false;
+    }
+  }
+
+  /**
+   * Live read of this run's file-attribution evidence (SPEC v3
+   * "Observability — Completion evidence") — the same evidence the
+   * recorded outcome carries. Pure observation: nothing reads this for
+   * admission, scheduling, or execution decisions.
+   */
+  attribution(): { readonly files: readonly string[]; readonly uncertain: boolean } {
+    return { files: [...this.attributed], uncertain: this.uncertainFiles };
+  }
+
+  /** Stamps the attempt's observed attribution onto its result. */
+  private withAttribution(outcome: AttemptResult): AttemptResult {
+    const files = [...this.attributed];
+    return {
+      ...outcome,
+      ...(files.length > 0 ? { attributedFiles: files } : {}),
+      ...(this.uncertainFiles ? { uncertainFiles: true } : {}),
+    };
+  }
+
+  /**
+   * One observed tool call's contribution to file attribution. write/edit
+   * claim a path in their arguments; bash/exec record no path but mark
+   * the evidence uncertain — a shell can mutate anything it can reach.
+   */
+  private noteToolCall(toolName: string, args: unknown): void {
+    if (SHELL_TOOLS.has(toolName)) {
+      this.uncertainFiles = true;
+      return;
+    }
+    if (!FILE_PATH_TOOLS.has(toolName)) return;
+    const raw = toolCallPath(args);
+    if (raw !== undefined) {
+      this.attributed.add(resolve(this.task.cwd, raw));
     }
   }
 
@@ -593,6 +678,11 @@ export class TaskExecution implements ExecutionHandle {
         ) {
           this.hadSideEffects = true;
         }
+        // File-attribution evidence: the call's claimed path, observed
+        // whether or not the tool reports success (it may have mutated).
+        if (event.type === "tool_execution_start") {
+          this.noteToolCall(event.toolName, event.args);
+        }
       });
       // Armed until the run ends — including waitForIdle, where a wedged
       // session produces no events and the watchdog is the rescue.
@@ -747,6 +837,15 @@ export async function runTask(
 ): Promise<TaskOutcome> {
   let retries = 0;
   let usage: Usage | undefined;
+  // Task-level file attribution unions every attempt's evidence: the task
+  // record reports all paths any of its runs claimed (SPEC v3
+  // "Observability — Completion evidence").
+  const allFiles = new Set<string>();
+  let anyUncertain = false;
+  const mergeAttribution = (attempt: AttemptResult): void => {
+    for (const file of attempt.attributedFiles ?? []) allFiles.add(file);
+    if (attempt.uncertainFiles === true) anyUncertain = true;
+  };
   let last: AttemptResult = {
     status: "failed",
     error: "no attempt ran",
@@ -859,6 +958,7 @@ export async function runTask(
     }
     last = recorded;
     usage = addUsage(usage, last.usage);
+    mergeAttribution(recorded);
 
     // Worker truth is independent of caller settlement: every attempt's
     // real settlement drops its live handle, and when result() reported a
@@ -867,6 +967,9 @@ export async function runTask(
     void execution
       .settled()
       .then((real) => {
+        // Worker truth may carry paths the provisional snapshot had not
+        // yet observed — merge before the late outcome replaces it.
+        mergeAttribution(real);
         onWorkerSettled?.(
           execution,
           real === recorded
@@ -884,6 +987,10 @@ export async function runTask(
                 usage: addUsage(usageBeforeAttempt, real.usage),
                 quarantined: real.quarantined || undefined,
                 sessionFile: real.sessionFile,
+                ...(allFiles.size > 0
+                  ? { attributedFiles: [...allFiles] }
+                  : {}),
+                ...(anyUncertain ? { uncertainFiles: true } : {}),
               },
         );
       })
@@ -925,5 +1032,7 @@ export async function runTask(
     usage,
     quarantined: last.quarantined || undefined,
     sessionFile: last.sessionFile,
+    ...(allFiles.size > 0 ? { attributedFiles: [...allFiles] } : {}),
+    ...(anyUncertain ? { uncertainFiles: true } : {}),
   };
 }

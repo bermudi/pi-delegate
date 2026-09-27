@@ -1906,6 +1906,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // The rendered content is spill-bounded; details keep the
               // complete outcomes for the expanded view and recovery.
               results: result.outcomes,
+              // SPEC v3 "Observability — Completion evidence": the
+              // machine-readable half of the per-task `files:` lines —
+              // absolute write/edit paths plus the bash-uncertainty flag.
+              attributedFiles: result.outcomes.map((outcome) => ({
+                taskId: outcome.id,
+                files: [...(outcome.attributedFiles ?? [])],
+                uncertain: outcome.uncertainFiles === true,
+              })),
               // When any worker's accounting is incomplete the usage total
               // below is a lower bound — the flag lets a machine caller see
               // what the result text's note says in prose.
@@ -1984,6 +1992,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
             results:
               call.action === "poll" || call.action === "wait"
                 ? result.ticket?.outcomes
+                : undefined,
+            // SPEC v3 "Observability — Completion evidence":
+            // machine-readable attribution per task — recorded outcomes,
+            // plus observed-so-far evidence for tasks still running.
+            attributedFiles:
+              (call.action === "poll" || call.action === "wait") &&
+              result.ticket !== undefined
+                ? tickets.attributionDetails(result.ticket)
                 : undefined,
             ...(result.ticket !== undefined &&
             result.ticket.notices.length > 0

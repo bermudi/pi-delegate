@@ -174,9 +174,9 @@ gaps.
   `async: false`.)
 - **Regression:** failed task does not fail siblings or destroy index
   alignment; partial output/usage preserved on failure (v1 additionally
-  preserved touched-file lists — that surface was dropped by user decision
-  2026-09-27; see COMPATIBILITY "Touched-file attribution reporting
-  removed").
+  preserved touched-file lists — the heavier physical tracking was dropped
+  2026-09-27 and a lighter observed-path attribution returned under SPEC v3
+  "Observability — Completion evidence"; see the attribution section below).
 - **Internal:** `formatCompletedTask`/`formatFailedTask` rendering, header
   markers, `fmt*`/`trunc*` helpers, touched-file extraction helpers.
 - **Covered now:** ordered results; sibling failure isolation — a mixed
@@ -207,10 +207,9 @@ gaps.
   delegate tool. The original AgentSession fault seam also broke the wrapper
   before delegate ran; its verifier commit is retained, with one explicitly
   user-authorized correction commit (#13 exception comment).
-- **Gap:** overlap warnings on results — **decided out 2026-09-27** with the
-  whole touched-file attribution surface (user decision; recorded in
-  COMPATIBILITY as a deliberate breaking change, possible future
-  restoration). Not a coverage target unless it returns.
+- **Gap:** none — overlap reporting returned in lighter form under SPEC v3
+  "Observability — Completion evidence" (one `overlap:` line per path two
+  tasks attributed, naming both ids; see the attribution section below).
 
 ### Multi-task / concurrent dispatch
 
@@ -854,6 +853,30 @@ live run — never a mid-turn merge.
   voided by cancellation replays `not-applied` and the never-started
   child receives nothing. Cold-recovered tickets refuse with
   `not-applied` in `tests/contract/recovery.test.ts`.
+
+### Completion evidence — file attribution (v3, #38, 2026-09-27)
+
+SPEC v3 "Observability — Completion evidence" restores a lighter form of
+v1's touched-file reporting: observed write/edit call paths (resolved
+against the task cwd, ordered, deduplicated) plus a bash/exec uncertainty
+marker — never v1's physical tracking (inode signatures, symlink
+canonicalization, git-diff fallback). Evidence, not confinement: nothing
+reads it for admission, scheduling, or execution.
+
+- **Contract:** `files: a.ts, src/b.md` / `files: uncertain (bash)` lines
+  beside each task's claim in sync results, live/settled ticket views,
+  and delivered wakes; `overlap: <path>` once per path two tasks
+  attributed, naming both task ids; `details.attributedFiles` on sync
+  results and poll/wait; journal persistence via optional fields, so
+  pre-attribution records parse unchanged; cancel previews carry no
+  attribution.
+- **Covered now:** `tests/contract/attribution.test.ts` — write and edit
+  attribution, relative-path resolution against a task `cwd`, dedupe,
+  out-of-root paths rendering absolute, bash uncertainty without output
+  parsing, combined write+bash evidence, the single named overlap line,
+  ticket/wake/live-poll rendering, `details.attributedFiles`, cancel
+  previews staying evidence-free, cold recovery of recorded attribution,
+  and pre-attribution journal records parsing cleanly.
 
 ## First tranche
 

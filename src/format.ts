@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { relative } from "node:path";
 import { renderOutputForLLM } from "./spill.ts";
 import type {
   OutputBounds,
@@ -189,6 +190,65 @@ export function integrationLines(integration: TaskIntegration): string[] {
 }
 
 /**
+ * SPEC v3 "Observability — Completion evidence": an absolute attributed
+ * path displays relative to the task cwd when it resolves under it
+ * (v1's relativeTouchedSummary rule, format.ts:640-649) — but a path
+ * escaping the cwd renders absolute rather than being dropped: evidence
+ * is never hidden, only shortened.
+ */
+export function displayPath(file: string, cwd: string | undefined): string {
+  if (cwd === undefined) return file;
+  const rel = relative(cwd, file);
+  return rel !== "" && !rel.startsWith("..") ? rel : file;
+}
+
+/**
+ * The compact `files:` evidence line beside a task's output/claim:
+ * `files: a.ts, src/b.md` for observed write/edit targets; `files:
+ * uncertain (bash)` when only shell calls ran (their file effects are
+ * unobservable and bash output is never parsed); both marks when both
+ * kinds of evidence exist. Undefined when the task carries no evidence.
+ */
+export function filesLine(
+  files: readonly string[] | undefined,
+  uncertain: boolean | undefined,
+  cwd: string | undefined,
+): string | undefined {
+  const paths = files ?? [];
+  const mark = "uncertain (bash)";
+  if (paths.length === 0) {
+    return uncertain === true ? `files: ${mark}` : undefined;
+  }
+  const list = paths.map((file) => displayPath(file, cwd)).join(", ");
+  return `files: ${list}${uncertain === true ? ` · ${mark}` : ""}`;
+}
+
+/**
+ * One line per absolute path that two or more outcomes in the batch
+ * claimed: `overlap: /path — attributed by tasks a, b`. Computed on
+ * attributed (write/edit-observed) paths only — never on bash-uncertain
+ * tasks, whose effects name no path. Evidence, not a lock claim: it
+ * says so once, naming the file and the tasks (SPEC v3 "Observability —
+ * Completion evidence").
+ */
+export function overlapLines(
+  outcomes: readonly TaskOutcome[],
+): string[] {
+  const claims = new Map<string, string[]>();
+  for (const outcome of outcomes) {
+    for (const file of new Set(outcome.attributedFiles ?? [])) {
+      const ids = claims.get(file) ?? [];
+      if (!ids.includes(outcome.id)) ids.push(outcome.id);
+      claims.set(file, ids);
+    }
+  }
+  return [...claims]
+    .filter(([, ids]) => ids.length > 1)
+    .map(([file, ids]) => `overlap: ${file} — attributed by tasks ${ids.join(", ")}`)
+    .sort();
+}
+
+/**
  * Synchronous dispatch result body: one section per task, in input order.
  * Task output is projected through the spill boundary — over-threshold
  * output becomes a tail plus a temp-file pointer; `outcome.output` itself
@@ -212,8 +272,16 @@ export function formatDispatchResult(
       ? `\n${integrationLines(outcome.integration).join("\n")}`
       : "";
     const label = tasks[outcome.index]?.agent ?? outcome.id;
+    // Completion evidence rides beside the task's claim — between the
+    // status head and its output (SPEC v3 "Observability").
+    const evidence = filesLine(
+      outcome.attributedFiles,
+      outcome.uncertainFiles,
+      task?.cwd,
+    );
+    const files = evidence !== undefined ? `\n${evidence}` : "";
     if (outcome.status === "ok") {
-      return `${head}\n${renderOutputForLLM(outcome.output ?? "", label, bounds)}${quarantined}${integration}`;
+      return `${head}${files}\n${renderOutputForLLM(outcome.output ?? "", label, bounds)}${quarantined}${integration}`;
     }
     const detail = outcome.error ?? "no output";
     const session =
@@ -223,7 +291,7 @@ export function formatDispatchResult(
     const partial = outcome.output
       ? `\n\nPartial output:\n${renderOutputForLLM(outcome.output, label, bounds)}`
       : "";
-    return `${head}\n${detail}${partial}${session}${quarantined}${integration}`;
+    return `${head}${files}\n${detail}${partial}${session}${quarantined}${integration}`;
   });
   // The result's aggregate usage rides `details.usage`; when any worker's
   // accounting is incomplete that total is a lower bound, not a sum — the
@@ -231,5 +299,8 @@ export function formatDispatchResult(
   const lowerBound = outcomes.some((outcome) => outcome.quarantined)
     ? "\n\nNote: token usage and cost totals are lower bounds — at least one worker's accounting is incomplete (termination unconfirmed)."
     : "";
-  return sections.join("\n\n") + lowerBound;
+  const overlap = overlapLines(outcomes);
+  const overlapNote =
+    overlap.length > 0 ? `\n\n${overlap.join("\n")}` : "";
+  return sections.join("\n\n") + lowerBound + overlapNote;
 }

@@ -154,20 +154,27 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 ## v2 deliberate breaking changes
 
 - **Touched-file attribution reporting removed (user decision 2026-09-27;
-  possible future restoration).** V1 reported which physical files each
+  restored under v3 the same day).** V1 reported which physical files each
   task touched — resolved through symlinks with conservative `uncertain`
   flags, external writes through worker links reported at their physical
   paths — in results and poll/cancel/wait views, warned when tasks touched
   the same files (`details.overlapWarning`), and preserved touched-file
-  lists on partial failure. V2 outcomes carry no touched-file data at all.
-  Callers must not rely on touched-file reporting, overlap warnings, or
-  file-level attribution in any v2 result or view. Migration: derive file
-  lists from the task briefs or the underlying Git state; overlap between
-  same-call shared writers is still prevented by admission (serialization
+  lists on partial failure. V2 outcomes carried no touched-file data at
+  all. **Restored under v3 the same day (SPEC v3 "Observability —
+  Completion evidence", #38) — see the restoration note below.**
   notices name the serialized tasks), and cross-call conflicts still
   reject — only the *reporting* of touched files is gone. Decided during
-  the 2026-09-27 gap audit (V1-V2-MAP §3d item 1); a future restoration
-  would reintroduce file-tracking machinery and is not promised.
+  the 2026-09-27 gap audit (V1-V2-MAP §3d item 1).
+
+  **Restored in lighter form by SPEC v3 "Observability — Completion
+  evidence" (#38).** V2 now records the paths observed in each task's
+  write/edit tool calls — resolved against the task cwd, ordered,
+  deduplicated — plus an uncertainty marker when the task ran bash/exec.
+  This is evidence, not v1's physical tracking: no inode signatures,
+  no symlink canonicalization, no git-diff inference, and no claim about
+  paths a tool call never named. Display, overlap reporting, and
+  `details.attributedFiles` are the restored surfaces; v1's
+  `details.overlapWarning` shape and physical-identity semantics are not.
 
 - **Child base prompt is composed, not precedence-chosen (#33, user decision
   2026-09-26).** V1 picked one prompt by precedence — task, then agent, then a

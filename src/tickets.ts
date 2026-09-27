@@ -3,7 +3,10 @@ import { join } from "node:path";
 import {
   activityAge,
   aliasNote,
+  displayPath,
+  filesLine,
   integrationLines,
+  overlapLines,
   recoveryLines,
   resumeMarker,
   truncateLine,
@@ -189,8 +192,18 @@ function taskSection(
           return rendered;
         }
       : (output: string) => renderOutputForPoll(output, bounds);
+  // Completion evidence rides beside the task's claim, between the status
+  // head and its output (SPEC v3 "Observability"). The task's cwd
+  // relativizes the display; records written before attribution have no
+  // cwd, so their paths render absolute.
+  const evidence = filesLine(
+    outcome.attributedFiles,
+    outcome.uncertainFiles,
+    ticket.tasks[outcome.index]?.cwd,
+  );
+  const files = evidence !== undefined ? `\n${evidence}` : "";
   if (outcome.status === "ok") {
-    return `${head}\n${render(outcome.output ?? "")}${quarantined}${integration}`;
+    return `${head}${files}\n${render(outcome.output ?? "")}${quarantined}${integration}`;
   }
   const detail = outcome.error ?? "no output";
   const session =
@@ -198,7 +211,7 @@ function taskSection(
       ? `\n${recoveryLines(outcome.sessionFile).join("\n")}`
       : "";
   const partial = outcome.output ? `\n${render(outcome.output)}` : "";
-  return `${head}\n${detail}${session}${partial}${quarantined}${integration}`;
+  return `${head}${files}\n${detail}${session}${partial}${quarantined}${integration}`;
 }
 
 /**
@@ -240,7 +253,13 @@ function activityLabel(row: ActivityRow): string {
  * and seconds since the last observed event. Queued tasks read
  * `waiting…`; a paused ticket's unfinished tasks read `paused`.
  */
-function liveTaskLine(ticket: Ticket, index: number, live: LiveState | undefined): string {
+function liveTaskLine(
+  ticket: Ticket,
+  index: number,
+  live: LiveState | undefined,
+  /** Cancel previews show task state, not claims — no evidence there. */
+  withEvidence = true,
+): string {
   const task = ticket.tasks[index];
   const label = taskLabel(ticket, index);
   const row =
@@ -258,6 +277,23 @@ function liveTaskLine(ticket: Ticket, index: number, live: LiveState | undefined
   const parts = [activityLabel(row)];
   if (row.toolCalls.length > 0) {
     parts.push(`${row.toolCalls.length} tool${row.toolCalls.length === 1 ? "" : "s"}`);
+  }
+  // Completion evidence so far (SPEC v3 "Observability"): the live
+  // execution's observed write/edit targets, bounded to the row — settled
+  // sections list every path.
+  const evidence = withEvidence
+    ? live?.executions.get(index)?.attribution?.()
+    : undefined;
+  if (evidence !== undefined && (evidence.files.length > 0 || evidence.uncertain)) {
+    const shown = evidence.files
+      .slice(0, 2)
+      .map((file) => displayPath(file, task?.cwd));
+    const more =
+      evidence.files.length > shown.length ? `, +${evidence.files.length - shown.length} more` : "";
+    const uncertain = evidence.uncertain
+      ? `${shown.length > 0 ? " · " : ""}uncertain (bash)`
+      : "";
+    parts.push(`files: ${shown.join(", ")}${more}${uncertain}`);
   }
   const age = activityAge(row.lastEventAt);
   if (age !== "") parts.push(age);
@@ -310,6 +346,12 @@ function ticketView(
       lines.push(liveTaskLine(ticket, index, live));
     }
   }
+  // Overlap evidence (SPEC v3 "Observability — Completion evidence"):
+  // one line per path two settled tasks both attributed.
+  const overlaps = overlapLines(
+    ticket.outcomes.filter((outcome) => outcome !== undefined),
+  );
+  if (overlaps.length > 0) lines.push("", ...overlaps);
   return lines.join("\n");
 }
 
@@ -377,6 +419,9 @@ export class TicketStore {
           agent: task.agent,
           resumeTag: task.resumeTag,
           aliasedFrom: task.aliasedFrom,
+          // Optional in the journal — records written before file
+          // attribution have none; their paths render absolute.
+          ...(task.cwd !== undefined ? { cwd: task.cwd } : {}),
         })),
         totalTasks: item.tasks.length,
         outcomes: item.outcomes.map((outcome) => outcome ?? undefined),
@@ -536,6 +581,40 @@ export class TicketStore {
 
   list(): Ticket[] {
     return [...this.tickets.values()].map((entry) => entry.record);
+  }
+
+  /**
+   * SPEC v3 "Observability — Completion evidence" machine half: per-task
+   * attribution for `details.attributedFiles` — a recorded outcome's
+   * final evidence, or a still-running task's observed-so-far evidence
+   * from its live execution handle. Tasks with no outcome and no live
+   * evidence (queued, blocked before running) have no entry.
+   */
+  attributionDetails(
+    ticket: Ticket,
+  ): readonly { taskId: string; files: readonly string[]; uncertain: boolean }[] {
+    const { record, rt } = this.entry(ticket);
+    const rows: { taskId: string; files: readonly string[]; uncertain: boolean }[] = [];
+    for (let index = 0; index < record.tasks.length; index++) {
+      const outcome = record.outcomes[index];
+      if (outcome !== undefined) {
+        rows.push({
+          taskId: outcome.id,
+          files: [...(outcome.attributedFiles ?? [])],
+          uncertain: outcome.uncertainFiles === true,
+        });
+        continue;
+      }
+      const live = rt.executions.get(index)?.attribution?.();
+      if (live !== undefined && (live.files.length > 0 || live.uncertain)) {
+        rows.push({
+          taskId: record.tasks[index]!.id,
+          files: live.files,
+          uncertain: live.uncertain,
+        });
+      }
+    }
+    return rows;
   }
 
   /** Record a task outcome. Never changes a terminal ticket's status. */
@@ -944,10 +1023,11 @@ export class TicketStore {
       };
       // The preview names every task's current state (v1's cancel
       // preview): settled tasks keep their icon and error, unfinished
-      // ones show the same live line a poll would.
+      // ones show the same live line a poll would — minus completion
+      // evidence, which belongs to result views, not cancel previews.
       const taskLines = record.tasks.map((task, index) => {
         const outcome = record.outcomes[index];
-        if (outcome === undefined) return liveTaskLine(record, index, live);
+        if (outcome === undefined) return liveTaskLine(record, index, live, false);
         const icon = outcome.status === "ok" ? "✓" : "✗";
         const what =
           outcome.status === "ok"

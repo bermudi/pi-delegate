@@ -115,6 +115,18 @@ export interface TaskOutcome {
    * session was file-backed; reported in failure views for recovery.
    */
   readonly sessionFile?: string;
+  /**
+   * SPEC v3 "Observability — Completion evidence": absolute paths named by
+   * the task's write/edit tool calls, resolved against the task cwd,
+   * in first-observed order, deduplicated. Evidence, not confinement —
+   * only what tool calls claimed; a file never named is never reported.
+   */
+  readonly attributedFiles?: readonly string[];
+  /**
+   * True when the task ran a bash/exec tool call: shell effects are
+   * unobservable per-path, so `attributedFiles` is then a lower bound.
+   */
+  readonly uncertainFiles?: boolean;
 }
 
 export type TicketStatus =
@@ -156,8 +168,8 @@ export interface Ticket {
   readonly totalTasks: number;
   /** Index-aligned per-task outcomes; entries appear as tasks finish. */
   readonly outcomes: readonly (TaskOutcome | undefined)[];
-  /** Only labels, correlation ids, resume tags, and alias notes are required to render saved tickets. */
-  readonly tasks: readonly Pick<ResolvedTask, "id" | "agent" | "resumeTag" | "aliasedFrom">[];
+  /** Labels, correlation ids, resume tags, alias notes — plus the task cwd, which relativizes attributed-file display (optional: records written before file attribution carry none). */
+  readonly tasks: readonly (Pick<ResolvedTask, "id" | "agent" | "resumeTag" | "aliasedFrom"> & { readonly cwd?: string })[];
   /** Unanswered worker questions (never persisted across host shutdown). */
   readonly questions: readonly WorkerQuestion[];
   /**
@@ -207,6 +219,14 @@ export interface ExecutionHandle {
    * injecting into a dead or pooled session.
    */
   steer?(message: string): boolean;
+  /**
+   * The task's file-attribution evidence so far (SPEC v3 "Observability —
+   * Completion evidence"): write/edit call targets resolved against the
+   * task cwd, plus the bash-uncertainty flag. Live view of the same
+   * evidence the recorded outcome carries; attribution never feeds
+   * admission, scheduling, or execution decisions.
+   */
+  attribution?(): { readonly files: readonly string[]; readonly uncertain: boolean };
 }
 
 export class Deferred {
