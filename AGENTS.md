@@ -45,6 +45,23 @@ on record: agent-name aliases, batch-in-one-call description teaching
 (landed), misfire telemetry for rejected calls (blocked: SPEC currently
 records nothing on rejects — needs reconciliation).
 
+## Deployment reality (learned 2026-09-27, the hard way)
+
+Pi loads `npm:@bermudi/pi-delegate` (v1) from `~/.pi/agent/npm/` — **not
+this tree**. A green suite says nothing about the installed artifact.
+Run the tree per-session with `pi -ne -e <repo>/delegate.ts`; do NOT add
+a `.pi/extensions/` shim here — pi hard-errors on duplicate tool names
+between project and user extensions, which bricks every normal session
+in the repo. v3 has no publish pipeline yet; until it ships, sessions
+outside this repo (and panes without `-e`) run v1. The user-global
+`~/.pi/agent/delegate.json` also carries v1-era keys
+(`agentOverridesByParentModel`) that v3 silently ignores.
+
+Before calling any unit shipped, dogfood it: a fresh `pi -ne -e` session
+dispatching a real batch. The 2026-09-27 dogfood caught the deployment
+gap, a missing receipt note (#39), and confirmed the wake loop live in
+one run.
+
 ## Stack
 
 TypeScript (strict), Bun, TypeBox. Our `typebox` pin must mirror Pi's
