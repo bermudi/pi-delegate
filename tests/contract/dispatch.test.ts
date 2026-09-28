@@ -248,6 +248,42 @@ describe("delegate dispatch contract", () => {
   );
 
   test(
+    "the default global bound is 8 simultaneous tasks (#41)",
+    async () => {
+      // SPEC v3 "Surface rules — Concurrency default": with no delegate.json
+      // at all, the default `maxConcurrent` is 8 — nine read-only tasks
+      // (no shared-write serialization, one model key, so the per-model
+      // fallback reads the same global bound) must reach exactly 8 in
+      // flight before the ninth gets a slot.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      let active = 0;
+      let maxActive = 0;
+      const gated: FauxResponseFactory = async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 25));
+        active -= 1;
+        return fauxAssistantMessage("done");
+      };
+      subagents.respond(Array.from({ length: 9 }, () => gated));
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [0, 1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({
+          prompt: `task ${n}`,
+          tools: ["read"],
+        })),
+      });
+
+      expect(result.isError).toBe(false);
+      expect(subagents.state.callCount).toBe(9);
+      expect(maxActive).toBe(8);
+    },
+  );
+
+  test(
     "a later call re-reads the configured bound, both lower and higher",
     async () => {
       // The limit is per-call configuration: a coordinator must honour a

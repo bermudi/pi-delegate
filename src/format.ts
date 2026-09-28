@@ -2,10 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { relative } from "node:path";
 import { renderOutputForLLM } from "./spill.ts";
 import type {
+  FieldNormalization,
   OutputBounds,
   ResolvedTask,
   TaskIntegration,
   TaskOutcome,
+  Ticket,
 } from "./types.ts";
 
 /**
@@ -141,6 +143,33 @@ export function aliasNote(aliasedFrom: string | undefined, agent: string): strin
 }
 
 /**
+ * The field-normalization notes for a task section (SPEC v3 "Reflex
+ * meeting"): one `field "<field>" → "<to>"` line per cross-harness
+ * spelling validation folded into a canonical field — the same teaching
+ * pattern as the alias note.
+ */
+export function fieldNotes(
+  normalizedFrom: readonly FieldNormalization[] | undefined,
+): string[] {
+  return (normalizedFrom ?? []).map((note) => `field "${note.field}" → "${note.to}"`);
+}
+
+/**
+ * The caller's `description` as a single-line display label (SPEC v3
+ * "Reflex meeting"): whitespace-collapsed and bounded for rows and
+ * section heads; undefined when absent or blank so callers fall back to
+ * the correlation id, then a prompt preview.
+ */
+export function descriptionLabel(
+  description: string | undefined,
+): string | undefined {
+  const collapsed = description?.replace(/\s+/g, " ").trim();
+  return collapsed === undefined || collapsed === ""
+    ? undefined
+    : truncateLine(collapsed, 80);
+}
+
+/**
  * The isolated-workspace reconciliation line(s) for one task: status, file
  * counts, recovery pointers, and the applied_unverified disclaimer. A clean
  * apply is never presented as verified or tested.
@@ -257,14 +286,20 @@ export function overlapLines(
  */
 export function formatDispatchResult(
   outcomes: readonly TaskOutcome[],
-  tasks: readonly ResolvedTask[],
+  tasks: Ticket["tasks"],
   bounds: OutputBounds,
 ): string {
   const sections = outcomes.map((outcome) => {
     const task = tasks[outcome.index];
     const tag = task?.resumeTag;
     const aliased = task !== undefined ? aliasNote(task.aliasedFrom, task.agent) : "";
-    const head = `### Task ${outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${statusWord(outcome)}${aliased !== "" ? `\n${aliased}` : ""}`;
+    // Field-normalization notes precede the alias note — the fold happens
+    // first (SPEC v3 "Reflex meeting").
+    const notes = [
+      ...fieldNotes(task?.normalizedFrom),
+      ...(aliased !== "" ? [aliased] : []),
+    ];
+    const head = `### Task ${descriptionLabel(task?.description) ?? outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${statusWord(outcome)}${notes.length > 0 ? `\n${notes.join("\n")}` : ""}`;
     const quarantined = outcome.quarantined
       ? "\nWorker termination is unconfirmed; its write scope stays reserved. Recorded output and token usage are lower bounds — its accounting is incomplete."
       : "";

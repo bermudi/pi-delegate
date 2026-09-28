@@ -3,7 +3,9 @@ import { join } from "node:path";
 import {
   activityAge,
   aliasNote,
+  descriptionLabel,
   displayPath,
+  fieldNotes,
   filesLine,
   integrationLines,
   overlapLines,
@@ -162,7 +164,13 @@ function taskSection(
   const record = ticket.tasks[outcome.index];
   const tag = record?.resumeTag;
   const aliased = record !== undefined ? aliasNote(record.aliasedFrom, record.agent) : "";
-  const head = `### Task ${outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${outcome.status === "ok" ? "completed" : outcome.status}${aliased !== "" ? `\n${aliased}` : ""}`;
+  // Field-normalization notes precede the alias note — the fold happens
+  // first (SPEC v3 "Reflex meeting").
+  const notes = [
+    ...fieldNotes(record?.normalizedFrom),
+    ...(aliased !== "" ? [aliased] : []),
+  ];
+  const head = `### Task ${descriptionLabel(record?.description) ?? outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${outcome.status === "ok" ? "completed" : outcome.status}${notes.length > 0 ? `\n${notes.join("\n")}` : ""}`;
   const quarantined = outcome.quarantined
     ? ticket.recovered
       ? "\n(worker termination was unconfirmed; no live reservation was restored — inspect the workspace before new writes; recorded output and usage are lower bounds)"
@@ -419,6 +427,8 @@ export class TicketStore {
           agent: task.agent,
           resumeTag: task.resumeTag,
           aliasedFrom: task.aliasedFrom,
+          description: task.description,
+          normalizedFrom: task.normalizedFrom,
           // Optional in the journal — records written before file
           // attribution have none; their paths render absolute.
           ...(task.cwd !== undefined ? { cwd: task.cwd } : {}),

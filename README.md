@@ -39,6 +39,12 @@ runs the batch in task order. Task fields: `prompt` (required), `id` (auto
 `sessionId`, `resumeFrom`, `deadlineMs`, `workspace`, `dependsOn`. Top-level
 `workspace` defaults the batch's mode for tasks that don't name their own, and
 top-level `operationId` deduplicates the whole call against retries.
+Cross-harness spellings are accepted and normalized at validation —
+`subagent_type` → `agent` (aliases still apply), `description` (≤200 chars)
+labels the task in call rows and section headers, and `run_in_background`
+(top-level or per task) → `async`; each applied rename is reported on the
+result (`field "subagent_type" → "agent"`), conflicting spellings error,
+and unknown fields still fail (`additionalProperties: false`).
 
 Delivery happens once, when the batch fully settles: tickets settling within the
 same flush window coalesce into a single follow-up wake when the parent is still
@@ -47,7 +53,7 @@ one — or a single durable append when the branch moved or a navigation is in
 flight. Delivery failure never undoes settlement — the ticket stays pollable —
 and delivery suppressed at shutdown leaves it the same way.
 
-Concurrency: `maxConcurrent` caps simultaneous tasks globally (default 3).
+Concurrency: `maxConcurrent` caps simultaneous tasks globally (default 8).
 Per-model bounds work per model key — an exact `concurrency.models`
 `provider/model` entry wins over `concurrency.providers.<provider>`, which wins
 over `concurrency.default`, which falls back to `maxConcurrent`. Tasks over a
@@ -131,7 +137,7 @@ Unknown keys and malformed values fail loudly at the dispatch boundary.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `maxConcurrent` | `3` | Global cap on simultaneous tasks. |
+| `maxConcurrent` | `8` | Global cap on simultaneous tasks. |
 | `concurrency.default` | unset | Fallback in-flight bound. |
 | `concurrency.providers` | `{}` | Per-provider bound, e.g. `{"anthropic": 2}`. |
 | `concurrency.models` | `{}` | Per-model bound, e.g. `{"openai/gpt-5.2": 1}`; wins over provider and default. |

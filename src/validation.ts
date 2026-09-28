@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { resolveDependencyGraph } from "./graph.ts";
-import { expandTools } from "./profiles.ts";
+import { canonicalAgentName, expandTools } from "./profiles.ts";
+import type { FieldNormalization } from "./types.ts";
 
 export interface TaskInput {
   readonly id?: string;
@@ -17,6 +18,18 @@ export interface TaskInput {
   readonly deadlineMs?: number;
   readonly workspace?: "shared" | "scratch" | "isolated";
   readonly dependsOn?: string[];
+  // Cross-harness compatibility spellings (SPEC v3 "Reflex meeting") —
+  // folded into canonical fields by validateDispatchCall before any
+  // semantic read, with each applied rename recorded on normalizedFrom.
+  readonly subagent_type?: string;
+  readonly description?: string;
+  readonly run_in_background?: boolean;
+  /**
+   * Internal: compat spellings already folded into this task. Stamped by
+   * validation, never accepted from the wire (the task schema's
+   * additionalProperties: false rejects it there).
+   */
+  readonly normalizedFrom?: readonly FieldNormalization[];
 }
 
 export type DispatchCall =
@@ -26,6 +39,13 @@ export type DispatchCall =
       readonly tasks: readonly TaskInput[];
       readonly async: boolean;
       readonly operationId: string | undefined;
+      /**
+       * Applied dispatch-level compat renames (top-level
+       * `run_in_background` → `async`); per-task renames ride each
+       * task's `normalizedFrom`. Rendered as teaching notes on the
+       * result/receipt (SPEC v3 "Reflex meeting").
+       */
+      readonly callNotes: readonly FieldNormalization[];
     };
 
 /** Post-schema delegate_ticket arguments. */
@@ -58,6 +78,8 @@ export interface SessionArguments {
 export interface DispatchArguments {
   readonly tasks: readonly TaskInput[];
   readonly async?: boolean;
+  /** Cross-harness spelling of `async`; normalizes into the dispatch decision. */
+  readonly run_in_background?: boolean;
   /** Batch-level workspace default; a task's own `workspace` wins. */
   readonly workspace?: "shared" | "scratch" | "isolated";
   readonly operationId?: string;
@@ -220,7 +242,7 @@ export function validateSessionCall(args: SessionArguments): SessionCall {
  */
 export function validateDispatchCall(args: DispatchArguments): DispatchCall {
   if (args.tasks.length === 0) {
-    if (args.async === true) {
+    if (args.async === true || args.run_in_background === true) {
       fail(`async dispatch requires at least one task.`);
     }
     if (args.workspace !== undefined) {
@@ -232,24 +254,90 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
     return { mode: "help" };
   }
 
-  // The batch-level workspace is a default: tasks that name their own keep it.
-  const effectiveTasks =
-    args.workspace === undefined
-      ? args.tasks
-      : args.tasks.map((task) =>
-          task.workspace === undefined
-            ? { ...task, workspace: args.workspace }
-            : task,
+  // SPEC v3 "Reflex meeting": cross-harness field spellings fold into the
+  // canonical fields here — before agent resolution reads `agent`, so the
+  // alias table applies to `subagent_type` values too — and each applied
+  // rename records a teaching note on the task's `normalizedFrom`.
+  const effectiveTasks = args.tasks.map((task, index) => {
+    const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
+    const notes: FieldNormalization[] = [];
+    let agent = task.agent;
+    if (task.subagent_type !== undefined) {
+      if (
+        task.agent !== undefined &&
+        canonicalAgentName(task.agent) !== canonicalAgentName(task.subagent_type)
+      ) {
+        fail(
+          `${where}: 'agent' (${JSON.stringify(task.agent)}) and 'subagent_type' (${JSON.stringify(task.subagent_type)}) name different agents — they are the same field under two spellings; send one.`,
         );
+      }
+      agent = task.agent ?? task.subagent_type;
+      notes.push({ field: "subagent_type", to: "agent" });
+    }
+    if (task.run_in_background !== undefined) {
+      notes.push({ field: "run_in_background", to: "async" });
+    }
+    const { subagent_type, run_in_background, ...rest } = task;
+    const normalized: TaskInput =
+      agent === undefined ? { ...rest } : { ...rest, agent };
+    if (notes.length > 0) {
+      return {
+        ...normalized,
+        normalizedFrom: notes,
+        ...(task.workspace === undefined && args.workspace !== undefined
+          ? { workspace: args.workspace }
+          : {}),
+      };
+    }
+    return task.workspace === undefined && args.workspace !== undefined
+      ? { ...normalized, workspace: args.workspace }
+      : normalized;
+  });
   validateTasks(effectiveTasks);
+
+  // `run_in_background` is the same dispatch-level `async` under a
+  // cross-harness spelling — legal at top level and per task. Every
+  // occurrence names one decision, so all must agree; `async` wins when
+  // it agrees, and a value conflict names both fields.
+  const ribs: { readonly value: boolean; readonly where: string }[] = [];
+  if (args.run_in_background !== undefined) {
+    ribs.push({ value: args.run_in_background, where: "the top level" });
+  }
+  args.tasks.forEach((task, index) => {
+    if (task.run_in_background !== undefined) {
+      ribs.push({ value: task.run_in_background, where: `tasks[${index}]` });
+    }
+  });
+  const firstRib = ribs[0];
+  const clash = ribs.find((rib) => rib.value !== firstRib?.value);
+  if (firstRib !== undefined && clash !== undefined) {
+    fail(
+      `'run_in_background' conflicts: ${firstRib.where} sets ${firstRib.value} but ${clash.where} sets ${clash.value} — it is one dispatch-level decision (it normalizes to 'async'); set it once.`,
+    );
+  }
+  if (
+    args.async !== undefined &&
+    firstRib !== undefined &&
+    args.async !== firstRib.value
+  ) {
+    fail(
+      `'async': ${args.async} conflicts with 'run_in_background': ${firstRib.value} — the same dispatch field under two spellings; send one.`,
+    );
+  }
+  const callNotes: FieldNormalization[] =
+    args.run_in_background === undefined
+      ? []
+      : [{ field: "run_in_background", to: "async" }];
   return {
     mode: "dispatch",
     tasks: effectiveTasks,
     // SPEC v3 "Interaction grammar" — cardinality defaults: a single task
     // runs sync inline; a multi-task batch returns a ticket and
-    // auto-delivers. `async` overrides in both directions.
-    async: args.async ?? effectiveTasks.length > 1,
+    // auto-delivers. `async` (or its run_in_background spelling)
+    // overrides in both directions.
+    async: args.async ?? firstRib?.value ?? effectiveTasks.length > 1,
     operationId: args.operationId,
+    callNotes,
   };
 }
 
@@ -284,6 +372,11 @@ function validateTasks(tasks: readonly TaskInput[]): void {
     }
     if (task.prompt !== undefined && task.prompt.trim() === "") {
       fail(`${where}: prompt must be a non-empty string.`);
+    }
+    if (task.description !== undefined && task.description.length > 200) {
+      fail(
+        `${where}: description must be at most 200 characters; got ${task.description.length}.`,
+      );
     }
     if (task.systemPrompt !== undefined && task.systemPrompt.trim() === "") {
       // Blank stays invalid for non-identifier fields (SPEC "Input

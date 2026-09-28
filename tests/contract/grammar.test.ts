@@ -322,3 +322,228 @@ describe("agent-name aliases (SPEC v3 Reflex meeting)", () => {
     expect(subagents.state.callCount).toBe(0);
   });
 });
+
+/**
+ * SPEC v3 "Reflex meeting" + issue #41: Claude-Code-shaped task fields —
+ * `subagent_type`, `description`, `run_in_background` — are accepted
+ * cross-harness spellings that normalize onto canonical fields at
+ * validation, with each applied rename taught on the result/receipt as
+ * `field "<field>" → "<to>"`. The schema still fails closed on fields it
+ * does not know.
+ */
+describe("cross-harness field spellings (SPEC v3 Reflex meeting)", () => {
+  let session: TestSession | undefined;
+
+  afterEach(() => {
+    session?.dispose();
+    session = undefined;
+  });
+
+  test("a Claude-Code-shaped task normalizes subagent_type and labels by description", async () => {
+    // The trained Task call {subagent_type, description, prompt}:
+    // subagent_type folds into agent BEFORE resolution so the alias table
+    // applies (general-purpose → default); description becomes the
+    // section-head label without replacing the correlation id.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([fauxAssistantMessage("SHAPED-OK")]);
+
+    const result = await callDelegate(session, {
+      tasks: [
+        {
+          subagent_type: "general-purpose",
+          description: "classify auth",
+          prompt: "Classify the auth boundary",
+          tools: ["read"],
+        },
+      ],
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("SHAPED-OK");
+    // One note per applied normalization, then the alias expansion it
+    // enabled — the same teaching pattern as agent aliases.
+    expect(result.text).toContain('field "subagent_type" → "agent"');
+    expect(result.text).toContain('agent "general-purpose" → "default"');
+    // The description is the section-head label, not the correlation id.
+    expect(result.text).toContain("### Task classify auth — completed");
+    expect(result.text).not.toContain("### Task task-1");
+  });
+
+  test("top-level run_in_background normalizes to async — a multi-task call returns a ticket", async () => {
+    // SPEC v3 "Reflex meeting"/"Interaction grammar": identical to
+    // `async: true` — a receipt immediately, settled results delivered.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([
+      fauxAssistantMessage("BG-A"),
+      fauxAssistantMessage("BG-B"),
+    ]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "a" }, { prompt: "b" }],
+      run_in_background: true,
+    });
+
+    expect(dispatched.isError).toBe(false);
+    expect(objectOf(dispatched.details, "dispatched.details").async).toBe(true);
+    expect(dispatched.text).toContain('field "run_in_background" → "async"');
+    const ticket = ticketIdOf(dispatched.text);
+
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(settled.isError).toBe(false);
+    expect(settled.text).toContain("BG-A");
+    expect(settled.text).toContain("BG-B");
+  });
+
+  test("per-task run_in_background normalizes to async and labels the ticket view", async () => {
+    // Harnesses that carry the flag on each task emit this shape; the
+    // receipt records the per-task normalization and the settled section
+    // head prefers the description label.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([fauxAssistantMessage("TASK-BG")]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [
+        {
+          prompt: "background me",
+          run_in_background: true,
+          description: "classify auth",
+        },
+      ],
+    });
+
+    expect(dispatched.isError).toBe(false);
+    expect(objectOf(dispatched.details, "dispatched.details").async).toBe(true);
+    expect(dispatched.text).toContain(
+      'task-1: field "run_in_background" → "async"',
+    );
+    const ticket = ticketIdOf(dispatched.text);
+
+    const settled = await callDelegateTicket(session, {
+      action: "wait",
+      ticket,
+      timeoutMs: 5000,
+    });
+    expect(settled.isError).toBe(false);
+    // The description label rides the ticket's section headers — and the
+    // normalization note persists there too (journal-carried).
+    expect(settled.text).toContain("### Task classify auth — completed");
+    expect(settled.text).toContain('field "run_in_background" → "async"');
+  });
+
+  test("run_in_background: false pins a batch synchronous, like async: false", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([
+      fauxAssistantMessage("SYNC-RIB-A"),
+      fauxAssistantMessage("SYNC-RIB-B"),
+    ]);
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "a" }, { prompt: "b" }],
+      run_in_background: false,
+    });
+
+    expect(result.isError).toBe(false);
+    expect(objectOf(result.details, "result.details").async).toBe(false);
+    expect(result.text).toContain('field "run_in_background" → "async"');
+    expect(result.text).toContain("SYNC-RIB-A");
+  });
+
+  test("agent + subagent_type naming different agents errors naming both fields", async () => {
+    // SPEC v3 "Reflex meeting": the two spellings name one field —
+    // agreement is fine, divergence is a whole-call error.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "x", agent: "coder", subagent_type: "explore" }],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("'agent'");
+    expect(result.text).toContain("'subagent_type'");
+    expect(result.text).toContain("coder");
+    expect(result.text).toContain("explore");
+    expect(subagents.state.callCount).toBe(0);
+  });
+
+  test("agent + subagent_type naming the same agent is accepted with the note", async () => {
+    // Equal-after-alias spellings agree: alias expansion is shared, so
+    // "scout" and "explore" are the same agent — no conflict.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([fauxAssistantMessage("AGREE-OK")]);
+
+    const result = await callDelegate(session, {
+      tasks: [
+        {
+          prompt: "x",
+          agent: "scout",
+          subagent_type: "explore",
+        },
+      ],
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("AGREE-OK");
+    expect(result.text).toContain('field "subagent_type" → "agent"');
+    expect(result.text).toContain('agent "scout" → "explore"');
+  });
+
+  test("async + run_in_background with conflicting values errors naming both fields", async () => {
+    // SPEC v3 "Reflex meeting": explicit async wins only when they agree;
+    // a value conflict fails the call before any task starts.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "x" }],
+      async: true,
+      run_in_background: false,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("'async'");
+    expect(result.text).toContain("'run_in_background'");
+    expect(subagents.state.callCount).toBe(0);
+  });
+
+  test("async + run_in_background agreeing still runs, noting the rename", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([fauxAssistantMessage("AGREE-BG")]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "x" }],
+      async: true,
+      run_in_background: true,
+    });
+
+    expect(dispatched.isError).toBe(false);
+    expect(objectOf(dispatched.details, "dispatched.details").async).toBe(true);
+    expect(dispatched.text).toContain('field "run_in_background" → "async"');
+  });
+
+  test("an unknown task field still fails closed at the schema boundary", async () => {
+    // SPEC v3 "Reflex meeting": additionalProperties: false stays — only
+    // the three named spellings were admitted; `priority` is not a task
+    // field in any harness we accept.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "x", priority: 1 }],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/priority|additional propert|unexpected/i);
+    expect(subagents.state.callCount).toBe(0);
+  });
+});

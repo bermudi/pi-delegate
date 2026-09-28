@@ -24,6 +24,18 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   concurrency) are unchanged.
 - **Additive — misfire telemetry.** Dispatches rejected before
   execution record a telemetry row. No behavior change.
+- **Additive — cross-harness task-field spellings (#41).** Task objects
+  accept `subagent_type` (normalizes to `agent` before alias
+  resolution), `description` (≤200-char display label preferred over
+  the id in call rows and section headers — not a correlation key),
+  and `run_in_background` at top level or per task (normalizes to
+  `async`). Conflicting spellings (`agent` vs `subagent_type` naming
+  different agents, `async` vs `run_in_background` disagreeing) are
+  validation errors naming both; each applied rename is reported as
+  `field "<field>" → "<to>"`. `additionalProperties: false` stays.
+- **Changed — default `maxConcurrent` is 8, not 3 (#41).** Field
+  survey: letta/grok/oh-my-pi default 32; minimax/deepseek/MiMo/fx
+  uncapped. The `concurrency` maps remain the rate-limit guard.
 - Deferred to a later v3 unit: steering receipts (grammar fixed in
   SPEC v3, not yet implemented).
 

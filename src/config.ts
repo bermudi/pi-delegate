@@ -61,7 +61,12 @@ export interface DelegateConfig {
 }
 
 export const DEFAULT_CONFIG: DelegateConfig = {
-  maxConcurrent: 3,
+  // Default 8, not 3 (#41): the 2026-09-28 harness survey found
+  // letta/grok/oh-my-pi default to 32 and minimax/deepseek/MiMo/fx ship
+  // uncapped — 3 was conservative enough to tax ordinary fan-outs, while
+  // 8 stays moderate. `concurrency.models`/`providers` per-model maps
+  // remain the real rate-limit guard for providers that need one.
+  maxConcurrent: 8,
   concurrency: { default: undefined, providers: {}, models: {} },
   models: {},
   modelsByParent: {},

@@ -3,6 +3,17 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 export type Workspace = "shared" | "scratch" | "isolated";
 
+/**
+ * One applied cross-harness field spelling (SPEC v3 "Reflex meeting"):
+ * `field` is the compatibility name the caller wrote, `to` the canonical
+ * field it normalized to — rendered `field "<field>" → "<to>"` so the
+ * receipt teaches the real name.
+ */
+export interface FieldNormalization {
+  readonly field: string;
+  readonly to: string;
+}
+
 /** A task after semantic validation and agent/model/tool resolution. */
 export interface ResolvedTask {
   readonly index: number;
@@ -18,6 +29,19 @@ export interface ResolvedTask {
    * task sections so the expansion teaches the real name.
    */
   readonly aliasedFrom: string | undefined;
+  /**
+   * Cross-harness spellings folded into this task's canonical fields at
+   * validation (e.g. `subagent_type` → `agent`), rendered as
+   * `field "<field>" → "<to>"` beside the alias note. Undefined when the
+   * call used canonical spellings only.
+   */
+  readonly normalizedFrom: readonly FieldNormalization[] | undefined;
+  /**
+   * The caller's `description` label (cross-harness field): display-only —
+   * preferred over the correlation id in call rows and section headers,
+   * never an identity or dependency key.
+   */
+  readonly description: string | undefined;
   /** Absolute, canonicalized working directory for the task. */
   readonly cwd: string;
   readonly model: Model<Api>;
@@ -168,8 +192,8 @@ export interface Ticket {
   readonly totalTasks: number;
   /** Index-aligned per-task outcomes; entries appear as tasks finish. */
   readonly outcomes: readonly (TaskOutcome | undefined)[];
-  /** Labels, correlation ids, resume tags, alias notes — plus the task cwd, which relativizes attributed-file display (optional: records written before file attribution carry none). */
-  readonly tasks: readonly (Pick<ResolvedTask, "id" | "agent" | "resumeTag" | "aliasedFrom"> & { readonly cwd?: string })[];
+  /** Labels, correlation ids, resume tags, alias/normalization notes — plus the task cwd, which relativizes attributed-file display (optional: records written before file attribution carry none). */
+  readonly tasks: readonly (Pick<ResolvedTask, "id" | "agent" | "resumeTag" | "aliasedFrom" | "normalizedFrom" | "description"> & { readonly cwd?: string })[];
   /** Unanswered worker questions (never persisted across host shutdown). */
   readonly questions: readonly WorkerQuestion[];
   /**

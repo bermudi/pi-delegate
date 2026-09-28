@@ -27,6 +27,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
 import {
+  descriptionLabel,
   formatDispatchResult,
   resumeTagOf,
   truncateLine,
@@ -133,6 +134,7 @@ export function renderDelegateCall(
   args: {
     readonly tasks?: readonly {
       readonly id?: string;
+      readonly description?: string;
       readonly prompt?: string;
       readonly resumeFrom?: string;
     }[];
@@ -153,7 +155,9 @@ export function renderDelegateCall(
     ),
   ];
   tasks.slice(0, CALL_PREVIEW_TASKS).forEach((task, index) => {
-    const label = task.id ?? `task-${index + 1}`;
+    // SPEC v3 "Reflex meeting": the caller's `description` label replaces
+    // the id in display rows — display only, never a correlation key.
+    const label = descriptionLabel(task.description) ?? task.id ?? `task-${index + 1}`;
     const preview =
       task.prompt !== undefined && task.prompt.trim() !== ""
         ? promptPreview(task.prompt)

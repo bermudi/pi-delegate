@@ -28,6 +28,7 @@ import {
 } from "./src/coordinator.ts";
 import {
   aliasNote,
+  fieldNotes,
   formatDispatchResult,
   serializedNotices,
 } from "./src/format.ts";
@@ -156,6 +157,28 @@ const taskSchema = Type.Object(
           "Ids of tasks in this batch that must succeed before this one starts; their outputs are handed off.",
       }),
     ),
+    // Cross-harness compatibility spellings (SPEC v3 "Reflex meeting"):
+    // other harnesses' trained field names normalize onto canonical ones
+    // at validation — the receipt and result say so per applied rename.
+    subagent_type: Type.Optional(
+      Type.String({
+        description:
+          "Cross-harness spelling of 'agent' (Claude Code Task field): normalizes to agent before resolution, so aliases apply. Both present and differing is an error.",
+      }),
+    ),
+    description: Type.Optional(
+      Type.String({
+        maxLength: 200,
+        description:
+          "Cross-harness spelling (Claude Code Task field): a short label shown in place of the task id in call rows and section headers. Not a correlation key — dependsOn, answer, and steer still use id.",
+      }),
+    ),
+    run_in_background: Type.Optional(
+      Type.Boolean({
+        description:
+          "Cross-harness spelling of 'async' (Claude Code Task field): normalizes to the dispatch-level async decision. Conflicting values across fields is an error.",
+      }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -171,6 +194,12 @@ const delegateSchema = Type.Object(
       Type.Boolean({
         description:
           "Default depends on cardinality: one task runs synchronously and returns inline; a multi-task batch returns a ticket immediately and delivers the settled result automatically. Pass true to background a single task, false to block on a batch. Inspect or control tickets with delegate_ticket.",
+      }),
+    ),
+    run_in_background: Type.Optional(
+      Type.Boolean({
+        description:
+          "Cross-harness spelling of 'async' (Claude Code Task field): normalizes to the dispatch-level async decision; 'async' wins when both say the same, a value conflict is an error.",
       }),
     ),
     workspace: Type.Optional(
@@ -487,7 +516,7 @@ function normalizeTask(value: unknown, index: number): unknown {
     throw new Error(`tasks[${index}]: ${THINKING_FIELD_REJECTION}`);
   }
   if (typeof task.tools === "string") task.tools = normalizeTools(task.tools);
-  stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent"]);
+  stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent", "subagent_type", "description"]);
   return task;
 }
 
@@ -518,6 +547,11 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
       `'async' must be a boolean, not the string ${JSON.stringify(args.async)}.`,
     );
   }
+  if (typeof args.run_in_background === "string") {
+    throw new Error(
+      `'run_in_background' must be a boolean, not the string ${JSON.stringify(args.run_in_background)}.`,
+    );
+  }
   if (!Array.isArray(args.tasks)) return;
   args.tasks.forEach((task, index) => {
     if (!isRecord(task)) return;
@@ -532,6 +566,11 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
     if (typeof task.deadlineMs === "string") {
       throw new Error(
         `${where}: 'deadlineMs' must be a positive number, not the string ${JSON.stringify(task.deadlineMs)}.`,
+      );
+    }
+    if (typeof task.run_in_background === "string") {
+      throw new Error(
+        `${where}: 'run_in_background' must be a boolean, not the string ${JSON.stringify(task.run_in_background)}.`,
       );
     }
   });
@@ -619,6 +658,11 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   if (!hasTasks) {
     const task: Record<string, unknown> = {};
     for (const field of taskFieldNames) {
+      // run_in_background is a task field in the schema (per-task
+      // spelling) but a dispatch-level decision in flat calls — it stays
+      // top-level so `{run_in_background: true}` alone still fails as
+      // "async dispatch requires at least one task".
+      if (field === "run_in_background") continue;
       if (args[field] !== undefined) {
         task[field] = args[field];
         delete args[field];
@@ -629,10 +673,13 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     // Flat fields cannot merge into an explicit batch (SPEC: folding only
     // applies without a task array) — a stray task field beside one is a
     // caller mistake, so name it rather than surfacing a bare
-    // additionalProperties error. `workspace` is excluded: it is also a
-    // legal top-level batch default.
+    // additionalProperties error. `workspace` and `run_in_background` are
+    // excluded: both are also legal top-level dispatch fields.
     const stray = taskFieldNames.filter(
-      (field) => field !== "workspace" && args[field] !== undefined,
+      (field) =>
+        field !== "workspace" &&
+        field !== "run_in_background" &&
+        args[field] !== undefined,
     );
     if (stray.length > 0) {
       throw new Error(
@@ -795,7 +842,10 @@ Three sibling tools share Delegate's machinery:
   inline), \`cwd\`, \`systemPrompt\`, \`tools\` (\`*\` writer group, \`ro\`
   read-only group, or tool names), \`deadlineMs\` (ms),
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated),
-  \`dependsOn\` (task ids to run first).
+  \`dependsOn\` (task ids to run first). Cross-harness spellings also
+  work: \`subagent_type\` → \`agent\`, \`description\` labels the task
+  in views, \`run_in_background\` (top-level or per task) → \`async\`;
+  each applied rename is reported on the result.
   A top-level \`workspace\` is the batch default.
 - \`dependsOn\` orders tasks in one batch: name earlier task ids (an
   explicit \`id\`, or the generated \`task-1\`, \`task-2\`, ...). A task
@@ -1246,9 +1296,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
         phase,
         message: error instanceof Error ? error.message : String(error),
         taskCount: tasks?.length ?? 0,
-        agents: (tasks ?? []).map((task) =>
-          task.agent === undefined ? "inline" : canonicalAgentName(task.agent),
-        ),
+        agents: (tasks ?? []).map((task) => {
+          // `subagent_type` is the same field under its cross-harness
+          // spelling — a rejected call's shape records the name the
+          // caller meant, not the spelling's absence from `agent`.
+          const named = task.agent ?? task.subagent_type;
+          return named === undefined ? "inline" : canonicalAgentName(named);
+        }),
         workspaces: (tasks ?? []).map(
           (task) => task.workspace ?? batchWorkspace ?? "shared",
         ),
@@ -1737,7 +1791,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
             noteMisfire(
               ctx, agentDir, telemetryConfigHint(agentDir),
               "validation", error, params.tasks, params.workspace,
-              params.async ?? params.tasks.length > 1,
+              params.async ??
+                params.run_in_background ??
+                params.tasks.find((task) => task.run_in_background !== undefined)
+                  ?.run_in_background ??
+                params.tasks.length > 1,
             );
           } catch {
             // The original rejection stands; nothing here may throw.
@@ -1857,20 +1915,31 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 );
               });
             armDelivery(ticket);
-            // The alias-expansion note the settled views carry (SPEC v3
+            // The teaching notes the settled views carry (SPEC v3
             // "Reflex meeting") must also reach the caller at dispatch —
-            // the receipt is the only sync surface an async call has.
-            const aliasNotes = ticket.tasks.flatMap((task) => {
-              const note = aliasNote(task.aliasedFrom, task.agent);
-              return note === "" ? [] : [`${task.id}: ${note}`];
-            });
+            // the receipt is the only sync surface an async call has:
+            // applied field normalizations (call-level first), then the
+            // alias expansions they enabled.
+            const teachNotes = [
+              ...call.callNotes.map(
+                (note) => `field "${note.field}" → "${note.to}"`,
+              ),
+              ...ticket.tasks.flatMap((task) => [
+                ...fieldNotes(task.normalizedFrom).map(
+                  (line) => `${task.id}: ${line}`,
+                ),
+                ...(aliasNote(task.aliasedFrom, task.agent) !== ""
+                  ? [`${task.id}: ${aliasNote(task.aliasedFrom, task.agent)}`]
+                  : []),
+              ]),
+            ];
             return {
               content: [
                 {
                   type: "text" as const,
                   text:
                     `Ticket "${ticket.id}" created: ${ticket.totalTasks} task(s) running in the background.\n` +
-                    (aliasNotes.length > 0 ? `${aliasNotes.join("\n")}\n` : "") +
+                    (teachNotes.length > 0 ? `${teachNotes.join("\n")}\n` : "") +
                     `Results will be delivered automatically when the batch settles; keep working. ` +
                     `delegate_ticket can wait on or cancel it if needed (action "wait" / "cancel").` +
                     (ticket.notices.length > 0
@@ -1896,12 +1965,19 @@ export default function delegateExtension(api: ExtensionAPI): void {
             (outcome) =>
               outcome.status === "failed" || outcome.status === "blocked",
           );
+          // Dispatch-level normalizations (e.g. top-level
+          // run_in_background → async) precede the admission notices —
+          // they were decided before execution (SPEC v3 "Reflex meeting").
+          const callNoteLines = call.callNotes.map(
+            (note) => `field "${note.field}" → "${note.to}"`,
+          );
+          const textNotices = [...callNoteLines, ...notices];
           return {
             content: [
               {
                 type: "text" as const,
                 text:
-                  (notices.length > 0 ? `${notices.join("\n")}\n\n` : "") +
+                  (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
                   formatDispatchResult(result.outcomes, tasks, outputBounds),
               },
             ],
@@ -1929,7 +2005,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               ...(result.outcomes.some((outcome) => outcome.quarantined)
                 ? { usageLowerBound: true }
                 : {}),
-              ...(notices.length > 0 ? { notices } : {}),
+              ...(textNotices.length > 0 ? { notices: textNotices } : {}),
             },
             usage: result.usage,
             isError: allFailed,
@@ -1945,7 +2021,16 @@ export default function delegateExtension(api: ExtensionAPI): void {
         try {
           return operations.run(
             call.operationId,
-            dispatchFingerprint({ async: call.async, tasks: call.tasks }),
+            // The fingerprint covers the post-normalization request, so
+            // compat spellings (`subagent_type`, `run_in_background`) of
+            // the same dispatch dedupe — `normalizedFrom` is teaching
+            // metadata, not request content.
+            dispatchFingerprint({
+              async: call.async,
+              tasks: call.tasks.map(
+                ({ normalizedFrom: _normalized, ...task }) => task,
+              ),
+            }),
             executeDispatch,
             () =>
               operationTicket

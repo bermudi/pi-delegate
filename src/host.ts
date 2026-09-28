@@ -403,6 +403,8 @@ export async function resolveTasks(
         agent ??
         (resumeTag !== undefined ? `resume:${resumeTag}` : "inline"),
       aliasedFrom,
+      normalizedFrom: task.normalizedFrom,
+      description: task.description,
       cwd: canonicalPath(cwd),
       model,
       thinking,

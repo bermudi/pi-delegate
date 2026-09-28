@@ -60,6 +60,12 @@ const savedTicket = Type.Object({
     id: Type.String(), agent: Type.String(),
     resumeTag: Type.Optional(Type.String()),
     aliasedFrom: Type.Optional(Type.String()),
+    // Optional: records written before cross-harness field compat have
+    // neither; their sections render the id label and no notes.
+    description: Type.Optional(Type.String()),
+    normalizedFrom: Type.Optional(Type.Array(Type.Object({
+      field: Type.String(), to: Type.String(),
+    }))),
     // Optional: records written before file attribution have no cwd —
     // their attributed paths render absolute instead of relative.
     cwd: Type.Optional(Type.String()),
@@ -127,7 +133,7 @@ export class TicketJournal {
       version: 1,
       id: ticket.id,
       status: ticket.status,
-      tasks: ticket.tasks.map(({ id, agent, resumeTag, aliasedFrom, cwd }) => ({ id, agent, resumeTag, aliasedFrom, cwd })),
+      tasks: ticket.tasks.map(({ id, agent, resumeTag, aliasedFrom, description, normalizedFrom, cwd }) => ({ id, agent, resumeTag, aliasedFrom, description, normalizedFrom, cwd })),
       outcomes: ticket.outcomes.map((item) => item ?? null),
       outputBounds: ticket.outputBounds,
       createdAt: ticket.createdAt,

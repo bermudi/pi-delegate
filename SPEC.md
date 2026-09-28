@@ -102,6 +102,20 @@ mid-flight the parent can steer. The grammar:
   matching.
 - **Unknown names still error** — with the available list, in one
   teachable round-trip (the v1 `general` error recovered in one retry).
+- **Cross-harness field spellings.** Task objects also accept the
+  Claude-Code-shaped spellings trained callers emit: `subagent_type`
+  normalizes to `agent` before agent resolution (the alias table
+  applies to it — `subagent_type: "general-purpose"` resolves
+  `default`), `description` (≤200 chars) is a display label preferred
+  over the id in call rows and section headers (never a correlation
+  key), and `run_in_background` — at top level or per task —
+  normalizes to the dispatch-level `async` decision. `agent` and
+  `subagent_type` present with different agents, or `async` and
+  `run_in_background` present with different values, is a validation
+  error naming both fields; every applied rename is reported on the
+  result/receipt as `field "<field>" → "<to>"`, the same teaching
+  pattern as alias expansion (#41). `additionalProperties: false`
+  stays closed — unrecognized fields still fail at the schema.
 
 ## Surface rules
 
@@ -111,6 +125,11 @@ mid-flight the parent can steer. The grammar:
   concurrency, batch-in-one-call.)
 - **No model-facing knobs for machinery.** Internal tuning lives in
   `delegate.json`, not the schema. The schema stays reflex-shaped.
+- **Concurrency default.** `maxConcurrent` defaults to 8 (#41): the
+  field survey found letta/grok/oh-my-pi default 32 and
+  minimax/deepseek/MiMo/fx uncapped — 3 taxed ordinary fan-outs. The
+  `concurrency.models`/`providers` maps remain the rate-limit guard
+  for providers that need one.
 
 ## Observability
 

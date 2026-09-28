@@ -824,6 +824,18 @@ New v3 contract — no v1 evidence; SPEC.md "Interaction grammar",
   validation, admission, config-load, and call-shape rejections plus the
   successful-dispatch no-row case live in
   `tests/contract/telemetry.test.ts`.
+- **Cross-harness field spellings (v3, #41):** `tests/contract/
+  grammar.test.ts` also covers the Claude-Code-shaped call
+  (`subagent_type` + `description` + `prompt` → alias expansion +
+  `field "…" → "…"` notes + description section head), top-level and
+  per-task `run_in_background` → `async` (ticket returned; the note
+  persists into the settled ticket view), `run_in_background: false`
+  pinning a batch sync, the `agent`/`subagent_type` and
+  `async`/`run_in_background` conflicts naming both fields,
+  agreeing-spellings acceptance, and `priority`-style unknown fields
+  failing at the schema boundary. The `maxConcurrent` default of 8 is
+  pinned through the boundary in `tests/contract/dispatch.test.ts`
+  (nine read-only tasks reach exactly eight in flight).
 - **Gap:** pre-`execute` rejections (host schema validation and
   `prepareArguments` recoveries such as `ticketAction`→`delegate_ticket`)
   have no context to locate the telemetry config and record no row.

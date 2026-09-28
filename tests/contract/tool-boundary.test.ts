@@ -55,22 +55,27 @@ describe("delegate public tool contract", () => {
     const taskFields = objectOf(task.properties, "task properties");
 
     expect(Object.keys(top).sort()).toEqual(
-      ["async", "operationId", "tasks", "workspace"].sort(),
+      ["async", "operationId", "run_in_background", "tasks", "workspace"].sort(),
     );
 
     // The task shape stays what it was — minus `model` and `thinking`,
     // which callers no longer select (an explicit one gets a validation
-    // error instead).
+    // error instead) — plus the #41 cross-harness compatibility
+    // spellings `subagent_type`/`description`/`run_in_background`, which
+    // normalize to `agent`/a display label/`async` with visible notes.
     expect(Object.keys(taskFields).sort()).toEqual(
       [
         "agent",
         "cwd",
         "deadlineMs",
         "dependsOn",
+        "description",
         "id",
         "prompt",
         "resumeFrom",
+        "run_in_background",
         "sessionId",
+        "subagent_type",
         "systemPrompt",
         "tools",
         "workspace",
