@@ -194,6 +194,29 @@ describe("agent-name aliases (SPEC v3 Reflex meeting)", () => {
     expect(settled.text).toContain('agent "general-purpose" → "default"');
   });
 
+  test("the expansion note appears on the async dispatch receipt (#39)", async () => {
+    // The receipt is the only sync surface an async call has — the note
+    // must appear at dispatch, not only in the delivered/settled views.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([
+      fauxAssistantMessage("RECEIPT-1"),
+      fauxAssistantMessage("RECEIPT-2"),
+    ]);
+
+    // A multi-task batch is async by default — no explicit `async` needed.
+    const dispatched = await callDelegate(session, {
+      tasks: [
+        { prompt: "work", agent: "explore" },
+        { prompt: "more work", agent: "plan" },
+      ],
+    });
+
+    expect(dispatched.isError).toBe(false);
+    expect(dispatched.text).toContain('task-1: agent "explore" → "scout"');
+    expect(dispatched.text).toContain('task-2: agent "plan" → "scout"');
+  });
+
   test("an unknown name after alias expansion errors with the available list", async () => {
     // SPEC v3 "Reflex meeting": names that survive expansion still error,
     // in one teachable round-trip that lists built-ins and their aliases.

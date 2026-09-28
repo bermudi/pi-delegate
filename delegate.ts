@@ -27,6 +27,7 @@ import {
   type DispatchOutcome,
 } from "./src/coordinator.ts";
 import {
+  aliasNote,
   formatDispatchResult,
   serializedNotices,
 } from "./src/format.ts";
@@ -1856,12 +1857,20 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 );
               });
             armDelivery(ticket);
+            // The alias-expansion note the settled views carry (SPEC v3
+            // "Reflex meeting") must also reach the caller at dispatch —
+            // the receipt is the only sync surface an async call has.
+            const aliasNotes = ticket.tasks.flatMap((task) => {
+              const note = aliasNote(task.aliasedFrom, task.agent);
+              return note === "" ? [] : [`${task.id}: ${note}`];
+            });
             return {
               content: [
                 {
                   type: "text" as const,
                   text:
                     `Ticket "${ticket.id}" created: ${ticket.totalTasks} task(s) running in the background.\n` +
+                    (aliasNotes.length > 0 ? `${aliasNotes.join("\n")}\n` : "") +
                     `Results will be delivered automatically when the batch settles; keep working. ` +
                     `delegate_ticket can wait on or cancel it if needed (action "wait" / "cancel").` +
                     (ticket.notices.length > 0
