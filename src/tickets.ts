@@ -5,6 +5,7 @@ import {
   aliasNote,
   descriptionLabel,
   displayPath,
+  briefNote,
   fieldNotes,
   filesLine,
   integrationLines,
@@ -53,6 +54,13 @@ export interface SteerDetails {
   readonly status: SteerStatus;
   /** On a duplicate receipt: the status the original call returned. */
   readonly replayed?: SteerStatus;
+}
+
+/** Machine-readable half of an interrupt receipt (action "interrupt"). */
+export interface InterruptDetails {
+  readonly ticket: string;
+  readonly taskId: string;
+  readonly status: "interrupted" | "not-applied";
 }
 
 interface SteerRecord {
@@ -143,7 +151,10 @@ function completedCount(ticket: Ticket): number {
 }
 
 function recoveryWarning(ticket: Ticket): string | undefined {
-  if (ticket.status === "interrupted") {
+  // A live ticket can also settle interrupted (every task interrupted on
+  // request) — that record is final and its tasks carry resume hints, so
+  // the cold-recovery warning applies only to a recovered one.
+  if (ticket.status === "interrupted" && ticket.recovered) {
     return "This run stopped without a final record. Unfinished tasks may have changed files or run commands; nothing will resume automatically.";
   }
   if (ticket.recovered && completedCount(ticket) < ticket.totalTasks) {
@@ -337,8 +348,12 @@ function ticketView(
   live?: LiveState,
 ): string {
   const warning = recoveryWarning(ticket);
+  const brief = briefNote(ticket.brief);
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished${isTerminal(ticket.status) ? "" : liveCounts(ticket, live)}.`,
+    // The shared batch brief is mentioned once, at the head — never
+    // inside a task section (SPEC v3 "Batch brief").
+    ...(brief !== undefined ? [brief] : []),
     ...(warning ? [warning] : []),
     ...ticket.notices,
     ...ticket.questions.map((q) =>
@@ -440,6 +455,8 @@ export class TicketStore {
         createdAt: item.createdAt,
         recovered: true,
         notices: item.notices,
+        // Optional in the journal — pre-brief records have none.
+        ...(item.brief !== undefined ? { brief: item.brief } : {}),
       };
       this.tickets.set(item.id, { record: recovered, rt: this.runtime(false) });
     }
@@ -500,6 +517,7 @@ export class TicketStore {
     options: {
       readonly holdSettlement: boolean;
       readonly outputBounds: OutputBounds;
+      readonly brief?: string;
     },
   ): Ticket {
     const record: Writable<Ticket> = {
@@ -510,6 +528,7 @@ export class TicketStore {
       outcomes: new Array<TaskOutcome | undefined>(tasks.length).fill(undefined),
       tasks,
       questions: [],
+      ...(options.brief !== undefined ? { brief: options.brief } : {}),
       outputBounds: options.outputBounds,
       createdAt: Date.now(),
       notices: [],
@@ -868,6 +887,98 @@ export class TicketStore {
   }
 
   /**
+   * SPEC v3 "Interaction grammar — Interrupt": abort the task's live turn
+   * cooperatively — the same abort path as cancellation (quiescence
+   * confirmed before reservations release), but the outcome settles
+   * `interrupted` and the worker stays resumable: a pooled session
+   * returns reusable, a fresh task keeps its persisted transcript and a
+   * resume hint. There is no idempotency key — interrupt is naturally
+   * idempotent: anything it could no longer reach reports `not-applied`
+   * (settled ticket or task, interrupted already, unknown task, or no
+   * live turn to abort).
+   */
+  interrupt(ticket: Ticket, callTaskId: string | undefined): TicketRpcResult {
+    const { record, rt } = this.entry(ticket);
+    const notApplied = (text: string, taskId = ""): TicketRpcResult => ({
+      text,
+      isError: false,
+      ticket,
+      interrupt: { ticket: ticket.id, taskId, status: "not-applied" },
+    });
+    if (record.status !== "running") {
+      return notApplied(
+        ticket.recovered
+          ? `Interrupt on ticket "${ticket.id}": not-applied — it is a recovered ${record.status} result; recovery never resumes it. Poll it for the final outcome.`
+          : `Interrupt on ticket "${ticket.id}": not-applied — the ticket is already ${record.status}; nothing is running. Poll it for the final result.`,
+      );
+    }
+    let taskIndex: number;
+    if (callTaskId !== undefined) {
+      taskIndex = record.tasks.findIndex((task) => task.id === callTaskId);
+      if (taskIndex < 0) {
+        return notApplied(
+          `Interrupt on ticket "${ticket.id}": not-applied — there is no task "${callTaskId}". Its tasks: ${record.tasks.map((t) => `"${t.id}"`).join(", ")}.`,
+        );
+      }
+    } else {
+      const unsettled = record.tasks
+        .map((_, index) => index)
+        .filter((index) => record.outcomes[index] === undefined);
+      if (unsettled.length === 0) {
+        return notApplied(
+          `Interrupt on ticket "${ticket.id}": not-applied — it has no running task left; poll it for the final results.`,
+        );
+      }
+      if (unsettled.length > 1) {
+        return {
+          text:
+            `action "interrupt" needs taskId on ticket "${ticket.id}" — ${unsettled.length} tasks are still running: ` +
+            `${unsettled.map((i) => `"${record.tasks[i]!.id}"`).join(", ")}.`,
+          isError: true,
+          ticket,
+        };
+      }
+      taskIndex = unsettled[0]!;
+    }
+    const taskId = record.tasks[taskIndex]!.id;
+    const outcome = record.outcomes[taskIndex];
+    if (outcome !== undefined) {
+      return notApplied(
+        `Interrupt on ticket "${ticket.id}" task "${taskId}": not-applied — it already settled (${outcome.status}); its outcome is final. Poll the ticket for it.`,
+        taskId,
+      );
+    }
+    const handle = rt.executions.get(taskIndex);
+    if (handle === undefined) {
+      return notApplied(
+        `Interrupt on ticket "${ticket.id}" task "${taskId}": not-applied — it has no live turn right now (queued, preparing, or between attempts); nothing is running to interrupt.`,
+        taskId,
+      );
+    }
+    // abort() may never resolve — a provider or tool ignoring the signal
+    // leaves the worker quarantined, and nothing caller-visible may block
+    // on it. The receipt reports the requested settlement; the outcome
+    // records the truth when the run winds down.
+    void handle.abort("interrupted").catch((error: unknown) => {
+      console.error(
+        `[delegate] interrupt abort of task ${taskId} on ticket ${ticket.id} failed`,
+        error,
+      );
+    });
+    console.info(`[delegate] ticket ${ticket.id} task ${taskId}: interrupt requested`);
+    return {
+      text:
+        `Interrupt for task "${taskId}" on ticket "${ticket.id}": interrupted — ` +
+        `its current turn is aborting and the task settles 'interrupted' once the worker confirms ` +
+        `it stopped (the same quiescence gate as cancellation). Its pooled session returns reusable, ` +
+        `or its transcript keeps a resume hint; poll the ticket for the outcome.`,
+      isError: false,
+      ticket,
+      interrupt: { ticket: ticket.id, taskId, status: "interrupted" },
+    };
+  }
+
+  /**
    * Drain the parked steers for one task — the run loop calls this just
    * before prompt() so each message merges at turn one. Records flip to
    * delivered; a task that settles with steers still parked voids them
@@ -946,9 +1057,13 @@ export class TicketStore {
         ? "completed"
         : record.outcomes.every((o) => o!.status === "cancelled")
           ? "cancelled"
-          : record.outcomes.some((o) => o!.status === "ok")
-            ? "partial"
-            : "failed",
+          : // Interrupt is terminal first-class, like cancelled: a batch
+            // whose tasks were all interrupted settles interrupted.
+            record.outcomes.every((o) => o!.status === "interrupted")
+            ? "interrupted"
+            : record.outcomes.some((o) => o!.status === "ok")
+              ? "partial"
+              : "failed",
     );
   }
 
@@ -1201,6 +1316,8 @@ export interface TicketRpcResult {
   readonly ticket?: Ticket;
   /** The steer receipt's machine-readable half (action "steer" only). */
   readonly steer?: SteerDetails;
+  /** The interrupt receipt's machine half (action "interrupt" only). */
+  readonly interrupt?: InterruptDetails;
 }
 
 /** delegate_ticket actions against the store. */
@@ -1213,7 +1330,8 @@ export async function handleTicketRpc(
       | "pause"
       | "resume"
       | "answer"
-      | "steer";
+      | "steer"
+      | "interrupt";
     ticket: string | undefined;
     force: boolean;
     timeoutMs: number | undefined;
@@ -1249,6 +1367,24 @@ export async function handleTicketRpc(
       };
     }
     return store.steer(ticket, call.taskId, call.steerId!, call.message!);
+  }
+  // Interrupt shares the receipt discipline: an unknown or recovered
+  // target answers not-applied, not a generic refusal.
+  if (call.action === "interrupt") {
+    if (ticket === undefined) {
+      return {
+        text:
+          `Interrupt on ticket '${call.ticket ?? ""}': not-applied — the ticket ` +
+          `is unknown; nothing was aborted. Poll with no ticket to list the live ones.`,
+        isError: false,
+        interrupt: {
+          ticket: call.ticket ?? "",
+          taskId: call.taskId ?? "",
+          status: "not-applied",
+        },
+      };
+    }
+    return store.interrupt(ticket, call.taskId);
   }
   if (!ticket) {
     return {

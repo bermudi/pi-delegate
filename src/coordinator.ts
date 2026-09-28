@@ -12,6 +12,7 @@ import {
   handoffAppendix,
   prerequisiteSatisfied,
 } from "./graph.ts";
+import { briefPreamble } from "./format.ts";
 import type { HostEnvironment } from "./host.ts";
 import type { ActivityStore } from "./activity.ts";
 import type { SessionPool } from "./sessions.ts";
@@ -150,6 +151,12 @@ export class DispatchCoordinator {
         outcomes: TaskOutcome[],
       ) => Promise<readonly TaskOutcome[]>;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
+      /**
+       * The shared batch brief (SPEC v3 "Batch brief"): prepended to
+       * every task's prompt as a delimited preamble — before the task's
+       * own prose, leaving the dependent handoff appendix trailing it.
+       */
+      brief?: string;
       /**
        * This batch's shutdown barrier, accepted as part of taking the
        * batch. `run` binds its resolver in the synchronous prefix of the
@@ -367,6 +374,7 @@ export class DispatchCoordinator {
       signal?: AbortSignal;
       ticket?: Ticket;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
+      brief?: string;
     },
     grant: AdmissionGrant,
     loaders: Map<string, Promise<DefaultResourceLoader>>,
@@ -587,25 +595,32 @@ export class DispatchCoordinator {
         });
         return;
       }
+      // The batch brief (SPEC v3 "Batch brief") leads the prompt as a
+      // delimited preamble — kept out of `task.prompt` itself so display
+      // surfaces (labels, fingerprints) still see the caller's prose.
+      const briefed: ResolvedTask =
+        options.brief === undefined
+          ? task
+          : { ...task, prompt: briefPreamble(options.brief) + task.prompt };
       // The handoff: each declared prerequisite's bounded final output and
       // what became of its work is appended to this task's prompt. Every
       // prerequisite is confirmed-quiescent and satisfied at this point,
       // so the projection reads final outcomes only.
       const effectiveTask: ResolvedTask =
-        task.dependsOn.length > 0
+        briefed.dependsOn.length > 0
           ? {
-              ...task,
+              ...briefed,
               prompt:
-                task.prompt +
+                briefed.prompt +
                 handoffAppendix(
-                  task.dependsOn.map((depIndex) => ({
+                  briefed.dependsOn.map((depIndex) => ({
                     task: tasks[depIndex]!,
                     outcome: outcomes[depIndex]!,
                   })),
                   options.config.output,
                 ),
             }
-          : task;
+          : briefed;
       while (true) {
         if (ticket) await this.waitWhilePaused(ticket, signal);
         if (signal.aborted) {

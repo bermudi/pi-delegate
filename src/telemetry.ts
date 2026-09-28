@@ -239,6 +239,11 @@ function batchStatus(outcomes: readonly TaskOutcome[]): TicketStatus {
   if (outcomes.every((outcome) => outcome.status === "cancelled")) {
     return "cancelled";
   }
+  // Interrupt is terminal first-class, like cancelled — a batch whose
+  // tasks were all interrupted settles interrupted, same as the store.
+  if (outcomes.every((outcome) => outcome.status === "interrupted")) {
+    return "interrupted";
+  }
   if (outcomes.some((outcome) => outcome.status === "ok")) return "partial";
   return "failed";
 }

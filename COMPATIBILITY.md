@@ -33,11 +33,20 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   different agents, `async` vs `run_in_background` disagreeing) are
   validation errors naming both; each applied rename is reported as
   `field "<field>" → "<to>"`. `additionalProperties: false` stays.
+- **Additive — shared batch `brief` (#43).** Top-level `brief` prepends
+  a `--- batch brief ---` preamble to every task's prompt; the result
+  and ticket headers name it once. `context` is its cross-harness
+  spelling — it normalizes to `brief` with the same rename note, and
+  `brief`+`context` with different text errors naming both. The
+  removed task-level `context` (v1's `fresh`/`with-parent-transcript`)
+  still rejects with migration guidance — at top level those trained
+  enum values keep the removal error rather than folding.
 - **Changed — default `maxConcurrent` is 8, not 3 (#41).** Field
   survey: letta/grok/oh-my-pi default 32; minimax/deepseek/MiMo/fx
   uncapped. The `concurrency` maps remain the rate-limit guard.
-- Deferred to a later v3 unit: steering receipts (grammar fixed in
-  SPEC v3, not yet implemented).
+- Landed since: steering receipts (#37), `delegate_ticket interrupt`
+  (#42 — abort one task's in-flight turn; it settles `interrupted`,
+  resumable, distinct from `cancel`'s ticket teardown).
 
 ## Status and rule
 

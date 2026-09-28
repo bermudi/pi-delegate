@@ -3,7 +3,7 @@
 Subagent dispatch for the [Pi coding agent](https://github.com/earendil-works/pi).
 Delegate registers three tools: `delegate` runs one task or a batch of tasks;
 `delegate_ticket` operates the durable ticket a backgrounded dispatch returns
-(poll, wait, cancel, pause, resume, answer, steer); `delegate_session` lists and
+(poll, wait, cancel, interrupt, pause, resume, answer, steer); `delegate_session` lists and
 closes pooled subagent sessions. Tasks run against the shared tree, a disposable
 copy, or a private Git worktree. `SPEC.md` is the v3 behavioral contract;
 `COMPATIBILITY.md` records deliberate v2→v3 breaks.
@@ -41,10 +41,14 @@ runs the batch in task order. Task fields: `prompt` (required), `id` (auto
 top-level `operationId` deduplicates the whole call against retries.
 Cross-harness spellings are accepted and normalized at validation —
 `subagent_type` → `agent` (aliases still apply), `description` (≤200 chars)
-labels the task in call rows and section headers, and `run_in_background`
-(top-level or per task) → `async`; each applied rename is reported on the
-result (`field "subagent_type" → "agent"`), conflicting spellings error,
-and unknown fields still fail (`additionalProperties: false`).
+labels the task in call rows and section headers, `run_in_background`
+(top-level or per task) → `async`, and `context` → `brief`; each applied
+rename is reported on the result (`field "subagent_type" → "agent"`),
+conflicting spellings error, and unknown fields still fail
+(`additionalProperties: false`). Top-level `brief` is shared batch
+context: it prepends to every task's prompt inside a `--- batch brief ---`
+fence (task sections and headers note it once; it never merges into the
+prompt's prose).
 
 Delivery happens once, when the batch fully settles: tickets settling within the
 same flush window coalesce into a single follow-up wake when the parent is still
@@ -172,6 +176,11 @@ and disables telemetry without changing delegation results. Inspect with
   response and tool calls finish first.
 - `answer` — reply to a worker question (see below).
 - `steer` — send text to a running task (see Steering).
+- `interrupt` — abort one task's in-flight turn cooperatively (`taskId`
+  defaults to the only still-running task). The task settles
+  `interrupted`, not `cancelled`: a pooled session returns reusable, a
+  fresh task keeps its transcript and a `resumeFrom` hint. A settled,
+  already-interrupted, or not-yet-running target receipts `not-applied`.
 
 Tickets are durable journals under `<agentDir>/delegate-tickets/` with
 owner-only permissions. Settled outcomes are recoverable after a restart via

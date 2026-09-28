@@ -54,8 +54,18 @@ describe("delegate public tool contract", () => {
     const task = objectOf(tasks.items, "task schema");
     const taskFields = objectOf(task.properties, "task properties");
 
+    // Top level: `brief` is the shared batch preamble (#43), `context`
+    // its cross-harness spelling.
     expect(Object.keys(top).sort()).toEqual(
-      ["async", "operationId", "run_in_background", "tasks", "workspace"].sort(),
+      [
+        "async",
+        "brief",
+        "context",
+        "operationId",
+        "run_in_background",
+        "tasks",
+        "workspace",
+      ].sort(),
     );
 
     // The task shape stays what it was — minus `model` and `thinking`,
@@ -128,6 +138,7 @@ describe("delegate public tool contract", () => {
       "resume",
       "answer",
       "steer",
+      "interrupt",
     ]);
     const sessionSchema = objectOf(
       registeredTool(session, "delegate_session").parameters,

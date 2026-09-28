@@ -145,7 +145,9 @@ export interface SessionSettle {
  * - insert only after a successful, prompted run with a durable session file;
  * - a checked-out session cancelled or watchdog-ended (deadline/stall) after
  *   prompting is evicted; either before prompting leaves it intact;
- * - an ordinary failure on a pooled session keeps it reusable;
+ * - an ordinary failure keeps it reusable, and so does an interrupt —
+ *   the aborted run wound down quiescent, and keeping the worker alive is
+ *   the interrupt's point (SPEC v3 "Interaction grammar — Interrupt");
  * - a quarantined session is evicted but never disposed — it may still be
  *   mutating.
  */
@@ -301,13 +303,18 @@ export class SessionPool {
     }
     if (entry !== undefined) {
       // Cancellation or a watchdog abort before prompting leaves the
-      // session intact. Ordinary failure keeps it reusable. Anything else
+      // session intact. Ordinary failure keeps it reusable, and so does
+      // an interrupt: the run wound down quiescent and the worker is the
+      // resumable surface the interrupt exists to preserve. Anything else
       // evicts it.
       if (!outcome.prompted) {
         keep();
         return;
       }
-      if (outcome.status === "failed" && outcome.watchdog === undefined) {
+      if (
+        (outcome.status === "failed" && outcome.watchdog === undefined) ||
+        outcome.status === "interrupted"
+      ) {
         keep();
         return;
       }

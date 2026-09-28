@@ -64,7 +64,7 @@ export interface RunControls {
 }
 
 export interface AttemptResult {
-  readonly status: "ok" | "failed" | "cancelled";
+  readonly status: "ok" | "failed" | "cancelled" | "interrupted";
   readonly output?: string;
   readonly error?: string;
   readonly usage?: Usage;
@@ -209,8 +209,12 @@ function lastAssistantText(session: AgentSession): {
  */
 const ABORT_PRECEDENCE: Record<string, number> = {
   cancelled: 0,
-  deadline: 1,
-  stall: 2,
+  // Interrupt is an operator abort that keeps the worker resumable — it
+  // outranks watchdog causes (an interrupt landing mid-deadline still
+  // reports interrupted) but loses to ticket/parent cancellation.
+  interrupted: 1,
+  deadline: 2,
+  stall: 3,
 };
 
 function preferredReason(
@@ -431,6 +435,22 @@ export class TaskExecution implements ExecutionHandle {
   }
 
   /**
+   * The status an abort settles as (SPEC v3 "Interaction grammar —
+   * Interrupt"): a task-level interrupt keeps the worker resumable; every
+   * other abort cause is a plain cancellation.
+   */
+  private abortStatus(): "cancelled" | "interrupted" {
+    return this.abortReason === "interrupted" ? "interrupted" : "cancelled";
+  }
+
+  /** The interruption explanation on the outcome's error field. */
+  private interruptError(): string | undefined {
+    return this.abortReason === "interrupted"
+      ? "the in-flight turn was aborted on request; the worker stays resumable"
+      : undefined;
+  }
+
+  /**
    * The outcome the caller sees when cancellation was requested before the
    * worker confirmed it stopped. Honest about uncertainty: quarantined is
    * always set, and partial output reflects what is already on the record.
@@ -452,8 +472,9 @@ export class TaskExecution implements ExecutionHandle {
       };
     }
     return {
-      status: "cancelled",
+      status: this.abortStatus(),
       output: partial.text || undefined,
+      error: this.interruptError(),
       hadSideEffects: this.hadSideEffects,
       quarantined: true,
       sessionFile: reportableTranscript(session, false),
@@ -619,7 +640,8 @@ export class TaskExecution implements ExecutionHandle {
           };
         }
         return {
-          status: "cancelled",
+          status: this.abortStatus(),
+          error: this.interruptError(),
           hadSideEffects: false,
           quarantined: this.quarantined,
           sessionFile: reportableTranscript(session, true),
@@ -728,8 +750,9 @@ export class TaskExecution implements ExecutionHandle {
       }
       if (this.abortReason || this.controls.isAborted() || stopReason === "aborted") {
         return {
-          status: "cancelled",
+          status: this.abortStatus(),
           output: text || undefined,
+          error: this.interruptError(),
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
@@ -781,7 +804,8 @@ export class TaskExecution implements ExecutionHandle {
       }
       if (this.abortReason || this.controls.isAborted()) {
         return {
-          status: "cancelled",
+          status: this.abortStatus(),
+          error: this.interruptError(),
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,

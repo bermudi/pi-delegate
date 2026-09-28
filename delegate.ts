@@ -28,6 +28,7 @@ import {
 } from "./src/coordinator.ts";
 import {
   aliasNote,
+  briefNote,
   fieldNotes,
   formatDispatchResult,
   serializedNotices,
@@ -208,6 +209,18 @@ const delegateSchema = Type.Object(
           "Default workspace for every task lacking its own. 'isolated' = parallel same-repo edits. 'scratch' = disposable copy, changes discarded.",
       }),
     ),
+    brief: Type.Optional(
+      Type.String({
+        description:
+          "Shared batch brief — context every task needs (spec, conventions, goal). Prepended to each task's prompt as a delimited preamble; the result header notes it once. Each task's 'prompt' stays required.",
+      }),
+    ),
+    context: Type.Optional(
+      Type.String({
+        description:
+          "Cross-harness spelling of 'brief': normalizes to the shared batch brief; sending both with different text is an error.",
+      }),
+    ),
     operationId: Type.Optional(
       Type.String({
         pattern: "^[A-Za-z0-9._-]{1,64}$",
@@ -221,9 +234,9 @@ const delegateSchema = Type.Object(
 
 const ticketSchema = Type.Object(
   {
-    action: stringEnum(["poll", "wait", "cancel", "pause", "resume", "answer", "steer"], {
+    action: stringEnum(["poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt"], {
       description:
-        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. pause/resume: hold and release queued work. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied.",
+        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. pause/resume: hold and release queued work. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown.",
     }),
     ticket: Type.Optional(
       Type.String({
@@ -246,7 +259,7 @@ const ticketSchema = Type.Object(
     taskId: Type.Optional(
       Type.String({
         description:
-          "Only with actions 'answer' and 'steer': the task to target. With 'steer' it defaults to the ticket's only still-running task.",
+          "Only with actions 'answer', 'steer', and 'interrupt': the task to target. With 'steer'/'interrupt' it defaults to the ticket's only still-running task.",
       }),
     ),
     questionId: Type.Optional(
@@ -396,7 +409,7 @@ function normalizeTools(value: string): unknown {
   return token !== "" && !/[\s,]/.test(token) ? [token] : value;
 }
 
-const TICKET_ACTIONS = ["poll", "wait", "cancel", "pause", "resume", "answer", "steer"];
+const TICKET_ACTIONS = ["poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt"];
 const SESSION_ACTIONS = ["list", "close"];
 
 /** A `delegate_ticket` example call built from the fields the caller sent. */
@@ -439,6 +452,9 @@ function delegateTicketExample(args: Record<string, unknown>): string {
         fields.push(`${key}: ${JSON.stringify(args[key])}`);
       }
     }
+  }
+  if (action === "interrupt" && typeof args.taskId === "string" && !isBlank(args.taskId)) {
+    fields.push(`taskId: ${JSON.stringify(args.taskId)}`);
   }
   return `delegate_ticket({ ${fields.join(", ")} })`;
 }
@@ -492,12 +508,16 @@ function unrunFieldsNote(
         .join(", ")} separately.`;
 }
 
+/** The removed task-level `context` field's trained values (v1 transcript sharing). */
+const OBSOLETE_CONTEXT_VALUES = ["fresh", "with-parent-transcript"] as const;
+
 /** Run before host schema coercion so obsolete fields receive migration guidance. */
 function rejectObsoleteContext(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "context")) {
     throw new Error(
       'The context field has been removed (including "fresh" and "with-parent-transcript"). ' +
         'Omit context and provide a self-contained task brief; parent conversation history is never shared. ' +
+        'For shared batch context, a top-level "brief" (or "context") prepends a preamble to every task. ' +
         'Child-owned sessionId and resumeFrom history remain supported.',
     );
   }
@@ -588,8 +608,17 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   if (!isRecord(value)) return value as DelegateArguments;
 
   const args = { ...value };
-  // Presence of `context` rejects even when null — before null stripping.
-  rejectObsoleteContext(args);
+  // Top-level `context` is the batch `brief` under a cross-harness
+  // spelling (#43) — validation folds it with a rename note. The removed
+  // task field's trained values still mean transcript sharing and keep
+  // the migration error, as does a non-string `context` (its misuse).
+  if (
+    Object.hasOwn(args, "context") &&
+    (typeof args.context !== "string" ||
+      (OBSOLETE_CONTEXT_VALUES as readonly string[]).includes(args.context))
+  ) {
+    rejectObsoleteContext(args);
+  }
   stripNulls(args);
   stripBlank(args, ["operationId", "sessionId", "cwd", "resumeFrom", "agent"]);
 
@@ -847,6 +876,11 @@ Three sibling tools share Delegate's machinery:
   in views, \`run_in_background\` (top-level or per task) → \`async\`;
   each applied rename is reported on the result.
   A top-level \`workspace\` is the batch default.
+- \`brief\` shares context across the batch: it prepends to every task's
+  prompt inside a \`--- batch brief ---\` fence, and the result header
+  notes it once. \`context\` is the same field under a cross-harness
+  spelling — it normalizes to \`brief\` (a rename note reports it);
+  sending both with different text is an error.
 - \`dependsOn\` orders tasks in one batch: name earlier task ids (an
   explicit \`id\`, or the generated \`task-1\`, \`task-2\`, ...). A task
   starts only after every prerequisite finished successfully — applied
@@ -905,6 +939,13 @@ Three sibling tools share Delegate's machinery:
   is an error). The receipt says what happened: \`steered\` (merged at
   the child's next turn boundary), \`activated\` (queued, opens the next
   turn), \`duplicate\`, or \`not-applied\` (settled/unknown target).
+- \`{ action: "interrupt", ticket, taskId? }\` — abort one task's
+  in-flight turn, cooperatively. The task settles \`interrupted\` —
+  partial output kept, the worker resumable (a pooled session returns
+  reusable; a fresh task keeps its transcript + resume hint). Distinct
+  from \`cancel\`, which tears the whole ticket down. \`taskId\`
+  defaults to the only still-running task; interrupting a settled,
+  already-interrupted, or not-yet-running task receipts \`not-applied\`.
 
 ## delegate_session — sessions
 - A task with \`sessionId\` keeps its session live after it finishes; a later
@@ -1342,6 +1383,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
     readonly ctx: ExtensionContext;
     /** The sync caller's host signal; async batches run on the ticket's. */
     readonly signal?: AbortSignal;
+    /** The shared batch brief (SPEC v3 "Batch brief"), if the call set one. */
+    readonly brief?: string;
     readonly onNotices?: (notices: readonly string[]) => void;
     /**
      * Async mode's edge: creates the ticket once tasks are resolved, so
@@ -1536,6 +1579,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 : "The call was aborted before source application.",
             }),
           onWorkerQuiesced: (taskIndex) => plan!.cleanupWorker(taskIndex),
+          brief: options.brief,
         })
         .then((outcome) => {
           telemetrySpan.finish(outcome, ticket?.status);
@@ -1855,6 +1899,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             await runDispatchPipeline({
             requestedTasks: call.tasks,
             ctx,
+            brief: call.brief,
             // One signal source in the pipeline: the caller's host signal
             // for a sync batch, the ticket's cancellation for an async one.
             signal: call.async ? undefined : signal,
@@ -1882,6 +1927,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
                     const created = tickets.create(tasks, {
                       holdSettlement: workspaceNeedsSettlementHold(tasks),
                       outputBounds: config.output,
+                      // The shared batch brief — persisted on the ticket so
+                      // views and post-restart recovery render the header
+                      // note (SPEC v3 "Batch brief").
+                      brief: call.brief,
                     });
                     operationTicket = created;
                     questionContexts.set(created.id, ctx);
@@ -1940,6 +1989,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   text:
                     `Ticket "${ticket.id}" created: ${ticket.totalTasks} task(s) running in the background.\n` +
                     (teachNotes.length > 0 ? `${teachNotes.join("\n")}\n` : "") +
+                    (briefNote(call.brief) !== undefined
+                      ? `${briefNote(call.brief)}\n`
+                      : "") +
                     `Results will be delivered automatically when the batch settles; keep working. ` +
                     `delegate_ticket can wait on or cancel it if needed (action "wait" / "cancel").` +
                     (ticket.notices.length > 0
@@ -1952,6 +2004,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 async: true,
                 ticket: ticket.id,
                 tasks: ticket.tasks.map((task) => task.id),
+                ...(call.brief !== undefined ? { brief: call.brief } : {}),
               },
             };
           }
@@ -1978,7 +2031,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 type: "text" as const,
                 text:
                   (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
-                  formatDispatchResult(result.outcomes, tasks, outputBounds),
+                  formatDispatchResult(result.outcomes, tasks, outputBounds, call.brief),
               },
             ],
             details: {
@@ -1988,6 +2041,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 id: outcome.id,
                 status: outcome.status,
               })),
+              // The batch brief as sent — the replayed/expanded render
+              // re-heads the result with it (SPEC v3 "Batch brief").
+              ...(call.brief !== undefined ? { brief: call.brief } : {}),
               // The rendered content is spill-bounded; details keep the
               // complete outcomes for the expanded view and recovery.
               results: result.outcomes,
@@ -2027,6 +2083,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
             // metadata, not request content.
             dispatchFingerprint({
               async: call.async,
+              // The brief is request content — a call differing only in
+              // its brief is a different dispatch, not a duplicate.
+              brief: call.brief,
               tasks: call.tasks.map(
                 ({ normalizedFrom: _normalized, ...task }) => task,
               ),
@@ -2058,10 +2117,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate_ticket",
       label: "Delegate Tickets",
       description:
-        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, answer a worker question, or steer a running task with a message + steerId (idempotent; the receipt reports steered/activated/duplicate/not-applied). Dispatch new work with delegate; manage pooled sessions with delegate_session.",
+        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, answer a worker question, steer a running task with a message + steerId (idempotent; the receipt reports steered/activated/duplicate/not-applied), or interrupt one task's in-flight turn (settles it interrupted, keeping the worker resumable — cancel tears the ticket down instead). Dispatch new work with delegate; manage pooled sessions with delegate_session.",
       parameters: ticketSchema,
       promptSnippet:
-        "Poll, wait on, cancel, pause/resume, answer questions, or steer running tasks for async delegate tickets",
+        "Poll, wait on, cancel, pause/resume, answer questions, steer, or interrupt running tasks for async delegate tickets",
       prepareArguments: prepareTicketArguments,
       renderCall: renderTicketCall,
       renderResult: createResultRenderer(tickets),
@@ -2103,8 +2162,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
               ? { questions: result.ticket?.questions }
               : {}),
             // SPEC v3 "Steering": the receipt's machine half rides
-            // details.steer (status, taskId, replayed original status).
+            // details.steer (status, taskId, replayed original status);
+            // an interrupt's rides details.interrupt the same way.
             ...(result.steer !== undefined ? { steer: result.steer } : {}),
+            ...(result.interrupt !== undefined ? { interrupt: result.interrupt } : {}),
           },
           isError: result.isError,
         };

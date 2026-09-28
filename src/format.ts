@@ -143,6 +143,25 @@ export function aliasNote(aliasedFrom: string | undefined, agent: string): strin
 }
 
 /**
+ * The batch-brief header note (SPEC v3 "Batch brief"): `brief: "<head>"`,
+ * whitespace-collapsed and truncated to ~80 chars — the header mentions
+ * the brief once; it never repeats inside per-task sections.
+ */
+export function briefNote(brief: string | undefined): string | undefined {
+  if (brief === undefined) return undefined;
+  return `brief: "${truncateLine(brief.replace(/\s+/g, " ").trim(), 80)}"`;
+}
+
+/**
+ * The delimited preamble prepended to every task prompt when a dispatch
+ * carries a batch brief (SPEC v3 "Batch brief") — the brief is a fenced
+ * block, never merged into the task's own prose.
+ */
+export function briefPreamble(brief: string): string {
+  return `--- batch brief ---\n${brief}\n--- end batch brief ---\n\n`;
+}
+
+/**
  * The field-normalization notes for a task section (SPEC v3 "Reflex
  * meeting"): one `field "<field>" → "<to>"` line per cross-harness
  * spelling validation folded into a canonical field — the same teaching
@@ -288,6 +307,7 @@ export function formatDispatchResult(
   outcomes: readonly TaskOutcome[],
   tasks: Ticket["tasks"],
   bounds: OutputBounds,
+  brief?: string,
 ): string {
   const sections = outcomes.map((outcome) => {
     const task = tasks[outcome.index];
@@ -337,5 +357,9 @@ export function formatDispatchResult(
   const overlap = overlapLines(outcomes);
   const overlapNote =
     overlap.length > 0 ? `\n\n${overlap.join("\n")}` : "";
-  return sections.join("\n\n") + lowerBound + overlapNote;
+  // The brief is batch context, not a task — it heads the result once
+  // and never repeats inside a task section (SPEC v3 "Batch brief").
+  const head = briefNote(brief);
+  return (head !== undefined ? `${head}\n\n` : "") +
+    sections.join("\n\n") + lowerBound + overlapNote;
 }

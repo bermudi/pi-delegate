@@ -893,6 +893,59 @@ reads it for admission, scheduling, or execution.
   previews staying evidence-free, cold recovery of recorded attribution,
   and pre-attribution journal records parsing cleanly.
 
+### Ticket interrupt — abort the turn, keep the worker (v3, #42)
+
+New v3 contract — no v1 evidence (v1 had only whole-ticket cancel);
+SPEC.md "Interaction grammar — Interrupt" defines the surface. The
+abort rides the same cooperative cancellation/quiescence machinery as
+cancel, but settles the task `interrupted` — a first-class terminal
+state, distinct from `cancelled` by resumability.
+
+- **Contract:** `delegate_ticket interrupt` takes `ticket` and an
+  optional `taskId` (defaults to the single still-running task;
+  ambiguous omissions error naming the running ids). Receipts —
+  `interrupted` / `not-applied` — ride the text and
+  `details.interrupt`. A pooled-session task returns its session
+  reusable; a fresh task keeps its persisted transcript and the
+  `resumeFrom` hint. `not-applied` covers settled tickets, settled or
+  already-interrupted tasks, unknown ids, and not-yet-running tasks.
+  Dependents block naming the interruption; an all-interrupted batch
+  settles the ticket `interrupted`; telemetry records the interrupted
+  task outcome and call status.
+- **Covered now:** `tests/contract/interrupt.test.ts` — fresh-task
+  interrupt (interrupted status in the view, transcript path and
+  `resumeFrom` hint once worker truth lands, never `cancelled`), the
+  pooled-session round trip (interrupt → pool listing → a later task
+  reuses the same conversation), the not-applied paths (unknown
+  ticket, unknown task, settled ticket, queued task, ambiguous
+  omission, already-interrupted retry), a dependent blocking with the
+  interruption named, and the telemetry rows. The action is pinned in
+  `tests/contract/tool-boundary.test.ts`.
+
+### Shared batch brief (v3, #43)
+
+New v3 contract — v1's task-level `context` (`fresh` /
+`with-parent-transcript`, transcript sharing) is unrelated; its
+removal error stands on task fields and on the trained enum values
+even at top level.
+
+- **Contract:** top-level `brief` prepends a `--- batch brief ---
+  …--- end batch brief ---` preamble to every task's prompt (before
+  its own prose; the dependent handoff still trails). Top-level
+  `context` normalizes to `brief` with the usual `field "context" →
+  "brief"` note; both spellings holding different text is an error
+  naming both. The sync result, async receipt, and ticket views name
+  the brief once (~80-char head, `details.brief` carries it on
+  dispatch results); the journal persists it for recovered views.
+  A whitespace-only brief is absent.
+- **Covered now:** `tests/contract/brief.test.ts` — every child's
+  provider-visible first message carries the fenced brief before its
+  prompt (both tasks of a batch), the once-in-the-header rule, the
+  async receipt + recovered-ticket header, the `context` fold with
+  its note, the `brief`/`context` conflict, absent-brief behavior,
+  and the brief→prompt→handoff ordering on a dependent. Schema pin in
+  `tests/contract/tool-boundary.test.ts`.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |
@@ -1368,7 +1421,11 @@ grouped by leaf routing (issue #36; `SPEC.md` "Wake delivery",
 receipts — turn-boundary `steered`, parked `activated`, idempotent
 `duplicate`, and `not-applied` on settled/unknown/recovered targets
 (issue #37; `SPEC.md` "Steering", `tests/contract/steering.test.ts`,
-`tests/contract/recovery.test.ts`).
+`tests/contract/recovery.test.ts`); ticket interrupt — a cooperative
+per-task abort settling `interrupted` with resumable workers (issue
+#42; `SPEC.md` "Interrupt", `tests/contract/interrupt.test.ts`); the
+shared batch `brief` with its `context` spelling (issue #43; `SPEC.md`
+"Batch brief", `tests/contract/brief.test.ts`).
 
 Remaining:
 

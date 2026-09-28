@@ -53,7 +53,8 @@ function isOutcome(value: unknown): value is TaskOutcome {
     (value.status === "ok" ||
       value.status === "failed" ||
       value.status === "cancelled" ||
-      value.status === "blocked")
+      value.status === "blocked" ||
+      value.status === "interrupted")
   );
 }
 
@@ -96,7 +97,12 @@ function expandedText(
   if (!Array.isArray(details.results)) return undefined;
   const outcomes = details.results.filter(isOutcome);
   if (outcomes.length === 0) return undefined;
-  const sections = formatDispatchResult(outcomes, [], UNBOUNDED_OUTPUT);
+  const sections = formatDispatchResult(
+    outcomes,
+    [],
+    UNBOUNDED_OUTPUT,
+    typeof details.brief === "string" ? details.brief : undefined,
+  );
   const notices = Array.isArray(details.notices)
     ? details.notices.filter((n): n is string => typeof n === "string")
     : [];

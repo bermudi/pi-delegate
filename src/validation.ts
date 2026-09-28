@@ -38,6 +38,12 @@ export type DispatchCall =
       readonly mode: "dispatch";
       readonly tasks: readonly TaskInput[];
       readonly async: boolean;
+      /**
+       * The shared batch brief (SPEC v3 "Batch brief") — normalized: the
+       * `context` compat spelling lands here too; a whitespace-only value
+       * is absent. Prepended to every task's prompt at dispatch.
+       */
+      readonly brief: string | undefined;
       readonly operationId: string | undefined;
       /**
        * Applied dispatch-level compat renames (top-level
@@ -57,7 +63,8 @@ export interface TicketArguments {
     | "pause"
     | "resume"
     | "answer"
-    | "steer";
+    | "steer"
+    | "interrupt";
   readonly ticket?: string;
   readonly timeoutMs?: number;
   readonly force?: boolean;
@@ -82,6 +89,13 @@ export interface DispatchArguments {
   readonly run_in_background?: boolean;
   /** Batch-level workspace default; a task's own `workspace` wins. */
   readonly workspace?: "shared" | "scratch" | "isolated";
+  /**
+   * Shared batch brief (SPEC v3 "Batch brief"): context every task needs,
+   * prepended to each prompt as a delimited preamble.
+   */
+  readonly brief?: string;
+  /** Cross-harness spelling of `brief`; normalizes into it. */
+  readonly context?: string;
   readonly operationId?: string;
 }
 
@@ -94,7 +108,8 @@ export interface TicketCall {
     | "pause"
     | "resume"
     | "answer"
-    | "steer";
+    | "steer"
+    | "interrupt";
   readonly ticket: string | undefined;
   readonly force: boolean;
   readonly timeoutMs: number | undefined;
@@ -143,11 +158,12 @@ export const THINKING_FIELD_REJECTION =
 /**
  * Within-tool rules for `delegate_ticket`: `ticket` is required for every
  * action except `poll` (bare poll is the roster), `force` only accompanies
- * `cancel`, `timeoutMs` only `wait`, `taskId` belongs to `answer` and
- * `steer`, `questionId`/`answer` belong to `answer` alone — which requires
- * all three — and `message`/`steerId` belong to `steer`, which requires
- * both. Conditional carries are reported before missing requirements,
- * matching the historical precedence; blank values count as missing.
+ * `cancel`, `timeoutMs` only `wait`, `taskId` belongs to `answer`,
+ * `steer`, and `interrupt`, `questionId`/`answer` belong to `answer` alone
+ * — which requires all three — and `message`/`steerId` belong to `steer`,
+ * which requires both. Conditional carries are reported before missing
+ * requirements, matching the historical precedence; blank values count as
+ * missing.
  */
 export function validateTicketCall(args: TicketArguments): TicketCall {
   const ticket = isBlank(args.ticket) ? undefined : args.ticket;
@@ -162,8 +178,13 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
   if (args.timeoutMs !== undefined && args.action !== "wait") {
     fail(`timeoutMs is valid only with action "wait".`);
   }
-  if (taskId !== undefined && args.action !== "answer" && args.action !== "steer") {
-    fail(`taskId is valid only with actions "answer" and "steer".`);
+  if (
+    taskId !== undefined &&
+    args.action !== "answer" &&
+    args.action !== "steer" &&
+    args.action !== "interrupt"
+  ) {
+    fail(`taskId is valid only with actions "answer", "steer", and "interrupt".`);
   }
   for (const [name, value] of [
     ["questionId", questionId],
@@ -248,6 +269,9 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
     if (args.workspace !== undefined) {
       fail(`workspace requires at least one task; it is a dispatch field.`);
     }
+    if (args.brief !== undefined || args.context !== undefined) {
+      fail(`brief requires at least one task; it is a dispatch field.`);
+    }
     if (args.operationId !== undefined) {
       fail(`operationId requires a non-empty dispatch task list.`);
     }
@@ -324,13 +348,32 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
       `'async': ${args.async} conflicts with 'run_in_background': ${firstRib.value} — the same dispatch field under two spellings; send one.`,
     );
   }
-  const callNotes: FieldNormalization[] =
-    args.run_in_background === undefined
+  // `context` is the batch `brief` under a cross-harness spelling
+  // (SPEC v3 "Reflex meeting"): it folds into `brief` with a teaching
+  // note, and both spellings holding different text conflicts. A
+  // whitespace-only brief prepends nothing — it reads as absent.
+  if (
+    args.brief !== undefined &&
+    args.context !== undefined &&
+    args.brief !== args.context
+  ) {
+    fail(
+      `'brief' and 'context' hold different text — they are the same batch field under two spellings; send one.`,
+    );
+  }
+  const rawBrief = args.brief ?? args.context;
+  const brief =
+    rawBrief !== undefined && rawBrief.trim() !== "" ? rawBrief : undefined;
+  const callNotes: FieldNormalization[] = [
+    ...(args.run_in_background === undefined
       ? []
-      : [{ field: "run_in_background", to: "async" }];
+      : [{ field: "run_in_background", to: "async" }]),
+    ...(args.context === undefined ? [] : [{ field: "context", to: "brief" }]),
+  ];
   return {
     mode: "dispatch",
     tasks: effectiveTasks,
+    brief,
     // SPEC v3 "Interaction grammar" — cardinality defaults: a single task
     // runs sync inline; a multi-task batch returns a ticket and
     // auto-delivers. `async` (or its run_in_background spelling)

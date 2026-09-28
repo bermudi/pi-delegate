@@ -20,7 +20,8 @@ export type ActivityStatus =
   | "ok"
   | "failed"
   | "cancelled"
-  | "blocked";
+  | "blocked"
+  | "interrupted";
 
 export interface ActivityToolCall {
   /** Start of the call (ms epoch); the preview is rewritten when it ends. */
@@ -103,7 +104,8 @@ function isSettled(status: ActivityStatus): boolean {
     status === "ok" ||
     status === "failed" ||
     status === "cancelled" ||
-    status === "blocked"
+    status === "blocked" ||
+    status === "interrupted"
   );
 }
 

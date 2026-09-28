@@ -81,6 +81,32 @@ mid-flight the parent can steer. The grammar:
   naming both attempts. A parked steer whose task settles before
   delivery voids to `not-applied` on retry — nothing delivers into
   a dead session.
+- **Interrupt.** `delegate_ticket interrupt` (ticket, optional
+  `taskId` defaulting like steer) cooperatively aborts the task's
+  in-flight turn through the cancellation machinery — the same
+  quiescence gate, write reservations held until the worker
+  confirms it stopped — but settles the task `interrupted`, not
+  `cancelled` (#42, the codex interrupt_agent primitive). The
+  distinction is resumability: a pooled-session task returns its
+  session to the pool reusable; a fresh task keeps its persisted
+  transcript and the resume hint. `interrupted` is a first-class
+  terminal state in views, telemetry, and the journal; dependents
+  treat it as not-succeeded and block naming the interruption.
+  Receipts ride the steer vocabulary — `interrupted` when the
+  abort lands on a live turn, `not-applied` on a settled,
+  interrupted-already, unknown, ambiguous, or not-yet-running
+  target. A whole ticket whose tasks all settle interrupted
+  settles `interrupted`.
+- **Batch brief.** A top-level `brief` is shared batch context
+  (#43): prepended to every task's prompt as a delimited
+  `--- batch brief ---` preamble — before the task's own prose,
+  with the dependent handoff appendix still trailing — never
+  merged into the prompt's text. The result and ticket headers
+  name it once (~80-char head); task sections never repeat it,
+  and `details.brief` carries it on dispatch results. The brief
+  persists on the ticket record so a recovered view still names
+  it. A whitespace-only brief is absent; `prompt` stays required
+  per task.
 - **Wake delivery.** Settled results inject as follow-up turns,
   leaf-aware; simultaneous settlements batch into one wake.
 
@@ -109,7 +135,9 @@ mid-flight the parent can steer. The grammar:
   `default`), `description` (≤200 chars) is a display label preferred
   over the id in call rows and section headers (never a correlation
   key), and `run_in_background` — at top level or per task —
-  normalizes to the dispatch-level `async` decision. `agent` and
+  normalizes to the dispatch-level `async` decision. Top-level
+  `context` is the same folding for the batch `brief` (#43).
+  `agent` and
   `subagent_type` present with different agents, or `async` and
   `run_in_background` present with different values, is a validation
   error naming both fields; every applied rename is reported on the

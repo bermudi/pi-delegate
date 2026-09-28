@@ -86,7 +86,19 @@ export interface ResolvedTask {
   readonly phase: number;
 }
 
-export type TaskStatus = "ok" | "failed" | "cancelled" | "blocked";
+export type TaskStatus =
+  | "ok"
+  | "failed"
+  | "cancelled"
+  | "blocked"
+  /**
+   * SPEC v3 "Interaction grammar — Interrupt": the task's in-flight turn
+   * was cooperatively aborted on request (delegate_ticket interrupt).
+   * Distinct from `cancelled` — interruption stops the turn but keeps the
+   * worker resumable: a pooled session returns to the pool, a fresh task
+   * keeps its persisted transcript for `resumeFrom`.
+   */
+  | "interrupted";
 
 /** How an isolated task's proposal ended up relative to the source tree. */
 export type IntegrationStatus =
@@ -196,6 +208,12 @@ export interface Ticket {
   readonly tasks: readonly (Pick<ResolvedTask, "id" | "agent" | "resumeTag" | "aliasedFrom" | "normalizedFrom" | "description"> & { readonly cwd?: string })[];
   /** Unanswered worker questions (never persisted across host shutdown). */
   readonly questions: readonly WorkerQuestion[];
+  /**
+   * The shared batch brief (SPEC v3 "Batch brief") prepended to every
+   * task's prompt; persisted so a recovered ticket still renders the
+   * header note. Undefined on pre-brief records and briefless dispatches.
+   */
+  readonly brief?: string;
   /**
    * Dispatch-scoped output-bounds snapshot captured at creation, so a
    * settled ticket's poll/wait renders under the bounds it ran with even
