@@ -63,7 +63,13 @@ mid-flight the parent can steer. The grammar:
 - **Steering.** Steering is a message with a delivery receipt,
   idempotent on retry — never polling. Outcome vocabulary adopted
   from the field: `queued` / `applied` / `not-applied` (fx) and
-  `activated` / `steered` / `duplicate` (minimax).
+  `activated` / `steered` / `duplicate` (minimax). The `interrupt`
+  action diverges from codex's same-named verb by lifecycle position:
+  codex interrupt is a non-final status on a persistent, re-taskable
+  agent; v3 interrupt settles the task `interrupted` — terminal for
+  the task, with the continuation path named (pooled session returned
+  reusable, transcript resumable). Codex-trained callers expecting
+  interrupt-then-message should steer or re-dispatch instead.
 
   `delegate_ticket steer` carries `message`, a caller-chosen
   `steerId`, and an optional `taskId` (default: the single
