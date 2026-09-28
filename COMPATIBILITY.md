@@ -62,6 +62,19 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   family is stripped silently from every child toolset — explicit
   `tools`, profile frontmatter, and the mirrored parent set alike —
   so subagents never nest.
+- **Changed — pooled-session idle residency is bounded (#46).** Idle
+  sessions beyond `sessions.maxIdle` (default 4) unload to their
+  transcript and transparently reload on the next reuse — callers see
+  no difference; memory footprint drops. Checked-out sessions are
+  never evicted, `maxIdle: 0` unloads everything settled, and
+  `delegate_session` `list`/`close` cover unloaded records.
+- **Additive — batch `tokenBudget` (#47).** Optional positive-integer
+  ceiling on a dispatch's recorded token usage: once settled tasks
+  charge the account past the limit, queued tasks settle
+  `budget-exhausted` (running tasks always finish), dependents block
+  naming the budget, and `details.tokenBudget` plus the telemetry row
+  carry `{limit, consumed, exhaustedAt}`. Absent by default — nothing
+  changes for budgetless calls.
 - Landed since: steering receipts (#37), `delegate_ticket interrupt`
   (#42 — abort one task's in-flight turn; it settles `interrupted`,
   resumable, distinct from `cancel`'s ticket teardown).

@@ -42,8 +42,8 @@ trained Claude-Code reflex colliding with our registry — and the
 17-repo comparison in `~/build/testing/subagents` (no other surface pays
 this tax; the pros ARE the training distribution). Candidate applications
 on record: agent-name aliases, batch-in-one-call description teaching
-(landed), misfire telemetry for rejected calls (blocked: SPEC currently
-records nothing on rejects — needs reconciliation).
+(landed), misfire telemetry for rejected calls (landed — `misfires`
+table, schema v5+).
 
 ## Deployment reality (learned 2026-09-27, the hard way)
 

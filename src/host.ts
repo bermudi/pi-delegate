@@ -456,10 +456,18 @@ export async function createSubagentSession(
   env: HostEnvironment,
   resourceLoader: DefaultResourceLoader,
   askParent: (question: string, signal: AbortSignal) => Promise<string>,
+  /**
+   * A pooled session's own transcript reloading after an idle unload
+   * (#46) — distinct from `task.resumeFrom` (caller-requested resume into
+   * a fresh task). Checkout already proved the frozen configuration
+   * matches; the open continues the same conversation transparently.
+   */
+  resumeFile?: string,
 ): Promise<AgentSession> {
+  const reopen = resumeFile ?? task.resumeFrom;
   const sessionManager =
-    task.resumeFrom !== undefined
-      ? SessionManager.open(task.resumeFrom)
+    reopen !== undefined
+      ? SessionManager.open(reopen)
       : task.sessionId !== undefined || task.workspace === "shared"
         ? SessionManager.create(
             task.cwd,

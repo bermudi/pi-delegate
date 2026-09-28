@@ -55,7 +55,8 @@ describe("delegate public tool contract", () => {
     const taskFields = objectOf(task.properties, "task properties");
 
     // Top level: `brief` is the shared batch preamble (#43), `context`
-    // its cross-harness spelling.
+    // its cross-harness spelling, `tokenBudget` the batch cost ceiling
+    // (#47).
     expect(Object.keys(top).sort()).toEqual(
       [
         "async",
@@ -64,6 +65,7 @@ describe("delegate public tool contract", () => {
         "operationId",
         "run_in_background",
         "tasks",
+        "tokenBudget",
         "workspace",
       ].sort(),
     );

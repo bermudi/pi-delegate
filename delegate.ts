@@ -29,6 +29,7 @@ import {
 import {
   aliasNote,
   briefNote,
+  budgetNote,
   fieldNotes,
   formatDispatchResult,
   serializedNotices,
@@ -241,6 +242,13 @@ const delegateSchema = Type.Object(
           "Cross-harness spelling of 'brief': normalizes to the shared batch brief; sending both with different text is an error.",
       }),
     ),
+    tokenBudget: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description:
+          "Shared token ceiling for the whole batch: once settled tasks' recorded usage reaches it, tasks still queued settle 'budget-exhausted' instead of starting — running tasks always finish.",
+      }),
+    ),
     operationId: Type.Optional(
       Type.String({
         pattern: "^[A-Za-z0-9._-]{1,64}$",
@@ -374,6 +382,7 @@ const dispatchFieldNames = [
   "async",
   "workspace",
   "operationId",
+  "tokenBudget",
   // `message` is a task field on delegate (spawn_agent's `prompt` spelling)
   // but ticket-owned on delegate_ticket (steer) — it must not bounce there.
   ...taskFieldNames.filter(
@@ -609,6 +618,21 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
   if (typeof args.run_in_background === "string") {
     throw new Error(
       `'run_in_background' must be a boolean, not the string ${JSON.stringify(args.run_in_background)}.`,
+    );
+  }
+  if (typeof args.tokenBudget === "string") {
+    throw new Error(
+      `'tokenBudget' must be a positive integer, not the string ${JSON.stringify(args.tokenBudget)}.`,
+    );
+  }
+  // The TypeBox Integer schema silently floors a fractional value on
+  // coercion — a corrupted ceiling must reject, not narrow (#47).
+  if (
+    typeof args.tokenBudget === "number" &&
+    !Number.isInteger(args.tokenBudget)
+  ) {
+    throw new Error(
+      `'tokenBudget' must be a positive integer, not ${JSON.stringify(args.tokenBudget)}.`,
     );
   }
   if (!Array.isArray(args.tasks)) return;
@@ -950,6 +974,12 @@ Three sibling tools share Delegate's machinery:
   notes it once. \`context\` is the same field under a cross-harness
   spelling — it normalizes to \`brief\` (a rename note reports it);
   sending both with different text is an error.
+- \`tokenBudget\` caps the batch's total recorded token usage (positive
+  integer). Settled tasks charge their usage to it; when it is exhausted
+  the batch stops starting new tasks — queued ones settle
+  \`budget-exhausted\` and dependents block on them — while tasks already
+  running finish normally. The result and ticket header report
+  \`consumed/limit\`; omit the field for no cap.
 - \`dependsOn\` orders tasks in one batch: name earlier task ids (an
   explicit \`id\`, or the generated \`task-1\`, \`task-2\`, ...). A task
   starts only after every prerequisite finished successfully — applied
@@ -1462,6 +1492,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
     readonly signal?: AbortSignal;
     /** The shared batch brief (SPEC v3 "Batch brief"), if the call set one. */
     readonly brief?: string;
+    /** The shared batch token ceiling (SPEC v3 "Batch token budget"). */
+    readonly tokenBudget?: number;
     readonly onNotices?: (notices: readonly string[]) => void;
     /**
      * Async mode's edge: creates the ticket once tasks are resolved, so
@@ -1657,6 +1689,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             }),
           onWorkerQuiesced: (taskIndex) => plan!.cleanupWorker(taskIndex),
           brief: options.brief,
+          tokenBudget: options.tokenBudget,
         })
         .then((outcome) => {
           telemetrySpan.finish(outcome, ticket?.status);
@@ -1977,6 +2010,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             requestedTasks: call.tasks,
             ctx,
             brief: call.brief,
+            tokenBudget: call.tokenBudget,
             // One signal source in the pipeline: the caller's host signal
             // for a sync batch, the ticket's cancellation for an async one.
             signal: call.async ? undefined : signal,
@@ -2002,7 +2036,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 ? undefined
                 : (tasks, relabel, config) => {
                     const created = tickets.create(tasks, {
-                      holdSettlement: workspaceNeedsSettlementHold(tasks),
+                      // Hold settlement through the coordinator's
+                      // finally when the batch has workspace
+                      // reconciliation or a token budget — the final
+                      // account must land on the record before any
+                      // racing `wait` renders the settled view.
+                      holdSettlement:
+                        workspaceNeedsSettlementHold(tasks) ||
+                        call.tokenBudget !== undefined,
                       outputBounds: config.output,
                       // The shared batch brief — persisted on the ticket so
                       // views and post-restart recovery render the header
@@ -2029,17 +2070,19 @@ export default function delegateExtension(api: ExtensionAPI): void {
           });
 
           if (ticket !== undefined) {
-            void completion
-              .then(() => undefined)
-              .catch((error: unknown) => {
-                // The coordinator's task-quiescence chain owns the barrier
-                // and resolves it on this same rejection path; here the
-                // ticket just settles failed and the crash is reported.
-                tickets.settle(ticket, "failed");
-                console.error(
-                  `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
-                );
-              });
+            // The settled ticket's views (and its journal record) carry
+            // the final token-budget account — the coordinator persists
+            // it inside its own finally, before the settlement hold
+            // lifts, so a racing `wait` never misses it.
+            void completion.catch((error: unknown) => {
+              // The coordinator's task-quiescence chain owns the barrier
+              // and resolves it on this same rejection path; here the
+              // ticket just settles failed and the crash is reported.
+              tickets.settle(ticket, "failed");
+              console.error(
+                `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
             armDelivery(ticket);
             // The teaching notes the settled views carry (SPEC v3
             // "Reflex meeting") must also reach the caller at dispatch —
@@ -2068,6 +2111,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
                     (teachNotes.length > 0 ? `${teachNotes.join("\n")}\n` : "") +
                     (briefNote(call.brief) !== undefined
                       ? `${briefNote(call.brief)}\n`
+                      : "") +
+                    (call.tokenBudget !== undefined
+                      ? `${budgetNote({ limit: call.tokenBudget, consumed: 0 })}\n`
                       : "") +
                     `Results will be delivered automatically when the batch settles; keep working. ` +
                     `delegate_ticket can wait on or cancel it if needed (action "wait" / "cancel").` +
@@ -2108,7 +2154,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 type: "text" as const,
                 text:
                   (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
-                  formatDispatchResult(result.outcomes, tasks, outputBounds, call.brief),
+                  formatDispatchResult(result.outcomes, tasks, outputBounds, call.brief, result.tokenBudget),
               },
             ],
             details: {
@@ -2121,6 +2167,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // The batch brief as sent — the replayed/expanded render
               // re-heads the result with it (SPEC v3 "Batch brief").
               ...(call.brief !== undefined ? { brief: call.brief } : {}),
+              // SPEC v3 "Batch token budget": the final account —
+              // {limit, consumed, exhaustedAt} — when the call set one.
+              ...(result.tokenBudget !== undefined
+                ? { tokenBudget: result.tokenBudget }
+                : {}),
               // The rendered content is spill-bounded; details keep the
               // complete outcomes for the expanded view and recovery.
               results: result.outcomes,
@@ -2163,6 +2214,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // The brief is request content — a call differing only in
               // its brief is a different dispatch, not a duplicate.
               brief: call.brief,
+              // Same for the batch token ceiling (#47).
+              tokenBudget: call.tokenBudget,
               tasks: call.tasks.map(
                 ({ normalizedFrom: _normalized, ...task }) => task,
               ),
@@ -2241,6 +2294,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
             ...(result.ticket !== undefined &&
             result.ticket.notices.length > 0
               ? { notices: result.ticket.notices }
+              : {}),
+            // SPEC v3 "Batch token budget": the settled batch's final
+            // account rides the view (poll/wait), same as the sync result.
+            ...(result.ticket?.tokenBudget !== undefined
+              ? { tokenBudget: result.ticket.tokenBudget }
               : {}),
             ...(call.action === "poll" || call.action === "wait"
               ? { questions: result.ticket?.questions }

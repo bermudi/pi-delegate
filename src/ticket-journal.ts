@@ -37,7 +37,7 @@ const outcome = Type.Object({
   status: Type.Union([
     Type.Literal("ok"), Type.Literal("failed"),
     Type.Literal("cancelled"), Type.Literal("blocked"),
-    Type.Literal("interrupted"),
+    Type.Literal("interrupted"), Type.Literal("budget-exhausted"),
   ]),
   output: Type.Optional(Type.String()), error: Type.Optional(Type.String()),
   retries: Type.Integer({ minimum: 0 }), usage: Type.Optional(usage),
@@ -76,6 +76,14 @@ const savedTicket = Type.Object({
   // The shared batch brief (SPEC v3 "Batch brief"); optional — records
   // written before it existed carry none.
   brief: Type.Optional(Type.String()),
+  // The batch's token-budget account (SPEC v3 "Batch token budget");
+  // optional — records written before it existed, and budgetless
+  // dispatches, carry none.
+  tokenBudget: Type.Optional(Type.Object({
+    limit: Type.Integer({ minimum: 1 }),
+    consumed: Type.Integer({ minimum: 0 }),
+    exhaustedAt: Type.Optional(Type.Number()),
+  })),
   outputBounds: Type.Object({
     spillThresholdChars: Type.Integer({ minimum: 0 }),
     spillTailChars: Type.Integer({ minimum: 0 }),
@@ -141,6 +149,7 @@ export class TicketJournal {
       tasks: ticket.tasks.map(({ id, agent, resumeTag, aliasedFrom, description, normalizedFrom, cwd }) => ({ id, agent, resumeTag, aliasedFrom, description, normalizedFrom, cwd })),
       outcomes: ticket.outcomes.map((item) => item ?? null),
       brief: ticket.brief,
+      tokenBudget: ticket.tokenBudget,
       outputBounds: ticket.outputBounds,
       createdAt: ticket.createdAt,
       notices: ticket.notices,

@@ -54,7 +54,14 @@ steer-shaped — the call is rejected with guidance toward
 never call arguments. Top-level `brief` is shared batch
 context: it prepends to every task's prompt inside a `--- batch brief ---`
 fence (task sections and headers note it once; it never merges into the
-prompt's prose).
+prompt's prose). Top-level `tokenBudget` (positive integer) caps the
+batch's recorded token usage: settled tasks charge their usage to it, and
+once the ceiling is reached queued tasks settle `budget-exhausted`
+instead of starting — tasks already running always finish, and dependents
+of an exhausted task block naming the budget. Result and ticket headers
+report `token budget: consumed/limit`, `details.tokenBudget` carries
+`{limit, consumed, exhaustedAt}`, and the dispatch's telemetry row
+records the account.
 
 Delivery happens once, when the batch fully settles: tickets settling within the
 same flush window coalesce into a single follow-up wake when the parent is still
@@ -159,6 +166,7 @@ Unknown keys and malformed values fail loudly at the dispatch boundary.
 | `models` | `{}` | Model override per canonical agent, e.g. `{"coder": "openai/gpt-5.2"}`. No `default` entry — it mirrors the parent. |
 | `modelsByParent` | `{}` | `models` scoped by exact normalized parent `provider/model-id`; wins over `models`. |
 | `stallTimeoutMs` | `900000` (15 min) | Inactivity watchdog: no session events for this long aborts the task. `0` disables. |
+| `sessions.maxIdle` | `4` | Idle pooled sessions kept resident in memory; beyond the bound the least-recently-idle unloads to its transcript and reloads on next use. `0` unloads every settled session. |
 | `telemetry.enabled` | `false` | Record dispatches in a local SQLite file. |
 | `telemetry.dbPath` | unset | Store location; falls back to `DELEGATE_TELEMETRY_DB`, then `<agentDir>/delegate-usage.db`. |
 | `output.spillThresholdChars` | `8000` | Characters before a result spills to a file. |
@@ -213,11 +221,14 @@ work.
 
 ## Sessions
 
-A task with `sessionId` keeps its subagent conversation pooled in memory; a
-later task reusing the id continues the same conversation. `delegate_session`
-`list` shows pooled sessions and `close` shuts one down. Pooled sessions end
-with the parent process; `resumeFrom` instead rehydrates a session from a prior
-`.jsonl` transcript.
+A task with `sessionId` keeps its subagent conversation pooled; a later task
+reusing the id continues the same conversation. Idle residents are bounded by
+`sessions.maxIdle` — over the bound, the least-recently-idle session unloads to
+its transcript file and the next reuse transparently reloads it; a running
+session is never evicted. `delegate_session` `list` shows pooled sessions
+(resident and on-disk) and `close` shuts one down. Pooled sessions end with the
+parent process; `resumeFrom` instead rehydrates a session from a prior `.jsonl`
+transcript.
 
 ## Parent conversation isolation
 

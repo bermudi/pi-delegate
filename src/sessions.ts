@@ -115,9 +115,19 @@ export function persistSessionHeader(sm: unknown): boolean {
 /** A live pooled session. `checkedOut` marks a run currently owning it. */
 export interface PooledSession {
   readonly sessionId: string;
-  readonly session: AgentSession;
+  /**
+   * The live session while resident; undefined once the residency policy
+   * (#46) unloaded it to `transcriptFile`. The record stays addressable —
+   * the next checkout reloads it transparently, and `close`/`list` work
+   * on it either way.
+   */
+  session: AgentSession | undefined;
   readonly config: FrozenSessionConfig;
+  /** The durable transcript the session unloads to and reloads from. */
+  readonly transcriptFile: string;
   checkedOut: boolean;
+  /** Idle ordering for residency eviction — bumped on every return to idle. */
+  idleSeq: number;
 }
 
 /** How a finished run left its session; the pool decides the disposition. */
@@ -134,6 +144,8 @@ export interface SessionSettle {
     /** Worker quiescence could not be confirmed; never dispose. */
     readonly quarantined: boolean;
   };
+  /** Idle residency bound (#46) — `delegate.json sessions.maxIdle`. */
+  readonly maxIdle: number;
 }
 
 /**
@@ -153,15 +165,17 @@ export interface SessionSettle {
  */
 export class SessionPool {
   private readonly entries = new Map<string, PooledSession>();
+  /** Monotonic idle-order clock for residency eviction (#46). */
+  private idleClock = 0;
 
   /**
    * Transcript file of a pooled session, when one is pooled — admission
    * resolves it for transcript exclusivity (a `resumeFrom` pointing at a
-   * live pooled session's file must reject).
+   * live pooled session's file must reject). Resident or unloaded, the
+   * recorded file is the session's durable state.
    */
   transcriptFileOf(sessionId: string): string | undefined {
-    const file = this.entries.get(sessionId)?.session.sessionFile;
-    return typeof file === "string" ? file : undefined;
+    return this.entries.get(sessionId)?.transcriptFile;
   }
 
   /** Active invocation of the delegate-owned tool; never part of frozen tools. */
@@ -210,8 +224,15 @@ export class SessionPool {
    * Take a pooled session for one run, or undefined when the id is not
    * pooled (or the task has none). Re-checks the frozen configuration —
    * a late mismatch is a task-level failure, not a whole-call error.
+   * An entry unloaded under the residency policy (#46) reloads
+   * transparently through `open` — the frozen-config check above already
+   * proved the world did not change, so the reload continues the same
+   * conversation on the same transcript file.
    */
-  checkout(task: ResolvedTask): PooledSession | undefined {
+  async checkout(
+    task: ResolvedTask,
+    open: (transcriptFile: string) => Promise<AgentSession>,
+  ): Promise<PooledSession | undefined> {
     if (task.sessionId === undefined) return undefined;
     if (this.closed) {
       throw new Error(
@@ -226,6 +247,23 @@ export class SessionPool {
       throw new Error(
         `Session '${task.sessionId}' is already running a task; wait for it to finish.`,
       );
+    }
+    if (entry.session === undefined) {
+      // Claim the entry before the async open: a second checkout arriving
+      // mid-reload must see checkedOut, not race a duplicate open on the
+      // same transcript file. A failed open releases the claim — the
+      // unloaded record stays pooled for a later retry.
+      entry.checkedOut = true;
+      try {
+        entry.session = await open(entry.transcriptFile);
+      } catch (error) {
+        entry.checkedOut = false;
+        throw new Error(
+          `Session '${task.sessionId}' could not be reloaded from its transcript ${entry.transcriptFile}: ` +
+            `${error instanceof Error ? error.message : String(error)}.`,
+          { cause: error },
+        );
+      }
     }
     // A steer or follow-up queued in the previous run's tail window (after
     // the loop's last queue poll but before settle) must not leak into this
@@ -247,7 +285,7 @@ export class SessionPool {
    * than re-pooled.
    */
   settle(args: SessionSettle): void {
-    const { entry, task, session, outcome } = args;
+    const { entry, task, session, outcome, maxIdle } = args;
     const sessionId = task.sessionId!;
     const stillPooled =
       entry !== undefined && this.entries.get(entry.sessionId) === entry;
@@ -255,9 +293,12 @@ export class SessionPool {
       if (stillPooled) this.entries.delete(sessionId);
       if (entry) entry.checkedOut = false;
     };
+    // A run releasing its entry idle re-arms it for residency selection.
     const keep = () => {
       if (stillPooled) {
         entry.checkedOut = false;
+        entry.idleSeq = ++this.idleClock;
+        this.enforceResidency(maxIdle);
       } else {
         this.dispose(session, sessionId);
       }
@@ -278,6 +319,8 @@ export class SessionPool {
     if (outcome.status === "ok" && outcome.prompted) {
       if (stillPooled) {
         entry.checkedOut = false;
+        entry.idleSeq = ++this.idleClock;
+        this.enforceResidency(maxIdle);
         return;
       }
       if (entry !== undefined) {
@@ -291,8 +334,11 @@ export class SessionPool {
           sessionId,
           session,
           config: frozenConfig(task),
+          transcriptFile: file,
           checkedOut: false,
+          idleSeq: ++this.idleClock,
         });
+        this.enforceResidency(maxIdle);
       } else {
         console.error(
           `[delegate] session '${sessionId}' succeeded but has no durable session file; not pooled.`,
@@ -326,6 +372,26 @@ export class SessionPool {
     dispose();
   }
 
+  /**
+   * Idle residency bound (#46): beyond `maxIdle` resident idle sessions,
+   * the least-recently-idle unload — the AgentSession is disposed and its
+   * record keeps only the frozen config + transcript file, which the next
+   * checkout reloads through `open`. Checked-out (in-flight) sessions are
+   * never candidates; eviction runs on idle transitions only, so a session
+   * is never unloaded out from under a run.
+   */
+  private enforceResidency(maxIdle: number): void {
+    const resident = [...this.entries.values()].filter(
+      (entry) => !entry.checkedOut && entry.session !== undefined,
+    );
+    resident.sort((a, b) => a.idleSeq - b.idleSeq);
+    while (resident.length > maxIdle) {
+      const victim = resident.shift()!;
+      this.dispose(victim.session!, victim.sessionId);
+      victim.session = undefined;
+    }
+  }
+
   private dispose(session: AgentSession, sessionId: string): void {
     try {
       session.dispose();
@@ -334,7 +400,7 @@ export class SessionPool {
     }
   }
 
-  /** `delegate_session` "list": every live pooled session, running or idle. */
+  /** `delegate_session` "list": every pooled session — running, resident idle, or on disk (#46). */
   list(): string {
     if (this.entries.size === 0) {
       return "No live sessions. A task with a sessionId creates one.";
@@ -342,7 +408,11 @@ export class SessionPool {
     const lines = [...this.entries.values()].map(
       (entry) =>
         `- "${entry.sessionId}" — model ${entry.config.model}, cwd ${entry.config.cwd}` +
-        (entry.checkedOut ? " (running)" : ""),
+        (entry.checkedOut
+          ? " (running)"
+          : entry.session === undefined
+            ? " (idle, on disk)"
+            : ""),
     );
     return `Sessions:\n${lines.join("\n")}`;
   }
@@ -373,11 +443,13 @@ export class SessionPool {
     // The entry is already removed, so ordering is safe: request an abort
     // (no-op on an idle session) without awaiting — abort() waits for
     // quiescence, which a stuck session could withhold forever — then
-    // dispose.
-    entry.session.abort().catch((error: unknown) => {
-      log(`abort on close of session '${sessionId}' failed`, error);
-    });
-    this.dispose(entry.session, sessionId);
+    // dispose. An unloaded entry has no live session at all (#46).
+    if (entry.session !== undefined) {
+      entry.session.abort().catch((error: unknown) => {
+        log(`abort on close of session '${sessionId}' failed`, error);
+      });
+      this.dispose(entry.session, sessionId);
+    }
     return `Session '${sessionId}' closed.`;
   }
 
@@ -390,6 +462,8 @@ export class SessionPool {
     this.closed = true;
     const failures: string[] = [];
     for (const entry of this.entries.values()) {
+      // An unloaded entry (#46) owns no live session — nothing to tear down.
+      if (entry.session === undefined) continue;
       if (entry.checkedOut) {
         entry.session.abort().catch((error: unknown) => {
           log(`abort of session '${entry.sessionId}' during shutdown`, error);

@@ -115,6 +115,22 @@ mid-flight the parent can steer. The grammar:
   persists on the ticket record so a recovered view still names
   it. A whitespace-only brief is absent; `prompt` stays required
   per task.
+- **Batch token budget.** A top-level `tokenBudget` (positive
+  integer, off by default) is a shared token ceiling for the
+  batch (#47): each settled task charges its recorded usage to
+  the account, and once the total reaches the limit the batch
+  stops starting new tasks — a task still queued settles
+  `budget-exhausted` with a visible reason naming the limit,
+  without consuming a slot, worker, or session. Tasks already
+  running always finish; the budget never hard-aborts a turn.
+  Dependents of a `budget-exhausted` task block with a reason
+  naming the exhausted budget, and unrelated branches still run.
+  `budget-exhausted` is a first-class terminal outcome in views,
+  telemetry, and the journal. The result and ticket headers
+  report the account (`token budget: consumed/limit`), and
+  `details.tokenBudget` carries `{limit, consumed, exhaustedAt?}`
+  on dispatch results, polls, and waits; it persists on the
+  ticket record so a recovered view still reports it.
 - **Wake delivery.** Settled results inject as follow-up turns,
   leaf-aware; simultaneous settlements batch into one wake.
 
@@ -195,6 +211,16 @@ mid-flight the parent can steer. The grammar:
   This matches the largest training surface (Claude Code subagents
   lack Task) and avoids recursion admission and depth accounting
   entirely. `ask_parent` is unaffected.
+- **Resident idle bound.** Idle pooled sessions held in memory are
+  bounded by `sessions.maxIdle` in `delegate.json` (default 4, #46):
+  beyond the bound the least-recently-idle session unloads to its
+  transcript file, and the next task naming its `sessionId`
+  transparently reloads it — the transcript was always the resume
+  authority, so unloading loses nothing but memory. Checked-out
+  (running) sessions are never evicted; `maxIdle: 0` keeps nothing
+  resident. `delegate_session list` shows unloaded records and
+  `close` removes them the same as live ones. Config machinery —
+  never a model-facing field.
 
 ## Observability
 

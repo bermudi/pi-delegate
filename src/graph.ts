@@ -161,6 +161,9 @@ export function blockingReason(
   if (outcome.status === "blocked") {
     return "was itself blocked";
   }
+  if (outcome.status === "budget-exhausted") {
+    return "never ran — the batch token budget was already exhausted";
+  }
   if (outcome.status !== "ok") {
     return outcome.error
       ? `${outcome.status} — ${outcome.error}`

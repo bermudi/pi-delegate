@@ -151,7 +151,7 @@ describe("delegate telemetry contract", () => {
       expect(result.isError).toBe(false);
       const db = new DatabaseSync(dbPath);
       try {
-        expect(userVersionOf(db)).toBe(5);
+        expect(userVersionOf(db)).toBe(6);
         const calls = rowsOf(db, "calls");
         const tasks = rowsOf(db, "tasks").sort(
           (a, b) => Number(a.idx) - Number(b.idx),
@@ -463,7 +463,7 @@ describe("delegate telemetry contract", () => {
 
       const db = new DatabaseSync(dbPath);
       try {
-        expect(userVersionOf(db)).toBe(5);
+        expect(userVersionOf(db)).toBe(6);
         const columns = (db.prepare("PRAGMA table_info(tasks)").all() as {
           name?: unknown;
         }[]).map((row) => row.name);
@@ -559,7 +559,7 @@ describe("delegate telemetry contract", () => {
       }
       expect(callCount).toBe(8);
       expect(taskCount).toBe(8);
-      expect(version).toBe(5);
+      expect(version).toBe(6);
       expect(journal).toBe("wal");
     },
     120_000,

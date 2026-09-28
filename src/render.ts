@@ -34,7 +34,7 @@ import {
 } from "./format.ts";
 import { UNBOUNDED_OUTPUT } from "./spill.ts";
 import type { TicketStore } from "./tickets.ts";
-import type { TaskOutcome } from "./types.ts";
+import type { TaskOutcome, TokenBudgetReport } from "./types.ts";
 import type { SessionArguments, TicketArguments } from "./validation.ts";
 
 /** Matches the stock tool-result fallback's collapsed preview budget. */
@@ -46,6 +46,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function isTokenBudgetReport(value: unknown): value is TokenBudgetReport {
+  return (
+    isRecord(value) &&
+    typeof value.limit === "number" &&
+    typeof value.consumed === "number" &&
+    (value.exhaustedAt === undefined || typeof value.exhaustedAt === "number")
+  );
+}
+
 function isOutcome(value: unknown): value is TaskOutcome {
   return (
     isRecord(value) &&
@@ -54,7 +63,8 @@ function isOutcome(value: unknown): value is TaskOutcome {
       value.status === "failed" ||
       value.status === "cancelled" ||
       value.status === "blocked" ||
-      value.status === "interrupted")
+      value.status === "interrupted" ||
+      value.status === "budget-exhausted")
   );
 }
 
@@ -102,6 +112,7 @@ function expandedText(
     [],
     UNBOUNDED_OUTPUT,
     typeof details.brief === "string" ? details.brief : undefined,
+    isTokenBudgetReport(details.tokenBudget) ? details.tokenBudget : undefined,
   );
   const notices = Array.isArray(details.notices)
     ? details.notices.filter((n): n is string => typeof n === "string")

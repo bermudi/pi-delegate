@@ -995,6 +995,54 @@ and "Reflex meeting — alias precedence" define it.
   tools run; no `agent "general" →` note), and the claimed-alias
   listing in the unknown-agent error.
 
+### Pooled-session residency (v3, #46)
+
+New v3 contract — v1 kept every pooled session resident for the
+parent's lifetime; v3 bounds idle residency while preserving the
+reuse contract (the transcript file was always the resume authority).
+
+- **Contract:** `sessions.maxIdle` (default 4) bounds idle pooled
+  sessions held in memory; over the bound the least-recently-idle
+  session unloads to its transcript, and the next task naming its
+  `sessionId` transparently reloads it with the conversation intact.
+  A checked-out session is never evicted, and it joins the idle set
+  only when it settles — the LRU victim is the older idle session.
+  `maxIdle: 0` unloads every settled session. `delegate_session list`
+  marks unloaded records and `close` removes them the same as live
+  ones. The frozen-config invariant still rejects an incompatible
+  reuse after unload.
+- **Covered now:** `tests/contract/session-residency.test.ts` —
+  over-bound eviction to disk and transparent reload with history
+  preserved, incompatible-config rejection after reload, a checked-out
+  session surviving the bound while the older idle session evicts,
+  `list`/`close` over unloaded records, and `maxIdle: 0`.
+
+### Batch token budget (v3, #47)
+
+New v3 contract — no v1 analog (the `rollout_budget` analog the issue
+names); SPEC.md "Interaction grammar — Batch token budget" defines it.
+
+- **Contract:** top-level `tokenBudget` (positive integer, off by
+  default) is a shared ceiling on the batch's recorded usage. Settled
+  tasks charge `usage.totalTokens` to it; once the total reaches the
+  limit, still-queued tasks settle `budget-exhausted` without
+  consuming a slot, worker, or session — checked before dependency and
+  semaphore waits and again at the start boundary. Running tasks are
+  never hard-aborted and finish normally. Dependents of an exhausted
+  task block with a reason naming the budget. Result and ticket
+  headers report `token budget: consumed/limit`, `details.tokenBudget`
+  carries `{limit, consumed, exhaustedAt}` on dispatch results and
+  poll/wait, the ticket journal persists it for recovered views, the
+  dispatch's telemetry row records it (schema v6), and the value joins
+  the `operationId` request fingerprint. Non-integer, non-positive,
+  and string values reject naming the field.
+- **Covered now:** `tests/contract/token-budget.test.ts` — queued
+  tasks settle `budget-exhausted` without a provider call, an
+  in-flight task finishes after exhaustion, a dependent of an
+  exhausted task blocks naming it, the telemetry call/task rows, the
+  validation rejections, the unchanged default, and the fingerprint
+  conflict.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |

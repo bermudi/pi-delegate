@@ -237,7 +237,7 @@ class SubagentBrowser implements Component {
           : Math.min(this.scroll, this.maxScroll);
       lines.push(...detail.slice(start, start + this.pageSize));
       while (lines.length < height - 3) lines.push("");
-      const settled = row.status === "ok" || row.status === "failed" || row.status === "cancelled" || row.status === "interrupted";
+      const settled = row.status === "ok" || row.status === "failed" || row.status === "cancelled" || row.status === "interrupted" || row.status === "budget-exhausted";
       const pauseHint =
         row.kind === "ticket" && row.ticketId !== undefined && !settled
           ? `p ${paused ? "resume" : "pause"} WHOLE ticket ${row.ticketId}`

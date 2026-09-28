@@ -53,6 +53,8 @@ export type DispatchCall =
        */
       readonly brief: string | undefined;
       readonly operationId: string | undefined;
+      /** The batch's shared token ceiling (SPEC v3 "Batch token budget"). */
+      readonly tokenBudget: number | undefined;
       /**
        * Applied dispatch-level compat renames (top-level
        * `run_in_background` → `async`); per-task renames ride each
@@ -107,6 +109,12 @@ export interface DispatchArguments {
   /** Cross-harness spelling of `brief`; normalizes into it. */
   readonly context?: string;
   readonly operationId?: string;
+  /**
+   * Shared batch token ceiling (SPEC v3 "Batch token budget"): settled
+   * tasks' recorded usage counts against it; once exhausted, queued tasks
+   * settle `budget-exhausted` — running tasks always finish.
+   */
+  readonly tokenBudget?: number;
 }
 
 /** A validated delegate_ticket call; blank optionals normalized to absent. */
@@ -321,6 +329,9 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
     if (args.operationId !== undefined) {
       fail(`operationId requires a non-empty dispatch task list.`);
     }
+    if (args.tokenBudget !== undefined) {
+      fail(`tokenBudget requires at least one task; it is a dispatch field.`);
+    }
     return { mode: "help" };
   }
 
@@ -449,6 +460,15 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
   const rawBrief = args.brief ?? args.context;
   const brief =
     rawBrief !== undefined && rawBrief.trim() !== "" ? rawBrief : undefined;
+  // SPEC v3 "Batch token budget": the field is a positive integer — the
+  // schema constrains it, but callers that bypass schema validation get
+  // the same loud answer here rather than a silently-instant exhaustion.
+  if (
+    args.tokenBudget !== undefined &&
+    (!Number.isInteger(args.tokenBudget) || args.tokenBudget <= 0)
+  ) {
+    fail(`'tokenBudget' must be a positive integer; got ${JSON.stringify(args.tokenBudget)}.`);
+  }
   const callNotes: FieldNormalization[] = [
     ...(args.run_in_background === undefined
       ? []
@@ -465,6 +485,7 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
     // overrides in both directions.
     async: args.async ?? firstRib?.value ?? effectiveTasks.length > 1,
     operationId: args.operationId,
+    tokenBudget: args.tokenBudget,
     callNotes,
   };
 }

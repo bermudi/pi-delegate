@@ -7,7 +7,7 @@ import type { TelemetryConfig } from "./config.ts";
 import type { DispatchOutcome } from "./coordinator.ts";
 import type { ResolvedTask, TaskOutcome, TicketStatus } from "./types.ts";
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const BUSY_TIMEOUT_MS = 100;
 const BUSY_WINDOW_MS = 500;
 const BUSY_RETRY_BASE_MS = 10;
@@ -21,7 +21,9 @@ const TABLES = [
       id TEXT PRIMARY KEY, ts INTEGER, version TEXT, pi_version TEXT,
       mode TEXT, parent_model TEXT, task_count INTEGER, wall_ms INTEGER,
       status TEXT, total_tokens INTEGER, total_cost REAL,
-      parent_session_file TEXT, parent_cwd TEXT)`,
+      parent_session_file TEXT, parent_cwd TEXT,
+      budget_limit INTEGER, budget_consumed INTEGER,
+      budget_exhausted_at INTEGER)`,
     columns: [
       ["id", "TEXT PRIMARY KEY"],
       ["ts", "INTEGER"],
@@ -36,6 +38,11 @@ const TABLES = [
       ["total_cost", "REAL"],
       ["parent_session_file", "TEXT"],
       ["parent_cwd", "TEXT"],
+      // SPEC v3 "Batch token budget" — the call's final budget account;
+      // all NULL on budgetless dispatches (schema v6).
+      ["budget_limit", "INTEGER"],
+      ["budget_consumed", "INTEGER"],
+      ["budget_exhausted_at", "INTEGER"],
     ],
   },
   {
@@ -438,8 +445,9 @@ export class TelemetryStore {
           const insertCall = db.prepare(
             `INSERT INTO calls(id, ts, version, pi_version, mode, parent_model,
                task_count, wall_ms, status, total_tokens, total_cost,
-               parent_session_file, parent_cwd)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+               parent_session_file, parent_cwd,
+               budget_limit, budget_consumed, budget_exhausted_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           );
           const insertTask = db.prepare(
             `INSERT INTO tasks(id, call_id, ts, version, pi_version, idx,
@@ -497,6 +505,9 @@ export class TelemetryStore {
             result.usage?.cost.total ?? null,
             null,
             null,
+            result.tokenBudget?.limit ?? null,
+            result.tokenBudget?.consumed ?? null,
+            result.tokenBudget?.exhaustedAt ?? null,
           );
         });
       });

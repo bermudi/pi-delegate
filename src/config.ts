@@ -25,6 +25,17 @@ export interface TelemetryConfig {
   readonly dbPath: string | undefined;
 }
 
+export interface SessionsConfig {
+  /**
+   * Pooled-session residency bound (#46): how many *idle* pooled sessions
+   * stay live in memory. Beyond it, the least-recently-idle unload to
+   * their transcript files and transparently reload on the next
+   * same-sessionId task. Checked-out (running) sessions never unload.
+   * 0 keeps nothing resident — every reuse reloads.
+   */
+  readonly maxIdle: number;
+}
+
 export interface DelegateConfig {
   /** Global bound on simultaneously executing tasks. */
   readonly maxConcurrent: number;
@@ -51,6 +62,7 @@ export interface DelegateConfig {
    */
   readonly stallTimeoutMs: number;
   readonly telemetry: TelemetryConfig;
+  readonly sessions: SessionsConfig;
   /**
    * LLM-facing output bounding: over `spillThresholdChars` a settled task's
    * output spills to an owner-only temp file and only a `spillTailChars`
@@ -72,6 +84,12 @@ export const DEFAULT_CONFIG: DelegateConfig = {
   modelsByParent: {},
   stallTimeoutMs: 15 * 60 * 1000,
   telemetry: { enabled: false, dbPath: undefined },
+  // Idle residency bound 4 (#46): codex unloads idle agents to their
+  // rollout files under memory pressure — a pooled session holds a full
+  // in-memory transcript, so resident idles are the expensive resource.
+  // Four keeps ordinary sessionId reuse resident while bounding a fleet;
+  // checked-out sessions are never counted (in-flight never unloads).
+  sessions: { maxIdle: 4 },
   output: { spillThresholdChars: 8000, spillTailChars: 2000 },
 };
 
@@ -273,6 +291,7 @@ export function loadDelegateConfig(
     stallTimeoutMs:
       (stallTimeoutMs as number) ?? DEFAULT_CONFIG.stallTimeoutMs,
     telemetry: parseTelemetry(config.telemetry, path),
+    sessions: parseSessions(config.sessions, path),
     output: parseOutput(config.output, path),
   };
 }
@@ -307,6 +326,38 @@ function parseOutput(value: unknown, path: string): OutputBounds {
     spillThresholdChars:
       (threshold as number) ?? DEFAULT_CONFIG.output.spillThresholdChars,
     spillTailChars: (tail as number) ?? DEFAULT_CONFIG.output.spillTailChars,
+  };
+}
+
+/**
+ * Parse the optional `sessions` block: pooled-session residency (#46).
+ * `maxIdle` is a non-negative integer — 0 unloads every idle session.
+ * Unknown keys fail loudly, like the other blocks.
+ */
+function parseSessions(value: unknown, path: string): SessionsConfig {
+  if (value === undefined) return DEFAULT_CONFIG.sessions;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${path}: sessions must be an object.`);
+  }
+  const raw = value as Record<string, unknown>;
+  for (const key of Object.keys(raw)) {
+    if (key !== "maxIdle") {
+      throw new Error(
+        `${path}: sessions.${key} is not a known sessions option; known keys: maxIdle.`,
+      );
+    }
+  }
+  if (raw.maxIdle !== undefined && !(
+    typeof raw.maxIdle === "number" &&
+    Number.isInteger(raw.maxIdle) &&
+    raw.maxIdle >= 0
+  )) {
+    throw new Error(
+      `${path}: sessions.maxIdle must be a non-negative integer; got ${JSON.stringify(raw.maxIdle)}.`,
+    );
+  }
+  return {
+    maxIdle: (raw.maxIdle as number) ?? DEFAULT_CONFIG.sessions.maxIdle,
   };
 }
 

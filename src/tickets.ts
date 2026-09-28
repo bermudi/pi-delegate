@@ -6,6 +6,7 @@ import {
   descriptionLabel,
   displayPath,
   briefNote,
+  budgetNote,
   fieldNotes,
   filesLine,
   integrationLines,
@@ -23,6 +24,7 @@ import type {
   TaskOutcome,
   Ticket,
   TicketStatus,
+  TokenBudgetReport,
   WorkerQuestion,
 } from "./types.ts";
 import { Deferred } from "./types.ts";
@@ -354,11 +356,14 @@ function ticketView(
 ): string {
   const warning = recoveryWarning(ticket);
   const brief = briefNote(ticket.brief);
+  const budget = budgetNote(ticket.tokenBudget);
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished${isTerminal(ticket.status) ? "" : liveCounts(ticket, live)}.`,
     // The shared batch brief is mentioned once, at the head — never
-    // inside a task section (SPEC v3 "Batch brief").
+    // inside a task section (SPEC v3 "Batch brief"). The token-budget
+    // account rides the same header row (SPEC v3 "Batch token budget").
     ...(brief !== undefined ? [brief] : []),
+    ...(budget !== undefined ? [budget] : []),
     ...(warning ? [warning] : []),
     ...ticket.notices,
     ...ticket.questions.map((q) =>
@@ -462,6 +467,11 @@ export class TicketStore {
         notices: item.notices,
         // Optional in the journal — pre-brief records have none.
         ...(item.brief !== undefined ? { brief: item.brief } : {}),
+        // Optional in the journal — pre-budget records and budgetless
+        // dispatches have none.
+        ...(item.tokenBudget !== undefined
+          ? { tokenBudget: item.tokenBudget }
+          : {}),
       };
       this.tickets.set(item.id, { record: recovered, rt: this.runtime(false) });
     }
@@ -649,6 +659,18 @@ export class TicketStore {
       }
     }
     return rows;
+  }
+
+  /**
+   * The dispatch's final token-budget account (SPEC v3 "Batch token
+   * budget"), recorded when its batch completes — the settled ticket's
+   * views and the journal both carry it.
+   */
+  noteTokenBudget(ticket: Ticket, report: TokenBudgetReport): void {
+    const writable = this.entry(ticket).record as Writable<Ticket>;
+    writable.tokenBudget = report;
+    this.save(writable);
+    this.changed();
   }
 
   /** Record a task outcome. Never changes a terminal ticket's status. */

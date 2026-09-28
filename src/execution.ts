@@ -43,6 +43,8 @@ export interface RunControls {
   readonly signal: AbortSignal;
   /** Inactivity watchdog budget in ms; 0 disables it. */
   readonly stallTimeoutMs: number;
+  /** Idle pooled-session residency bound (#46) — `delegate.json sessions.maxIdle`. */
+  readonly maxIdleSessions: number;
   /** Optional per-event sink (visibility/activity); never errors into the run. */
   readonly observe?: (event: AgentSessionEvent) => void;
   /**
@@ -567,6 +569,7 @@ export class TaskExecution implements ExecutionHandle {
             : undefined,
         quarantined: this.quarantined,
       },
+      maxIdle: this.controls.maxIdleSessions,
     });
   }
 
@@ -579,13 +582,17 @@ export class TaskExecution implements ExecutionHandle {
       // An abort already delivered (or landing during session creation)
       // resolves caller settlement even if creation never returns.
       if (this.controls.signal.aborted) void this.abort("cancelled");
-      this.poolEntry = this.controls.sessions.checkout(this.task);
-      session =
-        this.poolEntry?.session ??
-        (await createSubagentSession(
+      const create = (resumeFile?: string) =>
+        createSubagentSession(
           this.task, this.controls.env, loader,
           (question, signal) => this.controls.sessions.askQuestion(session!, question, signal),
-        ));
+          resumeFile,
+        );
+      // Checkout before creation: a pooled resident session is reused
+      // directly; an entry unloaded under the residency policy (#46)
+      // reloads transparently from its own transcript file.
+      this.poolEntry = await this.controls.sessions.checkout(this.task, create);
+      session = this.poolEntry?.session ?? (await create());
       // Transcript exclusivity: claim the concrete file before the first
       // turn writes into it. resumeFrom paths were reserved at admission;
       // this also covers a pooled session's first run, whose file did not
