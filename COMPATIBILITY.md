@@ -11,8 +11,9 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   Single-task calls still block inline by default; `async: true`
   overrides either way.
 - **Additive — agent-name aliases.** `general`, `general-purpose`,
-  `worker` resolve to `default`; `plan`, `scout` to `explore`;
-  `implement` to `coder`. Exact case-sensitive match; expansion is
+  `worker` resolve to `default`; `explorer`, `plan`, `scout` to
+  `explore`; `implement` to `coder`. Exact case-sensitive match;
+  expansion is
   visible in results; unknown names still error with the available
   list. Config model pins key on the canonical name.
 - **Renamed — the read-only built-in is `explore`, not `scout` (#40).**
@@ -44,6 +45,23 @@ v3 is a contract layer on the same engine. Caller-visible changes:
 - **Changed — default `maxConcurrent` is 8, not 3 (#41).** Field
   survey: letta/grok/oh-my-pi default 32; minimax/deepseek/MiMo/fx
   uncapped. The `concurrency` maps remain the rate-limit guard.
+- **Additive — trained-reflex long tail (#44).** `agent_type` folds
+  to `agent` with `subagent_type`'s conflict rules; `task_name` →
+  `id` and a task-shaped `message` → `prompt` on `delegate` (the
+  spawn_agent call dispatches; a bare `message` still routes to
+  `delegate_ticket` steer guidance, and `message` stays steer-owned
+  there); `timeout_ms` → `timeoutMs` on `delegate_ticket wait`;
+  `explorer` → `explore`; `reasoning_effort` rejects with the
+  `thinking` teaching at every level; `steerId` is optional — a
+  steer without one receipts under a derived `steer:<tool-call-id>`
+  key so a transport retry dedupes instead of re-injecting.
+- **Changed — alias precedence and no nested dispatch (#45).**
+  Discovered user/project profiles claim their exact names ahead of
+  the alias table — an authored `general.md` resolves to that profile,
+  not `default` (built-ins still win collisions). And the delegate
+  family is stripped silently from every child toolset — explicit
+  `tools`, profile frontmatter, and the mirrored parent set alike —
+  so subagents never nest.
 - Landed since: steering receipts (#37), `delegate_ticket interrupt`
   (#42 — abort one task's in-flight turn; it settles `interrupted`,
   resumable, distinct from `cancel`'s ticket teardown).

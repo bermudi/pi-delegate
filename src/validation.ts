@@ -22,8 +22,16 @@ export interface TaskInput {
   // folded into canonical fields by validateDispatchCall before any
   // semantic read, with each applied rename recorded on normalizedFrom.
   readonly subagent_type?: string;
+  readonly agent_type?: string;
+  readonly task_name?: string;
+  readonly message?: string;
   readonly description?: string;
   readonly run_in_background?: boolean;
+  /**
+   * Trained effort selector under a second spelling (#44): rejected like
+   * `thinking` wherever it appears — callers never pick subagent effort.
+   */
+  readonly reasoning_effort?: string;
   /**
    * Internal: compat spellings already folded into this task. Stamped by
    * validation, never accepted from the wire (the task schema's
@@ -67,6 +75,8 @@ export interface TicketArguments {
     | "interrupt";
   readonly ticket?: string;
   readonly timeoutMs?: number;
+  /** Cross-harness spelling of `timeoutMs`; folds with a rename note. */
+  readonly timeout_ms?: number;
   readonly force?: boolean;
   readonly taskId?: string;
   readonly questionId?: string;
@@ -118,6 +128,12 @@ export interface TicketCall {
   readonly answer: string | undefined;
   readonly message: string | undefined;
   readonly steerId: string | undefined;
+  /**
+   * Applied compat renames on the ticket boundary (currently
+   * `timeout_ms` → `timeoutMs`), rendered as teaching notes on the
+   * receipt — the same convention as dispatch's `normalizedFrom`.
+   */
+  readonly notes: readonly FieldNormalization[];
 }
 
 /** A validated delegate_session call. */
@@ -146,14 +162,22 @@ export const MODEL_FIELD_REJECTION =
   `configured for its agent under "models" in the delegate.json config.`;
 
 /**
- * Callers never select subagent effort either (SPEC "Dispatch") — effort is
- * user-configured via `:effort` suffixes on "models"/"modelsByParent"
- * entries. Same everywhere-it-appears rejection as `model`.
+ * The no-caller-effort teaching text, parameterized by the spelling the
+ * caller used (SPEC "Dispatch"): effort is user-configured via `:effort`
+ * suffixes on "models"/"modelsByParent" entries. `thinking` and
+ * `reasoning_effort` (#44) are the two trained names for the same wall —
+ * same everywhere-it-appears rejection as `model`, naming its own field.
  */
-export const THINKING_FIELD_REJECTION =
-  `the thinking field is not accepted — callers do not select subagent effort. ` +
+const effortFieldRejection = (field: string): string =>
+  `the ${field} field is not accepted — callers do not select subagent effort. ` +
   `Remove it: the task runs at the configured :effort for its agent, or at ` +
   `the parent's level when it runs on the parent's model.`;
+
+export const THINKING_FIELD_REJECTION = effortFieldRejection("thinking");
+
+/** `reasoning_effort` hits the same wall as `thinking` (SPEC "Dispatch"). */
+export const REASONING_EFFORT_FIELD_REJECTION =
+  effortFieldRejection("reasoning_effort");
 
 /**
  * Within-tool rules for `delegate_ticket`: `ticket` is required for every
@@ -161,7 +185,9 @@ export const THINKING_FIELD_REJECTION =
  * `cancel`, `timeoutMs` only `wait`, `taskId` belongs to `answer`,
  * `steer`, and `interrupt`, `questionId`/`answer` belong to `answer` alone
  * — which requires all three — and `message`/`steerId` belong to `steer`,
- * which requires both. Conditional carries are reported before missing
+ * which requires the message (`steerId` is optional — omitted, the ticket
+ * boundary derives an idempotency key from the calling tool call).
+ * Conditional carries are reported before missing
  * requirements, matching the historical precedence; blank values count as
  * missing.
  */
@@ -175,8 +201,27 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
   if (args.force === true && args.action !== "cancel") {
     fail(`force is valid only with action "cancel".`);
   }
-  if (args.timeoutMs !== undefined && args.action !== "wait") {
-    fail(`timeoutMs is valid only with action "wait".`);
+  // `timeout_ms` is `timeoutMs` under a cross-harness spelling (SPEC v3
+  // "Reflex meeting"): it folds with a rename note; both spellings holding
+  // different values conflicts, like the dispatch-level folds.
+  const notes: FieldNormalization[] = [];
+  if (
+    args.timeoutMs !== undefined &&
+    args.timeout_ms !== undefined &&
+    args.timeoutMs !== args.timeout_ms
+  ) {
+    fail(
+      `'timeoutMs' (${args.timeoutMs}) and 'timeout_ms' (${args.timeout_ms}) disagree — they are the same field under two spellings; send one.`,
+    );
+  }
+  const timeoutMs = args.timeoutMs ?? args.timeout_ms;
+  if (args.timeout_ms !== undefined) {
+    notes.push({ field: "timeout_ms", to: "timeoutMs" });
+  }
+  if (timeoutMs !== undefined && args.action !== "wait") {
+    fail(
+      `${args.timeout_ms !== undefined && args.timeoutMs === undefined ? "timeout_ms" : "timeoutMs"} is valid only with action "wait".`,
+    );
   }
   if (
     taskId !== undefined &&
@@ -216,13 +261,13 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     if (message === undefined) {
       fail(`action "steer" requires a nonempty message.`);
     }
-    if (steerId === undefined) {
-      fail(`action "steer" requires steerId — a caller-chosen idempotency key for safe retry.`);
-    }
-    // Same charset and length as task correlation ids.
-    if (!/^[A-Za-z0-9._-]{1,64}$/.test(steerId)) {
+    // `steerId` is optional (#44): omitted, the ticket boundary derives
+    // `steer:<toolCallId>` — an idempotent key for transport-level retries.
+    // Explicit ids stay caller-owned and keep the strict charset; ':' is
+    // admitted so a receipt's derived key can be echoed back verbatim.
+    if (steerId !== undefined && !/^[A-Za-z0-9._:-]{1,64}$/.test(steerId)) {
       fail(
-        `steerId '${steerId}' is outside the id charset (letters, digits, '.', '_', '-', at most 64 chars).`,
+        `steerId '${steerId}' is outside the id charset (letters, digits, '.', '_', '-', ':', at most 64 chars).`,
       );
     }
   }
@@ -233,12 +278,13 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     action: args.action,
     ticket,
     force: args.force === true,
-    timeoutMs: args.timeoutMs,
+    timeoutMs,
     taskId,
     questionId,
     answer,
     message,
     steerId,
+    notes,
   };
 }
 
@@ -285,37 +331,76 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
   const effectiveTasks = args.tasks.map((task, index) => {
     const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
     const notes: FieldNormalization[] = [];
-    let agent = task.agent;
-    if (task.subagent_type !== undefined) {
-      if (
-        task.agent !== undefined &&
-        canonicalAgentName(task.agent) !== canonicalAgentName(task.subagent_type)
-      ) {
+    // `agent` has three spellings (SPEC v3 "Reflex meeting"): `agent`,
+    // `subagent_type`, `agent_type`. All present spellings must name the
+    // same canonical agent; each compat spelling records a rename note.
+    const agentSpellings = (
+      [
+        ["agent", task.agent],
+        ["subagent_type", task.subagent_type],
+        ["agent_type", task.agent_type],
+      ] as readonly (readonly [string, string | undefined])[]
+    ).filter((pair): pair is readonly [string, string] => pair[1] !== undefined);
+    const distinctAgents = new Set(
+      agentSpellings.map(([, value]) => canonicalAgentName(value)),
+    );
+    if (distinctAgents.size > 1) {
+      fail(
+        `${where}: ${agentSpellings
+          .map(([field, value]) => `'${field}' (${JSON.stringify(value)})`)
+          .join(", ")} name different agents — they are the same field under different spellings; send one.`,
+      );
+    }
+    const agent = agentSpellings[0]?.[1];
+    for (const [field] of agentSpellings) {
+      if (field !== "agent") notes.push({ field, to: "agent" });
+    }
+    // `task_name`/`message` are spawn_agent's spellings of `id`/`prompt`
+    // (#44): same fold — both present and differing is a conflict.
+    let id = task.id;
+    if (task.task_name !== undefined) {
+      if (task.id !== undefined && task.id !== task.task_name) {
         fail(
-          `${where}: 'agent' (${JSON.stringify(task.agent)}) and 'subagent_type' (${JSON.stringify(task.subagent_type)}) name different agents — they are the same field under two spellings; send one.`,
+          `${where}: 'id' (${JSON.stringify(task.id)}) and 'task_name' (${JSON.stringify(task.task_name)}) name different ids — they are the same field under two spellings; send one.`,
         );
       }
-      agent = task.agent ?? task.subagent_type;
-      notes.push({ field: "subagent_type", to: "agent" });
+      id = task.id ?? task.task_name;
+      notes.push({ field: "task_name", to: "id" });
+    }
+    let prompt = task.prompt;
+    if (task.message !== undefined) {
+      if (task.prompt !== undefined && task.prompt !== task.message) {
+        fail(
+          `${where}: 'prompt' and 'message' hold different text — they are the same field under two spellings; send one.`,
+        );
+      }
+      prompt = task.prompt ?? task.message;
+      notes.push({ field: "message", to: "prompt" });
     }
     if (task.run_in_background !== undefined) {
       notes.push({ field: "run_in_background", to: "async" });
     }
-    const { subagent_type, run_in_background, ...rest } = task;
-    const normalized: TaskInput =
-      agent === undefined ? { ...rest } : { ...rest, agent };
-    if (notes.length > 0) {
-      return {
-        ...normalized,
-        normalizedFrom: notes,
-        ...(task.workspace === undefined && args.workspace !== undefined
-          ? { workspace: args.workspace }
-          : {}),
-      };
-    }
-    return task.workspace === undefined && args.workspace !== undefined
-      ? { ...normalized, workspace: args.workspace }
-      : normalized;
+    const {
+      subagent_type: _subagent_type,
+      agent_type: _agent_type,
+      task_name: _task_name,
+      message: _message,
+      run_in_background,
+      ...rest
+    } = task;
+    const normalized: TaskInput = {
+      ...rest,
+      ...(id === undefined ? {} : { id }),
+      ...(prompt === undefined ? {} : { prompt }),
+      ...(agent === undefined ? {} : { agent }),
+    };
+    return {
+      ...normalized,
+      ...(notes.length > 0 ? { normalizedFrom: notes } : {}),
+      ...(task.workspace === undefined && args.workspace !== undefined
+        ? { workspace: args.workspace }
+        : {}),
+    };
   });
   validateTasks(effectiveTasks);
 
@@ -412,6 +497,9 @@ function validateTasks(tasks: readonly TaskInput[]): void {
     }
     if (task.thinking !== undefined) {
       fail(`${where}: ${THINKING_FIELD_REJECTION}`);
+    }
+    if (task.reasoning_effort !== undefined) {
+      fail(`${where}: ${REASONING_EFFORT_FIELD_REJECTION}`);
     }
     if (task.prompt !== undefined && task.prompt.trim() === "") {
       fail(`${where}: prompt must be a non-empty string.`);

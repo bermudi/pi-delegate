@@ -14,6 +14,18 @@ export const CHILD_TOOLS = [
   "ls",
 ] as const;
 
+/**
+ * The delegate-family tool names. Children never nest dispatch (#45):
+ * these are stripped — silently — from every inventory a subagent can be
+ * given: explicit task `tools`, profile `tools`, and the parent's mirrored
+ * active set (which already excludes them by construction, via CHILD_TOOLS).
+ */
+export const DELEGATE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "delegate",
+  "delegate_ticket",
+  "delegate_session",
+]);
+
 /** Tools that cannot mutate the workspace, for shared-write admission. */
 export const READ_ONLY_TOOLS = new Set([
   "read",
@@ -106,13 +118,15 @@ export function knownAgentNames(): string[] {
  * trained name lands on a real agent instead of an error round-trip;
  * the expansion is echoed back in the task's result section as
  * `agent "<raw>" → "<canonical>"` so the caller learns the real name.
- * Aliases shadow same-named user profiles, consistent with built-ins
- * winning name collisions.
+ * Discovered profiles outrank aliases (#45): an authored `general.md`
+ * claims the name and the `general` → `default` alias never fires.
+ * Built-ins still win collisions because they never leave the catalog.
  */
 export const AGENT_ALIASES: Readonly<Record<string, string>> = {
   general: "default",
   "general-purpose": "default",
   worker: "default",
+  explorer: "explore",
   plan: "explore",
   scout: "explore",
   implement: "coder",
@@ -124,13 +138,40 @@ export function canonicalAgentName(name: string): string {
 }
 
 /**
+ * Resolve a caller-written agent name against the discovered catalog
+ * (#45): an exact catalog name — built-in or authored profile — claims
+ * the name ahead of the alias table, so a user's `general.md` is their
+ * agent, not the `general` → `default` reflex alias. The alias expands
+ * only when no profile claims the raw name; `aliasedFrom` then names the
+ * raw spelling for the visible `agent "x" → "y"` teaching note.
+ */
+export function claimAgentName(
+  name: string,
+  profiles: ReadonlyMap<string, AgentProfile>,
+): { agent: string; aliasedFrom?: string } {
+  if (profiles.has(name)) return { agent: name };
+  const canonical = canonicalAgentName(name);
+  return canonical === name
+    ? { agent: name }
+    : { agent: canonical, aliasedFrom: name };
+}
+
+/**
  * `name` with its alias targets annotated, for the unknown-agent error's
  * available list — `default (aliases: general, general-purpose, worker)`.
  * Built-ins carrying aliases teach both directions in one round-trip.
+ * `profiles` is the resolution catalog: an alias name already claimed by
+ * a discovered profile does not expand (#45) and is not listed.
  */
-export function agentListEntry(name: string): string {
+export function agentListEntry(
+  name: string,
+  profiles?: ReadonlyMap<string, AgentProfile>,
+): string {
   const aliases = Object.entries(AGENT_ALIASES)
-    .filter(([, canonical]) => canonical === name)
+    .filter(
+      ([alias, canonical]) =>
+        canonical === name && !(profiles !== undefined && profiles.has(alias)),
+    )
     .map(([alias]) => alias);
   return aliases.length === 0
     ? name
@@ -151,6 +192,9 @@ export function expandTools(spec: readonly string[] | undefined): string[] | str
   if (!spec) return [...TOOL_GROUPS["*"]!];
   const expanded: string[] = [];
   for (const entry of spec) {
+    // A trained caller may pass the dispatch family through — children
+    // never nest, so the entry drops silently rather than erroring (#45).
+    if (DELEGATE_TOOL_NAMES.has(entry)) continue;
     const group = TOOL_GROUPS[entry];
     if (group) {
       expanded.push(...group);

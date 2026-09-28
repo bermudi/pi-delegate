@@ -71,8 +71,10 @@ mid-flight the parent can steer. The grammar:
   reusable, transcript resumable). Codex-trained callers expecting
   interrupt-then-message should steer or re-dispatch instead.
 
-  `delegate_ticket steer` carries `message`, a caller-chosen
-  `steerId`, and an optional `taskId` (default: the single
+  `delegate_ticket steer` carries `message`, an optional `steerId`
+  (#44 — omitted, the boundary derives `steer:<toolCallId>` and the
+  receipt names it; the derived id dedupes a transport-level retry of
+  the same tool call), and an optional `taskId` (default: the single
   still-running task; an ambiguous omission errors naming the
   running ids). Pi delivers steers at turn boundaries — never
   mid-turn — so the receipts map: `steered` = queued on the live
@@ -123,15 +125,27 @@ mid-flight the parent can steer. The grammar:
   `scout` → `explore`. Alias expansion is visible in the result so the
   model learns the canonical name.
 
-  Decided (owner ratification, 2026-09-27; rename 2026-09-28, #40):
-  `general`, `general-purpose`, and `worker` → `default`; `plan` and
-  `scout` → `explore`; `implement` → `coder`. The read-only built-in is
+  Decided (owner ratification, 2026-09-27; rename 2026-09-28, #40;
+  `explorer` added #44 — codex's built-in role name):
+  `general`, `general-purpose`, and `worker` → `default`;
+  `explorer`, `plan`, and `scout` → `explore`; `implement` → `coder`.
+  The read-only built-in is
   `explore` — the trained canonical across grok, minimax, and Claude
   Code; `scout` survives only as a reverse alias. Each alias is sourced
   from a trained incumbent surface — Claude Code/letta/grok
-  `general-purpose`, MiMo `general`, minimax `worker`, grok `plan`,
+  `general-purpose`, MiMo `general`, minimax `worker`, codex
+  `explorer`, grok `plan`,
   pi-dialect `scout`. Exact case-sensitive match only, no fuzzy
   matching.
+
+  Alias precedence (#45): a discovered user or project profile claims
+  its exact name ahead of the alias table — an authored `general.md`
+  is that user's agent and the `general` → `default` alias never
+  fires; the alias applies only to names no profile claims. Built-ins
+  still win collisions with same-named profiles (they never leave the
+  catalog), and the unknown-agent error's available list keeps
+  naming built-ins with their live aliases — a claimed alias name is
+  listed as the profile, not as an alias.
 - **Unknown names still error** — with the available list, in one
   teachable round-trip (the v1 `general` error recovered in one retry).
 - **Cross-harness field spellings.** Task objects also accept the
@@ -142,10 +156,19 @@ mid-flight the parent can steer. The grammar:
   over the id in call rows and section headers (never a correlation
   key), and `run_in_background` — at top level or per task —
   normalizes to the dispatch-level `async` decision. Top-level
-  `context` is the same folding for the batch `brief` (#43).
-  `agent` and
-  `subagent_type` present with different agents, or `async` and
-  `run_in_background` present with different values, is a validation
+  `context` is the same folding for the batch `brief` (#43). The
+  #44 tail adds `agent_type` → `agent` (same machinery and conflict
+  rules as `subagent_type`), `task_name` → `id`, and `message` →
+  `prompt` — the spawn_agent-shaped call (`task_name` + `message` on
+  `delegate`) dispatches as a task rather than bouncing to steer
+  guidance, while a bare `message` with no task shape keeps its
+  `delegate_ticket` routing; `message` on `delegate_ticket` stays
+  steer-owned. `delegate_ticket wait` accepts `timeout_ms` →
+  `timeoutMs`. `reasoning_effort` rejects with the same no-caller-
+  effort teaching as `thinking`, at task level, top level, and on
+  the sibling tools (#44).
+  Any two spellings of one field
+  present with different values is a validation
   error naming both fields; every applied rename is reported on the
   result/receipt as `field "<field>" → "<to>"`, the same teaching
   pattern as alias expansion (#41). `additionalProperties: false`
@@ -164,6 +187,14 @@ mid-flight the parent can steer. The grammar:
   minimax/deepseek/MiMo/fx uncapped — 3 taxed ordinary fan-outs. The
   `concurrency.models`/`providers` maps remain the rate-limit guard
   for providers that need one.
+- **No nesting.** Children never receive the delegate family —
+  `delegate`, `delegate_ticket`, and `delegate_session` are stripped,
+  silently, from every toolset a subagent can be given (#45): explicit
+  task `tools`, a profile's frontmatter `tools`, and the mirrored
+  parent inventory alike (the mirror excludes them by construction).
+  This matches the largest training surface (Claude Code subagents
+  lack Task) and avoids recursion admission and depth accounting
+  entirely. `ask_parent` is unaffected.
 
 ## Observability
 

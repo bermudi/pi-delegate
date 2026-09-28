@@ -67,6 +67,7 @@ import {
 } from "./src/types.ts";
 import {
   MODEL_FIELD_REJECTION,
+  REASONING_EFFORT_FIELD_REJECTION,
   THINKING_FIELD_REJECTION,
   validateDispatchCall,
   validateSessionCall,
@@ -180,6 +181,25 @@ const taskSchema = Type.Object(
           "Cross-harness spelling of 'async' (Claude Code Task field): normalizes to the dispatch-level async decision. Conflicting values across fields is an error.",
       }),
     ),
+    agent_type: Type.Optional(
+      Type.String({
+        description:
+          "Cross-harness spelling of 'agent' (Minimax/OpenCode Task field): normalizes to agent before resolution, so aliases apply. Both present and differing is an error.",
+      }),
+    ),
+    task_name: Type.Optional(
+      Type.String({
+        pattern: "^[A-Za-z0-9._-]{1,64}$",
+        description:
+          "Cross-harness spelling of 'id' (OpenAI Agents/Minimax spawn field): normalizes to the task id. Both present and differing is an error.",
+      }),
+    ),
+    message: Type.Optional(
+      Type.String({
+        description:
+          "Cross-harness spelling of 'prompt' when it appears inside a task object, or on a task-shaped flat call (spawn_agent style with 'task_name'). Both present and differing is an error.",
+      }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -250,6 +270,12 @@ const ticketSchema = Type.Object(
           "Maximum wait in milliseconds; only with action 'wait'. A timeout detaches the waiter only — the ticket keeps running.",
       }),
     ),
+    timeout_ms: Type.Optional(
+      Type.Number({
+        description:
+          "Cross-harness spelling of 'timeoutMs': normalizes to it; both present and differing is an error.",
+      }),
+    ),
     force: Type.Optional(
       Type.Boolean({
         description:
@@ -283,7 +309,7 @@ const ticketSchema = Type.Object(
     steerId: Type.Optional(
       Type.String({
         description:
-          "Only with action 'steer': caller-chosen idempotency key — same id + same message + same target replays the original receipt instead of injecting twice; same id + different content is an error.",
+          "Only with action 'steer': idempotency key — same id + same message + same target replays the original receipt instead of injecting twice; same id + different content is an error. Optional: omitted, one is derived from this tool call and named in the receipt.",
       }),
     ),
   },
@@ -348,7 +374,11 @@ const dispatchFieldNames = [
   "async",
   "workspace",
   "operationId",
-  ...taskFieldNames.filter((field) => field !== "sessionId"),
+  // `message` is a task field on delegate (spawn_agent's `prompt` spelling)
+  // but ticket-owned on delegate_ticket (steer) — it must not bounce there.
+  ...taskFieldNames.filter(
+    (field) => field !== "sessionId" && field !== "message",
+  ),
   "context",
 ] as const;
 
@@ -358,6 +388,7 @@ const ticketFieldNames = [
   "ticket",
   "force",
   "timeoutMs",
+  "timeout_ms",
   "taskId",
   "questionId",
   "answer",
@@ -436,8 +467,13 @@ function delegateTicketExample(args: Record<string, unknown>): string {
     fields.push(`ticket: ${JSON.stringify(args.ticket)}`);
   }
   if (action === "cancel" && args.force === true) fields.push("force: true");
-  if (action === "wait" && typeof args.timeoutMs === "number") {
-    fields.push(`timeoutMs: ${JSON.stringify(args.timeoutMs)}`);
+  if (action === "wait") {
+    const timeout =
+      typeof args.timeoutMs === "number" ? args.timeoutMs : args.timeout_ms;
+    if (typeof timeout === "number") {
+      // Teach the canonical spelling even when `timeout_ms` was sent.
+      fields.push(`timeoutMs: ${JSON.stringify(timeout)}`);
+    }
   }
   if (action === "answer") {
     for (const key of ["taskId", "questionId", "answer"] as const) {
@@ -535,8 +571,11 @@ function normalizeTask(value: unknown, index: number): unknown {
   if (task.thinking !== undefined) {
     throw new Error(`tasks[${index}]: ${THINKING_FIELD_REJECTION}`);
   }
+  if (task.reasoning_effort !== undefined) {
+    throw new Error(`tasks[${index}]: ${REASONING_EFFORT_FIELD_REJECTION}`);
+  }
   if (typeof task.tools === "string") task.tools = normalizeTools(task.tools);
-  stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent", "subagent_type", "description"]);
+  stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent", "subagent_type", "agent_type", "task_name", "description"]);
   return task;
 }
 
@@ -622,6 +661,19 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   stripNulls(args);
   stripBlank(args, ["operationId", "sessionId", "cwd", "resumeFrom", "agent"]);
 
+  // #44 misroute fix: `message` is steer-owned only when the call is not
+  // task-shaped. A spawn_agent-shaped call (`task_name`/`message`, or any
+  // task field beside it) folds `message` into the task's prompt below —
+  // the ticket guidance must not swallow it. `message` alone still bounces.
+  const taskShaped =
+    (Array.isArray(args.tasks) && args.tasks.length > 0) ||
+    taskFieldNames.some(
+      (field) =>
+        field !== "message" &&
+        field !== "run_in_background" &&
+        args[field] !== undefined,
+    );
+
   // Fields the pre-split tool owned: guidance with an example to the right
   // tool beats a bare additionalProperties failure.
   if (
@@ -631,8 +683,8 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     args.taskId !== undefined ||
     args.questionId !== undefined ||
     args.answer !== undefined ||
-    args.message !== undefined ||
-    args.steerId !== undefined
+    args.steerId !== undefined ||
+    (args.message !== undefined && !taskShaped)
   ) {
     throw new Error(
       `Ticket operations moved to delegate_ticket: ${delegateTicketExample(args)}.` +
@@ -654,11 +706,12 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
         unrunFieldsNote(args, ["sessionAction"]),
     );
   }
-  if (args.timeoutMs !== undefined) {
+  if (args.timeoutMs !== undefined || args.timeout_ms !== undefined) {
+    const sent = args.timeoutMs ?? args.timeout_ms;
     throw new Error(
       `A delegate run waits for every task and cannot be bounded with timeoutMs. ` +
         `Dispatch with async: true, then bound the wait on its ticket: ` +
-        `delegate_ticket({ action: "wait", ticket: "<ticket>", timeoutMs: ${JSON.stringify(args.timeoutMs)} }).`,
+        `delegate_ticket({ action: "wait", ticket: "<ticket>", timeoutMs: ${JSON.stringify(sent)} }).`,
     );
   }
   if (args.action !== undefined) {
@@ -677,6 +730,9 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   }
   if (args.thinking !== undefined) {
     throw new Error(THINKING_FIELD_REJECTION);
+  }
+  if (args.reasoning_effort !== undefined) {
+    throw new Error(REASONING_EFFORT_FIELD_REJECTION);
   }
   if (typeof args.tasks === "string") {
     const parsed = parseArray(args.tasks);
@@ -782,6 +838,9 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
   if (args.thinking !== undefined) {
     throw new Error(THINKING_FIELD_REJECTION);
   }
+  if (args.reasoning_effort !== undefined) {
+    throw new Error(REASONING_EFFORT_FIELD_REJECTION);
+  }
   if (typeof args.force === "string") {
     throw new Error(
       `'force' must be a boolean, not the string ${JSON.stringify(args.force)}.`,
@@ -790,6 +849,11 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
   if (typeof args.timeoutMs === "string") {
     throw new Error(
       `'timeoutMs' must be a number, not the string ${JSON.stringify(args.timeoutMs)}.`,
+    );
+  }
+  if (typeof args.timeout_ms === "string") {
+    throw new Error(
+      `'timeout_ms' must be a number, not the string ${JSON.stringify(args.timeout_ms)}.`,
     );
   }
 
@@ -847,6 +911,9 @@ function prepareSessionArguments(value: unknown): SessionToolArguments {
   if (args.thinking !== undefined) {
     throw new Error(THINKING_FIELD_REJECTION);
   }
+  if (args.reasoning_effort !== undefined) {
+    throw new Error(REASONING_EFFORT_FIELD_REJECTION);
+  }
 
   return args as SessionToolArguments;
 }
@@ -872,9 +939,11 @@ Three sibling tools share Delegate's machinery:
   read-only group, or tool names), \`deadlineMs\` (ms),
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated),
   \`dependsOn\` (task ids to run first). Cross-harness spellings also
-  work: \`subagent_type\` → \`agent\`, \`description\` labels the task
-  in views, \`run_in_background\` (top-level or per task) → \`async\`;
-  each applied rename is reported on the result.
+  work: \`subagent_type\`/\`agent_type\` → \`agent\`, \`task_name\` →
+  \`id\`, \`message\` beside task-shaped fields → \`prompt\`,
+  \`description\` labels the task in views, \`run_in_background\`
+  (top-level or per task) → \`async\`; each applied rename is reported
+  on the result.
   A top-level \`workspace\` is the batch default.
 - \`brief\` shares context across the batch: it prepends to every task's
   prompt inside a \`--- batch brief ---\` fence, and the result header
@@ -891,17 +960,23 @@ Three sibling tools share Delegate's machinery:
 - \`operationId\` (1-64 letters/digits/./_/-) makes a dispatch duplicate-safe:
   same id + same request returns the original in-flight or settled result;
   same id + a changed request is an error. Dispatch-only.
-- Models and effort: you never pick either — task \`model\` and \`thinking\`
-  fields are rejected. Tasks run on the parent's model at the parent's
-  effort; a named agent may instead run on the model (and optional
-  \`:effort\`) the user configured for it under "models"/"modelsByParent" in
+- Models and effort: you never pick either — task \`model\`, \`thinking\`,
+  and \`reasoning_effort\` fields are rejected. Tasks run on the parent's
+  model at the parent's effort; a named agent may instead run on the model
+  (and optional \`:effort\`) the user configured for it under "models"/"modelsByParent" in
   the user-global delegate.json, or the \`model\`/\`thinking\` frontmatter
   of its Markdown profile.
 - Profiles: the four built-ins plus user-defined Markdown agents —
   \`.pi/agents/*.md\` in the nearest project ancestor, then \`agents/*.md\`
   under the user-global agent directory. A profile needs \`name\` and
   \`description\`; \`tools\`, \`thinking\`, and \`model\` are optional
-  frontmatter, the body is its system prompt.
+  frontmatter, the body is its system prompt. A discovered profile
+  claims its exact name ahead of the alias table — an authored
+  \`general.md\` is your agent, not the \`general\` → \`default\` alias.
+- Subagents never nest: \`delegate\`, \`delegate_ticket\`, and
+  \`delegate_session\` are removed from every child toolset — explicit
+  \`tools\`, profile frontmatter \`tools\`, and the mirrored parent
+  set alike.
 - Children never inherit parent conversation history. Supply a self-contained
   brief; project instructions and child-owned pooled/resumed history still apply.
 
@@ -923,7 +998,8 @@ Three sibling tools share Delegate's machinery:
 - \`{ action: "poll" }\` — the ticket roster, or one ticket's status with
   \`ticket\`. Never blocks.
 - \`{ action: "wait", ticket }\` — block until the ticket settles;
-  \`timeoutMs\` (ms) detaches only the waiter, the work continues.
+  \`timeoutMs\` (ms, \`timeout_ms\` also accepted) detaches only the
+  waiter, the work continues.
 - \`{ action: "cancel", ticket }\` — previews without \`force\`; with
   \`force: true\` the ticket is cancelled now and in-flight tasks are asked
   to stop (cooperative; no rollback).
@@ -932,11 +1008,12 @@ Three sibling tools share Delegate's machinery:
 - \`{ action: "answer", ticket, taskId, questionId, answer }\` — answer a
   worker's pending \`ask_parent\` question (all four fields required).
   Poll to see outstanding questions. Only async workers can ask.
-- \`{ action: "steer", ticket, taskId, message, steerId }\` — send a
+- \`{ action: "steer", ticket, taskId, message, steerId? }\` — send a
   message into a running task: \`taskId\` defaults to the only still-
   running task; \`steerId\` makes it retry-safe (same id + same message +
   same target replays the original receipt; same id + different content
-  is an error). The receipt says what happened: \`steered\` (merged at
+  is an error) — omitted, a key is derived from this call and the receipt
+  names it. The receipt says what happened: \`steered\` (merged at
   the child's next turn boundary), \`activated\` (queued, opens the next
   turn), \`duplicate\`, or \`not-applied\` (settled/unknown target).
 - \`{ action: "interrupt", ticket, taskId? }\` — abort one task's
@@ -1338,10 +1415,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
         message: error instanceof Error ? error.message : String(error),
         taskCount: tasks?.length ?? 0,
         agents: (tasks ?? []).map((task) => {
-          // `subagent_type` is the same field under its cross-harness
-          // spelling — a rejected call's shape records the name the
-          // caller meant, not the spelling's absence from `agent`.
-          const named = task.agent ?? task.subagent_type;
+          // `subagent_type`/`agent_type` are the same field under
+          // cross-harness spellings — a rejected call's shape records the
+          // name the caller meant, not the spelling's absence from `agent`.
+          const named = task.agent ?? task.subagent_type ?? task.agent_type;
           return named === undefined ? "inline" : canonicalAgentName(named);
         }),
         workspaces: (tasks ?? []).map(
@@ -2117,7 +2194,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate_ticket",
       label: "Delegate Tickets",
       description:
-        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, answer a worker question, steer a running task with a message + steerId (idempotent; the receipt reports steered/activated/duplicate/not-applied), or interrupt one task's in-flight turn (settles it interrupted, keeping the worker resumable — cancel tears the ticket down instead). Dispatch new work with delegate; manage pooled sessions with delegate_session.",
+        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, answer a worker question, steer a running task with a message (optional steerId is the retry key — derived from the call when omitted; the receipt reports steered/activated/duplicate/not-applied), or interrupt one task's in-flight turn (settles it interrupted, keeping the worker resumable — cancel tears the ticket down instead). Dispatch new work with delegate; manage pooled sessions with delegate_session.",
       parameters: ticketSchema,
       promptSnippet:
         "Poll, wait on, cancel, pause/resume, answer questions, steer, or interrupt running tasks for async delegate tickets",
@@ -2125,15 +2202,22 @@ export default function delegateExtension(api: ExtensionAPI): void {
       renderCall: renderTicketCall,
       renderResult: createResultRenderer(tickets),
 
-      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      async execute(toolCallId, params, signal, _onUpdate, ctx) {
         const call = validateTicketCall(params);
         visibility.captureFooterCtx(ctx);
         // Ticket RPCs need the saved journal; a corrupt or inaccessible one
         // fails this call visibly but does not affect dispatch or sessions.
         tickets.connect(resolveAgentDir(ctx).dir);
-        const result = await handleTicketRpc(call, tickets, signal);
+        // `toolCallId` seeds the derived steerId (#44) — an omitted key
+        // becomes `steer:<toolCallId>`, so a transport-level retry of the
+        // same tool call replays rather than re-injecting.
+        const result = await handleTicketRpc(call, tickets, signal, toolCallId);
+        const noteText =
+          call.notes.length === 0
+            ? ""
+            : `${fieldNotes(call.notes).join("\n")}\n\n`;
         return {
-          content: [{ type: "text" as const, text: result.text }],
+          content: [{ type: "text" as const, text: `${noteText}${result.text}` }],
           details: {
             mode: "ticket" as const,
             action: call.action,

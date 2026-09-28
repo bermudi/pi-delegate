@@ -40,12 +40,18 @@ runs the batch in task order. Task fields: `prompt` (required), `id` (auto
 `workspace` defaults the batch's mode for tasks that don't name their own, and
 top-level `operationId` deduplicates the whole call against retries.
 Cross-harness spellings are accepted and normalized at validation —
-`subagent_type` → `agent` (aliases still apply), `description` (≤200 chars)
+`subagent_type`/`agent_type` → `agent` (aliases still apply),
+`task_name` → `id`, `message` beside task-shaped fields → `prompt`,
+`description` (≤200 chars)
 labels the task in call rows and section headers, `run_in_background`
 (top-level or per task) → `async`, and `context` → `brief`; each applied
 rename is reported on the result (`field "subagent_type" → "agent"`),
 conflicting spellings error, and unknown fields still fail
-(`additionalProperties: false`). Top-level `brief` is shared batch
+(`additionalProperties: false`). A bare `message` without task shape is
+steer-shaped — the call is rejected with guidance toward
+`delegate_ticket`, and caller-supplied `model`, `thinking`, or
+`reasoning_effort` reject likewise: models and effort are configured,
+never call arguments. Top-level `brief` is shared batch
 context: it prepends to every task's prompt inside a `--- batch brief ---`
 fence (task sections and headers note it once; it never merges into the
 prompt's prose).
@@ -75,20 +81,25 @@ Built-in profiles:
 | `reviewer` | `read`, `bash` | Review that can run checks — carries `bash`, so it serializes as a writer. |
 
 Aliases expand to a canonical built-in, and the expansion is named in the
-result: `general`, `general-purpose`, `worker` → `default`; `plan`, `scout` →
-`explore`; `implement` → `coder`. Matching is exact and case-sensitive.
+result: `general`, `general-purpose`, `worker` → `default`; `explorer`,
+`plan`, `scout` → `explore`; `implement` → `coder`. Matching is exact and
+case-sensitive.
 
 Markdown profiles come from `.pi/agents/*.md` under the working directory first,
 then `<agentDir>/agents/*.md` — first definition wins; built-ins win name
 collisions. Frontmatter requires `name` and `description` and may set `tools`,
 `model`, `thinking`; the body is the system prompt. `.claude/agents` is never
-imported.
+imported. A discovered profile claims its exact name ahead of the alias
+table — a `general.md` is your agent, not the `general` → `default` alias.
 
 ## Steering
 
 `delegate_ticket({ ticket, action: "steer", message, steerId })` sends text to a
 running task; `taskId` picks the target when several run (it defaults to the
 only running task, and an ambiguous call errors naming the running ids).
+`steerId` is optional — omitted, the receipt names a `steer:<tool-call-id>`
+key derived from the tool call itself, so a transport-level retry dedupes
+instead of re-injecting.
 Receipts:
 
 - `steered` — queued on a live run; the child sees it at the next turn boundary.
@@ -168,7 +179,8 @@ and disables telemetry without changing delegation results. Inspect with
 
 - `poll` — the ticket roster, or one ticket's task list and settled results.
 - `wait` — block until the ticket settles; `timeoutMs` bounds the wait (unset
-  means wait for settlement). Timing out or detaching never affects the task.
+  means wait for settlement; `timeout_ms` is the same field and reports the
+  rename). Timing out or detaching never affects the task.
 - `cancel` — the first call previews what would stop and warns that writes and
   commands are not rolled back; `force: true` terminates the ticket and asks
   workers to abort.
@@ -215,7 +227,10 @@ otherwise the parent's user-authored prompt inputs plus a subagent framing.
 Project context files under the task's cwd are kept; user-global context files
 are excluded. Children run with no extensions and an in-memory settings
 profile: no parent extensions or MCP tools, no parent history or transcript
-tail, and no delegate tools of their own.
+tail, and no delegate tools of their own — `delegate`, `delegate_ticket`, and
+`delegate_session` are stripped from every child toolset (explicit `tools`,
+profile frontmatter, and the mirrored parent set alike), so subagents never
+nest dispatches.
 
 ## Develop
 

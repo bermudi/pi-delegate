@@ -152,14 +152,19 @@ V1 is evidence for behavior, never a design source. When consulting it:
   no config escape hatch. Only named agents may be overridden via the
   `delegate.json` `"models"` map (scoped per-parent by `"modelsByParent"`,
   entries may carry `:effort`), and callers never pick models or effort: the
-  task `model` and `thinking` fields are rejected (#32). Registry
+  task `model`, `thinking`, and `reasoning_effort` fields are rejected
+  (#32, #44). Registry
   resolvability is not authorization; see SPEC.md and COMPATIBILITY.md.
 - Markdown profiles (#7): `<project>/.pi/agents` then `<agentDir>/agents`,
   first definition wins, built-ins win name collisions, `.claude/agents`
   never imported. Frontmatter `model:`/`thinking`/`tools` are profile
   defaults below delegate.json pins. `models`/`modelsByParent` keys may name
   built-ins and globally defined profiles only — project profiles pin via
-  frontmatter `model:`.
+  frontmatter `model:`. Discovered profiles outrank the alias table (#45):
+  an authored `general.md` claims `general` and the alias never fires.
+- Subagents never nest dispatch (#45): `delegate`/`delegate_ticket`/
+  `delegate_session` are stripped — silently — from every child toolset
+  (explicit `tools`, profile frontmatter, mirrored parent inventory).
 - Until a subsystem is implemented it fails loudly. Scaffold errors and
   scaffold output are not the contract — `SPEC.md` is.
 - Do not extend the scaffold to force a migrated test green; let it fail

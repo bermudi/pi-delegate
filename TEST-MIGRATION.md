@@ -946,6 +946,55 @@ even at top level.
   and the brief→prompt→handoff ordering on a dependent. Schema pin in
   `tests/contract/tool-boundary.test.ts`.
 
+### Trained-reflex long tail (v3, #44)
+
+New v3 contract — no v1 evidence; SPEC.md "Reflex meeting" defines the
+spellings and the derived steering key.
+
+- **Contract:** `agent_type` folds to `agent` with `subagent_type`'s
+  machinery (same-visible-note, conflict names every spelling sent);
+  `explorer` → `explore` joins the alias table. `task_name` → `id` and
+  a task-shaped `message` → `prompt` make the spawn_agent-shaped
+  `delegate` call dispatch — a bare `message` without task shape keeps
+  the steer-migration rejection, and `message` on `delegate_ticket`
+  stays steer-owned. `timeout_ms` → `timeoutMs` on `wait` with the
+  rename note; elsewhere it rejects naming the sent spelling.
+  `reasoning_effort` rejects with `thinking`'s teaching at task, top,
+  and sibling-tool levels. `steerId` is optional: a steer without one
+  derives `steer:<toolCallId>`, the receipt names the key, and the
+  same derived key + message replays the original receipt without
+  re-injecting.
+- **Covered now:** `tests/contract/reflex-tail.test.ts` — the
+  `agent_type` fold and conflict, the spawn_agent-shaped dispatch, the
+  explicit-task `message` fold, bare-`message` steer guidance, the
+  `prompt`/`message` conflict, `timeout_ms` (fold, non-`wait`
+  rejection, agree/disagree), `reasoning_effort` at every level, the
+  derived `steer:<toolCallId>` receipt and its replay, and the
+  unmarked explicit `steerId`. `explorer` joins the alias loop in
+  `tests/contract/grammar.test.ts`; schema and `steerId` optionality
+  pins in `tests/contract/tool-boundary.test.ts` and
+  `tests/contract/steering.test.ts`.
+
+### No nested dispatch + profile precedence (v3, #45)
+
+New v3 contract — no v1 evidence; SPEC.md "Surface rules — No nesting"
+and "Reflex meeting — alias precedence" define it.
+
+- **Contract:** `delegate`, `delegate_ticket`, and `delegate_session`
+  are stripped — silently — from every inventory a child can be given:
+  explicit task `tools`, Markdown-profile frontmatter `tools`, and the
+  mirrored parent set (excluded by construction). A discovered profile
+  claims its exact name ahead of the alias table, so an authored
+  `general.md` resolves to that profile with no expansion note;
+  built-ins still win same-named collisions, and the unknown-agent
+  error lists built-ins with only the aliases that still expand.
+- **Covered now:** `tests/contract/no-nesting.test.ts` — the explicit
+  `tools` strip, the inline `*`-group child, the mirrored-parent strip
+  (parent inventory carries all three delegate tools), the profile
+  frontmatter strip, the `general.md` claim (profile prompt and `ro`
+  tools run; no `agent "general" →` note), and the claimed-alias
+  listing in the unknown-agent error.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |

@@ -70,23 +70,27 @@ describe("delegate public tool contract", () => {
 
     // The task shape stays what it was — minus `model` and `thinking`,
     // which callers no longer select (an explicit one gets a validation
-    // error instead) — plus the #41 cross-harness compatibility
-    // spellings `subagent_type`/`description`/`run_in_background`, which
-    // normalize to `agent`/a display label/`async` with visible notes.
+    // error instead) — plus the #41/#44 cross-harness compatibility
+    // spellings `subagent_type`/`agent_type`/`task_name`/`message`/
+    // `description`/`run_in_background`, which normalize to
+    // `agent`/`id`/`prompt`/a display label/`async` with visible notes.
     expect(Object.keys(taskFields).sort()).toEqual(
       [
         "agent",
+        "agent_type",
         "cwd",
         "deadlineMs",
         "dependsOn",
         "description",
         "id",
+        "message",
         "prompt",
         "resumeFrom",
         "run_in_background",
         "sessionId",
         "subagent_type",
         "systemPrompt",
+        "task_name",
         "tools",
         "workspace",
       ].sort(),
@@ -107,6 +111,7 @@ describe("delegate public tool contract", () => {
         "taskId",
         "ticket",
         "timeoutMs",
+        "timeout_ms",
       ].sort(),
     );
 

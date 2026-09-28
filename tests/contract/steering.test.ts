@@ -382,10 +382,11 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
   );
 
   test(
-    "steer requires message and steerId, and steer fields belong to steer alone",
+    "steer requires message; steerId is optional (#44), and steer fields belong to steer alone",
     async () => {
-      // SPEC: `message` (nonempty) and `steerId` (id charset, ≤64) are
-      // required; both reject on every other action.
+      // SPEC: `message` (nonempty) is required; `steerId` is a caller
+      // charset rule (≤64) only when sent — omitted, the boundary derives
+      // `steer:<toolCallId>` (#44). Both reject on every other action.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       subagents.respond([fauxAssistantMessage("OUT")]);
@@ -402,7 +403,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
 
       for (const [arguments_, pattern] of [
         [{ action: "steer", ticket, steerId: "s-8" }, /requires a nonempty message/],
-        [{ action: "steer", ticket, message: "m" }, /requires steerId/],
         [
           { action: "steer", ticket, message: "m", steerId: "bad id!" },
           /id charset/,
@@ -424,6 +424,17 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         expect(result.isError).toBe(true);
         expect(result.text).toMatch(pattern);
       }
+
+      // An omitted steerId on a settled ticket receipts not-applied with
+      // the derived key — validation no longer requires the field.
+      const derived = await callDelegateTicket(session, {
+        action: "steer",
+        ticket,
+        message: "m",
+      });
+      expect(derived.isError).toBe(false);
+      expect(derived.text).toContain("not-applied");
+      expect(derived.text).toContain(`steer:${derived.toolCallId}`);
     },
   );
 });

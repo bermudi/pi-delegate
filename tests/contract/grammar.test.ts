@@ -151,6 +151,7 @@ describe("agent-name aliases (SPEC v3 Reflex meeting)", () => {
     ["general", "default"],
     ["general-purpose", "default"],
     ["worker", "default"],
+    ["explorer", "explore"],
     ["plan", "explore"],
     ["scout", "explore"],
     ["implement", "coder"],

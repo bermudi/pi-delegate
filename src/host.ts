@@ -22,8 +22,9 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
   agentListEntry,
-  canonicalAgentName,
   CHILD_TOOLS,
+  claimAgentName,
+  DELEGATE_TOOL_NAMES,
   expandTools,
   isWriter,
   SUBAGENT_FRAMING,
@@ -245,10 +246,22 @@ export async function resolveTasks(
   config: DelegateConfig,
   catalog: ProfileCatalog,
 ): Promise<ResolvedTask[]> {
+  // Resolve every requested name against the catalog once up front (#45):
+  // an exact profile or built-in claims its name ahead of the alias table,
+  // so an authored `general.md` resolves to that profile — never the
+  // `general` → `default` alias — and does not inherit the default
+  // profile's parent-tool mirror either.
+  const claimed = tasks.map((task) =>
+    task.agent === undefined
+      ? undefined
+      : claimAgentName(task.agent, catalog.profiles),
+  );
+
   let parentActive: string[] = [];
-  // Explicit `default` (or an alias for it) mirrors the parent's active
-  // tools; an omitted agent is an inline task with the standard tool set.
-  if (tasks.some((task) => task.agent !== undefined && canonicalAgentName(task.agent) === "default" && task.tools === undefined)) {
+  // Explicit `default` (or an alias for it that no profile claims) mirrors
+  // the parent's active tools; an omitted agent is an inline task with the
+  // standard tool set.
+  if (tasks.some((task, index) => task.agent !== undefined && claimed[index]?.agent === "default" && task.tools === undefined)) {
     try {
       parentActive = env
         .getActiveTools()
@@ -270,17 +283,15 @@ export async function resolveTasks(
   const resolved: ResolvedTask[] = [];
   for (const [index, task] of tasks.entries()) {
     const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
-    // SPEC v3 "Reflex meeting": exact, case-sensitive alias expansion
-    // happens before any unknown-agent error — trained names land on
-    // built-ins; the raw name stays on `aliasedFrom` for the teaching
-    // note in the result.
-    const agent = task.agent === undefined ? undefined : canonicalAgentName(task.agent);
-    const aliasedFrom =
-      agent !== undefined && agent !== task.agent ? task.agent : undefined;
+    // SPEC v3 "Reflex meeting": alias expansion happens before any
+    // unknown-agent error, but only for names no profile claims — the
+    // raw name stays on `aliasedFrom` for the teaching note in the result.
+    const agent = claimed[index]?.agent;
+    const aliasedFrom = claimed[index]?.aliasedFrom;
     const profile = agent ? catalog.profiles.get(agent) : undefined;
     if (agent && !profile) {
       throw new Error(
-        `${where}: unknown agent '${agent}'. Known agents: ${[...catalog.profiles.keys()].map(agentListEntry).join(", ")}.`,
+        `${where}: unknown agent '${agent}'. Known agents: ${[...catalog.profiles.keys()].map((name) => agentListEntry(name, catalog.profiles)).join(", ")}.`,
       );
     }
 
@@ -297,6 +308,10 @@ export async function resolveTasks(
     if (typeof tools === "string") {
       throw new Error(`${where}: ${tools}`);
     }
+    // #45 belt: no inventory source may surface the delegate family to a
+    // child — expandTools strips it on entry and the parent mirror never
+    // carries it; this is the structural backstop over profile inventories.
+    tools = tools.filter((tool) => !DELEGATE_TOOL_NAMES.has(tool));
 
     // Model selection is user-only and inheritance-first: a named agent uses
     // its delegate.json pin (parent-scoped wins over unscoped), else its
