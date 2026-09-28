@@ -21,11 +21,13 @@ import {
   sleep,
 } from "./retry.ts";
 import { persistSessionHeader, type PooledSession, type SessionPool } from "./sessions.ts";
+import { parseVerdict } from "./format.ts";
 import {
   Deferred,
   type ExecutionHandle,
   type ResolvedTask,
   type TaskOutcome,
+  type TaskVerdict,
 } from "./types.ts";
 
 /** Cooperative controls the coordinator hands to each task run. */
@@ -836,6 +838,21 @@ export class TaskExecution implements ExecutionHandle {
   }
 }
 
+/**
+ * SPEC v3 "Observability — Completion evidence — verifier verdict" (#49):
+ * a task run under the built-in `verifier` profile gets its final output's
+ * last `VERDICT:` line parsed onto the outcome — evidence riding beside
+ * attribution, never an execution decision. Every other agent returns
+ * undefined, as does a verifier run whose output carries no verdict line.
+ */
+function verdictOf(
+  task: ResolvedTask,
+  output: string | undefined,
+): TaskVerdict | undefined {
+  if (task.agent !== "verifier" || output === undefined) return undefined;
+  return parseVerdict(output);
+}
+
 function canRetryWholeTask(
   task: ResolvedTask,
   attempt: AttemptResult,
@@ -1022,6 +1039,12 @@ export async function runTask(
                   ? { attributedFiles: [...allFiles] }
                   : {}),
                 ...(anyUncertain ? { uncertainFiles: true } : {}),
+                // The late outcome is the verifier's real verdict — the
+                // provisional snapshot's may have pre-dated its last line.
+                ...(() => {
+                  const verdict = verdictOf(task, real.output);
+                  return verdict !== undefined ? { verdict } : {};
+                })(),
               },
         );
       })
@@ -1065,5 +1088,11 @@ export async function runTask(
     sessionFile: last.sessionFile,
     ...(allFiles.size > 0 ? { attributedFiles: [...allFiles] } : {}),
     ...(anyUncertain ? { uncertainFiles: true } : {}),
+    // A verifier task's outcome carries its parsed verdict — reporting
+    // evidence beside attribution; it never gates anything (#49).
+    ...(() => {
+      const verdict = verdictOf(task, last.output);
+      return verdict !== undefined ? { verdict } : {};
+    })(),
   };
 }

@@ -7,6 +7,7 @@ import type {
   ResolvedTask,
   TaskIntegration,
   TaskOutcome,
+  TaskVerdict,
   Ticket,
   TokenBudgetReport,
 } from "./types.ts";
@@ -287,6 +288,51 @@ export function filesLine(
 }
 
 /**
+ * One `VERDICT:` line of a verifier's final output (SPEC v3
+ * "Observability — Completion evidence — verifier verdict"): the marker
+ * is case-sensitive, the value is one of PASS|FAIL|AMBIGUOUS, and an
+ * optional parenthetical (the profile invites counts) may follow.
+ * Whitespace around the marker and value is tolerated; anything else on
+ * the line means it is not a verdict line.
+ */
+const VERDICT_LINE = /^\s*VERDICT:\s*(PASS|FAIL|AMBIGUOUS)(?:\s*\([^()\n]*\))?\s*$/;
+
+/**
+ * The verdict of the LAST well-formed `VERDICT:` line in `output`, or
+ * undefined when none parses. Lines that carry the marker but not a
+ * clean value are simply not matches — an earlier clean line still wins
+ * over a later malformed one, matching "parse the last VERDICT: line;
+ * none found => no verdict" (#49).
+ */
+export function parseVerdict(output: string): TaskVerdict | undefined {
+  const lines = output.split("\n");
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const match = VERDICT_LINE.exec(lines[index]!);
+    if (match !== null) return match[1] as TaskVerdict;
+  }
+  return undefined;
+}
+
+/**
+ * The `verdict:` evidence line rendered beside `files:` — the parsed
+ * verdict plus the honesty note the attribution evidence earns (#49):
+ * a FAIL that observed no file change is an uncorroborated claim; a
+ * PASS with nothing attributed is unverifiable. Undefined when the
+ * outcome carries no verdict (non-verifier tasks, absent lines).
+ */
+export function verdictLine(outcome: TaskOutcome): string | undefined {
+  const verdict = outcome.verdict;
+  if (verdict === undefined) return undefined;
+  if ((outcome.attributedFiles ?? []).length > 0) return `verdict: ${verdict}`;
+  const note = verdict === "FAIL"
+    ? "claim not corroborated by any observed file change"
+    : verdict === "PASS"
+      ? "unverifiable"
+      : undefined;
+  return note !== undefined ? `verdict: ${verdict} — ${note}` : `verdict: ${verdict}`;
+}
+
+/**
  * One line per absolute path that two or more outcomes in the batch
  * claimed: `overlap: /path — attributed by tasks a, b`. Computed on
  * attributed (write/edit-observed) paths only — never on bash-uncertain
@@ -344,13 +390,19 @@ export function formatDispatchResult(
       : "";
     const label = tasks[outcome.index]?.agent ?? outcome.id;
     // Completion evidence rides beside the task's claim — between the
-    // status head and its output (SPEC v3 "Observability").
-    const evidence = filesLine(
-      outcome.attributedFiles,
-      outcome.uncertainFiles,
-      task?.cwd,
-    );
-    const files = evidence !== undefined ? `\n${evidence}` : "";
+    // status head and its output (SPEC v3 "Observability"). A verifier
+    // task's parsed verdict rides the same evidence block (#49).
+    const evidence = [
+      filesLine(
+        outcome.attributedFiles,
+        outcome.uncertainFiles,
+        task?.cwd,
+      ),
+      verdictLine(outcome),
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join("\n");
+    const files = evidence !== "" ? `\n${evidence}` : "";
     if (outcome.status === "ok") {
       return `${head}${files}\n${renderOutputForLLM(outcome.output ?? "", label, bounds)}${quarantined}${integration}`;
     }

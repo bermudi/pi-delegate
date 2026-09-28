@@ -129,6 +129,14 @@ export interface TaskIntegration {
   readonly worktreePath?: string;
 }
 
+/**
+ * The verdict a task run under the built-in `verifier` profile rules on:
+ * PASS (the claim held up), FAIL (the evidence contradicts it), or
+ * AMBIGUOUS (undecidable). Reporting evidence only (#49) — never
+ * admission, scheduling, or gating input.
+ */
+export type TaskVerdict = "PASS" | "FAIL" | "AMBIGUOUS";
+
 export interface TaskOutcome {
   readonly index: number;
   readonly id: string;
@@ -169,6 +177,14 @@ export interface TaskOutcome {
    * unobservable per-path, so `attributedFiles` is then a lower bound.
    */
   readonly uncertainFiles?: boolean;
+  /**
+   * SPEC v3 "Observability — Completion evidence — verifier verdict":
+   * when the task ran under the built-in `verifier` profile, the verdict
+   * parsed from the last `VERDICT:` line of its final output. Absent for
+   * every non-verifier task and for a verifier run whose output carried
+   * no verdict line — reporting only, never gating.
+   */
+  readonly verdict?: TaskVerdict;
 }
 
 /**

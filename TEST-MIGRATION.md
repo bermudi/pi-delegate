@@ -1043,6 +1043,56 @@ names); SPEC.md "Interaction grammar — Batch token budget" defines it.
   validation rejections, the unchanged default, and the fingerprint
   conflict.
 
+### Event-sensitive ticket waits (v3, #48)
+
+Extends "Async tickets" — SPEC.md "Waiting is explicit and detachable".
+A parked `delegate_ticket wait` resolves on any ticket activity worth a
+turn, not only settlement; `timeoutMs` still detaches the waiter only.
+
+- **Contract:** the wait wakes on settlement (complete settled view), a
+  worker-question arrival (the result carries the pending question —
+  ticket id, task id, question text, the `answer` invocation — inline;
+  the parent's separate question-wake turn still fires), and a task
+  newly settling `interrupted` (the result names the task and reports
+  the ticket still running). Activity already on record when the wait
+  begins is stale news — the view shows it but a fresh wait keeps
+  waiting; a timeout detaches only that waiter.
+- **Covered now:** `tests/contract/tickets.test.ts` — the question wake
+  carrying the full notice plus the `Wait detached` hint, the interrupt
+  wake naming the task while the ticket keeps running (the interrupt
+  fires through the registered `delegate_ticket` tool directly — the
+  harness serializes parent turns, so a parked wait can never see a
+  second turn's tool call), and a wait entered after an interruption
+  parking for the next event and timing out cleanly. The separate
+  question-wake turn stays covered in
+  `tests/contract/questions.test.ts`.
+
+### Verifier profile — verdict evidence (v3, #49)
+
+New v3 contract — no v1 analog; SPEC.md "Observability — Completion
+evidence — verifier verdict" defines the layer.
+
+- **Contract:** built-in `verifier` profile — the reviewer's
+  `read` + `bash` toolset under a prompt demanding a final
+  machine-parseable `VERDICT: PASS|FAIL|AMBIGUOUS` line (an optional
+  parenthetical count allowed); no alias maps onto it. Only tasks run
+  under the profile are parsed: the final output's last well-formed
+  `VERDICT:` line (case-sensitive marker, whitespace-tolerant; none
+  found → nothing reported) lands on the outcome beside its
+  `attributedFiles`, renders as a `verdict:` line in sync results,
+  delivered wakes, and ticket views, and rides `details.verdict` as
+  `{verdict, taskId}`. A `FAIL` with zero attributed files reports
+  `claim not corroborated by any observed file change`; a `PASS` with
+  zero attribution reports `unverifiable`. Reporting only — never
+  admission or gating; non-verifier tasks are untouched.
+- **Covered now:** `tests/contract/verdict.test.ts` — PASS/FAIL/
+  AMBIGUOUS parsing and rendering, the last-line-wins and
+  malformed-tail rules, whitespace tolerance, parenthetical counts,
+  case sensitivity, absent-verdict silence, the zero-attribution notes,
+  `details.verdict` on sync dispatch and poll/wait, the delivered-wake
+  message carrying verdict in text and details, ticket-view rendering,
+  and non-verifier isolation in mixed batches.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |

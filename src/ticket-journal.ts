@@ -49,6 +49,11 @@ const outcome = Type.Object({
   // written before attribution existed still parse unchanged.
   attributedFiles: Type.Optional(Type.Array(Type.String())),
   uncertainFiles: Type.Optional(Type.Boolean()),
+  // Verifier verdict (#49) — optional; only verifier-profile outcomes
+  // with a parseable VERDICT: line carry it.
+  verdict: Type.Optional(Type.Union([
+    Type.Literal("PASS"), Type.Literal("FAIL"), Type.Literal("AMBIGUOUS"),
+  ])),
 });
 const savedTicket = Type.Object({
   version: Type.Literal(1),

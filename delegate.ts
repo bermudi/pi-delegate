@@ -110,7 +110,7 @@ const taskSchema = Type.Object(
     agent: Type.Optional(
       Type.String({
         description:
-          "Named profile: 'default' (mirrors the parent), 'explore' (read-only investigation), 'coder' (implementation), 'reviewer' (review with read + bash — runs focused checks; serializes with writers), or a user-defined Markdown profile (.pi/agents). Omit for an inline task.",
+          "Named profile: 'default' (mirrors the parent), 'explore' (read-only investigation), 'coder' (implementation), 'reviewer' (review with read + bash — runs focused checks; serializes with writers), 'verifier' (claim-check with read + bash; reports a parsed verdict beside file evidence — reporting only, never gating), or a user-defined Markdown profile (.pi/agents). Omit for an inline task.",
       }),
     ),
     cwd: Type.Optional(
@@ -958,8 +958,8 @@ Three sibling tools share Delegate's machinery:
   poll in a loop. \`async\` overrides both ways: \`true\` backgrounds a
   single task, \`false\` blocks on a batch (results in input order).
 - Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
-  key), \`agent\` (\`default\`/\`explore\`/\`coder\`/\`reviewer\`; omit for
-  inline), \`cwd\`, \`systemPrompt\`, \`tools\` (\`*\` writer group, \`ro\`
+  key), \`agent\` (\`default\`/\`explore\`/\`coder\`/\`reviewer\`/\`verifier\`;
+  omit for inline), \`cwd\`, \`systemPrompt\`, \`tools\` (\`*\` writer group, \`ro\`
   read-only group, or tool names), \`deadlineMs\` (ms),
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated),
   \`dependsOn\` (task ids to run first). Cross-harness spellings also
@@ -996,7 +996,7 @@ Three sibling tools share Delegate's machinery:
   (and optional \`:effort\`) the user configured for it under "models"/"modelsByParent" in
   the user-global delegate.json, or the \`model\`/\`thinking\` frontmatter
   of its Markdown profile.
-- Profiles: the four built-ins plus user-defined Markdown agents —
+- Profiles: the five built-ins plus user-defined Markdown agents —
   \`.pi/agents/*.md\` in the nearest project ancestor, then \`agents/*.md\`
   under the user-global agent directory. A profile needs \`name\` and
   \`description\`; \`tools\`, \`thinking\`, and \`model\` are optional
@@ -1245,6 +1245,16 @@ export default function delegateExtension(api: ExtensionAPI): void {
           };
     const notices = group.flatMap(({ ticket }) => ticket.notices);
     if (notices.length > 0) details.notices = notices;
+    // Verifier verdicts (#49) — {verdict, taskId} per outcome that parsed
+    // one, flattened across the delivered group.
+    const verdict = group.flatMap(({ ticket }) =>
+      ticket.outcomes.flatMap((outcome) =>
+        outcome?.verdict !== undefined
+          ? [{ verdict: outcome.verdict, taskId: outcome.id }]
+          : [],
+      ),
+    );
+    if (verdict.length > 0) details.verdict = verdict;
     return {
       customType: DELIVERED_MESSAGE_TYPE,
       content:
@@ -2183,6 +2193,18 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 files: [...(outcome.attributedFiles ?? [])],
                 uncertain: outcome.uncertainFiles === true,
               })),
+              // SPEC v3 "Observability — Completion evidence — verifier
+              // verdict" (#49): the machine half of the `verdict:` lines —
+              // {verdict, taskId} per verifier task that produced one.
+              // Absent when no task carried a verdict.
+              ...(() => {
+                const verdict = result.outcomes.flatMap((outcome) =>
+                  outcome.verdict !== undefined
+                    ? [{ verdict: outcome.verdict, taskId: outcome.id }]
+                    : [],
+                );
+                return verdict.length > 0 ? { verdict } : {};
+              })(),
               // When any worker's accounting is incomplete the usage total
               // below is a lower bound — the flag lets a machine caller see
               // what the result text's note says in prose.
@@ -2290,6 +2312,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
               (call.action === "poll" || call.action === "wait") &&
               result.ticket !== undefined
                 ? tickets.attributionDetails(result.ticket)
+                : undefined,
+            // Verifier verdicts (#49) — {verdict, taskId} per recorded
+            // outcome that parsed one; poll/wait only, same as results.
+            verdict:
+              (call.action === "poll" || call.action === "wait") &&
+              result.ticket !== undefined
+                ? tickets.verdictDetails(result.ticket)
                 : undefined,
             ...(result.ticket !== undefined &&
             result.ticket.notices.length > 0

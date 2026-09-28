@@ -9,6 +9,7 @@ import {
   budgetNote,
   fieldNotes,
   filesLine,
+  verdictLine,
   integrationLines,
   overlapLines,
   recoveryLines,
@@ -221,13 +222,19 @@ function taskSection(
   // Completion evidence rides beside the task's claim, between the status
   // head and its output (SPEC v3 "Observability"). The task's cwd
   // relativizes the display; records written before attribution have no
-  // cwd, so their paths render absolute.
-  const evidence = filesLine(
-    outcome.attributedFiles,
-    outcome.uncertainFiles,
-    ticket.tasks[outcome.index]?.cwd,
-  );
-  const files = evidence !== undefined ? `\n${evidence}` : "";
+  // cwd, so their paths render absolute. A verifier task's parsed verdict
+  // rides the same evidence block (#49).
+  const evidence = [
+    filesLine(
+      outcome.attributedFiles,
+      outcome.uncertainFiles,
+      ticket.tasks[outcome.index]?.cwd,
+    ),
+    verdictLine(outcome),
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join("\n");
+  const files = evidence !== "" ? `\n${evidence}` : "";
   if (outcome.status === "ok") {
     return `${head}${files}\n${render(outcome.output ?? "")}${quarantined}${integration}`;
   }
@@ -662,6 +669,22 @@ export class TicketStore {
   }
 
   /**
+   * SPEC v3 "Observability — Completion evidence — verifier verdict"
+   * (#49): the machine half of the `verdict:` lines — one `{taskId,
+   * verdict}` entry per recorded outcome that carries a parsed verdict.
+   * Running or verdict-less tasks have no entry; nothing here is a gate.
+   */
+  verdictDetails(
+    ticket: Ticket,
+  ): readonly { taskId: string; verdict: string }[] {
+    return this.entry(ticket).record.outcomes.flatMap((outcome) =>
+      outcome?.verdict !== undefined
+        ? [{ taskId: outcome.id, verdict: outcome.verdict }]
+        : [],
+    );
+  }
+
+  /**
    * The dispatch's final token-budget account (SPEC v3 "Batch token
    * budget"), recorded when its batch completes — the settled ticket's
    * views and the journal both carry it.
@@ -675,17 +698,25 @@ export class TicketStore {
 
   /** Record a task outcome. Never changes a terminal ticket's status. */
   recordOutcome(ticket: Ticket, outcome: TaskOutcome): void {
+    const { record, rt } = this.entry(ticket);
     // Sole-writer cast: the exposed type is readonly, but it is the same
     // mutable array instance callers see — the store owns the one legal
     // write path (no freeze, no copy-on-write).
-    const outcomes = this.entry(ticket).record
-      .outcomes as (TaskOutcome | undefined)[];
+    const outcomes = record.outcomes as (TaskOutcome | undefined)[];
+    const previous = outcomes[outcome.index];
     outcomes[outcome.index] = outcome;
     // A settled task can never drain a parked steer — void them so a
     // retry of that steerId reports not-applied, not a stale activated.
     this.voidPendingSteers(ticket, outcome.index);
-    this.save(this.entry(ticket).record);
+    this.save(record);
     this.changed();
+    // SPEC v3 "Waiting": a task newly settling interrupted is ticket
+    // activity a parked waiter must hear — same wake a worker question
+    // gets. An outcome re-recorded already interrupted (late worker
+    // truth, reconciliation) is not new activity.
+    if (outcome.status === "interrupted" && previous?.status !== "interrupted") {
+      for (const notify of [...rt.waiters]) notify();
+    }
     this.maybeSettle(ticket);
   }
 
@@ -1230,19 +1261,38 @@ export class TicketStore {
   }
 
   /**
-   * Wait for settlement. A timeout or caller abort detaches only this
-   * waiter — the ticket and its work are untouched. Timeout and abort are
-   * distinct: only a timeout is a timeout.
+   * Wait for settlement — or for ticket activity worth waking on: a
+   * worker-question arrival (the waiter's result carries the pending
+   * question) and a task settling interrupted while this wait is parked
+   * (the result names the task). An interruption already on record when
+   * the wait begins is stale news, not a wake — it stays visible in the
+   * view but does not end a fresh wait early, so re-waiting after one
+   * still parks for the next event. A timeout or caller abort detaches
+   * only this waiter — the ticket and its work are untouched. Timeout
+   * and abort are distinct: only a timeout is a timeout.
    */
   async wait(
     ticket: Ticket,
     timeoutMs: number | undefined,
     signal: AbortSignal | undefined,
-  ): Promise<{ timedOut: boolean; aborted: boolean; questionPending: boolean }> {
+  ): Promise<{ timedOut: boolean; aborted: boolean; questionPending: boolean; interrupted: readonly string[] }> {
     const { record, rt } = this.entry(ticket);
-    if (isTerminal(record.status)) return { timedOut: false, aborted: false, questionPending: false };
-    if (record.questions.length > 0) return { timedOut: false, aborted: false, questionPending: true };
-    if (signal?.aborted === true) return { timedOut: false, aborted: true, questionPending: false };
+    const none = {
+      timedOut: false,
+      aborted: false,
+      questionPending: false,
+      interrupted: [] as readonly string[],
+    };
+    if (isTerminal(record.status)) return none;
+    if (record.questions.length > 0) return { ...none, questionPending: true };
+    if (signal?.aborted === true) return { ...none, aborted: true };
+    // Event-scoped interruption wake: the indexes already recorded
+    // interrupted are the baseline — only a NEW interrupted outcome is
+    // activity this wait should hear about.
+    const knownInterrupted = new Set<number>();
+    for (const [index, outcome] of record.outcomes.entries()) {
+      if (outcome?.status === "interrupted") knownInterrupted.add(index);
+    }
     let notify!: () => void;
     const onSettled = new Promise<void>((resolve) => {
       notify = () => {
@@ -1279,14 +1329,20 @@ export class TicketStore {
       }
       rt.waiters.delete(notify);
     }
-    if (isTerminal(record.status)) return { timedOut: false, aborted: false, questionPending: false };
-    if (record.questions.length > 0) return { timedOut: false, aborted: false, questionPending: true };
+    if (isTerminal(record.status)) return none;
+    if (record.questions.length > 0) return { ...none, questionPending: true };
+    const interrupted = record.tasks.flatMap((task, index) =>
+      record.outcomes[index]?.status === "interrupted" && !knownInterrupted.has(index)
+        ? [task.id]
+        : [],
+    );
+    if (interrupted.length > 0) return { ...none, interrupted };
     if (outcome === "aborted" || signal?.aborted) {
-      return { timedOut: false, aborted: true, questionPending: false };
+      return { ...none, aborted: true };
     }
     // A question can be answered by another caller between its notification
     // and this waiter resuming. Do not misreport that wake-up as a timeout.
-    return { timedOut: outcome === "timeout", aborted: false, questionPending: false };
+    return { ...none, timedOut: outcome === "timeout" };
   }
 
   /**
@@ -1459,7 +1515,7 @@ export async function handleTicketRpc(
     case "poll":
       return { text: store.view(ticket), isError: false, ticket };
     case "wait": {
-      const { timedOut, aborted, questionPending } = await store.wait(
+      const { timedOut, aborted, questionPending, interrupted } = await store.wait(
         ticket,
         call.timeoutMs,
         signal,
@@ -1467,11 +1523,13 @@ export async function handleTicketRpc(
       const view = store.view(ticket);
       const text = questionPending
         ? `${view}\n\nWait detached: answer the pending question before waiting for this ticket.`
-        : timedOut
-        ? `${view}\n\nWait timed out; the ticket is still ${statusWord(ticket)}.`
-        : aborted
-          ? `${view}\n\nWait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
-          : view;
+        : interrupted.length > 0
+          ? `${view}\n\nWait detached: ${interrupted.length === 1 ? "task" : "tasks"} ${interrupted.map((id) => `"${id}"`).join(", ")} ${interrupted.length === 1 ? "was" : "were"} interrupted — the ticket is still ${statusWord(ticket)}.`
+          : timedOut
+            ? `${view}\n\nWait timed out; the ticket is still ${statusWord(ticket)}.`
+            : aborted
+              ? `${view}\n\nWait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
+              : view;
       return { text, isError: false, ticket };
     }
     case "cancel":

@@ -86,6 +86,7 @@ Built-in profiles:
 | `explore` | `read`, `grep`, `find`, `ls` | Read-only investigation; runs fully concurrently. |
 | `coder` | `read`, `write`, `edit`, `bash` | Implementation in the shared workspace. |
 | `reviewer` | `read`, `bash` | Review that can run checks — carries `bash`, so it serializes as a writer. |
+| `verifier` | `read`, `bash` | Rules on a claim; its result carries a parsed `VERDICT:` line beside file evidence — reporting only, never gating. |
 
 Aliases expand to a canonical built-in, and the expansion is named in the
 result: `general`, `general-purpose`, `worker` → `default`; `explorer`,

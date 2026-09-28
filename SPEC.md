@@ -54,7 +54,15 @@ mid-flight the parent can steer. The grammar:
   (#28 superseded). The only timeouts are caller-chosen, on waits.
 - **Waiting is explicit and detachable.** `delegate_ticket wait` with
   the caller's `timeoutMs`; a timeout detaches the waiter only — the
-  ticket keeps running. (Engine behavior already; promoted to grammar.)
+  ticket keeps running. A parked wait also wakes on ticket activity
+  worth a turn (#48): settlement returns the complete settled view; a
+  worker-question arrival carries the question notice inline (ticket
+  id, task id, question text, answer invocation) — the separate
+  question-wake turn still delivers to the parent independently; a
+  task newly settling `interrupted` carries the interrupted notice
+  naming the task. Events already on record when a wait begins are
+  stale news — view-visible, not a wake. (Engine behavior already;
+  promoted to grammar.)
 - **Fan-out shape.** Batches in one call, taught at the boundary.
   N parallel single-task dispatches — the trained fan-out reflex — must
   work for read-only tasks (they hold no write claims); for overlapping
@@ -233,6 +241,20 @@ mid-flight the parent can steer. The grammar:
   same file, the result says so. Attribution is evidence, not
   confinement — it reports what tools touched and claims nothing
   about paths it could not observe.
+
+  A task run under the built-in `verifier` profile (#49 — the
+  reviewer's read + bash toolset under a prompt that demands a
+  machine-parseable closing line) adds a second evidence layer: the
+  verdict parsed from the last `VERDICT:` line of its final output
+  (`PASS`/`FAIL`/`AMBIGUOUS`; case-sensitive marker,
+  whitespace-tolerant, an optional parenthetical count allowed; no
+  parseable line means no verdict is reported). The verdict renders
+  beside attribution in the same views, and `details.verdict` carries
+  `{verdict, taskId}` machine-readably. A `FAIL` with zero attributed
+  files reports the claim as not corroborated by any observed file
+  change; a `PASS` with zero attribution reports `unverifiable`. It is
+  reporting only — never admission, scheduling, or gating input —
+  and non-verifier tasks are untouched by the layer.
 
 - **Misfire rows.** Rejected and failed dispatches — validation errors,
   admission rejects, unknown names — record telemetry. v2's SPEC

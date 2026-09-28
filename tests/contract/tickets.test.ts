@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
@@ -12,9 +13,29 @@ import {
   configureDelegate,
   installSubagentModel,
   openDelegateBoundary,
+  registeredTool,
   ticketIdOf,
   callDelegateTicket,
 } from "../support/pi-boundary.ts";
+
+interface DirectResult {
+  readonly content: readonly {
+    readonly type: string;
+    readonly text?: string;
+  }[];
+  readonly isError?: boolean;
+  readonly details?: unknown;
+}
+
+interface DirectTool {
+  execute(
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+    onUpdate: (update: unknown) => void,
+    ctx: unknown,
+  ): Promise<DirectResult>;
+}
 
 /** A scripted subagent stream that blocks until `release` is invoked. */
 function gate() {
@@ -25,6 +46,32 @@ function gate() {
     return fauxAssistantMessage("OUTPUT-RELEASED");
   };
   return { release, step };
+}
+
+/**
+ * Fire the registered delegate_ticket tool without a scripted parent turn.
+ * The harness serializes `session.run` turns, so a `wait` parked inside one
+ * turn can never see a second turn's `interrupt` land; executing the tool
+ * directly exercises the same registered entry point while the parked
+ * wait's own turn stays in flight.
+ */
+function directTicket(session: TestSession) {
+  const tool = registeredTool(session, "delegate_ticket") as unknown as DirectTool;
+  const ctx = (session.session as AgentSession).extensionRunner.createContext();
+  const fallback = new AbortController();
+  let sequence = 0;
+  return (
+    params: Record<string, unknown>,
+  ): Promise<DirectResult> => {
+    sequence += 1;
+    return tool.execute(
+      `direct-ticket-${sequence}`,
+      params,
+      fallback.signal,
+      () => {},
+      ctx,
+    );
+  };
 }
 
 /** Poll until true, bounded — keeps in-flight ordering assertions stable. */
@@ -389,6 +436,172 @@ describe("delegate ticket contract", () => {
         ticket,
         timeoutMs: 5000,
       });
+    },
+  );
+
+  test(
+    "wait wakes on a worker question and carries the question notice (#48)",
+    async () => {
+      // Issue #48: a parked waiter hears mailbox activity — the wait
+      // result carries the question (ticket id, task id, question text,
+      // and the answer invocation) inline, without duplicating the
+      // separate question-wake turn.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const ask: FauxResponseFactory = async () => {
+        await blocked;
+        return fauxAssistantMessage([
+          fauxToolCall("ask_parent", { question: "Which branch?" }),
+        ]);
+      };
+      subagents.respond([ask, fauxAssistantMessage("ANSWERED-DONE")]);
+      const dispatched = await callDelegate(session, {
+        tasks: [{ id: "asker", prompt: "think then ask" }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+
+      const waiting = callDelegateTicket(session, { action: "wait", ticket });
+      release();
+      const waited = await waiting;
+      expect(waited.isError).toBe(false);
+      // The question notice rides the wait result inline: ticket id, task
+      // id, the question text, and how to answer.
+      expect(waited.text).toContain(ticket);
+      expect(waited.text).toContain("task asker");
+      expect(waited.text).toContain("Which branch?");
+      expect(waited.text).toContain('delegate_ticket({ action: "answer"');
+      expect(waited.text).toContain("Wait detached");
+      const questionId = /question (q-\d+):/.exec(waited.text)?.[1] ?? "";
+      expect(questionId).not.toBe("");
+
+      const answered = await callDelegateTicket(session, {
+        action: "answer",
+        ticket,
+        taskId: "asker",
+        questionId,
+        answer: "the left one",
+      });
+      expect(answered.isError).toBe(false);
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(settled.text).toContain("ANSWERED-DONE");
+    },
+  );
+
+  test(
+    "wait wakes on a task interruption naming it while the ticket keeps running (#48)",
+    async () => {
+      // Issue #48: interruption is mailbox activity. A parked waiter on a
+      // multi-task ticket resolves when one task settles interrupted —
+      // the result carries the interrupted notice and the ticket is still
+      // live behind it.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const first = gate();
+      const second = gate();
+      subagents.respond([first.step, second.step]);
+      const dispatched = await callDelegate(session, {
+        // Read-only tasks hold no write claims — both run in parallel.
+        tasks: [
+          { prompt: "first", tools: ["read"] },
+          { prompt: "second", tools: ["read"] },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      await waitFor(
+        () => subagents.state.callCount === 2,
+        "both tasks parked inside their provider calls",
+      );
+
+      const waiting = callDelegateTicket(session, { action: "wait", ticket });
+      // The harness serializes parent turns, so the interrupt fires through
+      // the registered tool directly while the wait's turn stays parked.
+      // Wait for the call to be emitted, then give its execute() a beat to
+      // register the waiter — an interrupt that lands before the park is
+      // baseline news, not a wake.
+      await waitFor(
+        () => session!.events.toolCallsFor("delegate_ticket").length >= 1,
+        "the parked wait's tool call",
+      );
+      await Bun.sleep(50);
+      const receipt = await directTicket(session)({
+        action: "interrupt",
+        ticket,
+        taskId: "task-1",
+      });
+      expect(receipt.isError).not.toBe(true);
+
+      const waited = await waiting;
+      expect(waited.isError).toBe(false);
+      // The interrupted notice names the task; the ticket is still running.
+      expect(waited.text).toContain("### Task task-1 — interrupted");
+      expect(waited.text).toContain('task "task-1" was interrupted');
+      expect(waited.text).toContain("Wait detached");
+      expect(waited.text).toContain("still running");
+
+      first.release();
+      second.release();
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(settled.text).toContain("OUTPUT-RELEASED");
+      expect(settled.text).toContain("### Task task-2 — completed");
+    },
+  );
+
+  test(
+    "a wait entered after an interruption parks for the next event — timeout still detaches (#48)",
+    async () => {
+      // Issue #48: the interruption wake is event-scoped, like the
+      // question wake but without an actionable pending state — an
+      // interruption already on record is stale news the view carries, so
+      // a fresh wait keeps waiting and a timeout detaches the waiter only.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const first = gate();
+      const second = gate();
+      subagents.respond([first.step, second.step]);
+      const dispatched = await callDelegate(session, {
+        // Read-only tasks hold no write claims — both run in parallel.
+        tasks: [
+          { prompt: "first", tools: ["read"] },
+          { prompt: "second", tools: ["read"] },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      await waitFor(
+        () => subagents.state.callCount === 2,
+        "both tasks parked inside their provider calls",
+      );
+      await callDelegateTicket(session, {
+        action: "interrupt",
+        ticket,
+        taskId: "task-1",
+      });
+
+      const timedOut = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 60,
+      });
+      expect(timedOut.isError).toBe(false);
+      expect(timedOut.text).toContain("Wait timed out");
+      expect(timedOut.text).toContain("### Task task-1 — interrupted");
+      expect(timedOut.text).toContain("still running");
+
+      first.release();
+      second.release();
+      await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
     },
   );
 

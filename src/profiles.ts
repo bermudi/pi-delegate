@@ -105,6 +105,25 @@ const BUILTIN_PROFILES: Record<string, Omit<AgentProfile, "tools" | "name"> & { 
     systemPrompt: undefined,
     role: "You are a code-review subagent. Inspect the tree and report concrete findings.",
   },
+  verifier: {
+    // The reviewer's toolset (read + bash — it must run focused checks)
+    // but a different job: it rules on a claim and must close on a
+    // machine-parseable verdict. The verdict is completion evidence
+    // (#49) — reporting only, never admission or gating input.
+    tools: ["read", "bash"],
+    thinking: undefined,
+    systemPrompt: undefined,
+    role:
+      "You are a verification subagent. Your brief names a claim to check. " +
+      "Test it against the actual state of the tree: inspect files and run " +
+      "focused checks, then rule on the claim. Close your final message with " +
+      "a verdict line in exactly this form, on its own line: " +
+      "`VERDICT: PASS` when the claim held up, `VERDICT: FAIL` when the " +
+      "evidence contradicts it, or `VERDICT: AMBIGUOUS` when you cannot " +
+      "decide either way. A parenthetical count may follow the verdict word " +
+      "(e.g. `VERDICT: FAIL (2 findings)`). Emit exactly one verdict line, " +
+      "as the last line of your reply.",
+  },
 };
 
 export function knownAgentNames(): string[] {
