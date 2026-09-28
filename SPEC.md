@@ -3,7 +3,7 @@
 Status: **ratified 2026-09-27** by the v3 owner — stewardship delegated
 by bermudi ("you're gonna own this. v3 is now your baby"). This
 document is the sole behavioral authority; `SPEC-V2.md` is the
-gine-as-built contract it inherits. Nothing here requires a new
+engine-as-built contract it inherits. Nothing here requires a new
 codebase: v3 is a contract layer on the same engine (#34).
 
 Origin: the 2026-09-27 comparison against the six professional harnesses
@@ -27,8 +27,9 @@ below is traced to that evidence.
 2. **Records survive supervisors.** The supervision of record outlives
    any session: settled outcomes are durable and cold-recoverable,
    running snapshots report `interrupted` honestly, delivery is
-   exactly-once. The parent agent is a fallible client above a dispatch
-   service, not the ledger.
+   at-most-once — a suppressed or failed wake-up never undoes settlement,
+   and settled results remain pollable. The parent agent is a fallible
+   client above a dispatch service, not the ledger.
 
 3. **Admission is the one coordination layer an extension owns.** No
    sandbox, no process boundary, no permission system — an extension

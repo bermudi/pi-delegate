@@ -159,15 +159,17 @@ sanitization and cancel-on-settled wording (implemented; Gap entries above).
 | Scratch vs shared writer | (v1 scratch reserved on source) | scratch holds no source reservation — runs beside a shared writer |
 | Config surface | `maxConcurrent`, `concurrency{providers}`, `agentOverrides{,ByParentModel}`, `allowUnsafeSharedWrites`, `stallTimeoutMs`, `telemetry{enabled}`, `maxAsyncTickets`, `output.spill{Threshold,Tail}Chars` | `maxConcurrent`, `concurrency{default,providers,models}`, `stallTimeoutMs`, `models`, `modelsByParent`, `telemetry{enabled,dbPath}`, `output.spill{Threshold,Tail}Chars` |
 
+| Stall watchdog | 15 min default | 15 min default (parity) |
+| Package | published `@bermudi/pi-delegate` 0.1.21, esbuild bundle step | no bundle, `files: [delegate.ts, README]` |
+
 Audit note (2026-09-27): SPEC named only `models`/`modelsByParent`,
 `telemetry`, and `output.spill*` as config keys. **Closed 2026-09-27** —
-SPEC now documents `maxConcurrent` (default 3), the `concurrency` maps
+SPEC now documents `maxConcurrent` (documented as 3 at audit time; #41
+raised the SPEC v3 and `DEFAULT_CONFIG` default to 8), the `concurrency` maps
 (`models` → `providers` → `default`, below the global cap), and
 `stallTimeoutMs` (default 15 min, `0` disables), with the fail-loudly
 load rule for malformed values. README guidance is telemetry-only (open
 issue #20).
-| Stall watchdog | 15 min default | 15 min default (parity) |
-| Package | published `@bermudi/pi-delegate` 0.1.21, esbuild bundle step | no bundle, `files: [delegate.ts, README]` |
 
 ## 5. Confirmed carried over (spot-checked)
 

@@ -156,7 +156,9 @@ untouched.
 ## Configuration
 
 `delegate.json` in the agent directory (`PI_AGENT_DIR` or `~/.pi/agent`).
-Unknown keys and malformed values fail loudly at the dispatch boundary.
+Unknown top-level keys are ignored; unknown keys inside the `telemetry`,
+`sessions`, and `models`/`modelsByParent` blocks are rejected. Malformed
+values fail loudly at the dispatch boundary.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

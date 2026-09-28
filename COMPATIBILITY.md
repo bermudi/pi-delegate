@@ -221,8 +221,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   lists on partial failure. V2 outcomes carried no touched-file data at
   all. **Restored under v3 the same day (SPEC v3 "Observability —
   Completion evidence", #38) — see the restoration note below.**
-  notices name the serialized tasks), and cross-call conflicts still
-  reject — only the *reporting* of touched files is gone. Decided during
+  Same-call writers still serialize (completion notices name the
+  serialized tasks) and cross-call conflicts still
+  reject. Decided during
   the 2026-09-27 gap audit (V1-V2-MAP §3d item 1).
 
   **Restored in lighter form by SPEC v3 "Observability — Completion
