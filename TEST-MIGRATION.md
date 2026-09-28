@@ -580,7 +580,9 @@ gaps.
 - **Covered now:** aggregate usage present on the sync tool result;
   telemetry is disabled by default and creates no file; explicit opt-in
   writes call/task rows carrying only the allowed metadata with legacy
-  privacy columns NULL; `telemetry.dbPath` > `DELEGATE_TELEMETRY_DB` >
+  privacy columns NULL and `version`/`pi_version` stamped with the
+  extension and host Pi versions on every row — misfires included
+  (#50); `telemetry.dbPath` > `DELEGATE_TELEMETRY_DB` >
   `<agentDir>/delegate-usage.db` precedence; open/write failure is
   fail-open and leaves dispatch results intact; DB/WAL/SHM files are
   owner-only; a v1 database migrates in place preserving existing rows;

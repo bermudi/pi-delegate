@@ -3,9 +3,20 @@ import { chmodSync, closeSync, mkdirSync, openSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import type { TelemetryConfig } from "./config.ts";
 import type { DispatchOutcome } from "./coordinator.ts";
 import type { ResolvedTask, TaskOutcome, TicketStatus } from "./types.ts";
+
+const require = createRequire(import.meta.url);
+// The extension's own package.json — npm always ships it in the tarball
+// even unlisted in `files`, so this resolves both in-tree and installed
+// under ~/.pi/agent/npm/.
+const pkg = require("../package.json") as { version?: unknown };
+const EXTENSION_VERSION =
+  typeof pkg.version === "string" && pkg.version !== ""
+    ? pkg.version
+    : "unknown";
 
 const SCHEMA_VERSION = 6;
 const BUSY_TIMEOUT_MS = 100;
@@ -357,8 +368,8 @@ export class TelemetryStore {
           ).run(
             randomUUID(),
             Date.now(),
-            null,
-            null,
+            EXTENSION_VERSION,
+            PI_VERSION,
             row.phase,
             row.message,
             row.taskCount,
@@ -394,7 +405,6 @@ export class TelemetryStore {
     if (this.db !== undefined) return this.db;
     try {
       this.db = withBusyRetry(() => {
-        const require = createRequire(import.meta.url);
         const { DatabaseSync: Database } = require("node:sqlite") as {
           DatabaseSync: new (path: string) => DatabaseSync;
         };
@@ -465,8 +475,8 @@ export class TelemetryStore {
               `${callId}:${outcome.index}`,
               callId,
               input.startedAt,
-              null,
-              null,
+              EXTENSION_VERSION,
+              PI_VERSION,
               outcome.index,
               task?.agent ?? null,
               task ? `${task.model.provider}/${task.model.id}` : null,
@@ -492,8 +502,8 @@ export class TelemetryStore {
           insertCall.run(
             callId,
             input.startedAt,
-            null,
-            null,
+            EXTENSION_VERSION,
+            PI_VERSION,
             input.async ? "async" : "sync",
             null,
             input.tasks.length,

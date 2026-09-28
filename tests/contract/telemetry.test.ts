@@ -17,6 +17,7 @@ import {
   fauxToolCall,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
+import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import {
   callDelegate,
   configureDelegate,
@@ -25,6 +26,14 @@ import {
   ticketIdOf,
   callDelegateTicket,
 } from "../support/pi-boundary.ts";
+
+// The extension's own package version — the value telemetry rows must
+// carry in `version`. `pi_version` is the host's VERSION export.
+const EXTENSION_VERSION = (
+  JSON.parse(
+    readFileSync(join(import.meta.dirname, "../../package.json"), "utf8"),
+  ) as { version?: string }
+).version;
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "delegate-v2-telemetry-"));
@@ -52,16 +61,12 @@ function journalModeOf(db: DatabaseSync): string {
 }
 
 const CALLS_LEGACY_COLUMNS = [
-  "version",
-  "pi_version",
   "parent_model",
   "parent_session_file",
   "parent_cwd",
 ];
 
 const TASKS_LEGACY_COLUMNS = [
-  "version",
-  "pi_version",
   "failure_kind",
   "duration_ms",
   "tool_uses",
@@ -174,6 +179,8 @@ describe("delegate telemetry contract", () => {
         expect(typeof call.wall_ms).toBe("number");
         expect(call.wall_ms as number).toBeGreaterThanOrEqual(0);
         expect(typeof call.total_tokens).toBe("number");
+        expect(call.version).toBe(EXTENSION_VERSION);
+        expect(call.pi_version).toBe(PI_VERSION);
         for (const column of CALLS_LEGACY_COLUMNS) {
           expect(call[column]).toBeNull();
         }
@@ -192,6 +199,8 @@ describe("delegate telemetry contract", () => {
           expect(task.provisional).toBe(0);
           expect(typeof task.retries).toBe("number");
           expect(JSON.parse(String(task.tools))).toBeInstanceOf(Array);
+          expect(task.version).toBe(EXTENSION_VERSION);
+          expect(task.pi_version).toBe(PI_VERSION);
           for (const column of TASKS_LEGACY_COLUMNS) {
             expect(task[column]).toBeNull();
           }
@@ -488,11 +497,15 @@ describe("delegate telemetry contract", () => {
 
         const newCall = calls.find((row) => row.id !== "v1-call");
         expect(newCall).toBeDefined();
+        expect(newCall?.version).toBe(EXTENSION_VERSION);
+        expect(newCall?.pi_version).toBe(PI_VERSION);
         for (const column of CALLS_LEGACY_COLUMNS) {
           expect(newCall?.[column]).toBeNull();
         }
         const newTask = tasks.find((row) => row.id !== "v1-task");
         expect(newTask).toBeDefined();
+        expect(newTask?.version).toBe(EXTENSION_VERSION);
+        expect(newTask?.pi_version).toBe(PI_VERSION);
         for (const column of TASKS_LEGACY_COLUMNS) {
           expect(newTask?.[column]).toBeNull();
         }
@@ -969,6 +982,8 @@ describe("delegate telemetry contract", () => {
         expect(row?.async).toBe(1);
         expect(row?.parent_cwd).toBe(session.cwd);
         expect(typeof row?.ts).toBe("number");
+        expect(row?.version).toBe(EXTENSION_VERSION);
+        expect(row?.pi_version).toBe(PI_VERSION);
         // Nothing ran: no dispatch rows accompany the misfire.
         expect(rowsOf(db, "calls")).toHaveLength(0);
         expect(rowsOf(db, "tasks")).toHaveLength(0);
