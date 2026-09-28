@@ -1,5 +1,5 @@
 {
-  "name": "pi-delegate-v2",
+  "name": "@bermudi/pi-delegate",
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.87.0",
     "@earendil-works/pi-ai": "0.87.0",
@@ -9,7 +9,6 @@
     "@types/bun": "1.4.0",
     "typescript": "5.9.3"
   },
-  "private": true,
   "type": "module",
   "scripts": {
     "test": "bun test",
@@ -21,7 +20,7 @@
   "patchedDependencies": {
     "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
   },
-  "version": "0.0.0",
+  "version": "0.2.0",
   "pi": {
     "extensions": [
       "./delegate.ts"
@@ -29,9 +28,12 @@
   },
   "files": [
     "delegate.ts",
-    "README.md"
+    "src",
+    "README.md",
+    "COMPATIBILITY.md"
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "^0.87.0"
-  }
+  },
+  "description": "Pi extension: subagent dispatch with admission, durable tickets, workspaces, steering, and cross-harness reflex compatibility"
 }
