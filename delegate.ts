@@ -106,7 +106,7 @@ const taskSchema = Type.Object(
     agent: Type.Optional(
       Type.String({
         description:
-          "Named profile: 'default' (mirrors the parent), 'scout' (read-only investigation), 'coder' (implementation), 'reviewer' (review with read + bash — runs focused checks; serializes with writers), or a user-defined Markdown profile (.pi/agents). Omit for an inline task.",
+          "Named profile: 'default' (mirrors the parent), 'explore' (read-only investigation), 'coder' (implementation), 'reviewer' (review with read + bash — runs focused checks; serializes with writers), or a user-defined Markdown profile (.pi/agents). Omit for an inline task.",
       }),
     ),
     cwd: Type.Optional(
@@ -791,7 +791,7 @@ Three sibling tools share Delegate's machinery:
   poll in a loop. \`async\` overrides both ways: \`true\` backgrounds a
   single task, \`false\` blocks on a batch (results in input order).
 - Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
-  key), \`agent\` (\`default\`/\`scout\`/\`coder\`/\`reviewer\`; omit for
+  key), \`agent\` (\`default\`/\`explore\`/\`coder\`/\`reviewer\`; omit for
   inline), \`cwd\`, \`systemPrompt\`, \`tools\` (\`*\` writer group, \`ro\`
   read-only group, or tool names), \`deadlineMs\` (ms),
   \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated),
@@ -1689,7 +1689,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate",
       label: "Delegate to Subagents",
       description:
-        "Run subagent tasks. A single task runs synchronously and returns its result inline; a multi-task batch returns a ticket immediately (inspect or control it with delegate_ticket) and delivers the settled result automatically — pass async: false to block on a batch. tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; read-only tasks never serialize — parallel read-side fan-outs want 'ro' tools or the scout agent (the reviewer runs bash, so it serializes as a writer); 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
+        "Run subagent tasks. A single task runs synchronously and returns its result inline; a multi-task batch returns a ticket immediately (inspect or control it with delegate_ticket) and delivers the settled result automatically — pass async: false to block on a batch. tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; read-only tasks never serialize — parallel read-side fan-outs want 'ro' tools or the explore agent (the reviewer runs bash, so it serializes as a writer); 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
       parameters: delegateSchema,
       promptSnippet:
         "Run subagent tasks: one task sync inline, batches backgrounded with automatic results",

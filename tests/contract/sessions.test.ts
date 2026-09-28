@@ -143,14 +143,14 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("hi")]);
       await callDelegate(session, {
-        tasks: [{ prompt: "x", sessionId: "conv", agent: "scout" }],
+        tasks: [{ prompt: "x", sessionId: "conv", agent: "explore" }],
       });
 
       configureDelegate(session, {
-        models: { scout: subagents.alt.spec },
+        models: { explore: subagents.alt.spec },
       });
       const mismatched = await callDelegate(session, {
-        tasks: [{ prompt: "x", sessionId: "conv", agent: "scout" }],
+        tasks: [{ prompt: "x", sessionId: "conv", agent: "explore" }],
       });
       expect(mismatched.isError).toBe(true);
       expect(mismatched.text).toMatch(/conv|session/i);

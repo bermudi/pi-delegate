@@ -13,7 +13,7 @@ copy, or a private Git worktree. `SPEC.md` is the v3 behavioral contract;
 ```ts
 // One task — synchronous by default: blocks until it settles and returns inline.
 delegate({
-  tasks: [{ agent: "scout", prompt: "Map the authentication flow" }],
+  tasks: [{ agent: "explore", prompt: "Map the authentication flow" }],
 });
 
 // A batch — asynchronous by default: returns a ticket immediately. When every
@@ -60,13 +60,13 @@ Built-in profiles:
 | Agent | Tools | Purpose |
 | --- | --- | --- |
 | `default` | mirrors the parent's delegatable tools | Mirrors the parent's model and thinking; the base prompt composes from the parent's user-authored prompt inputs. |
-| `scout` | `read`, `grep`, `find`, `ls` | Read-only investigation; runs fully concurrently. |
+| `explore` | `read`, `grep`, `find`, `ls` | Read-only investigation; runs fully concurrently. |
 | `coder` | `read`, `write`, `edit`, `bash` | Implementation in the shared workspace. |
 | `reviewer` | `read`, `bash` | Review that can run checks — carries `bash`, so it serializes as a writer. |
 
 Aliases expand to a canonical built-in, and the expansion is named in the
-result: `general`, `general-purpose`, `worker` → `default`; `explore`, `plan` →
-`scout`; `implement` → `coder`. Matching is exact and case-sensitive.
+result: `general`, `general-purpose`, `worker` → `default`; `plan`, `scout` →
+`explore`; `implement` → `coder`. Matching is exact and case-sensitive.
 
 Markdown profiles come from `.pi/agents/*.md` under the working directory first,
 then `<agentDir>/agents/*.md` — first definition wins; built-ins win name
@@ -98,7 +98,7 @@ recovered tickets always refuse steering.
 ## Safety and admission
 
 Admission resolves physical Git roots and real tool sets before any subagent
-starts. Tasks whose tools cannot mutate (e.g. `scout`) hold no write claims and
+starts. Tasks whose tools cannot mutate (e.g. `explore`) hold no write claims and
 run fully concurrently. Shared writers touching the same repository serialize
 in task order within one call. A call whose writer overlaps a still-running
 dispatch from an earlier call is rejected before anything starts — there is no

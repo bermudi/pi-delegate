@@ -357,11 +357,11 @@ describe("delegate dispatch contract", () => {
       // a named agent with a delegate.json "models" entry runs elsewhere.
       // The parent session itself runs on the primary faux model (set by
       // installSubagentModel), so the inline task's provider call proves
-      // inheritance while the scout task's proves the override.
+      // inheritance while the explore task's proves the override.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: { scout: subagents.alt.spec },
+        models: { explore: subagents.alt.spec },
       });
       subagents.respond([fauxAssistantMessage("INLINE-INHERITS-PARENT")]);
       subagents.alt.respond([fauxAssistantMessage("SCOUT-RUNS-CONFIGURED")]);
@@ -369,7 +369,7 @@ describe("delegate dispatch contract", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { prompt: "look around", agent: "scout" },
+          { prompt: "look around", agent: "explore" },
           { prompt: "plain work" },
         ],
       });
@@ -378,7 +378,7 @@ describe("delegate dispatch contract", () => {
       expect(result.text).toContain("INLINE-INHERITS-PARENT");
       expect(result.text).toContain("SCOUT-RUNS-CONFIGURED");
       expect(subagents.state.callCount).toBe(1); // inline → parent model
-      expect(subagents.alt.state.callCount).toBe(1); // scout → configured
+      expect(subagents.alt.state.callCount).toBe(1); // explore → configured
     },
   );
 
@@ -391,12 +391,12 @@ describe("delegate dispatch contract", () => {
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: { scout: "ghost-provider/model-x" },
+        models: { explore: "ghost-provider/model-x" },
       });
       subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "x", agent: "scout" }],
+        tasks: [{ prompt: "x", agent: "explore" }],
       });
 
       expect(result.isError).toBe(true);
@@ -418,16 +418,16 @@ describe("delegate dispatch contract", () => {
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: { scout: subagents.alt.spec },
+        models: { explore: subagents.alt.spec },
         modelsByParent: {
-          "Delegate-Faux/FAUX-1": { scout: subagents.spec },
+          "Delegate-Faux/FAUX-1": { explore: subagents.spec },
         },
       });
       subagents.respond([fauxAssistantMessage("SCOPED-PARENT-MODEL")]);
       subagents.alt.respond([fauxAssistantMessage("UNSCOPED-LOSES")]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "look around", agent: "scout" }],
+        tasks: [{ prompt: "look around", agent: "explore" }],
       });
 
       expect(result.isError).toBe(false);
@@ -445,15 +445,15 @@ describe("delegate dispatch contract", () => {
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: { scout: subagents.alt.spec },
+        models: { explore: subagents.alt.spec },
         modelsByParent: {
-          "other-provider/other-model": { scout: subagents.spec },
+          "other-provider/other-model": { explore: subagents.spec },
         },
       });
       subagents.alt.respond([fauxAssistantMessage("UNSCOPED-APPLIES")]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "look around", agent: "scout" }],
+        tasks: [{ prompt: "look around", agent: "explore" }],
       });
 
       expect(result.isError).toBe(false);
@@ -478,7 +478,7 @@ describe("delegate dispatch contract", () => {
       (session.session as AgentSession).setThinkingLevel("low");
       configureDelegate(session, {
         models: {
-          scout: `${subagents.alt.spec}:high`,
+          explore: `${subagents.alt.spec}:high`,
           reviewer: subagents.alt.spec,
         },
       });
@@ -495,7 +495,7 @@ describe("delegate dispatch contract", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { id: "a", prompt: "a", agent: "scout" },
+          { id: "a", prompt: "a", agent: "explore" },
           { id: "b", prompt: "b", agent: "reviewer", dependsOn: ["a"] },
           { id: "c", prompt: "c", dependsOn: ["b"] },
         ],
@@ -534,10 +534,10 @@ describe("delegate dispatch contract", () => {
         "delegate-faux/fa ux-1",
       ]) {
         configureDelegate(session, {
-          modelsByParent: { [key]: { scout: subagents.spec } },
+          modelsByParent: { [key]: { explore: subagents.spec } },
         });
         const result = await callDelegate(session, {
-          tasks: [{ prompt: "look", agent: "scout" }],
+          tasks: [{ prompt: "look", agent: "explore" }],
         });
         expect(result.isError).toBe(true);
         expect(result.text).toContain("must be an exact provider/model-id");
@@ -560,13 +560,13 @@ describe("delegate dispatch contract", () => {
       subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
       configureDelegate(session, {
         modelsByParent: {
-          "delegate-faux/faux-1": { scout: subagents.spec },
-          "DELEGATE-FAUX/FAUX-1": { scout: subagents.spec },
+          "delegate-faux/faux-1": { explore: subagents.spec },
+          "DELEGATE-FAUX/FAUX-1": { explore: subagents.spec },
         },
       });
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "look", agent: "scout" }],
+        tasks: [{ prompt: "look", agent: "explore" }],
       });
 
       expect(result.isError).toBe(true);
@@ -600,10 +600,10 @@ describe("delegate dispatch contract", () => {
       configureDelegate(session, {
         // Unscoped pin to the colon id resolves verbatim; the scoped key —
         // shouted like the other modelsByParent test — must still match the
-        // colon-bearing parent and win for scout.
+        // colon-bearing parent and win for explore.
         models: { reviewer: "delegate-faux-tag/faux-t:32b" },
         modelsByParent: {
-          "DELEGATE-FAUX-TAG/FAUX-T:32B": { scout: subagents.alt.spec },
+          "DELEGATE-FAUX-TAG/FAUX-T:32B": { explore: subagents.alt.spec },
         },
       });
       subagents.alt.respond([fauxAssistantMessage("SCOPED-ALT")]);
@@ -615,7 +615,7 @@ describe("delegate dispatch contract", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { id: "a", prompt: "a", agent: "scout" },
+          { id: "a", prompt: "a", agent: "explore" },
           { id: "b", prompt: "b", agent: "reviewer", dependsOn: ["a"] },
           { id: "c", prompt: "c", dependsOn: ["b"] },
         ],
@@ -642,13 +642,13 @@ describe("delegate dispatch contract", () => {
       configureDelegate(session, {
         modelsByParent: {
           "openrouter/anthropic/claude-sonnet-4": {
-            scout: subagents.spec,
+            explore: subagents.spec,
           },
         },
       });
       subagents.respond([fauxAssistantMessage("SLASH-ID-KEY-LOADS")]);
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "look", agent: "scout" }],
+        tasks: [{ prompt: "look", agent: "explore" }],
       });
       // The scoped key simply never matches this parent; dispatch
       // succeeds and the task inherits the parent model.
@@ -691,7 +691,7 @@ describe("delegate dispatch contract", () => {
       host.setThinkingLevel("low");
       // The pin names the registry's canonical casing; it resolves to the
       // same model the parent runs, differing only in case.
-      configureDelegate(session, { models: { scout: subagents.spec } });
+      configureDelegate(session, { models: { explore: subagents.spec } });
       let seenReasoning: unknown;
       subagents.respond([
         (_context, options) => {
@@ -701,7 +701,7 @@ describe("delegate dispatch contract", () => {
       ]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "look", agent: "scout" }],
+        tasks: [{ prompt: "look", agent: "explore" }],
       });
 
       expect(result.isError).toBe(false);

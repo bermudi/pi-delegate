@@ -280,7 +280,7 @@ describe("delegate validation contract", () => {
     // close/list/resume) throws". SPEC: prompt is optional only with resumeFrom.
     session = await openDelegateBoundary();
     const result = await callDelegate(session, {
-      tasks: [{ agent: "scout" }],
+      tasks: [{ agent: "explore" }],
     });
     expect(result.isError).toBe(true);
     expect(result.text).toMatch(/prompt/i);

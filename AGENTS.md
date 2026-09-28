@@ -25,7 +25,7 @@ weights, and we have no RL flywheel to retrain them. Every design decision
 on the model-facing surface answers to this first:
 
 - Meet trained reflexes: accept pro-shaped attempts (alias common agent
-  names like `general`/`general-purpose` → `default`, `explore` → `scout`)
+  names like `general`/`general-purpose` → `default`, `scout` → `explore`)
   rather than erroring on them.
 - Converge where the idiom is arbitrary (names, argument shapes, defaults);
   differentiate only where the difference IS the product (admission,

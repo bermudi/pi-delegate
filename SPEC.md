@@ -88,15 +88,18 @@ mid-flight the parent can steer. The grammar:
 
 - **Agent-name aliases.** Trained names map onto built-ins:
   `general` → `default`, `general-purpose` → `default`,
-  `explore` → `scout`. Alias expansion is visible in the result so the
+  `scout` → `explore`. Alias expansion is visible in the result so the
   model learns the canonical name.
 
-  Decided (owner ratification, 2026-09-27): `general`,
-  `general-purpose`, and `worker` → `default`; `explore` and `plan` →
-  `scout`; `implement` → `coder`. Each alias is sourced from a trained
-  incumbent surface — Claude Code/letta/grok `general-purpose`, MiMo
-  `general`, minimax `worker`/`explore`, grok `plan`. Exact
-  case-sensitive match only, no fuzzy matching.
+  Decided (owner ratification, 2026-09-27; rename 2026-09-28, #40):
+  `general`, `general-purpose`, and `worker` → `default`; `plan` and
+  `scout` → `explore`; `implement` → `coder`. The read-only built-in is
+  `explore` — the trained canonical across grok, minimax, and Claude
+  Code; `scout` survives only as a reverse alias. Each alias is sourced
+  from a trained incumbent surface — Claude Code/letta/grok
+  `general-purpose`, MiMo `general`, minimax `worker`, grok `plan`,
+  pi-dialect `scout`. Exact case-sensitive match only, no fuzzy
+  matching.
 - **Unknown names still error** — with the available list, in one
   teachable round-trip (the v1 `general` error recovered in one retry).
 

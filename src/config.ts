@@ -30,7 +30,7 @@ export interface DelegateConfig {
   readonly maxConcurrent: number;
   readonly concurrency: ConcurrencyConfig;
   /**
-   * Per-agent model assignment: named agent (scout, coder, ...) → model
+   * Per-agent model assignment: named agent (explore, coder, ...) → model
    * reference with an optional `:effort` suffix. There is deliberately no
    * "default" entry: inline tasks and the `default` profile always mirror
    * the parent's model. Callers never select models; entries here are the
@@ -72,7 +72,7 @@ export const DEFAULT_CONFIG: DelegateConfig = {
 
 /** A `ModelAssignment` plus the config path that produced it, for errors. */
 export interface ResolvedModelAssignment extends ModelAssignment {
-  /** Config path naming the winning entry (e.g. `models.scout`). */
+  /** Config path naming the winning entry (e.g. `models.explore`). */
   readonly origin: string;
 }
 
@@ -377,6 +377,15 @@ function parseModels(
       throw new Error(
         `${path}: ${name}.default is rejected — inline/default tasks always run on the parent's model. ` +
           `Configure named agents only: ${known.join(", ")}.`,
+      );
+    }
+    // The v2→v3 scout→explore rename is a contract break: the old key is a
+    // trained alias now, never a config key — fail loudly naming the new key
+    // rather than silently never matching (#40).
+    if (agent === "scout") {
+      throw new Error(
+        `${path}: ${name}.scout is rejected — the built-in was renamed "explore". ` +
+          `Rename the key to ${name}.explore.`,
       );
     }
     if (!known.includes(agent)) {

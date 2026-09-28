@@ -196,7 +196,7 @@ gaps.
 - **Covered now (#13, v2 regression evidence):** throwing parent active-tool
   probes reject mixed sync/async batches before any child starts, preserving
   cause, guidance, and logging; explicit tools (including `[]`), built-in
-  scout/coder/reviewer, and inline choices bypass the probe; successful
+  explore/coder/reviewer, and inline choices bypass the probe; successful
   restricted-parent mirroring retains read-only tools and preserves empty or
   unsupported-only inventories; a public extension's `setActiveTools` on the
   three delegate tools independently exercises the real host path
@@ -804,11 +804,14 @@ New v3 contract — no v1 evidence; SPEC.md "Interaction grammar",
   multi-task calls return a ticket unless `async: false`, and an explicit
   `async` overrides both defaults; the tool description teaches the rule.
   Agent-name aliases expand exact, case-sensitively —
-  `general`/`general-purpose`/`worker` → `default`, `explore`/`plan` →
-  `scout`, `implement` → `coder` — before unknown-agent errors, surface a
+  `general`/`general-purpose`/`worker` → `default`, `plan`/`scout` →
+  `explore`, `implement` → `coder` — before unknown-agent errors, surface a
   `agent "x" → "y"` note in results and ticket views, and resolve
   `models`/`modelsByParent` pins against the canonical name; unknown
-  names still error naming the available built-ins. Dispatches rejected
+  names still error naming the available built-ins. The read-only
+  built-in is `explore` (#40 — `scout` survives as a reverse alias);
+  `models.scout`/`modelsByParent` `scout` keys fail loudly naming the
+  new key. Dispatches rejected
   at config load, validation (including post-expansion unknown agents),
   or admission record a `misfires` row — timestamp, phase, verbatim
   caller-visible message, and batch shape — in the same store and
@@ -1139,7 +1142,7 @@ Semantic decisions recorded during implementation:
 
 - **Read-only tasks reject.** A task whose resolved tools are all
   read-only cannot use scratch: the copy buys nothing and the failure
-  teaches the caller. `scout + bash` stays legal — bash can dirty the
+  teaches the caller. `explore + bash` stays legal — bash can dirty the
   tree, which is exactly what scratch contains.
 - **Linked worktrees and submodules reject before copying.** A `.git`
   file at the source root redirects Git into another repository, so
@@ -1308,7 +1311,7 @@ New live tests in `tests/contract/child-prompt.test.ts` (v1 evidence:
 `agents.ts` `buildSubagentSystemPrompt` / `sanitizeParentToolInventory`,
 redesigned per user decision — see V1-V2-MAP 3a): an inline child inherits
 the parent's custom persona and receives the fixed subagent framing; a
-stock parent still frames the child; built-in role lines (scout, coder)
+stock parent still frames the child; built-in role lines (explore, coder)
 compose *under* the parent persona rather than beating it (deliberate
 divergence from v1 precedence, recorded in COMPATIBILITY); an explicit
 task `systemPrompt` and a Markdown profile body are verbatim with no

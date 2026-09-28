@@ -929,7 +929,7 @@ describe("delegate telemetry contract", () => {
       // leaves a misfire row — phase, the caller-visible message, and the
       // requested batch shape. The unknown agent lands after alias
       // expansion, so the row's agents are the canonical names the
-      // caller's names resolved to ("explore" → "scout").
+      // caller's names resolved to ("scout" → "explore").
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const dbPath = join(trackedTempDir(), "misfires.db");
@@ -940,7 +940,7 @@ describe("delegate telemetry contract", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "x", agent: "explore", tools: ["read"] },
+          { prompt: "x", agent: "scout", tools: ["read"] },
           { prompt: "y", agent: "bogus-agent" },
         ],
       });
@@ -958,7 +958,7 @@ describe("delegate telemetry contract", () => {
         expect(row?.message).toContain("unknown agent 'bogus-agent'");
         expect(row?.task_count).toBe(2);
         expect(JSON.parse(String(row?.agents))).toEqual([
-          "scout",
+          "explore",
           "bogus-agent",
         ]);
         expect(JSON.parse(String(row?.workspaces))).toEqual([

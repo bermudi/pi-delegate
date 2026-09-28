@@ -139,7 +139,7 @@ describe("composed child base prompt contract (#33)", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "scout it", agent: "scout" },
+          { prompt: "explore it", agent: "explore" },
           { prompt: "code it", agent: "coder" },
         ],
       });
@@ -154,11 +154,11 @@ describe("composed child base prompt contract (#33)", () => {
         }
         return found;
       };
-      const scoutPrompt = promptFor("read-only investigation subagent");
+      const explorePrompt = promptFor("read-only investigation subagent");
       const coderPrompt = promptFor("implementation subagent");
       expect(seen).toHaveLength(2);
-      expect(scoutPrompt).toContain("PARENT-PERSONA");
-      expect(scoutPrompt).toContain(FRAMING);
+      expect(explorePrompt).toContain("PARENT-PERSONA");
+      expect(explorePrompt).toContain(FRAMING);
       expect(coderPrompt).toContain("PARENT-PERSONA");
       expect(coderPrompt).toContain(FRAMING);
     },

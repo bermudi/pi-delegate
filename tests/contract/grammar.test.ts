@@ -151,8 +151,8 @@ describe("agent-name aliases (SPEC v3 Reflex meeting)", () => {
     ["general", "default"],
     ["general-purpose", "default"],
     ["worker", "default"],
-    ["explore", "scout"],
-    ["plan", "scout"],
+    ["plan", "explore"],
+    ["scout", "explore"],
     ["implement", "coder"],
   ];
 
@@ -207,14 +207,14 @@ describe("agent-name aliases (SPEC v3 Reflex meeting)", () => {
     // A multi-task batch is async by default — no explicit `async` needed.
     const dispatched = await callDelegate(session, {
       tasks: [
-        { prompt: "work", agent: "explore" },
+        { prompt: "work", agent: "scout" },
         { prompt: "more work", agent: "plan" },
       ],
     });
 
     expect(dispatched.isError).toBe(false);
-    expect(dispatched.text).toContain('task-1: agent "explore" → "scout"');
-    expect(dispatched.text).toContain('task-2: agent "plan" → "scout"');
+    expect(dispatched.text).toContain('task-1: agent "scout" → "explore"');
+    expect(dispatched.text).toContain('task-2: agent "plan" → "explore"');
   });
 
   test("an unknown name after alias expansion errors with the available list", async () => {
@@ -230,10 +230,11 @@ describe("agent-name aliases (SPEC v3 Reflex meeting)", () => {
 
     expect(result.isError).toBe(true);
     expect(result.text).toContain("unknown agent 'bogus-agent'");
-    expect(result.text).toContain("scout");
+    expect(result.text).toContain("explore");
     // The list annotates built-ins with their aliases — both directions
     // teach in one error.
     expect(result.text).toMatch(/default \(aliases:.*general/);
+    expect(result.text).toMatch(/explore \(aliases:.*scout/);
     expect(subagents.state.callCount).toBe(0);
   });
 
@@ -251,23 +252,73 @@ describe("agent-name aliases (SPEC v3 Reflex meeting)", () => {
     expect(subagents.state.callCount).toBe(0);
   });
 
-  test("a configured model pin resolves against the canonical name", async () => {
-    // SPEC v3 "Reflex meeting": models/modelsByParent are keyed by the
-    // canonical name — `models.scout` applies to `agent: "explore"`.
+  test('"explore" resolves as the built-in itself — no expansion note (#40)', async () => {
+    // SPEC v3 "Reflex meeting": the trained read-only name IS the
+    // canonical profile; calling it directly expands nothing.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
-    configureDelegate(session, { models: { scout: subagents.alt.spec } });
+    subagents.respond([fauxAssistantMessage("VIA-EXPLORE")]);
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "work", agent: "explore", tools: ["read"] }],
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("VIA-EXPLORE");
+    expect(result.text).not.toContain("→");
+  });
+
+  test("a configured model pin resolves against the canonical name", async () => {
+    // SPEC v3 "Reflex meeting": models/modelsByParent are keyed by the
+    // canonical name — `models.explore` applies to `agent: "scout"`.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    configureDelegate(session, { models: { explore: subagents.alt.spec } });
     subagents.alt.respond([fauxAssistantMessage("PINNED-ALT")]);
     subagents.respond([fauxAssistantMessage("UNPINNED-PRIMARY")]);
 
     const result = await callDelegate(session, {
-      tasks: [{ prompt: "work", agent: "explore" }],
+      tasks: [{ prompt: "work", agent: "scout" }],
     });
 
     expect(result.isError).toBe(false);
     expect(result.text).toContain("PINNED-ALT");
-    expect(result.text).toContain('agent "explore" → "scout"');
+    expect(result.text).toContain('agent "scout" → "explore"');
     expect(subagents.alt.state.callCount).toBe(1);
+    expect(subagents.state.callCount).toBe(0);
+  });
+
+  test('a "models.scout" key fails loudly naming the new key (#40)', async () => {
+    // SPEC v3 "Reflex meeting" + issue #40: config keys are contract —
+    // the retired canonical is never silently mapped.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    configureDelegate(session, { models: { scout: "ghost-provider/model-x" } });
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "x", agent: "explore" }],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("models.scout is rejected");
+    expect(result.text).toContain("models.explore");
+    expect(subagents.state.callCount).toBe(0);
+  });
+
+  test('a "modelsByParent" scout key fails loudly naming the new key (#40)', async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    configureDelegate(session, {
+      modelsByParent: { "delegate-faux/faux-1": { scout: subagents.spec } },
+    });
+
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "x", agent: "explore" }],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("scout is rejected");
+    expect(result.text).toContain("explore");
     expect(subagents.state.callCount).toBe(0);
   });
 });

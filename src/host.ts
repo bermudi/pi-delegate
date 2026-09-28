@@ -308,8 +308,8 @@ export async function resolveTasks(
       parentModel === undefined
         ? undefined
         : `${parentModel.provider}/${parentModel.id}`.toLowerCase();
-    // The config pin resolves against the CANONICAL name: a models.scout
-    // entry applies to agent "explore" just as it does to "scout".
+    // The config pin resolves against the CANONICAL name: a models.explore
+    // entry applies to agent "scout" just as it does to "explore".
     const agentName = agent ?? "default";
     const assignment = configuredModelFor(agent, parentKey, config);
     const modelRef = assignment?.ref ?? profile?.modelPin;

@@ -342,7 +342,7 @@ describe("delegate explicit operation identity", () => {
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: { scout: "ghost-provider/model-x" },
+        models: { explore: "ghost-provider/model-x" },
       });
       const direct = directDispatcher(session);
       const { release, started, step } = gate();
@@ -359,7 +359,7 @@ describe("delegate explicit operation identity", () => {
 
       for (let n = 0; n <= 256; n += 1) {
         const outcome = await direct({
-          tasks: [{ prompt: `filler ${n}`, agent: "scout", tools: ["read"] }],
+          tasks: [{ prompt: `filler ${n}`, agent: "explore", tools: ["read"] }],
           operationId: `press-${String(n).padStart(4, "0")}`,
         }).then(
           () => undefined,
@@ -390,7 +390,7 @@ describe("delegate explicit operation identity", () => {
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: { scout: "ghost-provider/model-x" },
+        models: { explore: "ghost-provider/model-x" },
       });
       const direct = directDispatcher(session);
       subagents.respond([
@@ -407,7 +407,7 @@ describe("delegate explicit operation identity", () => {
 
       for (let n = 1; n <= 255; n += 1) {
         const outcome = await direct({
-          tasks: [{ prompt: `filler ${n}`, agent: "scout", tools: ["read"] }],
+          tasks: [{ prompt: `filler ${n}`, agent: "explore", tools: ["read"] }],
           operationId: `cap-${String(n).padStart(4, "0")}`,
         }).then(
           () => undefined,
@@ -483,10 +483,10 @@ describe("delegate explicit operation identity", () => {
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       configureDelegate(session, {
-        models: { scout: "ghost-provider/model-x" },
+        models: { explore: "ghost-provider/model-x" },
       });
       const args = {
-        tasks: [{ prompt: "x", agent: "scout", tools: ["read"] }],
+        tasks: [{ prompt: "x", agent: "explore", tools: ["read"] }],
         operationId: "op-failed",
       };
 
@@ -494,7 +494,7 @@ describe("delegate explicit operation identity", () => {
       expect(failed.isError).toBe(true);
       expect(subagents.state.callCount).toBe(0);
 
-      configureDelegate(session, { models: { scout: subagents.spec } });
+      configureDelegate(session, { models: { explore: subagents.spec } });
       const retry = await callDelegate(session, args);
       expect(retry.isError).toBe(true);
       expect(retry.text).toBe(failed.text);

@@ -44,7 +44,7 @@ describe("regression: parent tool mirroring", () => {
       const result = await callDelegate(session, {
         async,
         tasks: [
-          { prompt: "valid sibling must not start", agent: "scout" },
+          { prompt: "valid sibling must not start", agent: "explore" },
           { prompt: "requires parent tools", agent: "default" },
         ],
       });
@@ -72,9 +72,9 @@ describe("regression: parent tool mirroring", () => {
     const cases = [
       { task: { agent: "default", tools: ["read"] }, tools: ["read"] },
       { task: { agent: "default", tools: [] }, tools: [] },
-      { task: { agent: "scout", tools: [] }, tools: [] },
+      { task: { agent: "explore", tools: [] }, tools: [] },
       { task: { tools: [] }, tools: [] },
-      { task: { agent: "scout" }, tools: ["read", "grep", "find", "ls"] },
+      { task: { agent: "explore" }, tools: ["read", "grep", "find", "ls"] },
       { task: { agent: "coder" }, tools: ["read", "bash", "edit", "write"] },
       { task: { agent: "reviewer" }, tools: ["read", "bash"] },
       { task: {}, tools: ["read", "bash", "edit", "write"] },

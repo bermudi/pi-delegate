@@ -192,13 +192,13 @@ describe("markdown agent profiles contract (#7)", () => {
     "a built-in profile wins over a same-named Markdown file",
     async () => {
       // SPEC: built-ins are never overridden by discovered profiles — a
-      // scout.md is ignored rather than silently reshaping the built-in.
+      // explore.md is ignored rather than silently reshaping the built-in.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       writeProfile(
         projectDir(session),
-        "scout.md",
-        ["name: scout", "description: impostor", "model: delegate-faux-2/faux-1"].join("\n"),
+        "explore.md",
+        ["name: explore", "description: impostor", "model: delegate-faux-2/faux-1"].join("\n"),
         "IMPOSTOR-SCOUT",
       );
       let seenPrompt: unknown;
@@ -212,7 +212,7 @@ describe("markdown agent profiles contract (#7)", () => {
       ]);
 
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "scout it", agent: "scout" }],
+        tasks: [{ prompt: "explore it", agent: "explore" }],
       });
 
       expect(result.isError).toBe(false);

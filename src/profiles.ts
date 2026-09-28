@@ -73,7 +73,7 @@ const BUILTIN_PROFILES: Record<string, Omit<AgentProfile, "tools" | "name"> & { 
     thinking: undefined,
     systemPrompt: undefined,
   },
-  scout: {
+  explore: {
     tools: TOOL_GROUPS.ro,
     thinking: undefined,
     systemPrompt: undefined,
@@ -113,8 +113,8 @@ export const AGENT_ALIASES: Readonly<Record<string, string>> = {
   general: "default",
   "general-purpose": "default",
   worker: "default",
-  explore: "scout",
-  plan: "scout",
+  plan: "explore",
+  scout: "explore",
   implement: "coder",
 };
 
@@ -413,7 +413,7 @@ export interface ProfileDiscoveryOptions {
  * Discover Markdown agent profiles, first definition wins, in order:
  *   1. `<projectRoot>/.pi/agents` — nearest ancestor of `cwd` containing one
  *   2. `<agentDir>/agents`        — the user-global agent directory
- * Built-ins always win name collisions: a `scout.md` is ignored with a
+ * Built-ins always win name collisions: an `explore.md` is ignored with a
  * warning rather than silently reshaping a built-in. Files ending in
  * `.chain.md` are skipped (v1 convention). Within one directory, files are
  * visited in name order — readdir order is filesystem-dependent, and the

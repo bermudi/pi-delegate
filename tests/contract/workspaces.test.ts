@@ -315,7 +315,7 @@ describe("delegate workspace and shared-write contract", () => {
         {
           prompt: "look around",
           cwd: dir,
-          agent: "scout",
+          agent: "explore",
           workspace: "scratch",
         },
       ]) {

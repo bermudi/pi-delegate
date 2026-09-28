@@ -11,10 +11,17 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   Single-task calls still block inline by default; `async: true`
   overrides either way.
 - **Additive — agent-name aliases.** `general`, `general-purpose`,
-  `worker` resolve to `default`; `explore`, `plan` to `scout`;
+  `worker` resolve to `default`; `plan`, `scout` to `explore`;
   `implement` to `coder`. Exact case-sensitive match; expansion is
   visible in results; unknown names still error with the available
   list. Config model pins key on the canonical name.
+- **Renamed — the read-only built-in is `explore`, not `scout` (#40).**
+  The trained read-only name is canonical; `agent: "scout"` still works
+  through the reverse alias with the usual visible expansion note.
+  **Breaking for config:** `models.scout` and `modelsByParent` `scout`
+  keys are rejected at load with a migration message — rename them to
+  `models.explore`. Built-in semantics (toolset, role, read-only
+  concurrency) are unchanged.
 - **Additive — misfire telemetry.** Dispatches rejected before
   execution record a telemetry row. No behavior change.
 - Deferred to a later v3 unit: steering receipts (grammar fixed in
@@ -49,7 +56,7 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   `sessionAction`, an `action` field on `delegate` itself, and unsafe-write
   bypasses remain rejected (all of them — see the breaking-change entry
   below).
-- `default`, `scout`, `coder`, and `reviewer` semantics; task-over-profile
+- `default`, `explore`, `coder`, and `reviewer` semantics; task-over-profile
   precedence; Markdown discovery order and first-definition wins — subject to
   the model-selection, parent-history, and composed-child-base-prompt
   departures below.
@@ -233,7 +240,7 @@ and migration guidance; none may arrive as silent rewrite drift.
   before children start, with a logged, actionable error preserving the cause.
   Migration: restore the parent's tool inventory or supply an intentional
   explicit `tools` list (including `[]`) on every affected task. Explicit-tool,
-  scout/coder/reviewer, and inline dispatches do not probe the inventory;
+  explore/coder/reviewer, and inline dispatches do not probe the inventory;
   their existing capabilities are unchanged.
 
 - **Markdown profile discovery is narrower and cannot reshape built-ins
@@ -249,7 +256,7 @@ and migration guidance; none may arrive as silent rewrite drift.
   parent inheritance — but only globally defined names are valid config keys
   (see SPEC).
   Migration: move custom agents to one of the two supported directories,
-  rename profiles that collide with `default`/`scout`/`coder`/`reviewer`,
+  rename profiles that collide with `default`/`explore`/`coder`/`reviewer`,
   and translate `disallowedTools` into the positive `tools` list.
 
 - **Task `model` and `thinking` fields removed; model and effort are
@@ -283,7 +290,7 @@ and migration guidance; none may arrive as silent rewrite drift.
   case-insensitive, like config matching, so a host-set parent model whose
   casing differs from the registry's keeps the parent's live level.
   Migration: move any per-task model choice into `delegate.json`
-  `"models"` — e.g. `{"scout": "<provider/model-id>:high"}` with references
+  `"models"` — e.g. `{"explore": "<provider/model-id>:high"}` with references
   taken from your actual configured models; callers stop sending `model`
   and `thinking`. The model-failure recovery hint now addresses the
   operator, not the caller.
