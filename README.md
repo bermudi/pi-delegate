@@ -122,7 +122,9 @@ Reusing `steerId` with a different task or message is a conflict error naming
 both attempts. Steering is boundary delivery: the child's model receives the
 message at run start or a turn boundary, never merged into a turn already
 streaming. Parked steers void to `not-applied` if the task settles first;
-recovered tickets always refuse steering.
+recovered tickets always refuse steering. A whole-task retry re-supplies
+the failed attempt's injected steers through the next attempt's first
+turn — a receipted message is not dropped with the session that died.
 
 ## Safety and admission
 

@@ -382,6 +382,129 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
   );
 
   test(
+    "a whole-task retry re-supplies a live-steered message the failed attempt took with it",
+    async () => {
+      // SPEC v3 "Steering": a transient failure retries the task, not
+      // the settled state — steers already injected into the failed
+      // attempt's session ride the next attempt's drain. A live steer
+      // merged before the error must appear in the retried run's
+      // transcript, not die with the dead session.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const turnOne = gate("TURN-ONE");
+      let failingTurnCopies = -1;
+      const transient: FauxResponseFactory = (context) => {
+        failingTurnCopies = steerCopies(context, "CARRIED-STEER");
+        return fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "503 temporarily overloaded",
+        });
+      };
+      let retriedCopies = -1;
+      const retriedTurn: FauxResponseFactory = (context) => {
+        retriedCopies = steerCopies(context, "CARRIED-STEER");
+        return fauxAssistantMessage("RETRY-OUT");
+      };
+      subagents.respond([turnOne.step, transient, retriedTurn]);
+
+      const dispatched = await callDelegate(session, {
+        tasks: [{ prompt: "work" }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      await waitFor(
+        () => subagents.state.callCount === 1,
+        "child parked inside its first provider call",
+      );
+
+      const receipt = await callDelegateTicket(session, {
+        action: "steer",
+        ticket,
+        message: "CARRIED-STEER",
+        steerId: "s-retry-1",
+      });
+      expect(steerDetails(receipt).status).toBe("steered");
+
+      turnOne.release();
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(waited.text).toContain("RETRY-OUT");
+      // Call sequence: attempt 1 turn 1 (gated), attempt 1 turn 2
+      // (steer merged, transient error), attempt 2 turn 1 (retry).
+      expect(subagents.state.callCount).toBe(3);
+      // The steer really did land in the failed attempt...
+      expect(failingTurnCopies).toBe(1);
+      // ...and the retry re-supplied it exactly once.
+      expect(retriedCopies).toBe(1);
+    },
+  );
+
+  test(
+    "a whole-task retry re-supplies a parked steer the failed attempt already drained",
+    async () => {
+      // Same contract through the parked path: the steer is drained into
+      // attempt 1's first turn (marked delivered, queue emptied), so the
+      // retry can only see it if the execution retained it.
+      session = await openDelegateBoundary();
+      configureDelegate(session, { maxConcurrent: 1 });
+      const subagents = await installSubagentModel(session);
+      const first = gate("TASK-ONE-OUT");
+      let attemptOneCopies = -1;
+      const failedAttempt: FauxResponseFactory = (context) => {
+        attemptOneCopies = steerCopies(context, "PARKED-CARRIED");
+        return fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "429 too many requests",
+        });
+      };
+      let retriedCopies = -1;
+      const retriedAttempt: FauxResponseFactory = (context) => {
+        retriedCopies = steerCopies(context, "PARKED-CARRIED");
+        return fauxAssistantMessage("TASK-TWO-OUT");
+      };
+      subagents.respond([first.step, failedAttempt, retriedAttempt]);
+
+      const dispatched = await callDelegate(session, {
+        tasks: [
+          { prompt: "holds the slot" },
+          { prompt: "waits behind" },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      await waitFor(
+        () => subagents.state.callCount === 1,
+        "task-1 parked with task-2 queued",
+      );
+
+      const receipt = await callDelegateTicket(session, {
+        action: "steer",
+        ticket,
+        taskId: "task-2",
+        message: "PARKED-CARRIED",
+        steerId: "s-retry-2",
+      });
+      expect(steerDetails(receipt).status).toBe("activated");
+
+      first.release();
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(waited.text).toContain("TASK-TWO-OUT");
+      // call 1: task-1 gated; call 2: task-2 attempt 1 (drained steer,
+      // transient error); call 3: task-2 attempt 2 (re-supplied steer).
+      expect(subagents.state.callCount).toBe(3);
+      expect(attemptOneCopies).toBe(1);
+      expect(retriedCopies).toBe(1);
+    },
+  );
+
+  test(
     "steer requires message; steerId is optional (#44), and steer fields belong to steer alone",
     async () => {
       // SPEC: `message` (nonempty) is required; `steerId` is a caller

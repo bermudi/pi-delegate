@@ -110,7 +110,11 @@ mid-flight the parent can steer. The grammar:
   `steerId` with a different message or target is a conflict error
   naming both attempts. A parked steer whose task settles before
   delivery voids to `not-applied` on retry — nothing delivers into
-  a dead session.
+  a dead session. When a transient failure retries the whole
+  task, the task has not settled: steers the failed attempt
+  already injected — drained parked messages and live steers
+  alike — are re-supplied through the next attempt's drain, so a
+  receipted message survives the session that died with it.
 - **Interrupt.** `delegate_ticket interrupt` (ticket, optional
   `taskId` defaulting like steer) cooperatively aborts the task's
   in-flight turn through the cancellation machinery — the same

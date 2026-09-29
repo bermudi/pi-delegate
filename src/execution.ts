@@ -300,6 +300,14 @@ export class TaskExecution implements ExecutionHandle {
   private readonly attributed = new Set<string>();
   /** True once a bash/exec call ran — shell file effects are unobservable. */
   private uncertainFiles = false;
+  /**
+   * Steer text this attempt pushed onto its session's steering queue, in
+   * injection order — the parked drain first, then live steers. The
+   * session dies with its queue, so a whole-task retry re-supplies this
+   * list through the next attempt's consumeSteers (SPEC v3 "Steering":
+   * a receipted message survives the failed session).
+   */
+  private readonly injectedSteers: string[] = [];
   /** The pooled session this run checked out, when the task reused one. */
   private poolEntry: PooledSession | undefined;
   /**
@@ -395,11 +403,24 @@ export class TaskExecution implements ExecutionHandle {
         content: [{ type: "text", text: message }],
         timestamp: Date.now(),
       });
+      // Record only after the queue accepted the message — a thrown push
+      // was never delivered, so a retry must not re-supply it.
+      this.injectedSteers.push(message);
       return true;
     } catch (error) {
       log(`steer of task ${this.task.id} failed`, error);
       return false;
     }
+  }
+
+  /**
+   * Every steer message this attempt injected into its session, in order.
+   * runTask reads this at the retry boundary so the next attempt's
+   * consumeSteers can re-supply them. Final once the run winds down — a
+   * finished execution refuses steer() before it can touch the session.
+   */
+  retainedSteers(): readonly string[] {
+    return [...this.injectedSteers];
   }
 
   /**
@@ -779,6 +800,7 @@ export class TaskExecution implements ExecutionHandle {
           content: [{ type: "text", text: steer }],
           timestamp: Date.now(),
         });
+        this.injectedSteers.push(steer);
       }
       try {
         this.prompted = true;
@@ -934,6 +956,11 @@ export async function runTask(
 ): Promise<TaskOutcome> {
   let retries = 0;
   let usage: Usage | undefined;
+  // Steer text already injected into a failed attempt's session dies
+  // with it — each retry re-supplies the retained set through the next
+  // attempt's consumeSteers, ahead of anything parked since (SPEC v3
+  // "Steering": receipted input is never dropped with the session).
+  let carriedSteers: readonly string[] = [];
   // Task-level file attribution unions every attempt's evidence: the task
   // record reports all paths any of its runs claimed (SPEC v3
   // "Observability — Completion evidence").
@@ -1038,7 +1065,19 @@ export async function runTask(
       break;
     }
 
-    const execution = new TaskExecution(task, controls, loader);
+    const execution = new TaskExecution(
+      task,
+      carriedSteers.length === 0
+        ? controls
+        : {
+            ...controls,
+            consumeSteers: () => [
+              ...carriedSteers,
+              ...(controls.consumeSteers?.() ?? []),
+            ],
+          },
+      loader,
+    );
     onExecution?.(execution);
     let timer: ReturnType<typeof setTimeout> | undefined;
     if (deadlineAt !== undefined) {
@@ -1106,6 +1145,9 @@ export async function runTask(
     if (last.status !== "failed" || controls.isAborted()) break;
     if (retries + 1 >= MAX_TASK_ATTEMPTS || !canRetryWholeTask(task, last)) break;
     retries += 1;
+    // The failed attempt's full injected set replaces the carried list —
+    // it already contains everything the earlier attempts re-supplied.
+    carriedSteers = execution.retainedSteers();
     console.error(
       `[delegate] retrying task ${task.id} after transient failure (attempt ${retries + 1} of ${MAX_TASK_ATTEMPTS}): ${last.error ?? "unknown error"}`,
     );
