@@ -929,10 +929,12 @@ export class TicketStore {
         },
       };
     };
-    if (record.status !== "running") {
+    if (record.status !== "running" || ticket.recovered === true) {
       return notApplied(
         ticket.recovered
-          ? `Steer "${steerId}": not-applied — ticket "${ticket.id}" is a recovered ${record.status} result; recovery never resumes it. Poll it for the final outcome.`
+          ? record.status === "running"
+            ? `Steer "${steerId}": not-applied — ticket "${ticket.id}" is a recovered record whose work runs under another live session; steer it there.`
+            : `Steer "${steerId}": not-applied — ticket "${ticket.id}" is a recovered ${record.status} result; recovery never resumes it. Poll it for the final outcome.`
           : `Steer "${steerId}": not-applied — ticket "${ticket.id}" is already ${record.status}; nothing is running. Poll it for the final result.`,
       );
     }
@@ -1046,10 +1048,12 @@ export class TicketStore {
       ticket,
       interrupt: { ticket: ticket.id, taskId, status: "not-applied" },
     });
-    if (record.status !== "running") {
+    if (record.status !== "running" || ticket.recovered === true) {
       return notApplied(
         ticket.recovered
-          ? `Interrupt on ticket "${ticket.id}": not-applied — it is a recovered ${record.status} result; recovery never resumes it. Poll it for the final outcome.`
+          ? record.status === "running"
+            ? `Interrupt on ticket "${ticket.id}": not-applied — it is a recovered record whose work runs under another live session; interrupt it there.`
+            : `Interrupt on ticket "${ticket.id}": not-applied — it is a recovered ${record.status} result; recovery never resumes it. Poll it for the final outcome.`
           : `Interrupt on ticket "${ticket.id}": not-applied — the ticket is already ${record.status}; nothing is running. Poll it for the final result.`,
       );
     }
@@ -1357,6 +1361,11 @@ export class TicketStore {
   /** The single owner of the terminal transition; idempotent. */
   settle(ticket: Ticket, status: TicketStatus): boolean {
     const { record, rt } = this.entry(ticket);
+    // A recovered record is another host's journal projection — a still
+    // `running` one belongs to a live sibling (#54). Settling it here
+    // would overwrite that session's journal entry, so the record is
+    // read-only: no transition, no save.
+    if (record.recovered === true) return false;
     if (isTerminal(record.status) || status === "running") return false;
     record.status = status;
     record.paused = false;
@@ -1416,6 +1425,14 @@ export class TicketStore {
     const { record, rt } = this.entry(ticket);
     if (isTerminal(record.status)) {
       return `Ticket "${ticket.id}" is already ${record.status}.`;
+    }
+    if (record.recovered === true) {
+      // Still `running` here means a live sibling owns it (#54): this
+      // host holds no executions to abort and no journal write is legal.
+      return (
+        `Ticket "${ticket.id}" is a recovered record of work running under another live session; ` +
+        `only that session can cancel it.`
+      );
     }
     if (!force) {
       const inFlight = rt.executions.size;
@@ -1483,6 +1500,10 @@ export class TicketStore {
       interrupted: [] as readonly string[],
     };
     if (isTerminal(record.status)) return none;
+    // A recovered record can never produce activity in this host — a
+    // `running` one is live under a sibling, unreachable from here.
+    // Parking would only sit out the timeout, so return at once.
+    if (record.recovered === true) return none;
     if (record.questions.length > 0) return { ...none, questionPending: true };
     if (signal?.aborted === true) return { ...none, aborted: true };
     // Event-scoped interruption wake: the indexes already recorded

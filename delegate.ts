@@ -1895,7 +1895,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
     navigationEpoch += 1;
     return visibility.guardTreeNavigation(ctx, () => {
       for (const ticket of tickets.list()) {
-        if (ticket.status === "running") tickets.cancel(ticket, true);
+        // A recovered `running` record belongs to a live sibling — this
+        // host holds nothing to cancel and must not write its journal.
+        if (ticket.status === "running" && ticket.recovered !== true) {
+          tickets.cancel(ticket, true);
+        }
       }
     });
   });
@@ -1967,7 +1971,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
     visibility.shutdownTrace(
       event.reason,
       ctx,
-      tickets.list().filter((ticket) => ticket.status === "running"),
+      tickets
+        .list()
+        .filter(
+          (ticket) => ticket.status === "running" && ticket.recovered !== true,
+        ),
     );
     // Forced cancellation settles every ticket immediately and resolves its
     // waiters; delivery is suppressed by the latch above. Checked-out pooled
@@ -1975,7 +1983,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
     // their runs own disposal through settle, and the barrier below is what
     // confirms they actually stopped (a worker that ignores the abort holds
     // shutdown for as long as it runs, per COMPATIBILITY.md).
-    for (const ticket of tickets.list()) tickets.cancel(ticket, true);
+    for (const ticket of tickets.list()) {
+      // Recovered records project a sibling session's journal — nothing
+      // here can cancel them, and a settle would overwrite that entry.
+      if (ticket.recovered === true) continue;
+      tickets.cancel(ticket, true);
+    }
     sessions.shutdown();
     const pending = [...liveQuiescence];
     if (pending.length > 0) {

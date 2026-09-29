@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { dependsTransitively } from "./graph.ts";
 import type { ResolvedTask } from "./types.ts";
 
@@ -27,15 +27,20 @@ const GIT_REDIRECTS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as const;
 
 /**
  * Canonical transcript path for exclusivity matching: realpath defeats
- * symlink aliases (v1 quarantined canonical aliases too). Falls back to a
- * lexical resolve when the file is not on disk — matching must stay
- * symmetric for a path that exists on one side only.
+ * symlink aliases (v1 quarantined canonical aliases too). A missing leaf —
+ * a pooled session's first file, a stale resumeFrom — realpaths its parent
+ * instead, so a symlinked ancestor still converges both spellings onto one
+ * key; only a missing parent falls back to the lexical absolute.
  */
 function canonicalTranscript(path: string): string {
   try {
     return realpathSync(path);
   } catch {
-    return resolve(path);
+    try {
+      return join(realpathSync(dirname(path)), basename(path));
+    } catch {
+      return resolve(path);
+    }
   }
 }
 

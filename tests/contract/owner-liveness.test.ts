@@ -151,6 +151,69 @@ describe("owner-liveness startup recovery (issue #54)", () => {
     }
   });
 
+  test("a live owner's running ticket is read-only for the recovering host", async () => {
+    // The recovering boundary sees the sibling's ticket as recovered
+    // `running`: wait never parks (no activity can arrive here), cancel
+    // refuses rather than overwriting the sibling's journal row, steer and
+    // interrupt receipt not-applied, and this host's shutdown skips it.
+    const first = await openAt();
+    const provider = await installSubagentModel(first);
+    const { ticket, release } = await dispatchRunning(first, provider);
+    try {
+      const next = await openAt(first.cwd);
+      const before = journalOf(first.cwd, ticket);
+      expect(before.status).toBe("running");
+
+      const waited = await callDelegateTicket(next, {
+        action: "wait",
+        ticket,
+        timeoutMs: 10,
+      });
+      expect(waited.isError).toBe(false);
+      expect(waited.text).toContain("running");
+      expect(waited.text).not.toContain("timed out");
+
+      const cancel = await callDelegateTicket(next, {
+        action: "cancel",
+        ticket,
+        force: true,
+      });
+      expect(cancel.isError).toBe(true);
+      expect(cancel.text).toMatch(/recovered/i);
+      expect(journalOf(first.cwd, ticket)).toEqual(before);
+      const stillRunning = await callDelegateTicket(next, {
+        action: "poll",
+        ticket,
+      });
+      expect(stillRunning.text).toContain("running");
+
+      const steered = await callDelegateTicket(next, {
+        action: "steer",
+        ticket,
+        message: "wake up",
+        steerId: "s-sibling",
+      });
+      expect(steered.text).toContain("not-applied");
+      expect(
+        (steered.details as { steer?: { status?: string } }).steer?.status,
+      ).toBe("not-applied");
+      const interrupted = await callDelegateTicket(next, {
+        action: "interrupt",
+        ticket,
+      });
+      expect(interrupted.text).toContain("not-applied");
+
+      // Shutdown must not stamp over the sibling's journal entry.
+      await (next.session as AgentSession).extensionRunner.emit({
+        type: "session_shutdown",
+        reason: "quit",
+      });
+      expect(journalOf(first.cwd, ticket)).toEqual(before);
+    } finally {
+      release();
+    }
+  });
+
   test("a cross-boot owner counts as dead even while its pid lives", async () => {
     const first = await openAt();
     const provider = await installSubagentModel(first);

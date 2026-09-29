@@ -19,6 +19,8 @@ export interface SignalTicket {
   readonly paused: boolean;
   readonly totalTasks: number;
   readonly outcomes: readonly (unknown | undefined)[];
+  /** Cold-read record owned by another host — never live work here. */
+  readonly recovered?: boolean;
 }
 
 interface StatusCtx {
@@ -101,7 +103,12 @@ export class VisibilitySignals {
   }
 
   private active(): SignalTicket[] {
-    return this.readTickets().filter((ticket) => ticket.status === "running");
+    // A recovered record projects another session's journal — `running`
+    // there means live under a sibling, not here, so it never counts as
+    // this host's work (and quitting pi does not abort it).
+    return this.readTickets().filter(
+      (ticket) => ticket.status === "running" && ticket.recovered !== true,
+    );
   }
 
   /** Recompute the footer; dedupe by text; prune the warned set. */
