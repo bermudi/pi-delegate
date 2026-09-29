@@ -63,7 +63,15 @@ mid-flight the parent can steer. The grammar:
   task newly settling `interrupted` carries the interrupted notice
   naming the task. Events already on record when a wait begins are
   stale news — view-visible, not a wake. (Engine behavior already;
-  promoted to grammar.)
+  promoted to grammar.) `wait` also takes `tickets: [ids]` —
+  wait-any (#58): the call resolves on the first watched ticket to
+  settle, returning that ticket's view plus a one-line roster of the
+  rest still running; the same parked-wait wakes (question,
+  interruption) apply across the watch list, and the same
+  detach-only timeout governs the whole call. `ticket` and
+  `tickets` naming different targets is a validation error naming
+  both; a one-id `tickets` is the single-ticket wait under another
+  spelling.
 - **Fan-out shape.** Batches in one call, taught at the boundary.
   N parallel single-task dispatches — the trained fan-out reflex — must
   work for read-only tasks (they hold no write claims); for overlapping
@@ -93,7 +101,12 @@ mid-flight the parent can steer. The grammar:
   `duplicate` = same `steerId`, byte-identical message, same
   target — the original receipt replays verbatim, nothing
   re-injects; `not-applied` = the target settled, is unknown, or
-  is a recovered ticket, with teaching toward poll. Reusing a
+  is a recovered ticket, with teaching toward poll — and toward
+  continuation when the settled task is identifiable (#57): a
+  pooled session still live teaches re-dispatch with its
+  `sessionId`, a fresh task's durable transcript teaches
+  `resumeFrom`, and a task with neither keeps the plain text.
+  Reusing a
   `steerId` with a different message or target is a conflict error
   naming both attempts. A parked steer whose task settles before
   delivery voids to `not-applied` on retry — nothing delivers into
@@ -192,6 +205,11 @@ mid-flight the parent can steer. The grammar:
   `timeoutMs`. `reasoning_effort` rejects with the same no-caller-
   effort teaching as `thinking`, at task level, top level, and on
   the sibling tools (#44).
+  Context-sharing spellings are never folds — `fork_turns`,
+  `fork_context`, `history`, and `parent_context` reject at task and
+  top level, each naming its field, restating that subagents never
+  inherit the conversation, and pointing at the top-level `brief` as
+  the shared-context mechanism (#56).
   Any two spellings of one field
   present with different values is a validation
   error naming both fields; every applied rename is reported on the

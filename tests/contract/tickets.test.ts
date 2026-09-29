@@ -12,6 +12,7 @@ import {
   callDelegate,
   configureDelegate,
   installSubagentModel,
+  objectOf,
   openDelegateBoundary,
   registeredTool,
   ticketIdOf,
@@ -660,6 +661,206 @@ describe("delegate ticket contract", () => {
         timeoutMs: 5000,
       });
       expect(settled.text).toContain("ANSWERED-CONTINUE");
+    },
+  );
+
+  test(
+    "wait-any resolves on the first ticket to settle with its view and a running roster (#58)",
+    async () => {
+      // Issue #58 (third codex comparison): `tickets` watches several
+      // ids — the wait resolves on the first to settle, leading with
+      // that ticket's view and a one-line roster of the rest still
+      // running.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const early = gate();
+      const late = gate();
+      subagents.respond([early.step, late.step]);
+
+      const a = ticketIdOf(
+        (
+          await callDelegate(session, {
+            tasks: [{ prompt: "first", tools: ["read"] }],
+            async: true,
+          })
+        ).text,
+      );
+      const b = ticketIdOf(
+        (
+          await callDelegate(session, {
+            tasks: [{ prompt: "second", tools: ["read"] }],
+            async: true,
+          })
+        ).text,
+      );
+      await waitFor(
+        () => subagents.state.callCount === 2,
+        "both tickets parked in provider calls",
+      );
+
+      // Watch order is [b, a] but a settles first — the resolved ticket
+      // is the settler, not the list head.
+      const waiting = callDelegateTicket(session, {
+        action: "wait",
+        tickets: [b, a],
+      });
+      early.release();
+      const waited = await waiting;
+      expect(waited.isError).toBe(false);
+      expect(waited.text).toContain("OUTPUT-RELEASED");
+      expect(waited.text).toContain(`Ticket "${a}"`);
+      expect(waited.text).toContain("first watched ticket to settle");
+      expect(waited.text).toContain(`"${b}"`);
+      expect(waited.text).toMatch(/still running: "t-[0-9a-f-]+" \(running/);
+      const details = objectOf(waited.details, "waited.details");
+      expect(details.ticket).toBe(a);
+
+      late.release();
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket: b,
+        timeoutMs: 5000,
+      });
+      expect(settled.text).toContain("OUTPUT-RELEASED");
+    },
+  );
+
+  test(
+    "a wait-any timeout detaches only the waiter — every watched ticket keeps running (#58)",
+    async () => {
+      // Issue #58: timeout semantics are the single wait's, detached —
+      // nothing is cancelled and each ticket settles on its own clock.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const a = gate();
+      const b = gate();
+      subagents.respond([a.step, b.step]);
+
+      const ta = ticketIdOf(
+        (
+          await callDelegate(session, { tasks: [{ prompt: "one", tools: ["read"] }], async: true })
+        ).text,
+      );
+      const tb = ticketIdOf(
+        (
+          await callDelegate(session, { tasks: [{ prompt: "two", tools: ["read"] }], async: true })
+        ).text,
+      );
+      await waitFor(
+        () => subagents.state.callCount === 2,
+        "both tickets parked in provider calls",
+      );
+
+      const timedOut = await callDelegateTicket(session, {
+        action: "wait",
+        tickets: [ta, tb],
+        timeoutMs: 40,
+      });
+      expect(timedOut.isError).toBe(false);
+      expect(timedOut.text).toMatch(/timed out/i);
+      expect(timedOut.text).toContain(ta);
+      expect(timedOut.text).toContain(tb);
+      expect(timedOut.text).toMatch(/running/);
+
+      // Both are still alive and settle normally once released.
+      a.release();
+      b.release();
+      for (const ticket of [ta, tb]) {
+        const settled = await callDelegateTicket(session, {
+          action: "wait",
+          ticket,
+          timeoutMs: 5000,
+        });
+        expect(settled.text).toContain("OUTPUT-RELEASED");
+      }
+    },
+  );
+
+  test(
+    "wait-any validation: disagreement names both spellings, agreement folds, unknown ids error, tickets stays wait-only (#58)",
+    async () => {
+      // Issue #58: `ticket` and `tickets` name the same wait target —
+      // agreeing forms take the single-ticket path untouched; a
+      // divergence is a validation error naming both.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const a = gate();
+      const b = gate();
+      subagents.respond([a.step, b.step]);
+
+      const ta = ticketIdOf(
+        (
+          await callDelegate(session, { tasks: [{ prompt: "one", tools: ["read"] }], async: true })
+        ).text,
+      );
+      const tb = ticketIdOf(
+        (
+          await callDelegate(session, { tasks: [{ prompt: "two", tools: ["read"] }], async: true })
+        ).text,
+      );
+
+      // `ticket` + a `tickets` list naming a different set: error naming
+      // both fields and both values.
+      const disagree = await callDelegateTicket(session, {
+        action: "wait",
+        ticket: ta,
+        tickets: [ta, tb],
+      });
+      expect(disagree.isError).toBe(true);
+      expect(disagree.text).toContain("'ticket'");
+      expect(disagree.text).toContain("'tickets'");
+      expect(disagree.text).toContain(ta);
+      expect(disagree.text).toContain(tb);
+
+      // An unknown id in the list fails like the singular unknown.
+      const unknown = await callDelegateTicket(session, {
+        action: "wait",
+        tickets: [ta, "t-00000000-0000-4000-8000-000000000000"],
+      });
+      expect(unknown.isError).toBe(true);
+      expect(unknown.text).toContain("t-00000000-0000-4000-8000-000000000000");
+      expect(unknown.text).toMatch(/not found/i);
+
+      // `tickets` belongs to wait alone.
+      const misplaced = await callDelegateTicket(session, {
+        action: "poll",
+        tickets: [ta, tb],
+      });
+      expect(misplaced.isError).toBe(true);
+      expect(misplaced.text).toMatch(/tickets is valid only with action "wait"/);
+
+      // A bare wait teaches both spellings.
+      const bare = await callDelegateTicket(session, {
+        action: "wait",
+        timeoutMs: 10,
+      });
+      expect(bare.isError).toBe(true);
+      expect(bare.text).toMatch(/requires a ticket id/);
+      expect(bare.text).toContain("'tickets'");
+
+      // Agreement — `ticket` plus a one-id `tickets` naming it — folds
+      // to the single-ticket path: the settled view rides bare, with
+      // no wait-any resolution line.
+      a.release();
+      const agreed = await callDelegateTicket(session, {
+        action: "wait",
+        ticket: ta,
+        tickets: [ta],
+        timeoutMs: 5000,
+      });
+      expect(agreed.isError).toBe(false);
+      expect(agreed.text).toContain("OUTPUT-RELEASED");
+      expect(agreed.text).not.toContain("watched ticket");
+
+      b.release();
+      const solo = await callDelegateTicket(session, {
+        action: "wait",
+        tickets: [tb],
+        timeoutMs: 5000,
+      });
+      expect(solo.isError).toBe(false);
+      expect(solo.text).toContain("OUTPUT-RELEASED");
+      expect(solo.text).not.toContain("watched ticket");
     },
   );
 });

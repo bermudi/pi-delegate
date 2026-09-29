@@ -283,6 +283,12 @@ const ticketSchema = Type.Object(
           "Ticket id; required for every action except a roster poll — and optional on 'answer'/'steer'/'interrupt'/'tail' when taskId is a '<ticket>#<task>' compound, which carries its own ticket.",
       }),
     ),
+    tickets: Type.Optional(
+      Type.Array(Type.String(), {
+        description:
+          "Only with action 'wait': watch several tickets — the call resolves on the first to settle and reports the rest still running. 'ticket' and 'tickets' naming different targets is a validation error; a one-entry list is the single-ticket wait under another spelling.",
+      }),
+    ),
     timeoutMs: Type.Optional(
       Type.Number({
         description:
@@ -418,6 +424,7 @@ const dispatchFieldNames = [
 const ticketFieldNames = [
   "ticketAction",
   "ticket",
+  "tickets",
   "force",
   "timeoutMs",
   "timeout_ms",
@@ -491,6 +498,8 @@ function delegateTicketExample(args: Record<string, unknown>): string {
           ? "steer"
           : typeof args.offset === "number" || typeof args.waitMs === "number"
             ? "tail"
+            : Array.isArray(args.tickets) && args.tickets.length > 0
+              ? "wait"
             : isGiven(args.taskId) ||
                 isGiven(args.questionId) ||
                 isGiven(args.answer)
@@ -504,6 +513,9 @@ function delegateTicketExample(args: Record<string, unknown>): string {
   }
   if (action === "cancel" && args.force === true) fields.push("force: true");
   if (action === "wait") {
+    if (Array.isArray(args.tickets) && args.tickets.length > 0) {
+      fields.push(`tickets: ${JSON.stringify(args.tickets)}`);
+    }
     const timeout =
       typeof args.timeoutMs === "number" ? args.timeoutMs : args.timeout_ms;
     if (typeof timeout === "number") {
@@ -605,11 +617,40 @@ function rejectObsoleteContext(record: Record<string, unknown>): void {
   }
 }
 
+/**
+ * Context-sharing spellings trained callers reach for (#56: codex's
+ * `fork_turns`/`fork_context`, plus the `history`/`parent_context`
+ * cousins). None is an accepted field — each rejects with the same
+ * teaching shape as the removed `context`: name the field, restate the
+ * invariant (subagents never inherit this conversation), and point at
+ * the batch `brief` as the shared-context mechanism. Presence rejects
+ * even when the value is null — before null stripping, like `context`.
+ */
+const FOREIGN_CONTEXT_FIELDS = [
+  "fork_turns",
+  "fork_context",
+  "history",
+  "parent_context",
+] as const;
+
+function rejectForeignContextFields(record: Record<string, unknown>): void {
+  for (const field of FOREIGN_CONTEXT_FIELDS) {
+    if (Object.hasOwn(record, field)) {
+      throw new Error(
+        `The ${field} field is not accepted — subagents never inherit this conversation. ` +
+          `For shared context, put it in the batch brief (the top-level "brief" field) so every task starts with it.`,
+      );
+    }
+  }
+}
+
 function normalizeTask(value: unknown, index: number): unknown {
   if (!isRecord(value)) return value;
   const task = { ...value };
   // Presence of `context` rejects even when null — before null stripping.
   rejectObsoleteContext(task);
+  // Same for the foreign context-sharing spellings (#56).
+  rejectForeignContextFields(task);
   stripNulls(task);
   if (task.model !== undefined) {
     throw new Error(`tasks[${index}]: ${MODEL_FIELD_REJECTION}`);
@@ -719,6 +760,9 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   ) {
     rejectObsoleteContext(args);
   }
+  // Foreign context-sharing spellings reject at the top level too (#56)
+  // — before null stripping, so a `null` presence still teaches.
+  rejectForeignContextFields(args);
   stripNulls(args);
   stripBlank(args, ["operationId", "sessionId", "cwd", "resumeFrom", "agent"]);
 
@@ -740,6 +784,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   if (
     args.ticketAction !== undefined ||
     args.ticket !== undefined ||
+    args.tickets !== undefined ||
     args.force !== undefined ||
     args.taskId !== undefined ||
     args.questionId !== undefined ||
@@ -754,6 +799,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
         unrunFieldsNote(args, [
           "ticketAction",
           "ticket",
+          "tickets",
           "force",
           "taskId",
           "questionId",
@@ -1070,7 +1116,9 @@ Three sibling tools share Delegate's machinery:
   \`ticket\`. Never blocks.
 - \`{ action: "wait", ticket }\` — block until the ticket settles;
   \`timeoutMs\` (ms, \`timeout_ms\` also accepted) detaches only the
-  waiter, the work continues.
+  waiter, the work continues. \`tickets: [ids]\` watches several and
+  resolves on the first to settle — the result shows that ticket's
+  view plus a one-line roster of the rest still running.
 - \`{ action: "cancel", ticket }\` — previews without \`force\`; with
   \`force: true\` the ticket is cancelled now and in-flight tasks are asked
   to stop (cooperative; no rollback).
@@ -1245,7 +1293,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
     } catch (error) {
       console.error(`[delegate] notifying question ${ticket.id}/${question.id} failed (poll it with delegate_ticket): ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, activity);
+  }, activity,
+  // #57: pooled sessions are declared below; the lookup defers until a
+  // steer/interrupt receipt is built, so the binding is safe.
+  (sessionId) => sessions.transcriptFileOf(sessionId));
   const visibility = new VisibilitySignals(() => tickets.list());
   const admission = new AdmissionController();
   const sessions = new SessionPool();

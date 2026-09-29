@@ -113,6 +113,7 @@ describe("delegate public tool contract", () => {
         "steerId",
         "taskId",
         "ticket",
+        "tickets",
         "timeoutMs",
         "timeout_ms",
         "waitMs",

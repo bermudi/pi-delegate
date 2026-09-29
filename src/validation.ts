@@ -77,6 +77,8 @@ export interface TicketArguments {
     | "interrupt"
     | "tail";
   readonly ticket?: string;
+  /** Wait-any (#58): several ticket ids — the wait resolves on the first to settle. */
+  readonly tickets?: readonly string[];
   readonly timeoutMs?: number;
   /** Cross-harness spelling of `timeoutMs`; folds with a rename note. */
   readonly timeout_ms?: number;
@@ -133,6 +135,12 @@ export interface TicketCall {
     | "interrupt"
     | "tail";
   readonly ticket: string | undefined;
+  /**
+   * Wait-any watch list (#58): present only when `tickets` carried two or
+   * more distinct ids (a one-id list — including one agreeing with
+   * `ticket` — folds into `ticket` and takes the single-ticket path).
+   */
+  readonly tickets: readonly string[] | undefined;
   readonly force: boolean;
   readonly timeoutMs: number | undefined;
   readonly taskId: string | undefined;
@@ -210,7 +218,36 @@ export const REASONING_EFFORT_FIELD_REJECTION =
  * missing.
  */
 export function validateTicketCall(args: TicketArguments): TicketCall {
-  const ticket = isBlank(args.ticket) ? undefined : args.ticket;
+  let ticket = isBlank(args.ticket) ? undefined : args.ticket;
+  // `tickets` is wait-any (#58): watch several ids, resolve on the first
+  // to settle. `ticket` and `tickets` name the same target under two
+  // spellings — agreement folds to the single-ticket wait; divergence is
+  // a validation error naming both, the same rule as the other
+  // cross-spelling folds. Blank entries count as absent (the usual
+  // identifier rule); duplicates collapse.
+  const ticketIds = [
+    ...new Set(
+      (args.tickets ?? []).filter((id) => !isBlank(id)),
+    ),
+  ];
+  let tickets: readonly string[] | undefined;
+  if (ticketIds.length > 0 && args.action !== "wait") {
+    fail(`tickets is valid only with action "wait".`);
+  }
+  if (ticketIds.length > 0) {
+    if (
+      ticket !== undefined &&
+      !(ticketIds.length === 1 && ticketIds[0] === ticket)
+    ) {
+      fail(
+        `'ticket' (${JSON.stringify(ticket)}) and 'tickets' (${JSON.stringify(ticketIds)}) disagree — they name the same wait target under two spellings; send one.`,
+      );
+    }
+    if (ticket === undefined) {
+      if (ticketIds.length === 1) ticket = ticketIds[0];
+      else tickets = ticketIds;
+    }
+  }
   const taskId = isBlank(args.taskId) ? undefined : args.taskId;
   const questionId = isBlank(args.questionId) ? undefined : args.questionId;
   const answer = isBlank(args.answer) ? undefined : args.answer;
@@ -319,12 +356,17 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
       );
     }
   }
-  if (args.action !== "poll" && ticket === undefined && !compoundShaped) {
-    fail(`action "${args.action}" requires a ticket id in the ticket field.`);
+  if (args.action !== "poll" && ticket === undefined && tickets === undefined && !compoundShaped) {
+    fail(
+      args.action === "wait"
+        ? `action "wait" requires a ticket id in the ticket field — or several ticket ids in 'tickets' to resolve on the first to settle.`
+        : `action "${args.action}" requires a ticket id in the ticket field.`,
+    );
   }
   return {
     action: args.action,
     ticket,
+    tickets,
     force: args.force === true,
     timeoutMs,
     taskId,

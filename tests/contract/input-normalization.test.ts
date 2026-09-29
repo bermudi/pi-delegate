@@ -149,6 +149,12 @@ describe("input normalization contract", () => {
         { taskId: "t", questionId: "q", answer: "a" },
         'delegate_ticket({ action: "answer", taskId: "t", questionId: "q", answer: "a" })',
       ],
+      // #58: the wait-any watch list is ticket-owned — a `tickets`
+      // array stranded on delegate routes with a wait example.
+      [
+        { tickets: ["t-1", "t-2"] },
+        'delegate_ticket({ action: "wait", tickets: ["t-1","t-2"] })',
+      ],
     ] as const) {
       const result = await call(arguments_);
       expect(result.isError).toBe(true);
@@ -286,6 +292,14 @@ describe("input normalization contract", () => {
     expect(result.text).toContain("delegate_ticket");
     expect(result.text).toContain(
       'delegate_ticket({ action: "poll", ticket: "t-1" })',
+    );
+
+    // #58: the wait-any list is ticket-owned here too.
+    const watchList = await callSession({ action: "list", tickets: ["t-1", "t-2"] });
+    expect(watchList.isError).toBe(true);
+    expect(watchList.text).toContain("delegate_ticket");
+    expect(watchList.text).toContain(
+      'delegate_ticket({ action: "wait", tickets: ["t-1","t-2"] })',
     );
   });
 

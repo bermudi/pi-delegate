@@ -129,7 +129,9 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       expect(settledText).toContain("resumeFrom");
       expect(settledText).toContain("turn was aborted on request");
 
-      // Interrupting the settled task again is a not-applied receipt.
+      // Interrupting the settled task again is a not-applied receipt —
+      // and (#57) it teaches continuation: the fresh task's durable
+      // transcript points at resumeFrom.
       const again = await callDelegateTicket(session, {
         action: "interrupt",
         ticket,
@@ -137,6 +139,48 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       expect(again.isError).toBe(false);
       expect(again.text).toContain("not-applied");
       expect(interruptDetails(again).status).toBe("not-applied");
+      expect(again.text).toContain("resumeFrom");
+    },
+  );
+
+  test(
+    "a not-applied interrupt on a settled pooled task teaches the sessionId continuation (#57)",
+    async () => {
+      // Issue #57: interrupt shares the steer receipt discipline — an
+      // unapplied interrupt on a task that ran pooled names the sessionId
+      // to re-dispatch rather than dead-ending on "nothing is running".
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([
+        fauxAssistantMessage("POOLED-ONE"),
+        fauxAssistantMessage("POOLED-TWO"),
+      ]);
+      const first = await callDelegate(session, {
+        tasks: [{ prompt: "seed", sessionId: "conv" }],
+      });
+      expect(first.isError).toBe(false);
+      const dispatched = await callDelegate(session, {
+        tasks: [{ prompt: "more", sessionId: "conv" }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(settled.text).toContain("POOLED-TWO");
+
+      const receipt = await callDelegateTicket(session, {
+        action: "interrupt",
+        ticket,
+        taskId: "task-1",
+      });
+      expect(receipt.isError).toBe(false);
+      expect(interruptDetails(receipt).status).toBe("not-applied");
+      expect(receipt.text).toContain("not-applied");
+      expect(receipt.text).toContain('sessionId "conv"');
+      expect(receipt.text).toContain("re-dispatch");
     },
   );
 

@@ -547,4 +547,63 @@ describe("cross-harness field spellings (SPEC v3 Reflex meeting)", () => {
     expect(result.text).toMatch(/priority|additional propert|unexpected/i);
     expect(subagents.state.callCount).toBe(0);
   });
+
+  // Issue #56 (third codex comparison): a caller asking for context
+  // sharing via fork_turns/fork_context — or the history/parent_context
+  // cousins — must not die on a bare additionalProperties wall. Each is
+  // a known-foreign field: the rejection names it, restates the
+  // no-inheritance invariant, and points at the batch brief.
+  for (const field of ["fork_turns", "fork_context", "history", "parent_context"]) {
+    test(`task-level ${field} rejects with brief-pointer teaching`, async () => {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "x", [field]: 2 }],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(`The ${field} field is not accepted`);
+      expect(result.text).toContain("never inherit this conversation");
+      expect(result.text).toContain('"brief"');
+      expect(subagents.state.callCount).toBe(0);
+    });
+
+    test(`top-level ${field} rejects with brief-pointer teaching`, async () => {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "x" }],
+        [field]: 3,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(`The ${field} field is not accepted`);
+      expect(result.text).toContain("never inherit this conversation");
+      expect(result.text).toContain('"brief"');
+      expect(subagents.state.callCount).toBe(0);
+    });
+  }
+
+  test("foreign context spellings reject under flat, stringified, and null shapes", async () => {
+    // #56: the teaching fires wherever the field lands — a flat call
+    // (fields fold into one task), a JSON-stringified tasks array, and a
+    // null value (presence alone rejects, like the removed `context`).
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+
+    for (const args of [
+      { prompt: "flat", fork_turns: 5 },
+      { tasks: JSON.stringify([{ prompt: "encoded", fork_context: true }]) },
+      { tasks: [{ prompt: "x", history: null }] },
+      { fork_turns: 2 },
+    ]) {
+      const result = await callDelegate(session, args);
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/field is not accepted/);
+      expect(result.text).toContain('"brief"');
+    }
+    expect(subagents.state.callCount).toBe(0);
+  });
 });

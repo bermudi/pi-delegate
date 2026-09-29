@@ -437,4 +437,134 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       expect(derived.text).toContain(`steer:${derived.toolCallId}`);
     },
   );
+
+  test(
+    "a not-applied steer on a settled pooled task teaches the sessionId continuation (#57)",
+    async () => {
+      // Issue #57 (third codex comparison): an unapplied steer must not
+      // dead-end on "nothing is running" — a task that ran on a pooled
+      // session still owns that conversation, so the receipt teaches
+      // re-dispatch with its sessionId and the follow-up prompt.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      // The pooled task answers immediately; the sibling stays gated so
+      // the ticket is still running when the settled task is steered.
+      const held = gate("HELD-OUT");
+      const forPrompt: FauxResponseFactory = (context, options, state, model) =>
+        JSON.stringify(context.messages).includes("stays gated")
+          ? held.step(context, options, state, model)
+          : fauxAssistantMessage("POOLED-ONE");
+      subagents.respond([forPrompt, forPrompt]);
+      const dispatched = await callDelegate(session, {
+        tasks: [
+          { id: "pooled", prompt: "pooled work", sessionId: "conv" },
+          { id: "holder", prompt: "stays gated", tools: ["read"] },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      // Wait until the pooled task's outcome is on the record — the
+      // ticket itself is still running behind the gated sibling.
+      for (let i = 0; i < 250; i++) {
+        const view = await callDelegateTicket(session, { action: "poll", ticket });
+        if (view.text.includes("POOLED-ONE")) break;
+        await Bun.sleep(20);
+      }
+
+      // Named settled task on a still-running ticket: the not-applied
+      // receipt carries the sessionId continuation.
+      const named = await callDelegateTicket(session, {
+        action: "steer",
+        ticket,
+        taskId: "pooled",
+        message: "keep going",
+        steerId: "s-pool-1",
+      });
+      expect(named.isError).toBe(false);
+      expect(steerDetails(named).status).toBe("not-applied");
+      expect(named.text).toContain("not-applied");
+      expect(named.text).toContain('sessionId "conv"');
+      expect(named.text).toContain("re-dispatch");
+
+      // Once the ticket is terminal, the named-task form still resolves
+      // it — the terminal-ticket receipt teaches the same hint.
+      held.release();
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(settled.text).toContain("HELD-OUT");
+      const terminal = await callDelegateTicket(session, {
+        action: "steer",
+        ticket,
+        taskId: "pooled",
+        message: "keep going",
+        steerId: "s-pool-2",
+      });
+      expect(terminal.isError).toBe(false);
+      expect(terminal.text).toContain("not-applied");
+      expect(terminal.text).toContain('sessionId "conv"');
+    },
+  );
+
+  test(
+    "a not-applied steer on a settled fresh task teaches resumeFrom; a task that never ran keeps the plain text (#57)",
+    async () => {
+      // Issue #57: the continuation hint prefers the pooled sessionId;
+      // a fresh task's durable transcript points at `resumeFrom` instead
+      // (the same pointer failure views render), and a task that never
+      // ran — no transcript exists to continue — gets today's text.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([
+        fauxAssistantMessage("FRESH-DONE"),
+        fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "provider blew up",
+        }),
+      ]);
+      const dispatched = await callDelegate(session, {
+        tasks: [
+          { id: "done", prompt: "fresh one" },
+          { id: "doomed", prompt: "dies on the provider" },
+          { id: "blocked", prompt: "never ran", dependsOn: ["doomed"] },
+        ],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(settled.isError).toBe(false);
+
+      const fresh = await callDelegateTicket(session, {
+        action: "steer",
+        ticket,
+        taskId: "done",
+        message: "keep going",
+        steerId: "s-fresh",
+      });
+      expect(fresh.isError).toBe(false);
+      expect(steerDetails(fresh).status).toBe("not-applied");
+      expect(fresh.text).toContain("not-applied");
+      expect(fresh.text).toContain("resumeFrom");
+      expect(fresh.text).toContain("re-dispatch");
+
+      const blocked = await callDelegateTicket(session, {
+        action: "steer",
+        ticket,
+        taskId: "blocked",
+        message: "keep going",
+        steerId: "s-blocked",
+      });
+      expect(blocked.isError).toBe(false);
+      expect(steerDetails(blocked).status).toBe("not-applied");
+      expect(blocked.text).toContain("not-applied");
+      expect(blocked.text).not.toContain("re-dispatch");
+      expect(blocked.text).not.toContain("resumeFrom");
+    },
+  );
 });

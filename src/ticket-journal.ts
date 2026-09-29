@@ -69,6 +69,9 @@ const savedTicket = Type.Object({
   ]),
   tasks: Type.Array(Type.Object({
     id: Type.String(), agent: Type.String(),
+    // Optional: records written before #57's continuation teaching carry
+    // none; a recovered ticket never emits the hint either way.
+    sessionId: Type.Optional(Type.String()),
     resumeTag: Type.Optional(Type.String()),
     aliasedFrom: Type.Optional(Type.String()),
     // Optional: records written before cross-harness field compat have
@@ -164,7 +167,7 @@ export class TicketJournal {
       version: 1,
       id: ticket.id,
       status: ticket.status,
-      tasks: ticket.tasks.map(({ id, agent, resumeTag, aliasedFrom, description, normalizedFrom, cwd }) => ({ id, agent, resumeTag, aliasedFrom, description, normalizedFrom, cwd })),
+      tasks: ticket.tasks.map(({ id, agent, sessionId, resumeTag, aliasedFrom, description, normalizedFrom, cwd }) => ({ id, agent, sessionId, resumeTag, aliasedFrom, description, normalizedFrom, cwd })),
       outcomes: ticket.outcomes.map((item) => item ?? null),
       brief: ticket.brief,
       tokenBudget: ticket.tokenBudget,

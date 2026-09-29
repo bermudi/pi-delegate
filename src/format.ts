@@ -66,7 +66,7 @@ export function truncateLine(text: string, limit: number): string {
  * Reads the file but short-circuits at the first restorable entry; on the
  * failure path these files are tiny (header-only or near-empty).
  */
-function isResumableTranscript(sessionFile: string): boolean {
+export function isResumableTranscript(sessionFile: string): boolean {
   if (!existsSync(sessionFile)) return false;
   try {
     for (const line of readFileSync(sessionFile, "utf8").split("\n")) {

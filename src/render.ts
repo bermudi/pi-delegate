@@ -201,7 +201,12 @@ export function renderTicketCall(
   context: { lastComponent: Component | undefined },
 ): Component {
   const component = textOf(context.lastComponent);
-  const target = args.ticket !== undefined ? ` #${args.ticket}` : "";
+  const target =
+    args.ticket !== undefined
+      ? ` #${args.ticket}`
+      : Array.isArray(args.tickets) && args.tickets.length > 0
+        ? ` ${args.tickets.map((id) => `#${id}`).join(",")}`
+        : "";
   component.setText(
     theme.fg("toolTitle", theme.bold(`delegate_ticket ${args.action}`)) +
       theme.fg("muted", target),

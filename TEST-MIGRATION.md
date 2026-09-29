@@ -837,7 +837,11 @@ New v3 contract — no v1 evidence; SPEC.md "Interaction grammar",
   pinning a batch sync, the `agent`/`subagent_type` and
   `async`/`run_in_background` conflicts naming both fields,
   agreeing-spellings acceptance, and `priority`-style unknown fields
-  failing at the schema boundary. The `maxConcurrent` default of 8 is
+  failing at the schema boundary. Foreign context-sharing spellings
+  (#56): `fork_turns`, `fork_context`, `history`, and `parent_context`
+  each reject — at task level, top level, under flat/stringified/null
+  shapes — naming the field, restating no-inheritance, and pointing at
+  the top-level `brief`. The `maxConcurrent` default of 8 is
   pinned through the boundary in `tests/contract/dispatch.test.ts`
   (nine read-only tasks reach exactly eight in flight).
 - **Gap:** pre-`execute` rejections (host schema validation and
@@ -870,8 +874,12 @@ live run — never a mid-turn merge.
   omission error names both running ids without consuming the
   `steerId`; message- and target-conflict errors; a parked steer
   voided by cancellation replays `not-applied` and the never-started
-  child receives nothing. Cold-recovered tickets refuse with
-  `not-applied` in `tests/contract/recovery.test.ts`.
+  child receives nothing. Continuation teaching on not-applied
+  receipts (#57): a settled task that ran pooled teaches
+  re-dispatch with its `sessionId` (named-task and terminal-ticket
+  paths), a fresh task's durable transcript teaches `resumeFrom`,
+  and a task that never ran keeps the plain text. Cold-recovered
+  tickets refuse with `not-applied` in `tests/contract/recovery.test.ts`.
 
 ### Completion evidence — file attribution (v3, #38, 2026-09-27)
 
@@ -923,8 +931,9 @@ state, distinct from `cancelled` by resumability.
   reuses the same conversation), the not-applied paths (unknown
   ticket, unknown task, settled ticket, queued task, ambiguous
   omission, already-interrupted retry), a dependent blocking with the
-  interruption named, and the telemetry rows. The action is pinned in
-  `tests/contract/tool-boundary.test.ts`.
+  interruption named, the #57 continuation hints (pooled task's
+  `sessionId`, fresh transcript's `resumeFrom`), and the telemetry rows.
+  The action is pinned in `tests/contract/tool-boundary.test.ts`.
 
 ### Shared batch brief (v3, #43)
 
@@ -1202,6 +1211,39 @@ the never-resume invariant is unchanged.
   left alone. `tests/contract/recovery.test.ts` models cold starts by
   orphaning the journaled owner pid — a same-process second boundary is
   a live sibling under #54, not a restart.
+
+### Wait-any (v3, #58)
+
+Extends "Event-sensitive ticket waits" — SPEC.md "Waiting is explicit
+and detachable". `delegate_ticket wait` accepts `tickets: [ids]`
+alongside the singular `ticket`: the call parks across the list and
+resolves on the first ticket to settle, the watcher's `Promise.any`.
+
+- **Contract:** the resolved call leads with the settling ticket's view
+  and appends a one-line roster of the watched tickets still running;
+  the same parked-wait wakes (a pending question, a newly interrupted
+  task) apply per watched ticket, and the same detach-only timeout
+  governs the whole call — a timeout with nothing settled reports so
+  and lists every watched ticket, all left running. `ticket` and
+  `tickets` name the same target under two spellings: a one-id list —
+  or one agreeing with `ticket` — folds into the single-ticket wait;
+  divergence is a validation error naming both spellings and both
+  values. `tickets` on a non-wait action is a belongs error; unknown
+  ids fail the call like the singular unknown. A watch list whose
+  tickets can all never produce activity here (recovered records owned
+  by another session) returns unhearable at once instead of parking
+  out the timeout.
+- **Covered now:** `tests/contract/tickets.test.ts` — first-settlement
+  resolution showing the settler's view plus the running roster (watch
+  order is not outcome order; `details.ticket` names the settler), the
+  none-settled timeout leaving every ticket running, and the
+  validation matrix: disagreement naming both fields, `ticket` +
+  one-id agreement folding to the untouched single-ticket path,
+  unknown-list ids erroring, `tickets` rejected outside `wait`, and a
+  bare wait teaching both spellings. The ticket-owned misroute and
+  wait-example inference for `tickets` stranded on `delegate` or
+  `delegate_session` are pinned in
+  `tests/contract/input-normalization.test.ts`.
 
 ## First tranche
 
