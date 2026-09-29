@@ -11,12 +11,26 @@ import { delegateArgumentsSchema, delegateTaskSchema } from "./schema.ts";
 import type { AgentConfig } from "./types.ts";
 import { BUILTIN_AGENT_CONFIGS } from "./agents.ts";
 
+// TypeBox 1.x (what pi actually serves at runtime) types `TSchema` as
+// opaque, but the schema objects still carry these JSON-Schema fields.
+// This structural view replaces 0.34's loose index signature.
+type SchemaFields = {
+  enum?: readonly unknown[];
+  type?: string;
+  items?: TSchema;
+  default?: unknown;
+  description?: string;
+};
+
 function schemaType(schema: TSchema): string {
-  if (Array.isArray(schema.enum)) {
-    return schema.enum.map((value) => JSON.stringify(value)).join(" | ");
+  const fields: SchemaFields = schema;
+  if (Array.isArray(fields.enum)) {
+    return fields.enum.map((value) => JSON.stringify(value)).join(" | ");
   }
-  if (schema.type === "array") return `${schemaType(schema.items)}[]`;
-  return typeof schema.type === "string" ? schema.type : "unknown";
+  if (fields.type === "array") {
+    return `${fields.items ? schemaType(fields.items) : "unknown"}[]`;
+  }
+  return typeof fields.type === "string" ? fields.type : "unknown";
 }
 
 function markdownCell(value: string): string {
@@ -26,9 +40,10 @@ function markdownCell(value: string): string {
 function schemaTable(properties: Record<string, TSchema>): string {
   const rows = Object.entries(properties).map(([name, schema]) => {
     const type = markdownCell(schemaType(schema));
+    const fields: SchemaFields = schema;
     const defaultValue =
-      "default" in schema ? JSON.stringify(schema.default) : "—";
-    const description = markdownCell(schema.description ?? "");
+      "default" in fields ? JSON.stringify(fields.default) : "—";
+    const description = markdownCell(fields.description ?? "");
     return `| \`${name}\` | \`${type}\` | \`${defaultValue}\` | ${description} |`;
   });
   return [

@@ -1,4 +1,4 @@
-import { Type, type SchemaOptions } from "@sinclair/typebox";
+import { Type, type TSchemaOptions } from "@sinclair/typebox";
 import { VALID_THINKING_LEVELS, isSessionControlAction } from "./constants.ts";
 import type { DelegateArguments } from "./types.ts";
 
@@ -11,7 +11,7 @@ import type { DelegateArguments } from "./types.ts";
 // it is not a drop-in replacement here.)
 function StringEnum<const T extends readonly string[]>(
   values: T,
-  options?: SchemaOptions,
+  options?: TSchemaOptions,
 ) {
   return Type.Unsafe<T[number]>({
     ...options,

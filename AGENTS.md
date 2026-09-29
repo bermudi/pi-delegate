@@ -6,7 +6,7 @@ A delegate tool extension for the [Pi](https://github.com/earendil-works/pi) cod
 
 ## Stack
 
-TypeScript (strict), Bun, esbuild. The optional bundle is a single-file smoke-test artifact for Pi's Node process — external packages (`pi-agent-core`, `pi-ai`, `pi-tui`) are shared with the parent. Production Pi loads `delegate.ts` from the installed package. Tests use `@marcfargas/pi-test-harness` (Pi-specific). `@sinclair/typebox` for schema validation.
+TypeScript (strict), Bun, esbuild. The optional bundle is a single-file smoke-test artifact for Pi's Node process — external packages (`pi-agent-core`, `pi-ai`, `pi-tui`) are shared with the parent. Production Pi loads `delegate.ts` from the installed package. Tests use `@marcfargas/pi-test-harness` (Pi-specific). `@sinclair/typebox` for schema validation. Host-provided packages (`@earendil-works/*`, `@sinclair/typebox`, `typebox`) must be declared in `peerDependencies` with a `"*"` range and never in `dependencies` — pi maps their imports onto its own copies (jiti aliases / virtual modules) and warns on physical dependencies (fixed 2026-10-03). The devDep pins the mapped runtime through an npm alias (`"@sinclair/typebox": "npm:typebox@<pi's shipped version>"`; pi serves the renamed typebox 1.x line). TypeBox 1.x types `TSchema` as opaque: structural reads of JSON-Schema fields (`.enum`/`.type`/`.description`) go through a local view type (see `manual.ts`), while `SchemaOptions` is now `TSchemaOptions`.
 
 ## Architecture
 

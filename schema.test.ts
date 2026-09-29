@@ -996,9 +996,10 @@ describe("getSubagentManualMarkdown", () => {
   test("documents that isolated workspaces support async one-shot tasks", () => {
     const manual = getSubagentManualMarkdown(new Map());
     expect(manual).toContain('sync or async one-shot `workspace: "isolated"`');
-    expect(delegateTaskSchema.properties.workspace.description).toContain(
-      "isolated reconciles Git",
-    );
+    expect(
+      (delegateTaskSchema.properties.workspace as { description?: string })
+        .description,
+    ).toContain("isolated reconciles Git");
     expect(manual).toContain("reconciles successful proposals in task order");
   });
 
@@ -1006,7 +1007,9 @@ describe("getSubagentManualMarkdown", () => {
     // glm-5.3 read the old "none confine access" gloss as a fourth workspace
     // value and invented `workspace:"none"`. Enum-like copy must lead with
     // the allowed values and never contain a bare word that reads like one.
-    const desc = delegateTaskSchema.properties.workspace.description ?? "";
+    const desc =
+      (delegateTaskSchema.properties.workspace as { description?: string })
+        .description ?? "";
     expect(desc).toMatch(/^shared\/scratch\/isolated\./);
     expect(desc).not.toMatch(/none/i);
   });
