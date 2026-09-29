@@ -201,7 +201,7 @@ function stripAnsi(text: string): string {
 }
 
 /** Multiline sanitizer: preserves line structure, drops controls/bidi marks. */
-function sanitizeText(text: string): string {
+export function sanitizeText(text: string): string {
   return stripAnsi(text)
     .replace(/\r\n?|\u2028|\u2029/g, "\n")
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]+/g, " ")

@@ -74,7 +74,8 @@ export interface TicketArguments {
     | "resume"
     | "answer"
     | "steer"
-    | "interrupt";
+    | "interrupt"
+    | "tail";
   readonly ticket?: string;
   readonly timeoutMs?: number;
   /** Cross-harness spelling of `timeoutMs`; folds with a rename note. */
@@ -85,6 +86,8 @@ export interface TicketArguments {
   readonly answer?: string;
   readonly message?: string;
   readonly steerId?: string;
+  readonly offset?: number;
+  readonly waitMs?: number;
 }
 
 /** Post-schema delegate_session arguments. */
@@ -127,7 +130,8 @@ export interface TicketCall {
     | "resume"
     | "answer"
     | "steer"
-    | "interrupt";
+    | "interrupt"
+    | "tail";
   readonly ticket: string | undefined;
   readonly force: boolean;
   readonly timeoutMs: number | undefined;
@@ -136,6 +140,8 @@ export interface TicketCall {
   readonly answer: string | undefined;
   readonly message: string | undefined;
   readonly steerId: string | undefined;
+  readonly offset: number | undefined;
+  readonly waitMs: number | undefined;
   /**
    * Applied compat renames on the ticket boundary (currently
    * `timeout_ms` → `timeoutMs`), rendered as teaching notes on the
@@ -191,10 +197,14 @@ export const REASONING_EFFORT_FIELD_REJECTION =
  * Within-tool rules for `delegate_ticket`: `ticket` is required for every
  * action except `poll` (bare poll is the roster), `force` only accompanies
  * `cancel`, `timeoutMs` only `wait`, `taskId` belongs to `answer`,
- * `steer`, and `interrupt`, `questionId`/`answer` belong to `answer` alone
- * — which requires all three — and `message`/`steerId` belong to `steer`,
- * which requires the message (`steerId` is optional — omitted, the ticket
- * boundary derives an idempotency key from the calling tool call).
+ * `steer`, `interrupt`, and `tail` — a `<ticket>#<task>` compound in it
+ * carries its own ticket, making the `ticket` field optional (#53) —
+ * `questionId`/`answer` belong to
+ * `answer` alone — which requires all three — and `message`/`steerId`
+ * belong to `steer`, which requires the message (`steerId` is optional —
+ * omitted, the ticket boundary derives an idempotency key from the
+ * calling tool call). `offset`/`waitMs` belong to `tail` alone and must
+ * be non-negative integers.
  * Conditional carries are reported before missing
  * requirements, matching the historical precedence; blank values count as
  * missing.
@@ -235,9 +245,25 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     taskId !== undefined &&
     args.action !== "answer" &&
     args.action !== "steer" &&
-    args.action !== "interrupt"
+    args.action !== "interrupt" &&
+    args.action !== "tail"
   ) {
-    fail(`taskId is valid only with actions "answer", "steer", and "interrupt".`);
+    fail(`taskId is valid only with actions "answer", "steer", "interrupt", and "tail".`);
+  }
+  for (const [name, value] of [
+    ["offset", args.offset],
+    ["waitMs", args.waitMs],
+  ] as const) {
+    if (value !== undefined && args.action !== "tail") {
+      fail(`${name} is valid only with action "tail".`);
+    }
+    if (
+      args.action === "tail" &&
+      value !== undefined &&
+      (!Number.isFinite(value) || !Number.isInteger(value) || value < 0)
+    ) {
+      fail(`'${name}' must be a non-negative integer; got ${JSON.stringify(value)}.`);
+    }
   }
   for (const [name, value] of [
     ["questionId", questionId],
@@ -279,7 +305,21 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
       );
     }
   }
-  if (args.action !== "poll" && ticket === undefined) {
+  // A `<ticket>#<task>` compound in taskId carries its own ticket (#53):
+  // the ticket field is then optional. "#" never appears in a dispatched
+  // task id (the schema's id charset excludes it), so "#" is always the
+  // compound separator. With a ticket present the rpc layer still
+  // resolves the split — a disagreeing pair conflicts there.
+  const compoundShaped = taskId !== undefined && taskId.includes("#");
+  if (compoundShaped && ticket === undefined) {
+    const hash = taskId.indexOf("#");
+    if (taskId.slice(0, hash) === "" || taskId.slice(hash + 1) === "") {
+      fail(
+        `taskId ${JSON.stringify(taskId)} is malformed — a compound address is "<ticket>#<task>" (e.g. "t-1a2b#task-1").`,
+      );
+    }
+  }
+  if (args.action !== "poll" && ticket === undefined && !compoundShaped) {
     fail(`action "${args.action}" requires a ticket id in the ticket field.`);
   }
   return {
@@ -292,6 +332,8 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     answer,
     message,
     steerId,
+    offset: args.offset,
+    waitMs: args.waitMs,
     notes,
   };
 }

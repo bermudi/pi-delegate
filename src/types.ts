@@ -166,6 +166,13 @@ export interface TaskOutcome {
    */
   readonly sessionFile?: string;
   /**
+   * Byte offset into `sessionFile` where this run's entries begin. Fresh,
+   * exclusive transcripts carry 0; a pooled or resumed session's file
+   * holds earlier conversations, and the offset is where tailing starts
+   * so a run's output never includes prior turns (delegate_ticket tail).
+   */
+  readonly transcriptStart?: number;
+  /**
    * SPEC v3 "Observability — Completion evidence": absolute paths named by
    * the task's write/edit tool calls, resolved against the task cwd,
    * in first-observed order, deduplicated. Evidence, not confinement —
@@ -206,6 +213,18 @@ export type TicketStatus =
   | "failed"
   | "cancelled"
   | "interrupted";
+
+/**
+ * The dispatching host's identity (#54), journaled at creation so a later
+ * startup can tell "my predecessor died" from "a live sibling owns this
+ * record". `bootId` is absent where the kernel exposes none (e.g.
+ * Windows); `sessionId` names the owning Pi session for diagnostics.
+ */
+export interface TicketOwner {
+  readonly pid: number;
+  readonly bootId?: string;
+  readonly sessionId?: string;
+}
 
 /**
  * How caller-facing output text is bounded: at or under
@@ -261,6 +280,13 @@ export interface Ticket {
    */
   readonly outputBounds: OutputBounds;
   readonly createdAt: number;
+  /**
+   * The dispatching host's process/boot/session identity (#54), journaled
+   * at creation. Startup recovery interrupts a `running` record only when
+   * this owner is provably dead; records written before owner tracking
+   * carry none and are never owner-interrupted.
+   */
+  readonly owner?: TicketOwner;
   /** Cold-read ticket with no worker or admission reservation in this host. */
   readonly recovered?: boolean;
   /**
@@ -309,6 +335,15 @@ export interface ExecutionHandle {
    * admission, scheduling, or execution decisions.
    */
   attribution?(): { readonly files: readonly string[]; readonly uncertain: boolean };
+  /**
+   * The run's durable transcript span, when the session is file-backed:
+   * `file` is the `.jsonl` path and `start` the byte offset where this
+   * run's entries begin (0 for a fresh file; the size at checkout for a
+   * pooled or resumed one). Undefined while no session exists yet and
+   * for in-memory sessions — the caller falls back to captured activity
+   * text there.
+   */
+  transcript?(): { readonly file: string; readonly start: number } | undefined;
 }
 
 export class Deferred {

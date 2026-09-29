@@ -20,7 +20,7 @@ import {
   limitHint,
   sleep,
 } from "./retry.ts";
-import { persistSessionHeader, type PooledSession, type SessionPool } from "./sessions.ts";
+import { persistSessionHeader, transcriptSize, type PooledSession, type SessionPool } from "./sessions.ts";
 import { parseVerdict } from "./format.ts";
 import {
   Deferred,
@@ -83,6 +83,12 @@ export interface AttemptResult {
    * retry opens. Undefined for in-memory sessions or when no file exists.
    */
   readonly sessionFile?: string;
+  /**
+   * Byte offset into `sessionFile` where this attempt's entries begin —
+   * pairs with `sessionFile` so a tail of a pooled or resumed transcript
+   * reads only this run's turns (delegate_ticket tail).
+   */
+  readonly transcriptStart?: number;
   /**
    * This attempt's file-attribution evidence (SPEC v3 "Observability —
    * Completion evidence"): write/edit call targets resolved against the
@@ -296,6 +302,15 @@ export class TaskExecution implements ExecutionHandle {
   private uncertainFiles = false;
   /** The pooled session this run checked out, when the task reused one. */
   private poolEntry: PooledSession | undefined;
+  /**
+   * This run's durable transcript span: the `.jsonl` path plus the byte
+   * offset where its entries begin — the file's size at session
+   * assignment, before prompt() appends anything. Pooled and resumed
+   * sessions carry earlier conversations in the same file; the offset
+   * keeps a tail of this run from reading prior turns. Undefined for
+   * in-memory sessions.
+   */
+  private transcriptSpan: { readonly file: string; readonly start: number } | undefined;
   /** True once session.prompt() was attempted this run. */
   private prompted = false;
   /** Inactivity watchdog: while armed, the wall-clock instant of the stall. */
@@ -397,6 +412,32 @@ export class TaskExecution implements ExecutionHandle {
     return { files: [...this.attributed], uncertain: this.uncertainFiles };
   }
 
+  /**
+   * This run's durable transcript span for delegate_ticket tail — set at
+   * session assignment and stable for the run's life: the file may still
+   * be unwritten (first write lands with the first assistant message) and
+   * is not required to exist for the span to be correct.
+   */
+  transcript(): { readonly file: string; readonly start: number } | undefined {
+    return this.transcriptSpan;
+  }
+
+  /**
+   * The `{sessionFile, transcriptStart}` pair for an outcome — the
+   * reportable transcript plus the byte offset where this run's entries
+   * begin, so a later tail of the file reads only this run's turns.
+   */
+  private transcriptOutcome(
+    flushHeader: boolean,
+  ): { sessionFile?: string; transcriptStart?: number } {
+    const file = reportableTranscript(this.session, flushHeader);
+    if (file === undefined) return {};
+    return {
+      sessionFile: file,
+      transcriptStart: this.transcriptSpan?.start ?? 0,
+    };
+  }
+
   /** Stamps the attempt's observed attribution onto its result. */
   private withAttribution(outcome: AttemptResult): AttemptResult {
     const files = [...this.attributed];
@@ -472,7 +513,7 @@ export class TaskExecution implements ExecutionHandle {
         error: watchdog,
         hadSideEffects: this.hadSideEffects,
         quarantined: true,
-        sessionFile: reportableTranscript(session, false),
+        ...this.transcriptOutcome(false),
       };
     }
     return {
@@ -481,7 +522,7 @@ export class TaskExecution implements ExecutionHandle {
       error: this.interruptError(),
       hadSideEffects: this.hadSideEffects,
       quarantined: true,
-      sessionFile: reportableTranscript(session, false),
+      ...this.transcriptOutcome(false),
     };
   }
 
@@ -625,6 +666,14 @@ export class TaskExecution implements ExecutionHandle {
           });
       session.setActiveToolsByName([...this.task.tools, ...(this.controls.askQuestion ? ["ask_parent"] : [])]);
       this.session = session;
+      // Tail baseline: everything already in the file predates this run —
+      // pooled and resumed transcripts carry earlier conversations. A
+      // file that does not exist yet starts at 0.
+      const spanFile = session.sessionFile;
+      this.transcriptSpan =
+        typeof spanFile === "string"
+          ? { file: spanFile, start: transcriptSize(spanFile) }
+          : undefined;
       // A cancellation that landed during session creation found no session
       // to abort; honor it now — the session must never be prompted. A
       // checked-out pooled session is quiescent by definition: it is simply
@@ -645,7 +694,7 @@ export class TaskExecution implements ExecutionHandle {
             error: watchdog,
             hadSideEffects: false,
             quarantined: this.quarantined,
-            sessionFile: reportableTranscript(session, true),
+            ...this.transcriptOutcome(true),
           };
         }
         return {
@@ -653,7 +702,7 @@ export class TaskExecution implements ExecutionHandle {
           error: this.interruptError(),
           hadSideEffects: false,
           quarantined: this.quarantined,
-          sessionFile: reportableTranscript(session, true),
+          ...this.transcriptOutcome(true),
         };
       }
 
@@ -754,7 +803,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
-          sessionFile: reportableTranscript(session, true),
+          ...this.transcriptOutcome(true),
         };
       }
       if (this.abortReason || this.controls.isAborted() || stopReason === "aborted") {
@@ -765,7 +814,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
-          sessionFile: reportableTranscript(session, true),
+          ...this.transcriptOutcome(true),
         };
       }
       if (stopReason === "error") {
@@ -782,7 +831,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
-          sessionFile: reportableTranscript(session, true),
+          ...this.transcriptOutcome(true),
         };
       }
       return {
@@ -791,7 +840,7 @@ export class TaskExecution implements ExecutionHandle {
         usage,
         hadSideEffects: this.hadSideEffects,
         quarantined: this.quarantined,
-        sessionFile: reportableTranscript(session, false),
+        ...this.transcriptOutcome(false),
       };
     } catch (error) {
       // A throw after prompt() consumed tokens still owes the caller the
@@ -808,7 +857,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
-          sessionFile: reportableTranscript(session, true),
+          ...this.transcriptOutcome(true),
         };
       }
       if (this.abortReason || this.controls.isAborted()) {
@@ -818,7 +867,7 @@ export class TaskExecution implements ExecutionHandle {
           usage,
           hadSideEffects: this.hadSideEffects,
           quarantined: this.quarantined,
-          sessionFile: reportableTranscript(session, true),
+          ...this.transcriptOutcome(true),
         };
       }
       return {
@@ -827,7 +876,7 @@ export class TaskExecution implements ExecutionHandle {
         usage,
         hadSideEffects: this.hadSideEffects,
         quarantined: this.quarantined,
-        sessionFile: reportableTranscript(session, true),
+        ...this.transcriptOutcome(true),
       };
     } finally {
       this.controls.signal.removeEventListener("abort", onAbort);
@@ -918,6 +967,7 @@ export async function runTask(
     hadSideEffects: last.hadSideEffects,
     quarantined: last.quarantined,
     sessionFile: last.sessionFile,
+    transcriptStart: last.transcriptStart,
   });
 
   for (;;) {
@@ -1035,6 +1085,7 @@ export async function runTask(
                 usage: addUsage(usageBeforeAttempt, real.usage),
                 quarantined: real.quarantined || undefined,
                 sessionFile: real.sessionFile,
+                transcriptStart: real.transcriptStart,
                 ...(allFiles.size > 0
                   ? { attributedFiles: [...allFiles] }
                   : {}),
@@ -1086,6 +1137,7 @@ export async function runTask(
     usage,
     quarantined: last.quarantined || undefined,
     sessionFile: last.sessionFile,
+    transcriptStart: last.transcriptStart,
     ...(allFiles.size > 0 ? { attributedFiles: [...allFiles] } : {}),
     ...(anyUncertain ? { uncertainFiles: true } : {}),
     // A verifier task's outcome carries its parsed verdict — reporting

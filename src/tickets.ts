@@ -24,8 +24,11 @@ import type {
   InterruptDetails,
   SteerDetails,
   SteerStatus,
+  TailDetails,
 } from "./details.ts";
 import { TicketJournal } from "./ticket-journal.ts";
+import { currentBootId, ownerIsDead } from "./owner.ts";
+import { assistantTextFromTranscript } from "./sessions.ts";
 import { renderOutputForLLM, renderOutputForPoll } from "./spill.ts";
 import type {
   ExecutionHandle,
@@ -33,6 +36,7 @@ import type {
   TaskOutcome,
   TaskVerdict,
   Ticket,
+  TicketOwner,
   TicketStatus,
   TokenBudgetReport,
   WorkerQuestion,
@@ -42,6 +46,15 @@ import type { ResolvedTask } from "./types.ts";
 
 /** The store-private, writable form of the caller-visible record. */
 type Writable<T> = { -readonly [K in keyof T]: T[K] };
+
+/**
+ * #54: the reason startup recovery stamps on an orphaned running record —
+ * on every unfinished task's synthesized outcome and once on the ticket
+ * notice. Kept verbatim: tests and operators grep for it.
+ */
+const ORPHANED_OWNER_REASON = "owning session ended before settlement";
+const ORPHANED_OWNER_NOTICE =
+  `Startup recovery interrupted this ticket: ${ORPHANED_OWNER_REASON}.`;
 
 /**
  * Live machinery for one ticket: cancellation, settlement gates, waiters,
@@ -135,6 +148,9 @@ function isTerminal(status: TicketStatus): boolean {
   return status !== "running";
 }
 
+/** How often an armed tail read re-polls its output source (ms). */
+const TAIL_POLL_MS = 50;
+
 function statusWord(ticket: Ticket): string {
   return ticket.status === "running" && ticket.paused ? "paused" : ticket.status;
 }
@@ -174,7 +190,7 @@ function taskSection(
     ...fieldNotes(record?.normalizedFrom),
     ...(aliased !== "" ? [aliased] : []),
   ];
-  const head = `### Task ${descriptionLabel(record?.description) ?? outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${outcome.status === "ok" ? "completed" : outcome.status}${notes.length > 0 ? `\n${notes.join("\n")}` : ""}`;
+  const head = `### Task ${descriptionLabel(record?.description) ?? outcome.id}${tag !== undefined ? ` ↻${tag}` : ""} — ${outcome.status === "ok" ? "completed" : outcome.status} · ${taskAddress(ticket.id, outcome.id)}${notes.length > 0 ? `\n${notes.join("\n")}` : ""}`;
   const quarantined = outcome.quarantined
     ? ticket.recovered
       ? "\n(worker termination was unconfirmed; no live reservation was restored — inspect the workspace before new writes; recorded output and usage are lower bounds)"
@@ -359,7 +375,7 @@ function ticketView(
     ...(warning ? [warning] : []),
     ...ticket.notices,
     ...ticket.questions.map((q) =>
-      `Waiting for parent answer: task ${q.taskId}, question ${q.id}: ${q.question}\nReply with delegate_ticket({ action: "answer", ticket: "${ticket.id}", taskId: "${q.taskId}", questionId: "${q.id}", answer: "..." }).`),
+      `Waiting for parent answer: task ${ticket.id}#${q.taskId}, question ${q.id}: ${q.question}\nReply with delegate_ticket({ action: "answer", taskId: "${ticket.id}#${q.taskId}", questionId: "${q.id}", answer: "..." }).`),
   ];
   for (let index = 0; index < ticket.outcomes.length; index++) {
     const outcome = ticket.outcomes[index];
@@ -389,10 +405,27 @@ function rosterView(tickets: readonly Ticket[]): string {
     return [
       `- "${ticket.id}" ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished`,
       ...(warning ? [`  ${warning}`] : []),
-      ...ticket.questions.map((q) => `  waiting for answer: ${q.taskId}/${q.id}: ${q.question}`),
+      ...ticket.questions.map((q) => `  waiting for answer: ${ticket.id}#${q.taskId} (${q.id}): ${q.question}`),
     ];
   });
   return `Tickets:\n${lines.join("\n")}`;
+}
+
+/**
+ * The canonical `<ticket>#<task>` address (#53) — rendered wherever a
+ * task is named as an addressee so the parent can copy it verbatim into
+ * any taskId field.
+ */
+function taskAddress(ticketId: string, taskId: string): string {
+  return `${ticketId}#${taskId}`;
+}
+
+/** Unknown-ticket errors name the live tickets — the available names. */
+function knownTickets(store: TicketStore): string {
+  const live = store.list().map((ticket) => `"${ticket.id}"`);
+  return live.length === 0
+    ? "There are no tickets right now — dispatch creates them."
+    : `Known tickets: ${live.join(", ")}.`;
 }
 
 /**
@@ -434,10 +467,31 @@ export class TicketStore {
     }
     const journal = new TicketJournal(agentDir);
     const saved = journal.load();
+    // #54 owner liveness: a journaled `running` ticket settles
+    // interrupted only when its recorded owner is provably dead — this
+    // process restarted, or a reboot happened since dispatch. Records
+    // without an owner (written before owner tracking) and records whose
+    // owner is still alive (a sibling pane's live ticket) stay untouched;
+    // recovery never restarts work either way.
+    const bootId = currentBootId();
+    let orphaned = 0;
     for (const item of saved) {
+      const orphanedRunning =
+        item.status === "running" && ownerIsDead(item.owner, bootId);
+      const outcomes = item.outcomes.map((outcome, index) =>
+        outcome ??
+        (orphanedRunning
+          ? {
+              index,
+              id: item.tasks[index]!.id,
+              status: "interrupted" as const,
+              retries: 0,
+              error: ORPHANED_OWNER_REASON,
+            }
+          : undefined));
       const recovered: Ticket = {
         id: item.id,
-        status: item.status === "running" ? "interrupted" : item.status,
+        status: orphanedRunning ? "interrupted" : item.status,
         paused: false,
         tasks: item.tasks.map((task) => ({
           id: task.id,
@@ -451,12 +505,15 @@ export class TicketStore {
           ...(task.cwd !== undefined ? { cwd: task.cwd } : {}),
         })),
         totalTasks: item.tasks.length,
-        outcomes: item.outcomes.map((outcome) => outcome ?? undefined),
+        outcomes,
         questions: [],
         outputBounds: item.outputBounds,
         createdAt: item.createdAt,
         recovered: true,
-        notices: item.notices,
+        ...(item.owner !== undefined ? { owner: item.owner } : {}),
+        notices: orphanedRunning
+          ? [...item.notices, ORPHANED_OWNER_NOTICE]
+          : item.notices,
         // Optional in the journal — pre-brief records have none.
         ...(item.brief !== undefined ? { brief: item.brief } : {}),
         // Optional in the journal — pre-budget records and budgetless
@@ -465,11 +522,25 @@ export class TicketStore {
           ? { tokenBudget: item.tokenBudget }
           : {}),
       };
+      // The interruption is journal-durable BEFORE the record becomes
+      // visible — the journal state machine is what makes a repeat startup
+      // see `interrupted` instead of settling the same ticket twice. A
+      // failed save propagates like any corrupt-journal failure: the
+      // orphaned record is never registered in a settled-but-unsaved state.
+      if (orphanedRunning) {
+        journal.save(recovered);
+        orphaned++;
+      }
       this.tickets.set(item.id, { record: recovered, rt: this.runtime(false) });
     }
     this.journal = journal;
     if (saved.length > 0) {
-      console.info(`[delegate] recovered ${saved.length} ticket record(s) from ${journal.dir}; unfinished work is interrupted, not restarted`);
+      console.info(
+        `[delegate] recovered ${saved.length} ticket record(s) from ${journal.dir}` +
+          (orphaned > 0
+            ? `; ${orphaned} still-running ticket(s) interrupted — owning session ended before settlement`
+            : "; unfinished work is never restarted"),
+      );
       this.changed();
     }
   }
@@ -525,6 +596,12 @@ export class TicketStore {
       readonly holdSettlement: boolean;
       readonly outputBounds: OutputBounds;
       readonly brief?: string;
+      /**
+       * The dispatching host's identity (#54), journaled with the record
+       * so a later startup's owner-liveness check can tell a dead
+       * predecessor from a live sibling.
+       */
+      readonly owner?: TicketOwner;
     },
   ): Ticket {
     const record: Writable<Ticket> = {
@@ -539,6 +616,7 @@ export class TicketStore {
       outputBounds: options.outputBounds,
       createdAt: Date.now(),
       notices: [],
+      ...(options.owner !== undefined ? { owner: options.owner } : {}),
     };
     // Isolated batches settle only after reconciliation has annotated the
     // outcomes — a terminal ticket must already show applied/conflict state.
@@ -749,16 +827,16 @@ export class TicketStore {
     const pending = rt.pendingQuestions.get(questionId);
     const previous = rt.answeredQuestions.get(questionId);
     if (index < 0 || (pending?.taskIndex ?? previous?.taskIndex) !== index) {
-      throw new Error(`No question '${questionId}' for task '${taskId}' on ticket '${ticket.id}'.`);
+      throw new Error(`No question '${questionId}' for task '${taskAddress(ticket.id, taskId)}'.`);
     }
     if (previous !== undefined) {
       if (previous.answer !== answer) throw new Error(`Question '${questionId}' was already answered differently.`);
-      return `Answer ${questionId} already recorded for task ${taskId}.`;
+      return `Answer ${questionId} already recorded for task ${taskAddress(ticket.id, taskId)}.`;
     }
     rt.answeredQuestions.set(questionId, { taskIndex: index, answer });
     console.info(`[delegate] ticket ${ticket.id} task ${taskId} answered question ${questionId}`);
     pending!.resolve(answer);
-    return `Answer ${questionId} recorded for task ${taskId}; worker will resume when capacity is available.`;
+    return `Answer ${questionId} recorded for task ${taskAddress(ticket.id, taskId)}; worker will resume when capacity is available.`;
   }
 
   /**
@@ -795,13 +873,13 @@ export class TicketStore {
       if (seen.message !== message || resolvedIndex !== seen.taskIndex) {
         const sameTarget = resolvedIndex === seen.taskIndex;
         const attempted = sameTarget
-          ? `task "${seen.taskId}"`
+          ? `task "${taskAddress(ticket.id, seen.taskId)}"`
           : resolvedIndex >= 0
-            ? `task "${record.tasks[resolvedIndex]!.id}"`
+            ? `task "${taskAddress(ticket.id, record.tasks[resolvedIndex]!.id)}"`
             : `task "${callTaskId ?? ""}" (not on this ticket)`;
         return {
           text:
-            `Steer id "${steerId}" conflict on ticket "${ticket.id}": first used for task "${seen.taskId}"; ` +
+            `Steer id "${steerId}" conflict on ticket "${ticket.id}": first used for task "${taskAddress(ticket.id, seen.taskId)}"; ` +
             `this attempt targets ${attempted}` +
             `${seen.message !== message ? " and carries a different message" : ""}. ` +
             `steerIds are single-use; retry with a new steerId.`,
@@ -863,7 +941,7 @@ export class TicketStore {
       taskIndex = record.tasks.findIndex((task) => task.id === callTaskId);
       if (taskIndex < 0) {
         return notApplied(
-          `Steer "${steerId}": not-applied — ticket "${ticket.id}" has no task "${callTaskId}". Its tasks: ${record.tasks.map((t) => `"${t.id}"`).join(", ")}.`,
+          `Steer "${steerId}": not-applied — ticket "${ticket.id}" has no task "${taskAddress(ticket.id, callTaskId)}". Its tasks: ${record.tasks.map((t) => `"${taskAddress(ticket.id, t.id)}"`).join(", ")}.`,
         );
       }
     } else {
@@ -879,7 +957,7 @@ export class TicketStore {
         return {
           text:
             `action "steer" needs taskId on ticket "${ticket.id}" — ${unsettled.length} tasks are still running: ` +
-            `${unsettled.map((i) => `"${record.tasks[i]!.id}"`).join(", ")}.`,
+            `${unsettled.map((i) => `"${taskAddress(ticket.id, record.tasks[i]!.id)}"`).join(", ")}.`,
           isError: true,
           ticket,
         };
@@ -890,7 +968,7 @@ export class TicketStore {
     const outcome = record.outcomes[taskIndex];
     if (outcome !== undefined) {
       return notApplied(
-        `Steer "${steerId}": not-applied — task "${taskId}" on ticket "${ticket.id}" already settled (${outcome.status}); its outcome is final. Poll the ticket for it.`,
+        `Steer "${steerId}": not-applied — task "${taskAddress(ticket.id, taskId)}" already settled (${outcome.status}); its outcome is final. Poll the ticket for it.`,
         taskId,
         taskIndex,
       );
@@ -907,7 +985,7 @@ export class TicketStore {
       ? {
           status: "steered" as const,
           text:
-            `Steer "${steerId}" for task "${taskId}" on ticket "${ticket.id}": steered — ` +
+            `Steer "${steerId}" for task "${taskAddress(ticket.id, taskId)}": steered — ` +
             `queued on the live run; the child sees it as a user message at its next turn boundary (not a mid-turn interrupt).` +
             pausedNote +
             derivedNote,
@@ -915,7 +993,7 @@ export class TicketStore {
       : {
           status: "activated" as const,
           text:
-            `Steer "${steerId}" for task "${taskId}" on ticket "${ticket.id}": activated — ` +
+            `Steer "${steerId}" for task "${taskAddress(ticket.id, taskId)}": activated — ` +
             `the task has no live turn right now (queued, preparing, or between attempts); the message opens its next turn.` +
             pausedNote +
             derivedNote,
@@ -980,7 +1058,7 @@ export class TicketStore {
       taskIndex = record.tasks.findIndex((task) => task.id === callTaskId);
       if (taskIndex < 0) {
         return notApplied(
-          `Interrupt on ticket "${ticket.id}": not-applied — there is no task "${callTaskId}". Its tasks: ${record.tasks.map((t) => `"${t.id}"`).join(", ")}.`,
+          `Interrupt on ticket "${ticket.id}": not-applied — there is no task "${taskAddress(ticket.id, callTaskId)}". Its tasks: ${record.tasks.map((t) => `"${taskAddress(ticket.id, t.id)}"`).join(", ")}.`,
         );
       }
     } else {
@@ -996,7 +1074,7 @@ export class TicketStore {
         return {
           text:
             `action "interrupt" needs taskId on ticket "${ticket.id}" — ${unsettled.length} tasks are still running: ` +
-            `${unsettled.map((i) => `"${record.tasks[i]!.id}"`).join(", ")}.`,
+            `${unsettled.map((i) => `"${taskAddress(ticket.id, record.tasks[i]!.id)}"`).join(", ")}.`,
           isError: true,
           ticket,
         };
@@ -1007,14 +1085,14 @@ export class TicketStore {
     const outcome = record.outcomes[taskIndex];
     if (outcome !== undefined) {
       return notApplied(
-        `Interrupt on ticket "${ticket.id}" task "${taskId}": not-applied — it already settled (${outcome.status}); its outcome is final. Poll the ticket for it.`,
+        `Interrupt on "${taskAddress(ticket.id, taskId)}": not-applied — it already settled (${outcome.status}); its outcome is final. Poll the ticket for it.`,
         taskId,
       );
     }
     const handle = rt.executions.get(taskIndex);
     if (handle === undefined) {
       return notApplied(
-        `Interrupt on ticket "${ticket.id}" task "${taskId}": not-applied — it has no live turn right now (queued, preparing, or between attempts); nothing is running to interrupt.`,
+        `Interrupt on "${taskAddress(ticket.id, taskId)}": not-applied — it has no live turn right now (queued, preparing, or between attempts); nothing is running to interrupt.`,
         taskId,
       );
     }
@@ -1031,7 +1109,7 @@ export class TicketStore {
     console.info(`[delegate] ticket ${ticket.id} task ${taskId}: interrupt requested`);
     return {
       text:
-        `Interrupt for task "${taskId}" on ticket "${ticket.id}": interrupted — ` +
+        `Interrupt for task "${taskAddress(ticket.id, taskId)}": interrupted — ` +
         `its current turn is aborting and the task settles 'interrupted' once the worker confirms ` +
         `it stopped (the same quiescence gate as cancellation). Its pooled session returns reusable, ` +
         `or its transcript keeps a resume hint; poll the ticket for the outcome.`,
@@ -1039,6 +1117,142 @@ export class TicketStore {
       ticket,
       interrupt: { ticket: ticket.id, taskId, status: "interrupted" },
     };
+  }
+
+  /**
+   * delegate_ticket "tail" (issue #52): a bounded, incremental read of
+   * one task's clean assistant output. `offset` is a char cursor into
+   * the accumulated text — an out-of-range value clamps; `text` is the
+   * chunk from that offset, capped per call at the ticket's spill tail
+   * bound, and `nextOffset` is the cursor for the following read.
+   *
+   * Source of truth: the run's durable transcript when the task is
+   * file-backed (fresh, shared, sessionId, resumeFrom) — the caller never
+   * parses raw `.jsonl`. The span's byte baseline excludes earlier
+   * conversations from pooled/resumed transcripts. In-memory tasks
+   * (scratch, isolated) tail from the activity store's captured text;
+   * a settled task whose activity row was pruned falls back to its
+   * recorded output. `waitMs` omitted or ≤0 is a pure snapshot; a
+   * positive bound parks the read until new output lands or the task
+   * settles — never longer than requested. Idempotent; no wake semantics
+   * (ticket events stay with `wait`).
+   */
+  async tail(
+    ticket: Ticket,
+    callTaskId: string | undefined,
+    offset: number | undefined,
+    waitMs: number | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<TicketRpcResult> {
+    const { record, rt } = this.entry(ticket);
+    const fail = (text: string): TicketRpcResult => ({
+      text,
+      isError: true,
+      ticket,
+    });
+    let taskIndex: number;
+    if (callTaskId !== undefined) {
+      taskIndex = record.tasks.findIndex((task) => task.id === callTaskId);
+      if (taskIndex < 0) {
+        return fail(
+          `Ticket "${record.id}" has no task "${taskAddress(record.id, callTaskId)}". Its tasks: ${record.tasks.map((task) => `"${taskAddress(record.id, task.id)}"`).join(", ")}.`,
+        );
+      }
+    } else {
+      const unsettled = record.tasks
+        .map((_, index) => index)
+        .filter((index) => record.outcomes[index] === undefined);
+      if (unsettled.length === 1) {
+        taskIndex = unsettled[0]!;
+      } else if (unsettled.length === 0 && record.tasks.length === 1) {
+        taskIndex = 0;
+      } else {
+        const candidates =
+          unsettled.length > 0 ? unsettled : record.tasks.map((_, i) => i);
+        return fail(
+          `action "tail" needs taskId on ticket "${record.id}" — ${candidates.length === 0 ? "it has no tasks" : `${candidates.length} tasks ${unsettled.length > 0 ? "are still running" : "ran"}: ${candidates.map((i) => `"${taskAddress(record.id, record.tasks[i]!.id)}"`).join(", ")}`}.`,
+        );
+      }
+    }
+    const taskId = record.tasks[taskIndex]!.id;
+    const cap = record.outputBounds.spillTailChars;
+
+    const read = (): {
+      source: string;
+      done: boolean;
+      taskState: TailDetails["taskState"];
+    } => {
+      const outcome = record.outcomes[taskIndex];
+      // File-backed runs read their transcript — the source of truth
+      // (spans exclude earlier pooled/resumed conversation). In-memory
+      // and pruned-row runs read the activity store's captured tail;
+      // a recorded output is the last fallback once both are gone.
+      const span =
+        rt.executions.get(taskIndex)?.transcript?.() ??
+        (outcome?.sessionFile !== undefined
+          ? { file: outcome.sessionFile, start: outcome.transcriptStart ?? 0 }
+          : undefined);
+      const source =
+        span !== undefined
+          ? assistantTextFromTranscript(span.file, span.start)
+          : (this.activity?.taskRow(record.id, taskId)?.assistantTail ??
+            outcome?.output ??
+            "");
+      const taskState =
+        outcome?.status ??
+        this.activity?.taskRow(record.id, taskId)?.status ??
+        (rt.executions.has(taskIndex) ? "running" : "queued");
+      return { source, done: outcome !== undefined, taskState };
+    };
+
+    const off = Number.isFinite(offset)
+      ? Math.max(0, Math.floor(offset!))
+      : 0;
+    const deadline =
+      waitMs !== undefined && Number.isFinite(waitMs) && waitMs > 0
+        ? Date.now() + waitMs
+        : undefined;
+    for (;;) {
+      const snap = read();
+      const clamped = Math.min(off, snap.source.length);
+      // A snapshot returns at once; an armed wait returns early on new
+      // output, on settlement, or on caller abort — never past the bound.
+      const grown = snap.source.length > clamped;
+      if (
+        deadline === undefined ||
+        grown ||
+        snap.done ||
+        signal?.aborted === true ||
+        Date.now() >= deadline
+      ) {
+        const text = snap.source.slice(clamped, clamped + cap);
+        const nextOffset = clamped + text.length;
+        const head =
+          `Tail of task "${taskAddress(record.id, taskId)}" — ` +
+          `${snap.done ? `settled (${snap.taskState})` : snap.taskState}: ` +
+          `${text.length} chars from offset ${clamped} → nextOffset ${nextOffset}` +
+          (snap.source.length > nextOffset
+            ? "; more output is already buffered beyond this read's bound"
+            : "") +
+          (snap.done ? "; complete" : "") +
+          ".";
+        return {
+          text: text === "" ? `${head}\n\n(no output in range)` : `${head}\n\n${text}`,
+          isError: false,
+          ticket,
+          tail: {
+            ticket: record.id,
+            taskId,
+            text,
+            offset: clamped,
+            nextOffset,
+            done: snap.done,
+            taskState: snap.taskState,
+          },
+        };
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, TAIL_POLL_MS));
+    }
   }
 
   /**
@@ -1076,7 +1290,7 @@ export class TicketStore {
         stored.receipt = {
           status: "not-applied",
           text:
-            `Steer "${steer.steerId}": not-applied — task "${taskId}" on ticket "${ticket.id}" ` +
+            `Steer "${steer.steerId}": not-applied — task "${taskAddress(ticket.id, taskId)}" ` +
             `settled before the message could be delivered; its outcome is final. Poll the ticket for it.`,
         };
       }
@@ -1406,6 +1620,8 @@ export interface TicketRpcResult {
   readonly steer?: SteerDetails;
   /** The interrupt receipt's machine half (action "interrupt" only). */
   readonly interrupt?: InterruptDetails;
+  /** The tail read's machine half (action "tail" only). */
+  readonly tail?: TailDetails;
 }
 
 /** delegate_ticket actions against the store. */
@@ -1419,7 +1635,8 @@ export async function handleTicketRpc(
       | "resume"
       | "answer"
       | "steer"
-      | "interrupt";
+      | "interrupt"
+      | "tail";
     ticket: string | undefined;
     force: boolean;
     timeoutMs: number | undefined;
@@ -1428,6 +1645,8 @@ export async function handleTicketRpc(
     answer: string | undefined;
     message: string | undefined;
     steerId: string | undefined;
+    offset: number | undefined;
+    waitMs: number | undefined;
   },
   store: TicketStore,
   signal: AbortSignal | undefined,
@@ -1437,7 +1656,37 @@ export async function handleTicketRpc(
   if (call.action === "poll" && call.ticket === undefined) {
     return { text: rosterView(store.list()), isError: false };
   }
-  const ticket = call.ticket !== undefined ? store.get(call.ticket) : undefined;
+  // Canonical task addresses (#53): a taskId of the form
+  // "<ticket>#<task>" carries its own ticket — the ticket field is
+  // optional with it. "#" can never appear in a dispatched task id (the
+  // task schema's id charset excludes it), so a "#" in taskId is always
+  // the compound separator; plain ticket/task forms are untouched.
+  let ticketName = call.ticket;
+  let taskId = call.taskId;
+  if (taskId !== undefined && taskId.includes("#")) {
+    const hash = taskId.indexOf("#");
+    const addressedTicket = taskId.slice(0, hash);
+    const addressedTask = taskId.slice(hash + 1);
+    if (addressedTicket === "" || addressedTask === "") {
+      return {
+        text:
+          `taskId ${JSON.stringify(call.taskId)} is malformed — a compound ` +
+          `address is "<ticket>#<task>" (e.g. "t-1a2b#task-1").`,
+        isError: true,
+      };
+    }
+    if (ticketName !== undefined && ticketName !== addressedTicket) {
+      return {
+        text:
+          `taskId ${JSON.stringify(call.taskId)} and ticket ${JSON.stringify(ticketName)} ` +
+          `disagree — a "<ticket>#<task>" compound resolves its own ticket; send one.`,
+        isError: true,
+      };
+    }
+    ticketName = addressedTicket;
+    taskId = addressedTask;
+  }
+  const ticket = ticketName !== undefined ? store.get(ticketName) : undefined;
   // Steering is receipt-shaped end to end (SPEC v3 "Steering"): an
   // unknown, terminal, or recovered target answers not-applied, not a
   // generic refusal. An omitted steerId derives `steer:<toolCallId>` —
@@ -1450,20 +1699,20 @@ export async function handleTicketRpc(
     if (ticket === undefined) {
       return {
         text:
-          `Steer "${steerId ?? ""}": not-applied — ticket '${call.ticket ?? ""}' ` +
-          `is unknown; nothing was sent. Poll with no ticket to list the live ones.` +
+          `Steer "${steerId ?? ""}": not-applied — ticket '${ticketName ?? ""}' ` +
+          `is unknown; nothing was sent. ${knownTickets(store)}` +
           (derivedSteer ? " (steerId derived from this call's tool-call id)" : ""),
         isError: false,
         steer: {
           steerId: steerId ?? "",
-          ticket: call.ticket ?? "",
-          taskId: call.taskId ?? "",
+          ticket: ticketName ?? "",
+          taskId: taskId ?? "",
           status: "not-applied",
           ...(derivedSteer ? { derived: true } : {}),
         },
       };
     }
-    return store.steer(ticket, call.taskId, steerId!, call.message!, derivedSteer);
+    return store.steer(ticket, taskId, steerId!, call.message!, derivedSteer);
   }
   // Interrupt shares the receipt discipline: an unknown or recovered
   // target answers not-applied, not a generic refusal.
@@ -1471,25 +1720,33 @@ export async function handleTicketRpc(
     if (ticket === undefined) {
       return {
         text:
-          `Interrupt on ticket '${call.ticket ?? ""}': not-applied — the ticket ` +
-          `is unknown; nothing was aborted. Poll with no ticket to list the live ones.`,
+          `Interrupt on ticket '${ticketName ?? ""}': not-applied — the ticket ` +
+          `is unknown; nothing was aborted. ${knownTickets(store)}`,
         isError: false,
         interrupt: {
-          ticket: call.ticket ?? "",
-          taskId: call.taskId ?? "",
+          ticket: ticketName ?? "",
+          taskId: taskId ?? "",
           status: "not-applied",
         },
       };
     }
-    return store.interrupt(ticket, call.taskId);
+    return store.interrupt(ticket, taskId);
   }
   if (!ticket) {
     return {
-      text: `Ticket '${call.ticket ?? ""}' not found.`,
+      text: `Ticket '${ticketName ?? ""}' not found. ${knownTickets(store)}`,
       isError: true,
     };
   }
-  if (ticket.recovered && call.action !== "poll" && call.action !== "wait") {
+  // tail shares poll/wait's read-only reach into recovered records — it
+  // observes the recorded outcome or a surviving transcript; it never
+  // mutates.
+  if (
+    ticket.recovered &&
+    call.action !== "poll" &&
+    call.action !== "wait" &&
+    call.action !== "tail"
+  ) {
     return {
       text: `Ticket '${ticket.id}' is a recovered ${ticket.status} result; ${call.action} cannot restart or change it.`,
       isError: true,
@@ -1509,7 +1766,7 @@ export async function handleTicketRpc(
       const text = questionPending
         ? `${view}\n\nWait detached: answer the pending question before waiting for this ticket.`
         : interrupted.length > 0
-          ? `${view}\n\nWait detached: ${interrupted.length === 1 ? "task" : "tasks"} ${interrupted.map((id) => `"${id}"`).join(", ")} ${interrupted.length === 1 ? "was" : "were"} interrupted — the ticket is still ${statusWord(ticket)}.`
+          ? `${view}\n\nWait detached: ${interrupted.length === 1 ? "task" : "tasks"} ${interrupted.map((id) => `"${ticket.id}#${id}"`).join(", ")} ${interrupted.length === 1 ? "was" : "were"} interrupted — the ticket is still ${statusWord(ticket)}.`
           : timedOut
             ? `${view}\n\nWait timed out; the ticket is still ${statusWord(ticket)}.`
             : aborted
@@ -1525,9 +1782,11 @@ export async function handleTicketRpc(
       return { text: store.resume(ticket), isError: false, ticket };
     case "answer":
       try {
-        return { text: store.answer(ticket, call.taskId!, call.questionId!, call.answer!), isError: false, ticket };
+        return { text: store.answer(ticket, taskId!, call.questionId!, call.answer!), isError: false, ticket };
       } catch (error) {
         return { text: error instanceof Error ? error.message : String(error), isError: true, ticket };
       }
+    case "tail":
+      return store.tail(ticket, taskId, call.offset, call.waitMs, signal);
   }
 }

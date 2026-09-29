@@ -1,6 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AdmissionController } from "./admission.ts";
+import { sanitizeText } from "./activity.ts";
 import type { ResolvedTask, TaskStatus } from "./types.ts";
 
 function log(context: string, error: unknown): void {
@@ -110,6 +111,90 @@ export function persistSessionHeader(sm: unknown): boolean {
     log("session transcript flush failed", error);
   }
   return existsSync(file);
+}
+
+/**
+ * A transcript file's current byte size — 0 when it is absent or
+ * unreadable. SessionManager appends whole lines synchronously once the
+ * first assistant message lands, so a byte offset captured before the
+ * first prompt marks where a run's entries begin (delegate_ticket tail).
+ */
+export function transcriptSize(file: string): number {
+  try {
+    return statSync(file).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Clean assistant text appended to a session transcript after byte offset
+ * `start` (the run's baseline — 0 for a fresh file, the size at checkout
+ * for a pooled or resumed one). This is the delegate_ticket tail's source
+ * of truth for file-backed tasks: the caller never parses `.jsonl`.
+ *
+ * Entries are whole `type: "message"` lines; a partial trailing line (a
+ * write in flight) is skipped — the next read catches it once complete.
+ * Per-message text blocks join with blank lines, messages with blank
+ * lines — the same accumulation the activity store uses, so a tail stream
+ * keeps its offsets when the source switches. Sanitized like activity
+ * text: ANSI/control noise never reaches a tool result. A missing,
+ * shrunk, or unreadable file reads as empty.
+ */
+export function assistantTextFromTranscript(
+  file: string,
+  start: number,
+): string {
+  let buffer: Buffer;
+  try {
+    buffer = readFileSync(file);
+  } catch {
+    return "";
+  }
+  if (buffer.length <= start) return "";
+  const slice = buffer.subarray(start).toString("utf8");
+  const whole = slice.endsWith("\n") ? slice : slice.slice(0, slice.lastIndexOf("\n") + 1);
+  const messages: string[] = [];
+  for (const line of whole.split("\n")) {
+    if (line === "") continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // corrupt or partially-written line — skip it
+    }
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      (entry as { type?: unknown }).type !== "message"
+    ) {
+      continue;
+    }
+    const message = (entry as { message?: unknown }).message;
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      (message as { role?: unknown }).role !== "assistant"
+    ) {
+      continue;
+    }
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    const parts: string[] = [];
+    for (const block of content) {
+      if (
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string" &&
+        (block as { text: string }).text !== ""
+      ) {
+        parts.push(sanitizeText((block as { text: string }).text));
+      }
+    }
+    if (parts.length > 0) messages.push(parts.join("\n\n"));
+  }
+  return messages.join("\n\n");
 }
 
 /** A live pooled session. `checkedOut` marks a run currently owning it. */

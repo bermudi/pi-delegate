@@ -114,6 +114,10 @@ export const taskOutcomeDetailsSchema = Type.Object(
     blockedBy: Type.Optional(readonlyArray(Type.String())),
     quarantined: Type.Optional(Type.Boolean()),
     sessionFile: Type.Optional(Type.String()),
+    // Byte offset into sessionFile where the run's entries begin —
+    // the tail boundary for pooled/resumed transcripts (delegate_ticket
+    // tail).
+    transcriptStart: Type.Optional(Type.Integer()),
     attributedFiles: Type.Optional(readonlyArray(Type.String())),
     uncertainFiles: Type.Optional(Type.Boolean()),
     verdict: Type.Optional(taskVerdictSchema),
@@ -222,6 +226,36 @@ export const interruptDetailsSchema = Type.Object(
 );
 export type InterruptDetails = Static<typeof interruptDetailsSchema>;
 
+/**
+ * `details.tail` — machine-readable half of a tail read (delegate_ticket
+ * action "tail", issue #52): the output-so-far chunk from `offset`
+ * (spill-bounded per call), the `nextOffset` cursor for the following
+ * call, whether the task settled, and its state.
+ */
+export const tailDetailsSchema = Type.Object(
+  {
+    ticket: Type.String(),
+    taskId: Type.String(),
+    text: Type.String(),
+    offset: Type.Integer(),
+    nextOffset: Type.Integer(),
+    done: Type.Boolean(),
+    taskState: literalUnion([
+      "queued",
+      "running",
+      "paused",
+      "ok",
+      "failed",
+      "cancelled",
+      "blocked",
+      "interrupted",
+      "budget-exhausted",
+    ] as const),
+  },
+  { additionalProperties: false },
+);
+export type TailDetails = Static<typeof tailDetailsSchema>;
+
 /** `details.questions` — unanswered worker questions (SPEC "Worker questions"). */
 export const workerQuestionDetailsSchema = readonlyArray(
   Type.Object(
@@ -293,6 +327,7 @@ const ticketActionSchema = literalUnion([
   "answer",
   "steer",
   "interrupt",
+  "tail",
 ] as const);
 
 /**
@@ -320,6 +355,7 @@ export const ticketDetailsSchema = Type.Object(
     ),
     steer: Type.Optional(steerDetailsSchema),
     interrupt: Type.Optional(interruptDetailsSchema),
+    tail: Type.Optional(tailDetailsSchema),
   },
   { additionalProperties: false },
 );

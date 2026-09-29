@@ -58,6 +58,7 @@ import {
 } from "./src/operations.ts";
 import { createActivityStore } from "./src/activity.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
+import { currentBootId } from "./src/owner.ts";
 import { canonicalAgentName, discoverProfiles } from "./src/profiles.ts";
 import {
   createMessageRenderer,
@@ -272,14 +273,14 @@ const delegateSchema = Type.Object(
 
 const ticketSchema = Type.Object(
   {
-    action: stringEnum(["poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt"], {
+    action: stringEnum(["poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt", "tail"], {
       description:
-        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. pause/resume: hold and release queued work. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown.",
+        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. pause/resume: hold and release queued work. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown. tail: read a task's clean assistant output incrementally — {text, nextOffset, done, taskState}; offset resumes the stream, waitMs bounds a park that resolves early on new output.",
     }),
     ticket: Type.Optional(
       Type.String({
         description:
-          "Ticket id; required for every action except a roster poll.",
+          "Ticket id; required for every action except a roster poll — and optional on 'answer'/'steer'/'interrupt'/'tail' when taskId is a '<ticket>#<task>' compound, which carries its own ticket.",
       }),
     ),
     timeoutMs: Type.Optional(
@@ -303,7 +304,7 @@ const ticketSchema = Type.Object(
     taskId: Type.Optional(
       Type.String({
         description:
-          "Only with actions 'answer', 'steer', and 'interrupt': the task to target. With 'steer'/'interrupt' it defaults to the ticket's only still-running task.",
+          "Only with actions 'answer', 'steer', 'interrupt', and 'tail': the task to target. With 'steer'/'interrupt' it defaults to the ticket's only still-running task; with 'tail' it also defaults to the ticket's only task. Accepts the canonical '<ticket>#<task>' address — the ticket field is then optional.",
       }),
     ),
     questionId: Type.Optional(
@@ -328,6 +329,18 @@ const ticketSchema = Type.Object(
       Type.String({
         description:
           "Only with action 'steer': idempotency key — same id + same message + same target replays the original receipt instead of injecting twice; same id + different content is an error. Optional: omitted, one is derived from this tool call and named in the receipt.",
+      }),
+    ),
+    offset: Type.Optional(
+      Type.Number({
+        description:
+          "Only with action 'tail': char offset into the task's accumulated assistant output — pass back a prior nextOffset to continue the stream. Out-of-range values clamp.",
+      }),
+    ),
+    waitMs: Type.Optional(
+      Type.Number({
+        description:
+          "Only with action 'tail': bound the read — the call resolves early when new output lands or the task settles, and never later than this. Omitted or 0 is a pure snapshot.",
       }),
     ),
   },
@@ -413,6 +426,8 @@ const ticketFieldNames = [
   "answer",
   "message",
   "steerId",
+  "offset",
+  "waitMs",
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -459,7 +474,7 @@ function normalizeTools(value: string): unknown {
   return token !== "" && !/[\s,]/.test(token) ? [token] : value;
 }
 
-const TICKET_ACTIONS = ["poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt"];
+const TICKET_ACTIONS = ["poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt", "tail"];
 const SESSION_ACTIONS = ["list", "close"];
 
 /** A `delegate_ticket` example call built from the fields the caller sent. */
@@ -474,13 +489,15 @@ function delegateTicketExample(args: Record<string, unknown>): string {
         ? args.action
         : isGiven(args.message) || isGiven(args.steerId)
           ? "steer"
-          : isGiven(args.taskId) ||
-              isGiven(args.questionId) ||
-              isGiven(args.answer)
-            ? "answer"
-            : args.force === true
-              ? "cancel"
-              : "poll";
+          : typeof args.offset === "number" || typeof args.waitMs === "number"
+            ? "tail"
+            : isGiven(args.taskId) ||
+                isGiven(args.questionId) ||
+                isGiven(args.answer)
+              ? "answer"
+              : args.force === true
+                ? "cancel"
+                : "poll";
   const fields = [`action: ${JSON.stringify(action)}`];
   if (typeof args.ticket === "string" && !isBlank(args.ticket)) {
     fields.push(`ticket: ${JSON.stringify(args.ticket)}`);
@@ -510,6 +527,16 @@ function delegateTicketExample(args: Record<string, unknown>): string {
   }
   if (action === "interrupt" && typeof args.taskId === "string" && !isBlank(args.taskId)) {
     fields.push(`taskId: ${JSON.stringify(args.taskId)}`);
+  }
+  if (action === "tail") {
+    if (typeof args.taskId === "string" && !isBlank(args.taskId)) {
+      fields.push(`taskId: ${JSON.stringify(args.taskId)}`);
+    }
+    for (const key of ["offset", "waitMs"] as const) {
+      if (typeof args[key] === "number") {
+        fields.push(`${key}: ${JSON.stringify(args[key])}`);
+      }
+    }
   }
   return `delegate_ticket({ ${fields.join(", ")} })`;
 }
@@ -718,6 +745,8 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     args.questionId !== undefined ||
     args.answer !== undefined ||
     args.steerId !== undefined ||
+    args.offset !== undefined ||
+    args.waitMs !== undefined ||
     (args.message !== undefined && !taskShaped)
   ) {
     throw new Error(
@@ -731,6 +760,8 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
           "answer",
           "message",
           "steerId",
+          "offset",
+          "waitMs",
         ]),
     );
   }
@@ -957,7 +988,7 @@ const help = `# Delegate Manual
 Three sibling tools share Delegate's machinery:
 - \`delegate\` dispatches subagent tasks, synchronously or on an async ticket.
 - \`delegate_ticket\` operates on async tickets: poll, wait, cancel, pause,
-  resume, answer, steer.
+  resume, answer, steer, interrupt, tail.
 - \`delegate_session\` lists and closes pooled subagent sessions.
 
 ## delegate — dispatch
@@ -1063,6 +1094,29 @@ Three sibling tools share Delegate's machinery:
   from \`cancel\`, which tears the whole ticket down. \`taskId\`
   defaults to the only still-running task; interrupting a settled,
   already-interrupted, or not-yet-running task receipts \`not-applied\`.
+- \`{ action: "tail", ticket, taskId?, offset?, waitMs? }\` — read one
+  task's clean assistant output incrementally. Returns \`{text,
+  nextOffset, done, taskState}\` in details: \`text\` is the output-so-far
+  chunk from \`offset\` (bounded per call like spilled output), and
+  \`nextOffset\` is the cursor to pass back for the next chunk —
+  concatenating chunks reproduces the stream. \`done\` flips when the
+  task settles and \`taskState\` names its state (\`running\`,
+  \`queued\`, \`paused\`, or a settled status). \`waitMs\` parks the
+  read until new output lands or the task settles, never exceeding the
+  bound; omitted or 0 is a pure snapshot. \`taskId\` defaults to the
+  only still-running task (or the ticket's only task). Sources: the
+  task's durable transcript for file-backed runs, the captured activity
+  text for scratch/isolated ones — raw transcripts are never exposed.
+- Canonical task addresses: anywhere \`taskId\` is taken it accepts the
+  compound \`"<ticket>#<task>"\` — e.g. \`"t-1a2b#task-1"\` — and the
+  separate \`ticket\` field is then optional (the address carries it).
+  Wakes, receipts, and task sections render tasks this way so the parent
+  can copy the address verbatim.
+- Restart recovery: saved tickets stay pollable across host restarts, and
+  a \`running\` record is interrupted at startup only when its owning
+  process is provably gone (different boot, or a dead pid) — \`owning
+  session ended before settlement\`. A sibling session's live ticket is
+  left alone, and recovery never restarts work.
 
 ## delegate_session — sessions
 - A task with \`sessionId\` keeps its session live after it finishes; a later
@@ -1170,7 +1224,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     if (ctx === undefined || shuttingDown) return;
     const message = {
       customType: "delegate-question",
-      content: `Worker ${question.taskId} on ticket ${ticket.id} asks: ${question.question}\nAnswer with delegate_ticket({ action: "answer", ticket: "${ticket.id}", taskId: "${question.taskId}", questionId: "${question.id}", answer: "..." }). Do not wait on this ticket while it needs your answer.`,
+      content: `Worker "${ticket.id}#${question.taskId}" asks: ${question.question}\nAnswer with delegate_ticket({ action: "answer", taskId: "${ticket.id}#${question.taskId}", questionId: "${question.id}", answer: "..." }). Do not wait on this ticket while it needs your answer.`,
       display: true,
       details: ({
         ticket: ticket.id,
@@ -1186,7 +1240,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       if (sameLeaf) api.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
       else {
         api.sendMessage(message, { triggerTurn: false });
-        ctx.ui.notify(`Worker ${question.taskId} asks a question on ticket ${ticket.id}; poll and answer it with delegate_ticket on this branch.`, "info");
+        ctx.ui.notify(`Worker "${ticket.id}#${question.taskId}" asks a question; poll and answer it with delegate_ticket on this branch.`, "info");
       }
     } catch (error) {
       console.error(`[delegate] notifying question ${ticket.id}/${question.id} failed (poll it with delegate_ticket): ${error instanceof Error ? error.message : String(error)}`);
@@ -2102,6 +2156,16 @@ export default function delegateExtension(api: ExtensionAPI): void {
                       // views and post-restart recovery render the header
                       // note (SPEC v3 "Batch brief").
                       brief: call.brief,
+                      // #54 owner liveness: the dispatching host's identity
+                      // rides the journal record so a later startup
+                      // interrupts this ticket only when the owner is
+                      // provably dead — a live sibling pane's ticket is
+                      // left untouched.
+                      owner: {
+                        pid: process.pid,
+                        bootId: currentBootId(),
+                        sessionId: ctx.sessionManager.getSessionId(),
+                      },
                     });
                     operationTicket = created;
                     questionContexts.set(created.id, ctx);
@@ -2312,10 +2376,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
       name: "delegate_ticket",
       label: "Delegate Tickets",
       description:
-        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, answer a worker question, steer a running task with a message (optional steerId is the retry key — derived from the call when omitted; the receipt reports steered/activated/duplicate/not-applied), or interrupt one task's in-flight turn (settles it interrupted, keeping the worker resumable — cancel tears the ticket down instead). Dispatch new work with delegate; manage pooled sessions with delegate_session.",
+        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, answer a worker question, steer a running task with a message (optional steerId is the retry key — derived from the call when omitted; the receipt reports steered/activated/duplicate/not-applied), interrupt one task's in-flight turn (settles it interrupted, keeping the worker resumable — cancel tears the ticket down instead), or tail a task's assistant output incrementally (offset/nextOffset page a bounded chunk; waitMs parks until new output lands). Dispatch new work with delegate; manage pooled sessions with delegate_session.",
       parameters: ticketSchema,
       promptSnippet:
-        "Poll, wait on, cancel, pause/resume, answer questions, steer, or interrupt running tasks for async delegate tickets",
+        "Poll, wait on, cancel, pause/resume, answer questions, steer, interrupt, or tail output of tasks on async delegate tickets",
       prepareArguments: prepareTicketArguments,
       renderCall: renderTicketCall,
       renderResult: createResultRenderer(tickets),
@@ -2377,9 +2441,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
               : {}),
             // SPEC v3 "Steering": the receipt's machine half rides
             // details.steer (status, taskId, replayed original status);
-            // an interrupt's rides details.interrupt the same way.
+            // an interrupt's rides details.interrupt the same way. A tail
+            // read's {text, nextOffset, done, taskState} rides
+            // details.tail (#52).
             ...(result.steer !== undefined ? { steer: result.steer } : {}),
             ...(result.interrupt !== undefined ? { interrupt: result.interrupt } : {}),
+            ...(result.tail !== undefined ? { tail: result.tail } : {}),
           } satisfies TicketDetails),
           isError: result.isError,
         };

@@ -1129,6 +1129,80 @@ against them.
   `tests/contract/profiles.test.ts` (unscoped + parent-scoped pins,
   unpinned profile unchanged).
 
+### Ticket output tails (v3, #52)
+
+New v3 contract — no v1 analog. `delegate_ticket` action `tail` returns
+`{text, nextOffset, done, taskState}` — an incremental read of one
+task's clean assistant output. File-backed runs (shared workspace,
+`sessionId`, `resumeFrom`) are read from the durable `.jsonl`
+transcript between a per-attempt byte baseline and EOF — pooled and
+resumed transcripts never leak earlier conversations — while
+scratch/in-memory runs read the activity store's captured
+`assistantTail`; a recorded outcome is the last fallback once both are
+gone. `offset` is a clamped char cursor into the extracted text,
+`waitMs` bounds a park that resolves early on new output or
+settlement, and each call's `text` is capped at the ticket's
+`spillTailChars` (no spill file on a running read).
+
+- **Covered now:** `tests/contract/tail.test.ts` — growing transcript
+  text with advancing offsets across a file-backed task's life,
+  settled-task `done`+state with the full stream, `waitMs` early
+  resolve on fresh output (task still `running`, proving output — not
+  settlement — woke it) and timeout at the bound on a silent stream,
+  out-of-range offset clamping, scratch/in-memory reads from captured
+  activity text, per-call bound paging, and the targeting/field rules
+  (ambiguous and unknown taskIds name the ticket's tasks, `offset`/
+  `waitMs` reject on non-tail actions). `details.tail` is pinned by
+  `Check` against `tailDetailsSchema` on every call. The published
+  schema gains the action and fields in `tool-boundary.test.ts`.
+
+### Canonical task addresses (v3, #53)
+
+New v3 contract — no v1 analog. Anywhere `taskId` is accepted
+(`steer`/`answer`/`interrupt`/`tail`), the compound
+`"<ticketId>#<taskId>"` resolves the task AND its ticket — the separate
+`ticket` field is then optional. A disagreeing `ticket` + compound pair
+conflicts naming both; a compound with an empty half is malformed;
+unknown ticket parts name the live tickets and unknown task parts name
+the ticket's tasks as compound addresses. `#` is schema-impossible in
+dispatched task ids, so `#` in `taskId` is always the separator — plain
+forms are untouched. Receipts, wakes, question notices, the roster's
+waiting lines, unknown-task lists, and settled task-section heads all
+render the compound so the parent can copy it verbatim.
+
+- **Covered now:** `tests/contract/addressing.test.ts` — steer,
+  interrupt, and tail resolving compounds with the ticket field omitted
+  (receipt details still decompose ticket/taskId); answer resolving the
+  compound while the question wake and poll notice render it verbatim;
+  the settled view (the delivered wake's content) carrying
+  `### Task <id> — <status> · <ticket>#<id>`; unknown ticket/task
+  components naming the available names; disagreeing and malformed
+  compounds rejecting; and the plain two-field form unchanged.
+
+### Owner-liveness startup recovery (v3, #54)
+
+New v3 contract — no v1 analog (v1's restart recovery blanket-interrupted
+every `running` journal row; a second host could kill a live sibling's
+work). Dispatch journals the owning host `{pid, bootId, sessionId}`; a
+later startup's scan settles a `running` record `interrupted` — reason
+"owning session ended before settlement" on every unfinished outcome and
+one ticket notice — exactly once, journal-durable before any view
+reports it. Owner is provably dead when the recorded boot id differs from
+this boot's or the pid no longer exists; a missing owner (pre-tracking
+records), an absent boot id (Windows fallback — pid evidence only), and a
+live pid all leave the record untouched. Recovery never restarts work;
+the never-resume invariant is unchanged.
+
+- **Covered now:** `tests/contract/owner-liveness.test.ts` — the journaled
+  owner identity at dispatch; a dead-pid owner interrupted at startup
+  with the reason, durable in the journal and idempotent across a second
+  startup; a live-owner ticket left `running`; a cross-boot owner treated
+  as dead while its pid lives; the no-boot-id fallback judged on pid
+  liveness alone; settled records never reopened; and ownerless records
+  left alone. `tests/contract/recovery.test.ts` models cold starts by
+  orphaning the journaled owner pid — a same-process second boundary is
+  a live sibling under #54, not a restart.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |

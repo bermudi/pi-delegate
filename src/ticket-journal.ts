@@ -45,6 +45,10 @@ const outcome = Type.Object({
   blockedBy: Type.Optional(Type.Array(Type.String())),
   quarantined: Type.Optional(Type.Boolean()),
   sessionFile: Type.Optional(Type.String()),
+  // Byte offset into sessionFile where this run's entries begin —
+  // optional; records written before output tailing carry none, and a
+  // pooled/resumed file's earlier conversation is excluded by it.
+  transcriptStart: Type.Optional(Type.Integer({ minimum: 0 })),
   // Completion evidence (SPEC v3 "Observability"): optional so records
   // written before attribution existed still parse unchanged.
   attributedFiles: Type.Optional(Type.Array(Type.String())),
@@ -93,6 +97,15 @@ const savedTicket = Type.Object({
     spillThresholdChars: Type.Integer({ minimum: 0 }),
     spillTailChars: Type.Integer({ minimum: 0 }),
   }),
+  // The dispatching host's identity (#54) — optional; records written
+  // before owner tracking carry none and are never owner-interrupted at
+  // startup. `bootId` itself is optional where the kernel exposes none
+  // (Windows); its absence degrades liveness to pid evidence only.
+  owner: Type.Optional(Type.Object({
+    pid: Type.Integer({ minimum: 1 }),
+    bootId: Type.Optional(Type.String()),
+    sessionId: Type.Optional(Type.String()),
+  })),
   createdAt: Type.Number(),
   notices: Type.Array(Type.String()),
 });
@@ -156,6 +169,7 @@ export class TicketJournal {
       brief: ticket.brief,
       tokenBudget: ticket.tokenBudget,
       outputBounds: ticket.outputBounds,
+      owner: ticket.owner,
       createdAt: ticket.createdAt,
       notices: ticket.notices,
     });

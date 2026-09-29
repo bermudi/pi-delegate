@@ -256,16 +256,16 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       });
       expect(bogus.isError).toBe(false);
       expect(bogus.text).toContain("not-applied");
-      expect(bogus.text).toContain('"task-1"');
-      expect(bogus.text).toContain('"second"');
+      expect(bogus.text).toContain(`"${ticket}#task-1"`);
+      expect(bogus.text).toContain(`"${ticket}#second"`);
 
       const ambiguous = await callDelegateTicket(session, {
         action: "interrupt",
         ticket,
       });
       expect(ambiguous.isError).toBe(true);
-      expect(ambiguous.text).toContain('"task-1"');
-      expect(ambiguous.text).toContain('"second"');
+      expect(ambiguous.text).toContain(`"${ticket}#task-1"`);
+      expect(ambiguous.text).toContain(`"${ticket}#second"`);
 
       held.release();
       const settled = await callDelegateTicket(session, {

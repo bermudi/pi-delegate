@@ -467,10 +467,10 @@ describe("delegate ticket contract", () => {
       release();
       const waited = await waiting;
       expect(waited.isError).toBe(false);
-      // The question notice rides the wait result inline: ticket id, task
-      // id, the question text, and how to answer.
+      // The question notice rides the wait result inline: the task's
+      // canonical address, the question text, and how to answer.
       expect(waited.text).toContain(ticket);
-      expect(waited.text).toContain("task asker");
+      expect(waited.text).toContain(`task ${ticket}#asker`);
       expect(waited.text).toContain("Which branch?");
       expect(waited.text).toContain('delegate_ticket({ action: "answer"');
       expect(waited.text).toContain("Wait detached");
@@ -542,7 +542,7 @@ describe("delegate ticket contract", () => {
       expect(waited.isError).toBe(false);
       // The interrupted notice names the task; the ticket is still running.
       expect(waited.text).toContain("### Task task-1 — interrupted");
-      expect(waited.text).toContain('task "task-1" was interrupted');
+      expect(waited.text).toContain(`task "${ticket}#task-1" was interrupted`);
       expect(waited.text).toContain("Wait detached");
       expect(waited.text).toContain("still running");
 

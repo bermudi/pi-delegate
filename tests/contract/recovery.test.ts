@@ -23,6 +23,27 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     return session;
   }
 
+  /**
+   * A second boundary in the SAME process shares the recorded owner's pid
+   * and boot id — issue #54's liveness check correctly keeps a live-owner
+   * `running` ticket untouched, so modeling a cold start means the
+   * journal's owner must die first: rewrite its pid to a process that
+   * existed and already exited.
+   */
+  async function orphanTicket(agentDir: string, ticket: string): Promise<void> {
+    const gone = Bun.spawn({ cmd: ["true"], stdout: "ignore", stderr: "ignore" });
+    await gone.exited;
+    const path = join(agentDir, "delegate-tickets", `${ticket}.json`);
+    const saved = JSON.parse(readFileSync(path, "utf8")) as {
+      owner?: { pid: number; bootId?: string; sessionId?: string };
+    };
+    if (saved.owner === undefined) {
+      throw new Error(`ticket ${ticket}'s journal row carries no owner to orphan`);
+    }
+    saved.owner = { ...saved.owner, pid: gone.pid };
+    writeFileSync(path, JSON.stringify(saved));
+  }
+
   test("a new instance can poll and wait on a settled result without replay or delivery", async () => {
     const first = await openAt();
     const provider = await installSubagentModel(first);
@@ -72,7 +93,10 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       const ticket = ticketIdOf(dispatched.text);
       await entered;
       // A fresh extension reading the on-disk snapshot models a cold start.
-      // It cannot adopt the old instance's live worker.
+      // It cannot adopt the old instance's live worker — and with #54's
+      // owner liveness, the recorded owner must be dead for the snapshot
+      // to settle interrupted at all.
+      await orphanTicket(first.cwd, ticket);
       const next = await openAt(first.cwd);
       const poll = await callDelegateTicket(next, { action: "poll", ticket });
       expect(poll.text).toContain("interrupted");
@@ -111,6 +135,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       const ticket = ticketIdOf(dispatched.text);
       await entered;
 
+      await orphanTicket(first.cwd, ticket);
       const next = await openAt(first.cwd);
       const steered = await callDelegateTicket(next, {
         action: "steer",
@@ -321,6 +346,9 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     } finally {
       chmodSync(dir, 0o700);
     }
+    // The journal still shows the creation write (status running, live
+    // owner): the cold reader must see the owner die before it interrupts.
+    await orphanTicket(first.cwd, ticket);
     const next = await openAt(first.cwd);
     const recovered = await callDelegateTicket(next, { action: "poll", ticket });
     expect(recovered.text).toContain("interrupted");
