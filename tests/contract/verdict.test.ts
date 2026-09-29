@@ -241,10 +241,16 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       // on the poll/wait surface carries the same {verdict, taskId}.
       session = await openDelegateBoundary();
       const model = await installSubagentModel(session);
-      model.respond([
-        fauxAssistantMessage("Held up.\nVERDICT: PASS"),
-        fauxAssistantMessage("done\nVERDICT: FAIL (1 finding)"),
-      ]);
+      // The two verifier tasks run in parallel and the response queue is
+      // a shared FIFO — route by the task's own prompt so v-one always
+      // reports PASS and v-two FAIL regardless of provider-call order.
+      const byPrompt: FauxResponseFactory = async (context) =>
+        fauxAssistantMessage(
+          JSON.stringify(context.messages).includes('"verify one"')
+            ? "Held up.\nVERDICT: PASS"
+            : "done\nVERDICT: FAIL (1 finding)",
+        );
+      model.respond([byPrompt, byPrompt]);
 
       const dispatched = await callDelegate(session, {
         tasks: [
@@ -318,10 +324,15 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       // task in the same dispatch keeps its plain result shape.
       session = await openDelegateBoundary();
       const model = await installSubagentModel(session);
-      model.respond([
-        fauxAssistantMessage("Ruled.\nVERDICT: PASS"),
-        fauxAssistantMessage("PLAIN-OUTPUT"),
-      ]);
+      // Verifier and coder run in parallel — route the verdict to the
+      // verifier's prompt by content, not by shared FIFO order.
+      const byPrompt: FauxResponseFactory = async (context) =>
+        fauxAssistantMessage(
+          JSON.stringify(context.messages).includes('"verify"')
+            ? "Ruled.\nVERDICT: PASS"
+            : "PLAIN-OUTPUT",
+        );
+      model.respond([byPrompt, byPrompt]);
 
       const result = await callDelegate(session, {
         tasks: [

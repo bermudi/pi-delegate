@@ -123,7 +123,16 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
       configureDelegate(session, { maxConcurrent: 2 });
       const gateA = gate("A-DONE");
       const gateB = gate("B-DONE");
-      subagents.respond([gateA.step, gateB.step, fauxAssistantMessage("C-DONE")]);
+      // a and b start concurrently — route by each task's prompt so a
+      // always parks on gateA and b on gateB regardless of provider-call
+      // order; c would draw C-DONE if it ever ran.
+      const byPrompt: FauxResponseFactory = (context, options, state, model) => {
+        const seen = JSON.stringify(context.messages);
+        if (seen.includes('"one"')) return gateA.step(context, options, state, model);
+        if (seen.includes('"two"')) return gateB.step(context, options, state, model);
+        return fauxAssistantMessage("C-DONE");
+      };
+      subagents.respond([byPrompt, byPrompt, byPrompt]);
 
       const dispatched = await callDelegate(session, {
         tokenBudget: 1,

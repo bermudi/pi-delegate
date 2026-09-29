@@ -339,20 +339,20 @@ export class TelemetryStore {
     agentDir: string,
     row: MisfireShape,
   ): void {
-    const destination = config.enabled
-      ? destinationOf(config, agentDir)
-      : undefined;
+    // Disabled — or unknowable on the config-load path, where the hint
+    // degrades to the disabled default — is a pure no-op: there is no
+    // row to write, and running the destination diff would close a live
+    // backend and bump the generation out from under in-flight dispatch
+    // spans, silently dropping their rows.
+    if (!config.enabled) return;
+    const destination = destinationOf(config, agentDir);
     if (destination !== this.destination) {
       this.closeBackend();
       this.destination = destination;
       this.failedDestination = undefined;
       this.generation += 1;
     }
-    if (
-      destination === undefined ||
-      this.closed ||
-      destination === this.failedDestination
-    ) {
+    if (this.closed || destination === this.failedDestination) {
       return;
     }
     const db = this.backend(destination);

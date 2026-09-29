@@ -675,7 +675,14 @@ describe("delegate ticket contract", () => {
       const subagents = await installSubagentModel(session);
       const early = gate();
       const late = gate();
-      subagents.respond([early.step, late.step]);
+      // Two separate dispatches race to the provider — route by each
+      // ticket's prompt so "first" always parks on early and "second" on
+      // late, regardless of which worker's provider call lands first.
+      const byPrompt: FauxResponseFactory = (context, options, state, model) =>
+        JSON.stringify(context.messages).includes('"first"')
+          ? early.step(context, options, state, model)
+          : late.step(context, options, state, model);
+      subagents.respond([byPrompt, byPrompt]);
 
       const a = ticketIdOf(
         (
@@ -786,7 +793,13 @@ describe("delegate ticket contract", () => {
       const subagents = await installSubagentModel(session);
       const a = gate();
       const b = gate();
-      subagents.respond([a.step, b.step]);
+      // Two dispatches race to the provider — route by prompt so `a`'s
+      // release below always unblocks ta's own worker.
+      const byPrompt: FauxResponseFactory = (context, options, state, model) =>
+        JSON.stringify(context.messages).includes('"one"')
+          ? a.step(context, options, state, model)
+          : b.step(context, options, state, model);
+      subagents.respond([byPrompt, byPrompt]);
 
       const ta = ticketIdOf(
         (
