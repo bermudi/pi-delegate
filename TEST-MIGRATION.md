@@ -808,7 +808,7 @@ New v3 contract — no v1 evidence; SPEC.md "Interaction grammar",
   multi-task calls return a ticket unless `async: false`, and an explicit
   `async` overrides both defaults; the tool description teaches the rule.
   Agent-name aliases expand exact, case-sensitively —
-  `general`/`general-purpose`/`worker` → `default`, `plan`/`scout` →
+  `general`/`general-purpose`/`worker` → `default`, `explorer`/`plan`/`scout` →
   `explore`, `implement` → `coder` — before unknown-agent errors, surface a
   `agent "x" → "y"` note in results and ticket views, and resolve
   `models`/`modelsByParent` pins against the canonical name; unknown
@@ -821,7 +821,7 @@ New v3 contract — no v1 evidence; SPEC.md "Interaction grammar",
   caller-visible message, and batch shape — in the same store and
   retention policy as dispatch rows.
 - **Covered now:** `tests/contract/grammar.test.ts` — all four
-  cardinality cases, the description text, all six aliases, the
+  cardinality cases, the description text, all seven aliases, the
   expansion note in sync results and settled ticket views, a canonical
   model pin resolving on the aliased name, the unknown-agent built-in
   list, and case sensitivity (`General` errors). Misfire rows for
