@@ -1397,8 +1397,29 @@ export default function delegateExtension(api: ExtensionAPI): void {
     if (wake.length === 0 && moved.length === 0) return;
     const ids = (group: readonly QueuedDelivery[]) =>
       group.map(({ ticket }) => `"${ticket.id}"`).join(", ");
-    try {
-      if (wake.length > 0) {
+    // Delivery failure never undoes settlement: the tickets stay
+    // terminal and pollable. Each group's send is isolated so one
+    // failure neither skips nor misreports the other — and only the
+    // failed group's tickets are named (the stale-ctx branch's skips
+    // already logged their own line and own no working ctx).
+    const reportFailure = (
+      group: readonly QueuedDelivery[],
+      error: unknown,
+    ): void => {
+      console.error(
+        `[delegate] delivering ticket(s) ${ids(group)} failed (results remain pollable): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      try {
+        group[0]!.ctx.ui.notify(
+          `Delegate ticket(s) ${ids(group)} settled but their results could not be delivered; poll them for the results.`,
+          "error",
+        );
+      } catch {
+        // A stale ctx cannot show the notice; the log line stands.
+      }
+    };
+    if (wake.length > 0) {
+      try {
         // Same leaf, no transition observed: a follow-up wakes an idle
         // parent and queues behind a busy one's tool calls. One wake per
         // settlement group, not per ticket (SPEC "Wake delivery").
@@ -1406,8 +1427,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
           deliverAs: "followUp",
           triggerTurn: true,
         });
+      } catch (error) {
+        reportFailure(wake, error);
       }
-      if (moved.length > 0) {
+    }
+    if (moved.length > 0) {
+      try {
         // Leaf moved or a transition is in flight: append durably at the
         // current leaf without triggering a turn — it enters model
         // context on the next user turn.
@@ -1422,20 +1447,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
         } catch {
           // The UI may already be gone; the append itself landed.
         }
-      }
-    } catch (error) {
-      // Delivery failure never undoes settlement: the tickets stay
-      // terminal and pollable.
-      console.error(
-        `[delegate] delivering ticket(s) ${ids(batch)} failed (results remain pollable): ${error instanceof Error ? error.message : String(error)}`,
-      );
-      try {
-        batch[0]!.ctx.ui.notify(
-          `Delegate ticket(s) ${ids(batch)} settled but their results could not be delivered; poll them for the results.`,
-          "error",
-        );
-      } catch {
-        // A stale ctx cannot show the notice; the log line stands.
+      } catch (error) {
+        reportFailure(moved, error);
       }
     }
   };
