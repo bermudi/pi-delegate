@@ -491,7 +491,9 @@ gaps.
 - **Internal:** `findSharedWriteConflicts` grouping internals, canonical-path
   helpers.
 - **Covered now:** same-call writer serialization order; cross-call
-  rejection against a running ticket; shared + isolated same-call rejection;
+  rejection against a running ticket — the rejection names the live
+  running-task count against `maxConcurrent` and the held write claims
+  (task + owner) (#51); shared + isolated same-call rejection;
   an inherited `GIT_DIR` redirect fails closed for a bash-capable
   multi-writer batch; the scope probe runs with `GIT_*` scrubbed so a bogus
   redirect cannot shrink the reserved scope.
@@ -1094,6 +1096,38 @@ evidence — verifier verdict" defines the layer.
   `details.verdict` on sync dispatch and poll/wait, the delivered-wake
   message carrying verdict in text and details, ticket-view rendering,
   and non-verifier isolation in mixed batches.
+
+### Result-details stabilization and admission/manual disclosure (v3, #51)
+
+New v3 contract — no v1 analog. The Pi `ToolDefinition` seam carries no
+result/details schema slot (`parameters` is the only TypeBox surface), so
+`src/details.ts` exports internal TypeBox schemas that describe the
+emitted details as-built; the producing literals satisfy the `Static`
+types at compile time, and the contract tests `Check` real dispatches
+against them.
+
+- **Contract:** every machine-readable details surface has a pinned
+  shape — the sync/async dispatch envelopes (`tasks`, `results`,
+  `attributedFiles`, `verdict`, `brief`, `tokenBudget`,
+  `usageLowerBound`, `notices`), the ticket RPC envelope (plus
+  `details.steer`/`details.interrupt` receipts and `details.questions`),
+  the session RPC envelope, the delivered `delegate-result` message
+  (single- and multi-ticket shapes), and the `delegate-question`
+  notification. A cross-call write-overlap rejection names live capacity
+  — running tasks against `maxConcurrent` — and every held write claim
+  (task + owner). The manual's discovered-profile listing names each
+  profile's delegate.json pin (`model[:effort]` + its config origin);
+  unpinned profiles render unchanged.
+- **Covered now:** `tests/contract/details.test.ts` — `Check` against
+  the exported schemas on a real help call, sync dispatch (brief via the
+  `context` rename, tokenBudget, write attribution, verifier verdict,
+  bash uncertainty), async dispatch + poll/wait + delivered wake, steer
+  and interrupt receipts, a worker-question notification, a session
+  list, and a quarantined-outcome `usageLowerBound`. The capacity
+  sentence lives in `tests/contract/workspaces.test.ts` (held claim
+  names task id and owner ticket). The pin disclosure lives in
+  `tests/contract/profiles.test.ts` (unscoped + parent-scoped pins,
+  unpinned profile unchanged).
 
 ## First tranche
 

@@ -44,6 +44,8 @@ interface Reservation {
   readonly owner: string;
   readonly kind: "shared" | "isolated";
   readonly taskIndex: number;
+  /** The holding task's caller-visible id — reported on rejections. */
+  readonly taskId: string;
 }
 
 export interface AdmissionGrant {
@@ -116,7 +118,16 @@ export class AdmissionController {
   admit(
     tasks: readonly ResolvedTask[],
     owner: string,
-    live?: { sessionFileOf?: (sessionId: string) => string | undefined },
+    live?: {
+      sessionFileOf?: (sessionId: string) => string | undefined;
+      /**
+       * Dispatch capacity at check time — the coordinator's in-flight
+       * task count and the call's configured `maxConcurrent`. When given,
+       * a cross-call write conflict names them beside the held claims so
+       * the rejection carries live context, not just the blocking claim.
+       */
+      capacity?: { running: number; maxConcurrent: number };
+    },
   ): AdmissionGrant {
     const reserving = tasks.filter((task) => task.writeRoots !== undefined);
 
@@ -238,8 +249,17 @@ export class AdmissionController {
     for (const task of reserving) {
       for (const reservation of this.reservations) {
         if (task.writeRoots!.some((root) => rootsOverlap(root, reservation.root))) {
+          // Live context (issue #51): the running-task count against the
+          // configured cap plus every held write claim, so a caller can
+          // see both who blocks this task and how busy dispatch is.
+          const context =
+            live?.capacity === undefined
+              ? ""
+              : ` Right now ${live.capacity.running}/${live.capacity.maxConcurrent} tasks are running; held write claims: ${this.reservations
+                  .map((held) => `${held.taskId} (owner ${held.owner})`)
+                  .join(", ")}.`;
           throw new Error(
-            `Task ${task.id} conflicts with ${reservation.kind === "isolated" ? "an isolated" : "a shared"} write already running in ${reservation.root} (owner: ${reservation.owner}). Wait for it to finish or use a different cwd.`,
+            `Task ${task.id} conflicts with ${reservation.kind === "isolated" ? "an isolated" : "a shared"} write already running in ${reservation.root} (owner: ${reservation.owner}).${context} Wait for it to finish or use a different cwd.`,
           );
         }
       }
@@ -301,6 +321,7 @@ export class AdmissionController {
         owner,
         kind: task.workspace === "isolated" ? ("isolated" as const) : ("shared" as const),
         taskIndex: task.index,
+        taskId: task.id,
       })),
     );
     this.reservations.push(...taken);

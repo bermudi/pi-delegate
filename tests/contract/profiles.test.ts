@@ -484,4 +484,61 @@ describe("markdown agent profiles contract (#7)", () => {
       }
     },
   );
+
+  test(
+    "the manual discloses delegate.json model/:effort pins on discovered profiles",
+    async () => {
+      // Issue #51: the profile listing names each discovered profile's
+      // configured pin — model reference, :effort when set, and the
+      // config entry it resolved from — so a caller sees the pin before
+      // dispatch resolves (or rejects) it. Unpinned profiles render as
+      // before.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      writeProfile(
+        globalDir(session),
+        "auditor.md",
+        ["name: auditor", "description: pinned reviewer"].join("\n"),
+        "Audit.",
+      );
+      writeProfile(
+        globalDir(session),
+        "spotter.md",
+        ["name: spotter", "description: scoped scout"].join("\n"),
+        "Spot.",
+      );
+      writeProfile(
+        globalDir(session),
+        "plain.md",
+        ["name: plain", "description: unpinned"].join("\n"),
+        "Plain.",
+      );
+      configureDelegate(session, {
+        models: { auditor: `${subagents.alt.spec}:high` },
+        modelsByParent: {
+          // The parent runs the primary faux model — this scoped pin
+          // resolves through the live parentKey.
+          [subagents.spec]: { spotter: subagents.spec },
+        },
+      });
+
+      const help = await callDelegate(session, { tasks: [] });
+      expect(help.isError).toBe(false);
+      expect(help.text).toContain("## Your agent profiles");
+      // Unscoped pin: model ref + :effort + config origin.
+      expect(help.text).toContain("`auditor`");
+      expect(help.text).toContain("delegate-faux-2/faux-1:high");
+      expect(help.text).toContain("models.auditor");
+      // Parent-scoped pin resolves against the live parent model key.
+      expect(help.text).toContain("`spotter`");
+      expect(help.text).toContain(
+        `modelsByParent.${subagents.spec}.spotter`,
+      );
+      // No pin → the line renders exactly as before.
+      const plainLine = help.text
+        .split("\n")
+        .find((line) => line.includes("`plain`"));
+      expect(plainLine).toBe("- `plain` — unpinned");
+    },
+  );
 });

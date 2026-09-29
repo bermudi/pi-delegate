@@ -90,6 +90,14 @@ export class DispatchCoordinator {
     private readonly activity?: ActivityStore,
   ) {}
 
+  /**
+   * Tasks holding a global-semaphore permit right now — the live half of
+   * the capacity context an admission rejection reports (issue #51).
+   */
+  runningCount(): number {
+    return this.semaphore.activeCount;
+  }
+
   /** Per-model bound, keyed `provider/id`; created once, re-limited per call. */
   private modelSemaphore(task: ResolvedTask, config: DelegateConfig): Semaphore {
     const key = `${task.model.provider}/${task.model.id}`;

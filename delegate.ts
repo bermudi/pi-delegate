@@ -16,12 +16,22 @@ import {
   type AdmissionGrant,
 } from "./src/admission.ts";
 import {
+  configuredModelFor,
   loadDelegateConfig,
   resolveAgentDir,
   telemetryConfigHint,
   type DelegateConfig,
   type TelemetryConfig,
 } from "./src/config.ts";
+import type {
+  AsyncDispatchDetails,
+  DeliveredDetails,
+  HelpDetails,
+  QuestionNoticeDetails,
+  SessionDetails,
+  SyncDispatchDetails,
+  TicketDetails,
+} from "./src/details.ts";
 import {
   DispatchCoordinator,
   type DispatchOutcome,
@@ -1090,9 +1100,31 @@ function customProfileSection(ctx: ExtensionContext): string {
     (profile) => profile.source !== undefined,
   );
   if (custom.length === 0) return "";
-  const lines = custom.map(
-    (profile) => `- \`${profile.name}\` — ${profile.description ?? ""}`,
-  );
+  // delegate.json pins (issue #51): a discovered profile the config pins
+  // names the resolved model/:effort here, so the manual shows the pin
+  // before dispatch resolves — or rejects — it. A broken delegate.json
+  // fails loudly at dispatch; the manual just loses the pin suffix.
+  let config: DelegateConfig | undefined;
+  try {
+    config = loadDelegateConfig(agentDir, catalog.globalNames);
+  } catch {
+    config = undefined;
+  }
+  const parentKey =
+    ctx.model === undefined
+      ? undefined
+      : `${ctx.model.provider}/${ctx.model.id}`.toLowerCase();
+  const lines = custom.map((profile) => {
+    const pin =
+      config === undefined
+        ? undefined
+        : configuredModelFor(profile.name, parentKey, config);
+    const suffix =
+      pin === undefined
+        ? ""
+        : ` · model \`${pin.ref}${pin.thinking !== undefined ? `:${pin.thinking}` : ""}\` (\`${pin.origin}\`)`;
+    return `- \`${profile.name}\` — ${profile.description ?? ""}${suffix}`;
+  });
   return `\n## Your agent profiles\n${lines.join("\n")}\n`;
 }
 
@@ -1140,7 +1172,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
       customType: "delegate-question",
       content: `Worker ${question.taskId} on ticket ${ticket.id} asks: ${question.question}\nAnswer with delegate_ticket({ action: "answer", ticket: "${ticket.id}", taskId: "${question.taskId}", questionId: "${question.id}", answer: "..." }). Do not wait on this ticket while it needs your answer.`,
       display: true,
-      details: { ticket: ticket.id, taskId: question.taskId, questionId: question.id },
+      details: ({
+        ticket: ticket.id,
+        taskId: question.taskId,
+        questionId: question.id,
+      } satisfies QuestionNoticeDetails),
     };
     try {
       const sameLeaf =
@@ -1231,7 +1267,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     const anyCancelled = group.some(
       ({ ticket }) => ticket.status === "cancelled",
     );
-    const details: Record<string, unknown> =
+    const details: DeliveredDetails =
       group.length === 1
         ? {
             ticket: group[0]!.ticket.id,
@@ -1648,6 +1684,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
       try {
         grant = admission.admit(tasks, owner, {
           sessionFileOf: (sessionId) => sessions.transcriptFileOf(sessionId),
+          // Issue #51: a cross-call rejection names live capacity — the
+          // coordinator's in-flight count against this call's configured
+          // ceiling — beside the held claims it lists.
+          capacity: {
+            running: coordinator.runningCount(),
+            maxConcurrent: config.maxConcurrent,
+          },
         });
       } catch (error) {
         noteMisfire(
@@ -1977,7 +2020,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 text: help + customProfileSection(ctx),
               },
             ],
-            details: { mode: "help" as const },
+            details: ({ mode: "help" as const } satisfies HelpDetails),
           };
         }
         let operationTicket: Ticket | undefined;
@@ -2132,13 +2175,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
                       : ""),
                 },
               ],
-              details: {
+              details: ({
                 mode: "dispatch" as const,
                 async: true,
                 ticket: ticket.id,
                 tasks: ticket.tasks.map((task) => task.id),
                 ...(call.brief !== undefined ? { brief: call.brief } : {}),
-              },
+              } satisfies AsyncDispatchDetails),
             };
           }
 
@@ -2167,7 +2210,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   formatDispatchResult(result.outcomes, tasks, outputBounds, call.brief, result.tokenBudget),
               },
             ],
-            details: {
+            details: ({
               mode: "dispatch" as const,
               async: false,
               tasks: result.outcomes.map((outcome) => ({
@@ -2212,7 +2255,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 ? { usageLowerBound: true }
                 : {}),
               ...(textNotices.length > 0 ? { notices: textNotices } : {}),
-            },
+            } satisfies SyncDispatchDetails),
             usage: result.usage,
             isError: allFailed,
           };
@@ -2293,7 +2336,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             : `${fieldNotes(call.notes).join("\n")}\n\n`;
         return {
           content: [{ type: "text" as const, text: `${noteText}${result.text}` }],
-          details: {
+          details: ({
             mode: "ticket" as const,
             action: call.action,
             ticket: result.ticket?.id,
@@ -2337,7 +2380,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             // an interrupt's rides details.interrupt the same way.
             ...(result.steer !== undefined ? { steer: result.steer } : {}),
             ...(result.interrupt !== undefined ? { interrupt: result.interrupt } : {}),
-          },
+          } satisfies TicketDetails),
           isError: result.isError,
         };
       },
@@ -2362,11 +2405,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
         const result = handleSessionRpc(call, sessions, admission);
         return {
           content: [{ type: "text" as const, text: result.text }],
-          details: {
+          details: ({
             mode: "session" as const,
             action: call.action,
             sessionId: call.sessionId,
-          },
+          } satisfies SessionDetails),
           isError: result.isError,
         };
       },

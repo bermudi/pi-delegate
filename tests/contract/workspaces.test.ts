@@ -24,6 +24,7 @@ import {
 import {
   callDelegate,
   callDelegateTicket,
+  configureDelegate,
   installSubagentModel,
   openDelegateBoundary,
   ticketIdOf,
@@ -259,6 +260,56 @@ describe("delegate workspace and shared-write contract", () => {
       expect(subagents.state.callCount).toBe(callsBefore);
 
       release();
+    },
+  );
+
+  test(
+    "a cross-call write rejection reports live capacity and held write claims",
+    async () => {
+      // Issue #51: the overlap rejection carries one sentence of live
+      // context — the running-task count against the configured
+      // maxConcurrent and every held write claim (task + owner) — so a
+      // caller sees dispatch pressure, not only the blocking claim.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      configureDelegate(session, { maxConcurrent: 4 });
+      const dir = tempDir();
+
+      let release!: () => void;
+      const gatePromise = new Promise<void>((r) => (release = r));
+      const hanging: FauxResponseFactory = async () => {
+        await gatePromise;
+        return fauxAssistantMessage("bg done");
+      };
+      subagents.respond([hanging]);
+
+      const dispatched = await callDelegate(session, {
+        tasks: [{ id: "holder", prompt: "bg", cwd: dir, tools: ["write"] }],
+        async: true,
+      });
+      const ticket = ticketIdOf(dispatched.text);
+      // Wait until the worker holds its semaphore slot — the count the
+      // rejection reports must be live, not theoretical.
+      const end = Date.now() + 3000;
+      while (subagents.state.callCount === 0 && Date.now() < end) {
+        await Bun.sleep(5);
+      }
+      expect(subagents.state.callCount).toBe(1);
+
+      const rejected = await callDelegate(session, {
+        tasks: [{ prompt: "now", cwd: dir, tools: ["write"] }],
+      });
+      expect(rejected.isError).toBe(true);
+      expect(rejected.text).toContain("1/4 tasks are running");
+      // The held claim names the blocking task and its owning ticket.
+      expect(rejected.text).toContain(`holder (owner ${ticket})`);
+
+      release();
+      await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
     },
   );
 

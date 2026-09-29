@@ -17,12 +17,21 @@ import {
   truncateLine,
 } from "./format.ts";
 import type { ActivityRow, ActivityStore } from "./activity.ts";
+// The receipt details types derive from the TypeBox schemas in
+// details.ts — the emitted shape and the pinned contract share one
+// definition (SPEC v3 "Observability"; issue #51).
+import type {
+  InterruptDetails,
+  SteerDetails,
+  SteerStatus,
+} from "./details.ts";
 import { TicketJournal } from "./ticket-journal.ts";
 import { renderOutputForLLM, renderOutputForPoll } from "./spill.ts";
 import type {
   ExecutionHandle,
   OutputBounds,
   TaskOutcome,
+  TaskVerdict,
   Ticket,
   TicketStatus,
   TokenBudgetReport,
@@ -40,36 +49,12 @@ type Writable<T> = { -readonly [K in keyof T]: T[K] };
  * reach it only through the store's methods, so the caller-visible `Ticket`
  * stays free of it.
  */
-/**
- * SPEC v3 "Interaction grammar — Steering" receipt outcomes. `steered`:
- * the message is on a live run's steering queue and merges at the next
- * turn boundary. `activated`: no run was live, so the message is parked
- * and opens the task's next turn. `duplicate`: an idempotent replay of a
- * recorded steerId. `not-applied`: nothing could or can receive it.
- */
-export type SteerStatus = "activated" | "steered" | "duplicate" | "not-applied";
-
-/** Machine-readable half of a steer receipt, attached as details.steer. */
-export interface SteerDetails {
-  readonly steerId: string;
-  readonly ticket: string;
-  readonly taskId: string;
-  readonly status: SteerStatus;
-  /** On a duplicate receipt: the status the original call returned. */
-  readonly replayed?: SteerStatus;
-  /**
-   * The key was derived from the calling tool call (#44) rather than
-   * caller-chosen — `steer:<toolCallId>`.
-   */
-  readonly derived?: boolean;
-}
-
-/** Machine-readable half of an interrupt receipt (action "interrupt"). */
-export interface InterruptDetails {
-  readonly ticket: string;
-  readonly taskId: string;
-  readonly status: "interrupted" | "not-applied";
-}
+// `SteerStatus`, `SteerDetails`, and `InterruptDetails` — the
+// machine-readable halves of the steer and interrupt receipts (SPEC v3
+// "Interaction grammar — Steering" / "Interrupt") — are defined by the
+// TypeBox schemas in details.ts and re-exported here for the ticket
+// store's callers.
+export type { InterruptDetails, SteerDetails, SteerStatus };
 
 interface SteerRecord {
   readonly taskIndex: number;
@@ -676,7 +661,7 @@ export class TicketStore {
    */
   verdictDetails(
     ticket: Ticket,
-  ): readonly { taskId: string; verdict: string }[] {
+  ): readonly { taskId: string; verdict: TaskVerdict }[] {
     return this.entry(ticket).record.outcomes.flatMap((outcome) =>
       outcome?.verdict !== undefined
         ? [{ taskId: outcome.id, verdict: outcome.verdict }]

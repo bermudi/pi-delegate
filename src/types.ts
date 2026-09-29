@@ -344,6 +344,10 @@ export class Semaphore {
   constructor(limit: number) {
     this.limit = Math.max(1, Math.floor(limit));
   }
+  /** Granted permits — the in-flight task count under this bound. */
+  get activeCount(): number {
+    return this.active;
+  }
   setLimit(limit: number): void {
     this.limit = Math.max(1, Math.floor(limit));
     this.drain();
