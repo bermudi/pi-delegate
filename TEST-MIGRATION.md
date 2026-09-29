@@ -1733,3 +1733,34 @@ Remaining:
 
 Each slice should add only the public test driver capabilities it needs. Tests
 must not introduce public exports solely to reach private v2 state.
+
+## 2026-09-29 — provider-scoped extensions (issue #59) and usage events (issue #60)
+
+New contract suite `tests/contract/provider-extensions.test.ts` (v1
+evidence: `config.ts:455-480` shipped `openai-codex` →
+`npm:@bermudi/pi-codex` default; `config.test.ts:63-275` provenance —
+user-listed sources required, shipped defaults best-effort, empty arrays
+ignored, exact re-list of the default required; `delegate.test.ts:594`
+`web_search` in the child's tool inventory). Live coverage: malformed
+`providerExtensions` shapes fail loudly naming the key (a v2 divergence
+from v1's silent drops, per the file's fail-loud config stance); a
+missing required source fails the whole dispatch before any child
+starts; the shipped default degrades silently when uninstalled;
+re-listing the default makes it required; an empty array neither errors
+nor disables the default; other providers stay untouched; explicit
+`web_search` rejects without an allowlist and a user-configured local
+extension loads into the child — its `web_search` executes (marker
+file). Non-inheritance is pinned twice: without an allowlist the
+mirrored `web_search` is stripped (no marker), and with one the child
+executes its own copy, distinguishable from the parent's registry
+entry. A required root that fails to load fails closed, and a
+`providerExtensions` change invalidates a pooled session's frozen
+configuration. Same file's `delegate:usage` block (#60): task
+settlement emits provider/model/token payload on `pi.events`,
+same-window settlements throttle to one emission, a settlement after
+the 30s window emits again, and a ticketed batch carries both
+`ticketId` and `taskId`. Fixtures: `tests/fixtures/web-search-ext/`
+(child-side extension, marker on execute), `parent-web-search-ext/`
+(parent-side, distinguishable marker), `broken-ext/` (module-eval
+throw for the load-failure path); the `pi.events` listener test seam
+is `tests/support/usage-listener.ts` loaded via `leadingExtensions`.

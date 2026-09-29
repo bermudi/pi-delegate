@@ -49,6 +49,22 @@ export interface ResolvedTask {
   /** Expanded built-in tool names for the child session. */
   readonly tools: readonly string[];
   /**
+   * The verified provider-extension allowlist for this task's resolved
+   * model provider (#59): user-scope package roots to load into the
+   * child, the subset tagged best-effort (droppable on load failure), and
+   * the signature pooled sessions freeze on. Present whenever the
+   * provider has any applicable sources — `paths` may still be empty when
+   * every shipped default failed to resolve; such tasks run
+   * extension-free while keeping the signature for pool compatibility.
+   */
+  readonly providerExtensions:
+    | {
+        readonly paths: ReadonlySet<string>;
+        readonly bestEffortPaths: ReadonlySet<string>;
+        readonly signature: string;
+      }
+    | undefined;
+  /**
    * Base prompt: authored text (task `systemPrompt` or profile body) or the
    * parent's custom base prompt for composed children; undefined keeps the
    * stock prefix.

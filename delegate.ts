@@ -11,6 +11,7 @@ import {
   type ExtensionContext,
   type NormalizedBuildSystemPromptOptions,
 } from "@earendil-works/pi-coding-agent";
+import type { Usage } from "@earendil-works/pi-ai";
 import {
   AdmissionController,
   type AdmissionGrant,
@@ -386,6 +387,16 @@ const DELIVERED_MESSAGE_TYPE = "delegate-result";
  * internal timing out of caller reach.
  */
 const DELIVERY_FLUSH_MS = 100;
+
+/**
+ * Issue #60: namespaced usage signal on `pi.events` — settled subagent
+ * work emits `delegate:usage` so listeners (provider-balance) can refresh
+ * usage displays while a batch burns tokens. Throttled to one emission
+ * per interval per extension instance — matching the consumer's own
+ * refresh throttle; the event is a wake, not an accounting channel.
+ */
+const USAGE_EVENT_NAME = "delegate:usage";
+const USAGE_EVENT_MIN_INTERVAL_MS = 30_000;
 
 type TaskSchemaArguments = Static<typeof taskSchema>;
 
@@ -1318,6 +1329,49 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // cancelled navigation attempt, which conservatively downgrades delivery.
   let navigationEpoch = 0;
 
+  // Owned by this closure: the `delegate:usage` throttle stamp (#60).
+  // One emission per interval across task and batch settlement alike —
+  // inside a settlement cluster only the first event goes out, which is
+  // exactly what a refresh wake wants.
+  let lastUsageEventAt = Number.NEGATIVE_INFINITY;
+  const emitUsage = (payload: {
+    ticketId?: string;
+    taskId?: string;
+    provider: string;
+    model: string;
+    totalTokens: number;
+    inputTokens: number;
+    outputTokens: number;
+    costUsd?: number;
+  }): void => {
+    const now = Date.now();
+    if (now - lastUsageEventAt < USAGE_EVENT_MIN_INTERVAL_MS) return;
+    lastUsageEventAt = now;
+    try {
+      api.events.emit(USAGE_EVENT_NAME, payload);
+    } catch (error) {
+      // The event is a best-effort wake (#60): a stale ctx after session
+      // replacement or a bus-level fault must never unsettle a task.
+      console.error(
+        `[delegate] ${USAGE_EVENT_NAME} emit failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+  /** One settled task's usage payload: the provider/model that burned it. */
+  const taskUsagePayload = (
+    task: ResolvedTask,
+    usage: Usage,
+    ids: { ticketId?: string; taskId?: string },
+  ): Parameters<typeof emitUsage>[0] => ({
+    ...ids,
+    provider: task.model.provider,
+    model: task.model.id,
+    totalTokens: usage.totalTokens,
+    inputTokens: usage.input,
+    outputTokens: usage.output,
+    costUsd: usage.cost.total,
+  });
+
   /**
    * SPEC v3 "Interaction grammar — Wake delivery": settled results
    * inject as follow-up turns, leaf-aware, and simultaneous settlements
@@ -1859,11 +1913,59 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 : "The call was aborted before source application.",
             }),
           onWorkerQuiesced: (taskIndex) => plan!.cleanupWorker(taskIndex),
+          // #60: task settlement is the usage event's firing point — the
+          // settled outcome's recorded usage, tagged with its ticket and
+          // task. No usage (never ran, cancelled pre-prompt) → no event.
+          onTaskSettled: (task, outcome) => {
+            if (outcome.usage === undefined) return;
+            emitUsage(
+              taskUsagePayload(task, outcome.usage, {
+                ticketId: ticket?.id,
+                taskId: task.id,
+              }),
+            );
+          },
           brief: options.brief,
           tokenBudget: options.tokenBudget,
         })
         .then((outcome) => {
           telemetrySpan.finish(outcome, ticket?.status);
+          // #60: batch settlement also reports — one event per distinct
+          // provider/model pair with its summed settled usage (the
+          // per-instance throttle decides what actually goes out).
+          const byModel = new Map<
+            string,
+            {
+              provider: string;
+              model: string;
+              totalTokens: number;
+              inputTokens: number;
+              outputTokens: number;
+              costUsd: number;
+            }
+          >();
+          for (const settled of outcome.outcomes) {
+            if (settled?.usage === undefined) continue;
+            const task = tasks[settled.index];
+            if (task === undefined) continue;
+            const key = `${task.model.provider}/${task.model.id}`;
+            const aggregate = byModel.get(key) ?? {
+              provider: task.model.provider,
+              model: task.model.id,
+              totalTokens: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              costUsd: 0,
+            };
+            aggregate.totalTokens += settled.usage.totalTokens;
+            aggregate.inputTokens += settled.usage.input;
+            aggregate.outputTokens += settled.usage.output;
+            aggregate.costUsd += settled.usage.cost.total;
+            byModel.set(key, aggregate);
+          }
+          for (const aggregate of byModel.values()) {
+            emitUsage({ ticketId: ticket?.id, ...aggregate });
+          }
           return outcome;
         })
         .finally(() => {
@@ -1922,6 +2024,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
               signal: batch.dispatchSignal,
               ticket: cancelledTicket,
               quiescence: barrier,
+              onTaskSettled: (task, outcome) => {
+                if (outcome.usage === undefined) return;
+                emitUsage(
+                  taskUsagePayload(task, outcome.usage, {
+                    ticketId: cancelledTicket.id,
+                    taskId: task.id,
+                  }),
+                );
+              },
             })
             .finally(() => tickets.releaseSettlement(cancelledTicket)),
         };

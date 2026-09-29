@@ -167,6 +167,14 @@ export class DispatchCoordinator {
       ) => Promise<readonly TaskOutcome[]>;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
       /**
+       * One task's caller-visible settlement (#60): invoked for every
+       * recorded outcome — provisional or final — as it lands, with the
+       * settled outcome's recorded usage. The sink publishes usage
+       * telemetry (pi.events "delegate:usage"); it must never throw
+       * into the dispatch — call sites guard like the activity feed.
+       */
+      onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
+      /**
        * The shared batch brief (SPEC v3 "Batch brief"): prepended to
        * every task's prompt as a delimited preamble — before the task's
        * own prose, leaving the dependent handoff appendix trailing it.
@@ -433,6 +441,7 @@ export class DispatchCoordinator {
       signal?: AbortSignal;
       ticket?: Ticket;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
+      onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
       brief?: string;
       tokenBudget?: number;
     },
@@ -534,6 +543,18 @@ export class DispatchCoordinator {
       // stamp exhaustion now so the report is honest even when no queued
       // task is left to observe it.
       budgetExhausted();
+      // Usage reporting (#60): the settled outcome's recorded usage is
+      // what the event carries — emit at the settlement point itself,
+      // not at batch end, so a long-running ticket reports as it goes.
+      if (options.onTaskSettled !== undefined) {
+        try {
+          options.onTaskSettled(task, outcome);
+        } catch (error) {
+          console.error(
+            `[delegate] usage settlement sink failed for task ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
     };
     /**
      * The worker's true settlement, independent of the caller-visible one.

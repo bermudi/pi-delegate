@@ -48,20 +48,38 @@ bump, in order; a failed seam here is a silent contract break (#15).
    rows cannot see these). Compat spellings must live in the schema,
    not the handler. Verify the host still enforces TypeBox
    additionalProperties.
+9. **Provider-extension loading (`#59`)** — child resource loaders run
+   `noExtensions: true` plus `additionalExtensionPaths` for verified
+   user-scope roots (`src/host.ts` `createChildResourceLoader` /
+   `loadSubagentResources`). Verify on every bump: the option still
+   exists and resolves install dirs, `noExtensions` still excludes the
+   parent/project inventory while additional paths still load (a
+   regression either silently strips provider extensions or — worse —
+   leaks the parent inventory into children), `getExtensions()`
+   still reports loaded paths and per-extension load errors, and
+   `createAgentSession()` still accepts a caller-supplied
+   `resourceLoader`. The trust checks lean on
+   `DefaultPackageManager.getInstalledPath`/`parseSource`-family
+   exports via `src/pi-package-source.ts` — verify those signatures
+   too.
+10. **`pi.events` bus (`#60`)** — `delegate:usage` emits on the
+    extension-shared event bus (`ExtensionContext.events.emit/on`).
+    Verify the channel name is free-form namespaced and `emit`/`on`
+    signatures are unchanged; a listener throw must not propagate.
 
 ## Soft seams (degrade gracefully)
 
-9. **`runtime-credentials`** — pooled-session reload after residency
-   unload re-acquires runtime credentials through the standard
-   session-open path; no direct API use, but verify reloads under a
-   rotated key behave (reject loudly, never silently no-op).
-10. **Tool description channel** — the registered schema descriptions
+11. **`runtime-credentials`** — pooled-session reload after residency
+    unload re-acquires runtime credentials through the standard
+    session-open path; no direct API use, but verify reloads under a
+    rotated key behave (reject loudly, never silently no-op).
+12. **Tool description channel** — the registered schema descriptions
     are the only channel to trained weights. Verify Pi renders the
     full field descriptions to the model (no truncation on bump).
-11. **`pi-ai` faux provider** — `installSubagentModel` test strategy
+13. **`pi-ai` faux provider** — `installSubagentModel` test strategy
     assumes delegate resolves and streams subagent models through the
     parent session's model runtime. Verify on bump.
-12. **`typebox` pin** — must mirror pi-coding-agent's exact pin
+14. **`typebox` pin** — must mirror pi-coding-agent's exact pin
     (schema symbol identity across instances). Re-align every bump.
 
 ## Bump procedure

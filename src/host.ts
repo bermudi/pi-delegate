@@ -31,6 +31,11 @@ import {
   type ProfileCatalog,
 } from "./profiles.ts";
 import { configPathOf, configuredModelFor, type DelegateConfig } from "./config.ts";
+import {
+  partitionExtensionLoadFailures,
+  resolveProviderExtensionPaths,
+  type ProviderExtensionCache,
+} from "./provider-extensions.ts";
 import { resumeTagOf } from "./format.ts";
 import { resolveDependencyGraph } from "./graph.ts";
 import type { TaskInput } from "./validation.ts";
@@ -262,12 +267,15 @@ export async function resolveTasks(
   let parentActive: string[] = [];
   // Explicit `default` (or an alias for it that no profile claims) mirrors
   // the parent's active tools; an omitted agent is an inline task with the
-  // standard tool set.
+  // standard tool set. web_search passes the mirror filter so a parent
+  // that has it (through its own provider extension) can hand it to a
+  // child whose provider resolved an extension allowlist — tasks without
+  // one strip it per-task below.
   if (tasks.some((task, index) => task.agent !== undefined && claimed[index]?.agent === "default" && task.tools === undefined)) {
     try {
       parentActive = env
         .getActiveTools()
-        .filter((name) => (CHILD_TOOLS as readonly string[]).includes(name));
+        .filter((name) => (CHILD_TOOLS as readonly string[]).includes(name) || name === "web_search");
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       const message =
@@ -281,6 +289,13 @@ export async function resolveTasks(
   // The graph was validated in validation.ts; resolution re-derives the
   // same ids to attach dependency indexes and phases to each task.
   const graph = resolveDependencyGraph(tasks);
+
+  // #59: provider-extension resolution + verification runs at dispatch —
+  // a required-source failure rejects the whole call before any child
+  // starts. The map is the dispatch-scoped absence/verification cache:
+  // `getInstalledPath` can spawn `npm root -g`, so a fan-out shares one
+  // probe per (provider, cwd) instead of one per task.
+  const extensionCache: ProviderExtensionCache = new Map();
 
   const resolved: ResolvedTask[] = [];
   for (const [index, task] of tasks.entries()) {
@@ -296,24 +311,6 @@ export async function resolveTasks(
         `${where}: unknown agent '${agent}'. Known agents: ${[...catalog.profiles.keys()].map((name) => agentListEntry(name, catalog.profiles)).join(", ")}.`,
       );
     }
-
-    let tools: string[] | string;
-    if (task.tools !== undefined) {
-      tools = expandTools(task.tools);
-    } else if (agent === "default") {
-      tools = parentActive;
-    } else if (profile?.tools) {
-      tools = [...profile.tools];
-    } else {
-      tools = expandTools(undefined);
-    }
-    if (typeof tools === "string") {
-      throw new Error(`${where}: ${tools}`);
-    }
-    // #45 belt: no inventory source may surface the delegate family to a
-    // child — expandTools strips it on entry and the parent mirror never
-    // carries it; this is the structural backstop over profile inventories.
-    tools = tools.filter((tool) => !DELEGATE_TOOL_NAMES.has(tool));
 
     // Model selection is user-only and inheritance-first: a named agent uses
     // its delegate.json pin (parent-scoped wins over unscoped), else its
@@ -361,6 +358,52 @@ export async function resolveTasks(
     const cwd = task.cwd ? resolveTaskCwd(task.cwd, env.ctx.cwd) : env.ctx.cwd;
     if (!existsSync(cwd)) {
       throw new Error(`${where}: cwd does not exist: '${cwd}'.`);
+    }
+
+    // #59: provider-scoped extension resolution runs against the task's
+    // RESOLVED provider — after model pins and profile frontmatter — and
+    // the task's own cwd. A required-source failure here rejects the
+    // whole dispatch before any child starts; shipped best-effort
+    // defaults that miss degrade silently to an empty path set.
+    let providerExtensions: ResolvedTask["providerExtensions"];
+    try {
+      providerExtensions = await resolveProviderExtensionPaths(
+        model.provider,
+        cwd,
+        env.agentDir,
+        config,
+        extensionCache,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`${where}: ${detail}`, { cause: error });
+    }
+    const hasProviderExtensions =
+      providerExtensions !== undefined && providerExtensions.paths.size > 0;
+    let tools: string[] | string;
+    if (task.tools !== undefined) {
+      tools = expandTools(task.tools, {
+        providerExtensions: hasProviderExtensions,
+      });
+    } else if (agent === "default") {
+      tools = parentActive;
+    } else if (profile?.tools) {
+      tools = [...profile.tools];
+    } else {
+      tools = expandTools(undefined);
+    }
+    if (typeof tools === "string") {
+      throw new Error(`${where}: ${tools}`);
+    }
+    // #45 belt: no inventory source may surface the delegate family to a
+    // child — expandTools strips it on entry and the parent mirror never
+    // carries it; this is the structural backstop over profile inventories.
+    tools = tools.filter((tool) => !DELEGATE_TOOL_NAMES.has(tool));
+    if (!hasProviderExtensions) {
+      // A mirrored or authored web_search without a supplying provider
+      // extension could never activate — strip it so the task's declared
+      // inventory stays honest (it was never loadable anyway).
+      tools = tools.filter((tool) => tool !== "web_search");
     }
 
     const workspace: Workspace = task.workspace ?? "shared";
@@ -426,6 +469,7 @@ export async function resolveTasks(
       model,
       thinking,
       tools,
+      providerExtensions,
       systemPrompt,
       appendSystemPrompt: promptAppend,
       sessionId: task.sessionId,
@@ -510,19 +554,30 @@ export async function createSubagentSession(
 }
 
 /**
- * A resource loader for one task: no extensions (subagents must not inherit
- * the parent's interactive extension inventory — including this tool), no
- * user-global context files; project context under the task cwd is kept.
+ * A resource loader for one task: no extensions beyond the verified
+ * provider-extension roots (subagents must not inherit the parent's
+ * interactive extension inventory — including this tool), no user-global
+ * context files; project context under the task cwd is kept.
+ *
+ * `noExtensions` stays on even with `additionalExtensionPaths`: in Pi
+ * 0.87 the flag only excludes the user/project extension inventory —
+ * CLI/additional paths still resolve and load — so the child receives
+ * exactly the allowlisted roots and nothing else.
  */
 export function createSubagentResourceLoader(
   task: ResolvedTask,
   env: HostEnvironment,
+  additionalExtensionPaths?: readonly string[],
 ): DefaultResourceLoader {
   return new DefaultResourceLoader({
     cwd: task.cwd,
     agentDir: env.agentDir,
     settingsManager: SettingsManager.inMemory(),
     noExtensions: true,
+    ...(additionalExtensionPaths !== undefined &&
+      additionalExtensionPaths.length > 0
+      ? { additionalExtensionPaths: [...additionalExtensionPaths] }
+      : {}),
     agentsFilesOverride: ({ agentsFiles }) => ({
       agentsFiles: agentsFiles.filter(
         ({ path }) => !isGlobalContextFile(path, env.agentDir),
@@ -535,4 +590,68 @@ export function createSubagentResourceLoader(
       ? { appendSystemPrompt: [...task.appendSystemPrompt] }
       : {}),
   });
+}
+
+/**
+ * Build and load one task's resource loader, retrying without any
+ * best-effort provider-extension root that failed to load (v1 host.ts
+ * `loadChildResources`; the roots were resolved and verified at dispatch
+ * by `resolveProviderExtensionPaths` — this is only the load step).
+ *
+ * A dropped default leaves the subagent extension-free on Pi's native
+ * compaction — silently, per the drop-site rationale in
+ * `provider-extensions.ts`. User-configured roots still fail closed.
+ *
+ * Loop invariant: Pi's `reload()` never *throws* for an extension's own
+ * failure — its loader wraps module import and factory invocation in
+ * try/catch and returns them as `extensionsResult.errors` (verified in
+ * pi 0.87, core/extensions/loader.js). A reload() throw is therefore
+ * environmental (settings reload, package resolution) and not
+ * attributable to any supplied root; letting it propagate is correct
+ * even when best-effort roots are present.
+ *
+ * Extension-bearing loaders are never shared or pooled: the extension
+ * runtime binds mutable per-session state, so every attempt builds a
+ * fresh loader.
+ */
+export async function loadSubagentResources(
+  task: ResolvedTask,
+  env: HostEnvironment,
+): Promise<DefaultResourceLoader> {
+  const providerExtensions = task.providerExtensions;
+  let extensionPaths = [...(providerExtensions?.paths ?? [])];
+  for (;;) {
+    const resourceLoader = createSubagentResourceLoader(
+      task,
+      env,
+      extensionPaths,
+    );
+    await resourceLoader.reload();
+
+    const extensionsResult = resourceLoader.getExtensions();
+    const { fatalCount, droppableRoots } = partitionExtensionLoadFailures({
+      extensionPaths,
+      loadedExtensionPaths: extensionsResult.extensions.map(
+        (extension) => extension.resolvedPath || extension.path,
+      ),
+      extensionErrors: extensionsResult.errors,
+      bestEffortRoots: providerExtensions?.bestEffortPaths ?? new Set(),
+    });
+    if (fatalCount > 0) {
+      const providerName =
+        task.model.provider.trim() || "the selected provider";
+      throw new Error(
+        `Failed to load ${fatalCount} allowlisted provider extension(s) for ${providerName}; delegation stopped instead of running without the required integration.`,
+      );
+    }
+
+    if (droppableRoots.length > 0) {
+      extensionPaths = extensionPaths.filter(
+        (root) => !droppableRoots.includes(root),
+      );
+      continue;
+    }
+
+    return resourceLoader;
+  }
 }

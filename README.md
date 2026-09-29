@@ -175,6 +175,7 @@ values fail loudly at the dispatch boundary.
 | `sessions.maxIdle` | `4` | Idle pooled sessions kept resident in memory; beyond the bound the least-recently-idle unloads to its transcript and reloads on next use. `0` unloads every settled session. |
 | `telemetry.enabled` | `false` | Record dispatches in a local SQLite file. |
 | `telemetry.dbPath` | unset | Store location; falls back to `DELEGATE_TELEMETRY_DB`, then `<agentDir>/delegate-usage.db`. |
+| `providerExtensions` | `{"openai-codex": ["npm:@bermudi/pi-codex"]}` | Per-provider user-scope packages injected into that provider's subagents (e.g. `{"openai-codex": ["npm:@bermudi/pi-codex"]}`). A listed provider's array replaces the shipped default for that provider and its sources are required — missing or unverifiable, the dispatch fails. Providers never listed fall back to shipped defaults, which degrade silently to extension-free children. Empty arrays are ignored. |
 | `output.spillThresholdChars` | `8000` | Characters before a result spills to a file. |
 | `output.spillTailChars` | `2000` | Tail kept inline on spill. |
 

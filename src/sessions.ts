@@ -13,8 +13,10 @@ function log(context: string, error: unknown): void {
 /**
  * The configuration a `sessionId` freezes at first use. Every reuse is
  * compared against the resolved (post-profile/default expansion) task —
- * tool comparison is order-independent. Provider extensions are not part
- * of it: subagent sessions are extension-free by construction.
+ * tool comparison is order-independent. The provider-extension signature
+ * is part of it: a `delegate.json` edit changing the applicable
+ * allowlist must never silently reuse a session whose runtime already
+ * loaded different extension code (#59; v1 lifecycle.ts).
  */
 interface FrozenSessionConfig {
   readonly cwd: string;
@@ -23,6 +25,8 @@ interface FrozenSessionConfig {
   readonly model: string;
   readonly systemPrompt: string | undefined;
   readonly appendSystemPrompt: readonly string[];
+  /** Opaque hash of the task's applicable extension sources ("" when none). */
+  readonly providerExtensions: string;
 }
 
 function frozenConfig(task: ResolvedTask): FrozenSessionConfig {
@@ -33,6 +37,7 @@ function frozenConfig(task: ResolvedTask): FrozenSessionConfig {
     model: `${task.model.provider}/${task.model.id}`,
     systemPrompt: task.systemPrompt,
     appendSystemPrompt: task.appendSystemPrompt,
+    providerExtensions: task.providerExtensions?.signature ?? "",
   };
 }
 
@@ -62,6 +67,11 @@ function mismatches(
     diffs.push(
       `tools [${frozen.tools.join(", ")}] vs [${actual.tools.join(", ")}]`,
     );
+  }
+  if (frozen.providerExtensions !== actual.providerExtensions) {
+    // The signature stays opaque even in the error — it may hash
+    // credential-bearing source URLs.
+    diffs.push("providerExtensions: changed");
   }
   return diffs;
 }

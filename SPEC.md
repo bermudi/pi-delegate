@@ -252,6 +252,21 @@ mid-flight the parent can steer. The grammar:
   resident. `delegate_session list` shows unloaded records and
   `close` removes them the same as live ones. Config machinery —
   never a model-facing field.
+- **Provider-scoped extensions (#59).** Subagents run with no extension
+  inventory — not the parent's, not the project's — except a
+  per-provider allowlist of user-scope packages via `delegate.json`
+  `providerExtensions` (`{"openai-codex": ["npm:@bermudi/pi-codex"]}`
+  is the shipped default). A provider the user lists is replaced
+  wholesale, not appended to, and its sources are required: missing,
+  unverifiable, or failing to load, the dispatch fails before any
+  child starts. Providers the user never lists fall back to shipped
+  defaults, which are best-effort — a missing or broken one degrades
+  silently to an extension-free child, and an empty configured array
+  does not disable a default. Sources resolve user-scope only and are
+  verified against their configured origin/version; extensions a
+  provider supplies (today `web_search` for codex children) join the
+  child toolset through the same allowlist as built-ins. Operator
+  machinery — the schema never exposes it.
 
 ## Observability
 
@@ -294,6 +309,16 @@ mid-flight the parent can steer. The grammar:
   sync/async). Retention is identical to dispatch rows — one policy,
   no extra knobs. Serialized — not rejected — batches keep riding
   normal completed rows.
+
+- **Usage events (#60).** Task settlement emits `delegate:usage` on
+  the shared `pi.events` bus: `{ticketId?, taskId?, provider, model,
+  totalTokens, inputTokens, outputTokens, costUsd?}` from the settled
+  outcome's recorded usage. Batch settlement adds one emission per
+  distinct provider/model pair with that pair's summed usage. The
+  channel is a refresh wake for sibling extensions (provider-balance),
+  not an accounting stream — emission is throttled to one per 30 s per
+  extension instance, listener errors can never break settlement, and
+  tickets remain the durable usage record.
 
 ## Substrate inheritance
 

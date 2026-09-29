@@ -653,7 +653,15 @@ function validateTasks(tasks: readonly TaskInput[]): void {
       fail(`${where}: agent must be a non-empty name.`);
     }
     if (task.tools !== undefined) {
-      const expanded = expandTools(task.tools);
+      // Syntax check only: `web_search` is a valid name whose
+      // availability is provider-scoped (#59) — unknown until the
+      // task's model resolves at dispatch. Passing providerExtensions:
+      // true defers the availability check to resolveTasks, which
+      // re-expands with the resolved provider's real allowlist and
+      // reports the same error there.
+      const expanded = expandTools(task.tools, {
+        providerExtensions: true,
+      });
       if (typeof expanded === "string") {
         fail(`${where}: ${expanded}`);
       }

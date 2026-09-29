@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import {
@@ -64,6 +65,16 @@ export interface DelegateConfig {
   readonly telemetry: TelemetryConfig;
   readonly sessions: SessionsConfig;
   /**
+   * User-scope extension sources to load into subagent children, keyed by
+   * provider id (#59). The stored map is the user-only view: a provider
+   * absent here falls back to `DEFAULT_PROVIDER_EXTENSIONS` at selection
+   * time; a listed provider's array REPLACES that provider's defaults
+   * (never appends) and its sources become required (fail closed), while
+   * shipped defaults degrade silently. Empty arrays are ignored — they do
+   * not disable a shipped default.
+   */
+  readonly providerExtensions: Readonly<Record<string, readonly string[]>>;
+  /**
    * LLM-facing output bounding: over `spillThresholdChars` a settled task's
    * output spills to an owner-only temp file and only a `spillTailChars`
    * tail stays in-context (see `spill.ts`). Dispatch-scoped: tickets
@@ -90,8 +101,89 @@ export const DEFAULT_CONFIG: DelegateConfig = {
   // Four keeps ordinary sessionId reuse resident while bounding a fleet;
   // checked-out sessions are never counted (in-flight never unloads).
   sessions: { maxIdle: 4 },
+  providerExtensions: {},
   output: { spillThresholdChars: 8000, spillTailChars: 2000 },
 };
+
+/**
+ * The shipped provider-extension allowlist (#59; v1 config.ts:471-473):
+ * providers whose children want a companion extension — today
+ * `openai-codex` → `npm:@bermudi/pi-codex` (the apply_patch edit/write
+ * swap, web_search, and remote compaction codex children are trained
+ * for). Sources listed only here are best-effort: missing, unverifiable,
+ * or broken, they degrade silently to extension-free children — an
+ * absent optional integration is Pi's normal operation, not a warning.
+ * A provider the user lists in `providerExtensions` leaves this table:
+ * user-listed sources are required instead, including an exact
+ * re-listing of a shipped default.
+ */
+export const DEFAULT_PROVIDER_EXTENSIONS: Readonly<
+  Record<string, readonly string[]>
+> = Object.assign(Object.create(null) as Record<string, readonly string[]>, {
+  "openai-codex": ["npm:@bermudi/pi-codex"],
+});
+
+/** A configured provider-extension source with its failure semantics. */
+export interface ProviderExtensionSource {
+  readonly source: string;
+  /**
+   * True for every source the user listed in `providerExtensions` —
+   * including an exact re-listing of a shipped default, because typing it
+   * into the config expresses intent. False for a shipped default at a
+   * provider the user never mentioned (best-effort: degrade silently).
+   */
+  readonly required: boolean;
+}
+
+/**
+ * Provenance-tagged extension sources for one provider's subagents
+ * (v1 config.ts:818-846). Classification is by config presence, never
+ * string identity: everything the user lists is required; providers the
+ * user never configured fall back to the shipped defaults, tagged
+ * best-effort. Provider matching is case-insensitive.
+ */
+export function getSubagentProviderExtensionSourcesForProvider(
+  provider: string | undefined,
+  config: DelegateConfig,
+): readonly ProviderExtensionSource[] {
+  const normalized = provider?.trim().toLowerCase();
+  if (!normalized) return [];
+  // The parsed map is already normalized; hasOwn keeps config keys such
+  // as "__proto__" from resolving to Object.prototype members.
+  if (Object.hasOwn(config.providerExtensions, normalized)) {
+    return (config.providerExtensions[normalized] ?? []).map((source) => ({
+      source,
+      required: true,
+    }));
+  }
+  if (!Object.hasOwn(DEFAULT_PROVIDER_EXTENSIONS, normalized)) return [];
+  return (DEFAULT_PROVIDER_EXTENSIONS[normalized] ?? []).map((source) => ({
+    source,
+    required: false,
+  }));
+}
+
+/**
+ * Opaque signature of the provider-scoped extension allowlist applying to
+ * a provider (v1 config.ts:766-789): pooled sessions freeze it so a
+ * `delegate.json` edit that revokes or changes the applicable sources can
+ * never silently reuse a session whose runtime already loaded different
+ * extension code. Order and provenance are both significant — extension
+ * order may affect initialization, and re-listing a shipped source flips
+ * it from best-effort to required. Opaque on purpose: it crosses the
+ * session-pool boundary, so a credential-bearing Git source must never
+ * become model-visible through a pool mismatch.
+ */
+export function getProviderExtensionSignature(
+  provider: string | undefined,
+  config: DelegateConfig,
+): string {
+  const sources = getSubagentProviderExtensionSourcesForProvider(provider, config);
+  if (sources.length === 0) return "";
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(sources), "utf8")
+    .digest("hex")}`;
+}
 
 /** A `ModelAssignment` plus the config path that produced it, for errors. */
 export interface ResolvedModelAssignment extends ModelAssignment {
@@ -292,8 +384,62 @@ export function loadDelegateConfig(
       (stallTimeoutMs as number) ?? DEFAULT_CONFIG.stallTimeoutMs,
     telemetry: parseTelemetry(config.telemetry, path),
     sessions: parseSessions(config.sessions, path),
+    providerExtensions: parseProviderExtensions(config.providerExtensions, path),
     output: parseOutput(config.output, path),
   };
+}
+
+/**
+ * Parse the `providerExtensions` map (provider id → source array).
+ * Normalization mirrors v1 (config.ts:437-460): keys trim + lowercase,
+ * entries trim, dedupe first-seen, and an array with no usable entries
+ * is ignored — it never disables a shipped default. Where v1 dropped
+ * malformed shapes silently, this fails loudly naming the key, like the
+ * other config blocks: a half-applied allowlist is worse than an error.
+ */
+function parseProviderExtensions(
+  value: unknown,
+  path: string,
+): Record<string, readonly string[]> {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${path}: providerExtensions must be an object mapping a provider id to extension sources.`,
+    );
+  }
+  // A null-prototype map keeps keys such as "__proto__" own-properties.
+  const out = Object.create(null) as Record<string, readonly string[]>;
+  for (const [key, entries] of Object.entries(value as Record<string, unknown>)) {
+    const provider = key.trim().toLowerCase();
+    if (provider === "") {
+      throw new Error(`${path}: providerExtensions has a blank provider key.`);
+    }
+    if (!Array.isArray(entries)) {
+      throw new Error(
+        `${path}: providerExtensions.${key} must be an array of extension source strings; got ${JSON.stringify(entries)}.`,
+      );
+    }
+    const sources: string[] = [];
+    for (const [index, entry] of entries.entries()) {
+      if (typeof entry !== "string" || entry.trim() === "") {
+        throw new Error(
+          `${path}: providerExtensions.${key}[${index}] must be a non-empty source string; got ${JSON.stringify(entry)}.`,
+        );
+      }
+      const source = entry.trim();
+      if (!sources.includes(source)) sources.push(source);
+    }
+    // An empty array is ignored — the shipped default still applies;
+    // there is deliberately no config-only way to disable it (v1 parity).
+    if (sources.length === 0) continue;
+    if (Object.hasOwn(out, provider)) {
+      throw new Error(
+        `${path}: providerExtensions key '${key}' duplicates '${provider}' after normalization.`,
+      );
+    }
+    out[provider] = sources;
+  }
+  return out;
 }
 
 /**

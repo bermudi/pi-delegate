@@ -9,6 +9,7 @@ import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import {
   createSubagentResourceLoader,
   createSubagentSession,
+  loadSubagentResources,
   type HostEnvironment,
 } from "./host.ts";
 import {
@@ -1006,12 +1007,21 @@ export async function runTask(
       last = deadlineExpired();
       break;
     }
-    const key = JSON.stringify([task.cwd, task.systemPrompt ?? null, task.appendSystemPrompt]);
-    let loaderPromise = loaders.get(key);
-    if (!loaderPromise) {
-      const loader = createSubagentResourceLoader(task, controls.env);
-      loaderPromise = loader.reload().then(() => loader);
-      loaders.set(key, loaderPromise);
+    let loaderPromise: Promise<DefaultResourceLoader>;
+    if (task.providerExtensions !== undefined) {
+      // Extension-bearing children never share a loader: the extension
+      // runtime binds mutable per-session state, so every attempt builds
+      // and loads its own (v1 host.ts `loadChildResources`). Required
+      // roots fail closed here; best-effort roots drop silently.
+      loaderPromise = loadSubagentResources(task, controls.env);
+    } else {
+      const key = JSON.stringify([task.cwd, task.systemPrompt ?? null, task.appendSystemPrompt]);
+      loaderPromise = loaders.get(key) ?? (() => {
+        const loader = createSubagentResourceLoader(task, controls.env);
+        const promise = loader.reload().then(() => loader);
+        loaders.set(key, promise);
+        return promise;
+      })();
     }
     // A stalled resource loader must not hold a task past its explicit
     // deadline. Race the remaining wall budget as well as parent abort;

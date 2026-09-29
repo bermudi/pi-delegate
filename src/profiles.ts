@@ -206,8 +206,18 @@ export function getBuiltinProfile(name: string): AgentProfile | undefined {
  * Expand the task `tools` field into concrete child tool names.
  * `*` and `ro` are groups; every other entry must name a known tool.
  * Returns an error string instead of throwing so callers can compose it.
+ *
+ * `web_search` is not a built-in child tool: it exists only when a
+ * provider extension supplies it, so it expands only for tasks whose
+ * resolved provider has a non-empty extension allowlist (#59 —
+ * `options.providerExtensions`). When the named extension fails to load
+ * (best-effort roots may drop), the session activates only what the
+ * registry has — the name then rests inertly, same as v1.
  */
-export function expandTools(spec: readonly string[] | undefined): string[] | string {
+export function expandTools(
+  spec: readonly string[] | undefined,
+  options?: { readonly providerExtensions?: boolean },
+): string[] | string {
   if (!spec) return [...TOOL_GROUPS["*"]!];
   const expanded: string[] = [];
   for (const entry of spec) {
@@ -222,8 +232,11 @@ export function expandTools(spec: readonly string[] | undefined): string[] | str
     if (!READ_ONLY_TOOLS.has(entry) && !(CHILD_TOOLS as readonly string[]).includes(entry)) {
       return `unknown tool '${entry}'. Known tools: ${[...CHILD_TOOLS].join(", ")}; groups: *, ro.`;
     }
-    // web_search is meaningful for admission but is not a built-in child tool.
     if (!(CHILD_TOOLS as readonly string[]).includes(entry)) {
+      if (entry === "web_search" && options?.providerExtensions === true) {
+        expanded.push(entry);
+        continue;
+      }
       return `tool '${entry}' is not available to subagents. Known tools: ${[...CHILD_TOOLS].join(", ")}; groups: *, ro.`;
     }
     expanded.push(entry);
