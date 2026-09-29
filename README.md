@@ -3,7 +3,8 @@
 Subagent dispatch for the [Pi coding agent](https://github.com/earendil-works/pi).
 Delegate registers three tools: `delegate` runs one task or a batch of tasks;
 `delegate_ticket` operates the durable ticket a backgrounded dispatch returns
-(poll, wait, cancel, interrupt, pause, resume, answer, steer); `delegate_session` lists and
+(poll, wait, cancel, interrupt, pause, resume, answer, steer, tail);
+`delegate_session` lists and
 closes pooled subagent sessions. Tasks run against the shared tree, a disposable
 copy, or a private Git worktree. `SPEC.md` is the v3 behavioral contract;
 `COMPATIBILITY.md` records deliberate v2→v3 breaks.
@@ -193,7 +194,9 @@ and disables telemetry without changing delegation results. Inspect with
 - `poll` — the ticket roster, or one ticket's task list and settled results.
 - `wait` — block until the ticket settles; `timeoutMs` bounds the wait (unset
   means wait for settlement; `timeout_ms` is the same field and reports the
-  rename). Timing out or detaching never affects the task.
+  rename). A `tickets` array watches several and returns when the first
+  watched ticket settles — a one-id list folds into the single-ticket wait.
+  Timing out or detaching never affects the task.
 - `cancel` — the first call previews what would stop and warns that writes and
   commands are not rolled back; `force: true` terminates the ticket and asks
   workers to abort.
@@ -206,6 +209,13 @@ and disables telemetry without changing delegation results. Inspect with
   `interrupted`, not `cancelled`: a pooled session returns reusable, a
   fresh task keeps its transcript and a `resumeFrom` hint. A settled,
   already-interrupted, or not-yet-running target receipts `not-applied`.
+- `tail` — a bounded, incremental read of one task's assistant output
+  (`taskId` defaults to the ticket's only unsettled or only task and is
+  required when several ran).
+  `offset` is a char cursor that clamps when out of range; the reply
+  carries the chunk plus a `nextOffset` cursor for the following read.
+  `waitMs` bounds a park that resolves early when new output lands or the
+  task settles — omitted or `0` is a pure snapshot.
 
 Tickets are durable journals under `<agentDir>/delegate-tickets/` with
 owner-only permissions. Settled outcomes are recoverable after a restart via
