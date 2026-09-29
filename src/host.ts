@@ -296,6 +296,13 @@ export async function resolveTasks(
   // `getInstalledPath` can spawn `npm root -g`, so a fan-out shares one
   // probe per (provider, cwd) instead of one per task.
   const extensionCache: ProviderExtensionCache = new Map();
+  // Load probes (below, per task) dedupe on resolution identity: the
+  // cache returns the same object for every task sharing a provider+cwd,
+  // so each distinct resolution loads exactly once per dispatch — and a
+  // failure's error names the provider whose allowlist required it.
+  const probedExtensions = new Set<
+    NonNullable<ResolvedTask["providerExtensions"]>
+  >();
 
   const resolved: ResolvedTask[] = [];
   for (const [index, task] of tasks.entries()) {
@@ -455,7 +462,7 @@ export async function resolveTasks(
     const resumeTag =
       task.resumeFrom !== undefined ? resumeTagOf(task.resumeFrom) : undefined;
 
-    resolved.push({
+    const resolvedTask = {
       index,
       id: task.id ?? `task-${index + 1}`,
       prompt,
@@ -480,7 +487,34 @@ export async function resolveTasks(
       writeRoots: reserves ? await writeRootsOf(cwd) : undefined,
       dependsOn: graph.deps[index]!,
       phase: graph.phases[index]!,
-    } satisfies ResolvedTask);
+    } satisfies ResolvedTask;
+    resolved.push(resolvedTask);
+
+    // #59 fail-closed probe: a required root that fails to LOAD (not
+    // merely to resolve or verify) must also reject the whole dispatch
+    // before any child starts — "delegation stopped" is a whole-call
+    // rejection, not a per-task outcome that lets siblings begin. The
+    // probe uses the same loader the attempt will build, so the checked
+    // configuration is the run configuration. runTask still reloads per
+    // attempt for session-state isolation and to catch a root that
+    // changed between resolve and run. Resolutions whose roots are all
+    // best-effort skip the probe — their load failures degrade silently
+    // per #59 and the attempt path owns them.
+    if (
+      providerExtensions !== undefined &&
+      !probedExtensions.has(providerExtensions) &&
+      [...providerExtensions.paths].some(
+        (root) => !providerExtensions.bestEffortPaths.has(root),
+      )
+    ) {
+      probedExtensions.add(providerExtensions);
+      try {
+        await loadSubagentResources(resolvedTask, env);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${where}: ${detail}`, { cause: error });
+      }
+    }
   }
   return resolved;
 }

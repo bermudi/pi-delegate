@@ -1012,7 +1012,9 @@ export async function runTask(
       // Extension-bearing children never share a loader: the extension
       // runtime binds mutable per-session state, so every attempt builds
       // and loads its own (v1 host.ts `loadChildResources`). Required
-      // roots fail closed here; best-effort roots drop silently.
+      // roots already proved loadable at resolve time (before admission);
+      // this reload stays fail-closed for a root that changed since and
+      // for errors the probe skipped. Best-effort roots drop silently.
       loaderPromise = loadSubagentResources(task, controls.env);
     } else {
       const key = JSON.stringify([task.cwd, task.systemPrompt ?? null, task.appendSystemPrompt]);

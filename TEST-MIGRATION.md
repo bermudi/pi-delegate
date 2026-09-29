@@ -1753,9 +1753,11 @@ extension loads into the child — its `web_search` executes (marker
 file). Non-inheritance is pinned twice: without an allowlist the
 mirrored `web_search` is stripped (no marker), and with one the child
 executes its own copy, distinguishable from the parent's registry
-entry. A required root that fails to load fails closed, and a
-`providerExtensions` change invalidates a pooled session's frozen
-configuration. Same file's `delegate:usage` block (#60): task
+entry. A required root that fails to load fails the whole dispatch
+before any child starts — a resolved sibling on another provider never
+runs, and the rejection is a config error, not an `internal dispatch
+error` — and a `providerExtensions` change invalidates a pooled
+session's frozen configuration. Same file's `delegate:usage` block (#60): task
 settlement emits provider/model/token payload on `pi.events`,
 same-window settlements throttle to one emission, a settlement after
 the 30s window emits again, and a ticketed batch carries both

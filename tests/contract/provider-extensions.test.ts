@@ -44,8 +44,11 @@ const usageListenerPath = join(
  * what providerExtensions trusts; project-local paths are rejected by
  * construction, so the fixture must live under the agent dir.
  */
-function installWebSearchFixture(session: TestSession): string {
-  const dir = join(session.cwd, "user-ext", "web-search");
+function installWebSearchFixture(
+  session: TestSession,
+  name = "web-search",
+): string {
+  const dir = join(session.cwd, "user-ext", name);
   mkdirSync(dir, { recursive: true });
   copyFileSync(
     join(fixturesDir, "web-search-ext", "index.ts"),
@@ -353,22 +356,38 @@ describe("providerExtensions (#59)", () => {
   );
 
   test(
-    "a configured extension that fails to load fails the task closed",
+    "a configured extension that fails to load fails the whole dispatch before any child starts",
     async () => {
       // v1 evidence: load-failure partition — fatal roots abort rather
-      // than running without the configured integration.
+      // than running without the configured integration. SPEC #59 makes
+      // the rejection whole-dispatch and pre-execution: a resolved,
+      // healthy sibling on another provider must never start, and the
+      // failure is a config rejection — not an internal dispatch error.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
+      const codex = await installCodexProvider(session);
       const extensionDir = installBrokenFixture(session);
       configureDelegate(session, {
+        models: { coder: "openai-codex/faux-1" },
         providerExtensions: { "delegate-faux": [extensionDir] },
       });
       subagents.respond([fauxAssistantMessage("UNREACHABLE")]);
+      codex.setResponses([fauxAssistantMessage("UNREACHABLE-CODEX")]);
       const result = await callDelegate(session, {
-        tasks: [{ prompt: "x" }],
+        tasks: [
+          // Resolves cleanly (its shipped default is uninstalled,
+          // best-effort-skipped); under per-task semantics it would run.
+          { agent: "coder", prompt: "a", tools: ["read"] },
+          { prompt: "b" },
+        ],
+        async: false,
       });
+      expect(result.isError).toBe(true);
       expect(result.text).toContain("Failed to load");
       expect(result.text).toContain("allowlisted provider extension");
+      expect(result.text).not.toContain("internal dispatch error");
+      expect(subagents.state.callCount).toBe(0);
+      expect(codex.state.callCount).toBe(0);
     },
   );
 
@@ -390,9 +409,14 @@ describe("providerExtensions (#59)", () => {
       });
       expect(first.isError).toBe(false);
 
+      // A different WORKING source changes the allowlist signature
+      // without tripping the resolve-time load probe — the freeze check
+      // is what this test pins; a broken entry would reject on load
+      // first, and a second copy of the same fixture would collide on
+      // the web_search tool name.
       configureDelegate(session, {
         providerExtensions: {
-          "delegate-faux": [extensionDir, installBrokenFixture(session)],
+          "delegate-faux": [installWebSearchFixture(session, "web-search-alt")],
         },
       });
       subagents.respond([fauxAssistantMessage("S2")]);
