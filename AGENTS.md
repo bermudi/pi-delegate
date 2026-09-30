@@ -17,6 +17,15 @@ Before implementing or changing behavior, read `SPEC.md`, `INVARIANTS.md`,
 and `COMPATIBILITY.md` — they are authoritative and describe outcomes, not
 mechanisms. Before migrating or writing tests, read `TEST-MIGRATION.md`.
 
+Issue tracker: all v2-repo issues were transferred here 2026-09-30 — v2
+issue `#N` is now issue `#(N+53)` on this repo (e.g. v2 #55 live-turn
+steering → #108). `#NN` citations written before the merge (SPEC.md,
+INVARIANTS.md, TEST-MIGRATION.md, older test/code comments) use v2
+numbering — add 53 to resolve them. This repo's own #52 (shutdown
+quiescence bound) and #53 (CI deflake) predate the transfer; anything
+citing them in files touched by the 0.3.2 commit means this repo's
+issues, not v2's.
+
 ## Guiding principle: the weights are the platform
 
 The models calling this extension were RL-trained on the incumbent
