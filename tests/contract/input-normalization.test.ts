@@ -55,6 +55,7 @@ describe("input normalization contract", () => {
     const subagents = await installSubagentModel(session);
     subagents.respond([fauxAssistantMessage("NULL-OPID")]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "run" }],
       operationId: null,
     });
@@ -67,6 +68,7 @@ describe("input normalization contract", () => {
     const subagents = await installSubagentModel(session);
     subagents.respond([fauxAssistantMessage("NULL-FIELDS")]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "run", sessionId: null, cwd: null, agent: null }],
     });
     expect(result.isError).toBe(false);
@@ -112,6 +114,7 @@ describe("input normalization contract", () => {
     const subagents = await installSubagentModel(session);
     subagents.respond([fauxAssistantMessage("ONE-SHOT")]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "run", sessionId: "   " }],
     });
     expect(result.isError).toBe(false);
@@ -147,7 +150,7 @@ describe("input normalization contract", () => {
       [{ force: true }, 'delegate_ticket({ action: "cancel", force: true })'],
       [
         { taskId: "t", questionId: "q", answer: "a" },
-        'delegate_ticket({ action: "answer", taskId: "t", questionId: "q", answer: "a" })',
+        'delegate_ticket({ action: "answer", taskId: "t", questionId: "q", answer: "..." })',
       ],
       // #58: the wait-any watch list is ticket-owned — a `tickets`
       // array stranded on delegate routes with a wait example.
@@ -241,12 +244,12 @@ describe("input normalization contract", () => {
     for (const [arguments_, example] of [
       [
         { action: "poll", tasks: [{ prompt: "x" }] },
-        'delegate({ tasks: [{"prompt":"x"}] })',
+        'delegate({ tasks: [{ prompt: "..." }] })',
       ],
       [{ action: "poll", async: true }, "delegate("],
       [{ action: "poll", workspace: "isolated" }, "delegate("],
       [{ action: "poll", operationId: "op-1" }, "delegate("],
-      [{ action: "poll", prompt: "x" }, 'delegate({ tasks: [{"prompt":"x"}] })'],
+      [{ action: "poll", prompt: "x" }, 'delegate({ tasks: [{ prompt: "..." }] })'],
     ] as const) {
       const result = await callTicket(arguments_);
       expect(result.isError).toBe(true);
@@ -307,7 +310,7 @@ describe("input normalization contract", () => {
     const result = await callSession({ action: "list", tasks: [{ prompt: "x" }] });
     expect(result.isError).toBe(true);
     expect(result.text).toContain("delegate(");
-    expect(result.text).toContain('delegate({ tasks: [{"prompt":"x"}] })');
+    expect(result.text).toContain('delegate({ tasks: [{ prompt: "..." }] })');
   });
 
   test("sessionAction on delegate_session says the field is now action", async () => {

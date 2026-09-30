@@ -230,6 +230,7 @@ test(
 
     // While the worker may still mutate, conflicting work rejects.
     const rejected = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "conflict",  tools: ["write"] }],
     });
     expect(rejected.isError).toBe(true);
@@ -250,6 +251,7 @@ test(
     expect(settled.text).not.toMatch(/— (completed|ok)/i);
 
     const admitted = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "after",  tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
@@ -283,6 +285,7 @@ test(
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [
         {
           prompt: "hang",
@@ -299,6 +302,7 @@ test(
 
     // The abandoned worker may still mutate: conflicting work rejects.
     const rejected = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "conflict",  tools: ["write"] }],
     });
     expect(rejected.isError).toBe(true);
@@ -310,6 +314,7 @@ test(
     // provably gone.
     release();
     const admitted = await dispatchUntilAdmitted(session, {
+      async: false,
       tasks: [{ prompt: "after",  tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
@@ -362,12 +367,14 @@ test(
     // The abandoned worker's write scope stays reserved — the block did
     // not make its quarantined resources eligible for reuse.
     const rejected = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "conflict", tools: ["write"] }],
     });
     expect(rejected.isError).toBe(true);
 
     release();
     const admitted = await dispatchUntilAdmitted(session, {
+      async: false,
       tasks: [{ prompt: "after", tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
@@ -474,6 +481,7 @@ test(
     ]);
 
     const pending = callDelegateDetached(session, {
+      async: false,
       tasks: [
         {
           prompt: "hang",
@@ -502,6 +510,7 @@ test(
     // The worker's termination is still unconfirmed: its scope stays
     // reserved until the gate releases and quiescence is proven.
     const rejected = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "conflict",  tools: ["write"] }],
     });
     expect(rejected.isError).toBe(true);
@@ -509,6 +518,7 @@ test(
 
     release();
     const admitted = await dispatchUntilAdmitted(session, {
+      async: false,
       tasks: [{ prompt: "after",  tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
@@ -628,6 +638,7 @@ test(
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "hang",  tools: ["write"] }],
     });
     // The call returned at all: settlement did not wait on the still-gated
@@ -640,12 +651,14 @@ test(
     // Termination is unconfirmed while the gate holds: the worker's scope
     // stays reserved, same as any quarantined cancellation.
     const rejected = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "conflict",  tools: ["write"] }],
     });
     expect(rejected.isError).toBe(true);
 
     release();
     const admitted = await dispatchUntilAdmitted(session, {
+      async: false,
       tasks: [{ prompt: "after",  tools: ["write"] }],
     });
     expect(admitted.isError).toBe(false);
@@ -866,6 +879,7 @@ test(
       subagents.respond([fauxAssistantMessage("SYNC-PREP-DONE")]);
 
       const pending = callDelegateDetached(session, {
+        async: false,
         workspace: "isolated",
         tasks: [{ prompt: "hold at preparation", cwd: repo, tools: ["write"] }],
       });
@@ -1189,6 +1203,7 @@ test(
       await installSubagentModel(session);
 
       const result = await callDelegate(session, {
+        async: false,
         workspace: "isolated",
         tasks: [
           { prompt: "fail at preparation", cwd: repo, tools: ["write"] },

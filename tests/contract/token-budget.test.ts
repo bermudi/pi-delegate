@@ -73,6 +73,7 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
       subagents.respond([held.step]);
 
       const dispatched = await callDelegate(session, {
+        async: true,
         tokenBudget: 1,
         tasks: [
           { id: "a", prompt: "one", tools: ["read"] },
@@ -135,6 +136,7 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
       subagents.respond([byPrompt, byPrompt, byPrompt]);
 
       const dispatched = await callDelegate(session, {
+        async: true,
         tokenBudget: 1,
         tasks: [
           { id: "a", prompt: "one", tools: ["read"] },
@@ -180,6 +182,7 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
       subagents.respond([fauxAssistantMessage("FIRST-DONE")]);
 
       const dispatched = await callDelegate(session, {
+        async: true,
         tokenBudget: 1,
         tasks: [
           { id: "x", prompt: "one", tools: ["read"] },
@@ -220,7 +223,7 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
 
       const dispatched = await callDelegate(session, {
         tokenBudget: 1,
-        async: false,
+        async: true,
         tasks: [{ prompt: "one" }, { prompt: "two" }],
       });
       expect(dispatched.isError).toBe(false);
@@ -269,13 +272,14 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
 
       for (const bad of [0, -5, 1.5, "500"]) {
         const result = await callDelegate(session, {
+          async: false,
           tokenBudget: bad,
           tasks: [{ prompt: "work" }],
         });
         expect(result.isError, `tokenBudget ${JSON.stringify(bad)}`).toBe(true);
         expect(result.text).toMatch(/tokenBudget/);
       }
-      const noTasks = await callDelegate(session, { tokenBudget: 10 });
+      const noTasks = await callDelegate(session, { async: false, tokenBudget: 10 });
       expect(noTasks.isError).toBe(true);
       expect(noTasks.text).toMatch(/tokenBudget.*requires at least one task/);
     },
@@ -317,6 +321,7 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
       subagents.respond([fauxAssistantMessage("DONE")]);
 
       const original = await callDelegate(session, {
+        async: false,
         operationId: "op-budget",
         tokenBudget: 1_000_000,
         tasks: [{ prompt: "one" }],
@@ -324,6 +329,7 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
       expect(original.isError).toBe(false);
 
       const changed = await callDelegate(session, {
+        async: false,
         operationId: "op-budget",
         tokenBudget: 2_000_000,
         tasks: [{ prompt: "one" }],
@@ -333,6 +339,7 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
       expect(changed.text).toMatch(/original request|new operationId/i);
 
       const replay = await callDelegate(session, {
+        async: false,
         operationId: "op-budget",
         tokenBudget: 1_000_000,
         tasks: [{ prompt: "one" }],

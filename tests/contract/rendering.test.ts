@@ -126,6 +126,7 @@ test(
     subagents.respond([fauxAssistantMessage(output)]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "big" }],
     });
     expect(result.text).toContain("spilled to");
@@ -282,7 +283,7 @@ test(
     // expanded view renders their content whole rather than nothing.
     session = await openDelegateBoundary();
 
-    const help = await callDelegate(session, { tasks: [] });
+    const help = await callDelegate(session, { async: false, tasks: [] });
     const expanded = renderToolResult(session, help, true);
     expect(expanded).toContain("Delegate Manual");
   },

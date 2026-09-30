@@ -162,7 +162,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     chmodSync(dir, 0o755);
     try {
       expect((await callDelegateSession(first, { action: "list" })).isError).toBe(false);
-      const sync = await callDelegate(first, { tasks: [{ prompt: "sync works" }] });
+      const sync = await callDelegate(first, { async: false, tasks: [{ prompt: "sync works" }] });
       expect(sync.isError).toBe(false);
       expect(sync.text).toContain("SHOULD-NOT-RUN");
       expect(provider.state.callCount).toBe(1);
@@ -178,7 +178,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     const nextModel = await installSubagentModel(next);
     nextModel.respond([fauxAssistantMessage("SYNC-AFTER-CORRUPTION")]);
     expect((await callDelegateSession(next, { action: "list" })).isError).toBe(false);
-    const sync = await callDelegate(next, { tasks: [{ prompt: "sync despite corrupt journal" }] });
+    const sync = await callDelegate(next, { async: false, tasks: [{ prompt: "sync despite corrupt journal" }] });
     expect(sync.isError).toBe(false);
     expect(sync.text).toContain("SYNC-AFTER-CORRUPTION");
     const corrupt = await callDelegateTicket(next, { action: "poll" });

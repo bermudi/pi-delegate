@@ -21,8 +21,8 @@ below is traced to that evidence.
    RL flywheel and cannot retrain them. The surface meets trained
    reflexes: converge where the idiom is arbitrary, differentiate only
    where the difference is the product, teach every delta at the
-   boundary, and treat a trained reflex hitting our walls as a surface
-   bug — bend the surface before blaming the model.
+   boundary; the user-approved canonical surface below supersedes automatic
+   cross-harness aliases without changing the execution engine.
 
 2. **Records survive supervisors.** The supervision of record outlives
    any session: settled outcomes are durable and cold-recoverable,
@@ -43,13 +43,10 @@ The trained loop is: dispatch returns immediately, the parent keeps
 working, results arrive as wake-up turns with payload in-context, and
 mid-flight the parent can steer. The grammar:
 
-- **Cardinality defaults.** A single task runs sync and returns its
-  result inline (Claude Code `Task` reflex — the largest training
-  surface). A multi-task batch runs async by default: returns a ticket
-  immediately and auto-delivers the settled result as a wake-up turn
-  (codex/grok/letta/minimax reflex). Explicit override both ways:
-  `async: false` blocks a batch (scripts, CI); `async: true`
-  backgrounds a single task.
+- **Stable background default (#61, user-approved 2026-09-29).** Every
+  nonempty dispatch runs async unless the caller passes `async: false`.
+  Task count never changes execution mode. The explicit sync override returns
+  inline results; async tickets still auto-deliver settled results.
 - **No timers.** Parking budgets are rejected: the pros don't decide
   them because their grammar has no long-blocking dispatch to convert
   (#28 superseded). The only timeouts are caller-chosen, on waits.
@@ -160,66 +157,46 @@ mid-flight the parent can steer. The grammar:
 - **Wake delivery.** Settled results inject as follow-up turns,
   leaf-aware; simultaneous settlements batch into one wake.
 
-## Reflex meeting
+## Canonical surface (#61, user-approved 2026-09-29)
 
-- **Agent-name aliases.** Trained names map onto built-ins:
-  `general` → `default`, `general-purpose` → `default`,
-  `scout` → `explore`. Alias expansion is visible in the result so the
-  model learns the canonical name.
-
-  Decided (owner ratification, 2026-09-27; rename 2026-09-28, #40;
-  `explorer` added #44 — codex's built-in role name):
-  `general`, `general-purpose`, and `worker` → `default`;
-  `explorer`, `plan`, and `scout` → `explore`; `implement` → `coder`.
-  The read-only built-in is
-  `explore` — the trained canonical across grok, minimax, and Claude
-  Code; `scout` survives only as a reverse alias. Each alias is sourced
-  from a trained incumbent surface — Claude Code/letta/grok
-  `general-purpose`, MiMo `general`, minimax `worker`, codex
-  `explorer`, grok `plan`,
-  pi-dialect `scout`. Exact case-sensitive match only, no fuzzy
-  matching.
-
-  Alias precedence (#45): a discovered user or project profile claims
-  its exact name ahead of the alias table — an authored `general.md`
-  is that user's agent and the `general` → `default` alias never
-  fires; the alias applies only to names no profile claims. Built-ins
-  still win collisions with same-named profiles (they never leave the
-  catalog), and the unknown-agent error's available list keeps
-  naming built-ins with their live aliases — a claimed alias name is
-  listed as the profile, not as an alias.
-- **Unknown names still error** — with the available list, in one
-  teachable round-trip (the v1 `general` error recovered in one retry).
-- **Cross-harness field spellings.** Task objects also accept the
-  Claude-Code-shaped spellings trained callers emit: `subagent_type`
-  normalizes to `agent` before agent resolution (the alias table
-  applies to it — `subagent_type: "general-purpose"` resolves
-  `default`), `description` (≤200 chars) is a display label preferred
-  over the id in call rows and section headers (never a correlation
-  key), and `run_in_background` — at top level or per task —
-  normalizes to the dispatch-level `async` decision. Top-level
-  `context` is the same folding for the batch `brief` (#43). The
-  #44 tail adds `agent_type` → `agent` (same machinery and conflict
-  rules as `subagent_type`), `task_name` → `id`, and `message` →
-  `prompt` — the spawn_agent-shaped call (`task_name` + `message` on
-  `delegate`) dispatches as a task rather than bouncing to steer
-  guidance, while a bare `message` with no task shape keeps its
-  `delegate_ticket` routing; `message` on `delegate_ticket` stays
-  steer-owned. `delegate_ticket wait` accepts `timeout_ms` →
-  `timeoutMs`. `reasoning_effort` rejects with the same no-caller-
-  effort teaching as `thinking`, at task level, top level, and on
-  the sibling tools (#44).
-  Context-sharing spellings are never folds — `fork_turns`,
-  `fork_context`, `history`, and `parent_context` reject at task and
-  top level, each naming its field, restating that subagents never
-  inherit the conversation, and pointing at the top-level `brief` as
-  the shared-context mechanism (#56).
-  Any two spellings of one field
-  present with different values is a validation
-  error naming both fields; every applied rename is reported on the
-  result/receipt as `field "<field>" → "<to>"`, the same teaching
-  pattern as alias expansion (#41). `additionalProperties: false`
-  stays closed — unrecognized fields still fail at the schema.
+- **One spelling per field.** Canonical dispatch fields are `tasks`,
+  `async`, `workspace`, `brief`, `tokenBudget`, and `operationId`.
+  Task fields retain their canonical names. Cross-harness synonyms
+  (`subagent_type`, `agent_type`, `task_name`, task `message`,
+  `run_in_background`, top-level `context`, `timeout_ms`) reject
+  before any execution, even when null or supplied beside a canonical field.
+  Errors name the canonical replacement; no synonym is silently ignored.
+  A supplied malformed non-array `tasks` value rejects before flat recovery;
+  it must never be discarded in favor of adjacent flat task fields.
+- **Exact agent names.** Built-ins and discovered profiles resolve only by
+  their exact, case-sensitive names. No automatic agent-name translations.
+  User-authored profiles named `general` or `scout` remain valid exact
+  definitions. Unknown names list the available names.
+- **Profile defaults.** Markdown profile `tools` and body provide reusable
+  capability and base-instruction defaults. Full-mode task overrides remain
+  available and retain their existing precedence. Operator configuration,
+  model inheritance, admission, and all safety invariants are unchanged.
+- **Compact/full exposure.** The operator chooses `surface: "compact"`
+  (default) or `surface: "full"` in user-global `delegate.json` and reloads
+  the extension. The choice is session-scoped, never model-family-specific.
+  Both modes use the same execution engine. The advertised schema AND the
+  accepted arguments match the selected mode; hidden advanced inputs must
+  reject with guidance, never silently execute.
+  Compact dispatch advertises `tasks`, `async`, `workspace`, and
+  `brief`; each task has `prompt`, `agent`, `cwd`, and `workspace`.
+  Full mode adds task `id`, `description`, `tools`, `systemPrompt`,
+  `sessionId`, `resumeFrom`, `deadlineMs`, `dependsOn` and batch
+  `tokenBudget`, `operationId`. Compact ticket actions are poll, wait,
+  cancel, answer, steer, and interrupt, with their required addressing and
+  payload fields; full mode also exposes pause/resume/tail, wait-any
+  `tickets`, `timeoutMs`, `steerId`, `offset`, and `waitMs`.
+  Session list/close remain available in both modes. The manual explains how
+  to enable full mode and all retained advanced features.
+- **Description is a feature, not an alias.** The optional task display label
+  remains available in full mode; it is not a task correlation id.
+- **Conversation and model boundaries remain closed.** Parent history is
+  never shared. `context` and foreign history-fork fields reject with
+  guidance toward `brief`; model/effort selectors remain forbidden.
 
 ## Surface rules
 
@@ -302,13 +279,21 @@ mid-flight the parent can steer. The grammar:
 
   Decided (owner ratification, 2026-09-27): rows exist for every
   dispatch that ends before execution — validation rejections
-  (including unknown agent names after alias expansion), config-load
+  (including unknown exact agent names and pre-schema rejections), config-load
   failures, and admission rejections. Each row carries the timestamp,
   the phase, the caller-visible rejection message verbatim, and the
   batch shape (task count, requested agents, workspace selections,
   sync/async). Retention is identical to dispatch rows — one policy,
   no extra knobs. Serialized — not rejected — batches keep riding
   normal completed rows.
+
+  Pre-schema errors carry paths and diagnostic messages only, never Pi's
+  request-body dump. Caller-visible diagnostics are safe before persistence,
+  so the saved misfire message remains verbatim without storing prompt or
+  base-instruction content. Non-object wire arguments also produce a row
+  with empty sanitized batch metadata.
+  Recovery diagnostics omit supplied malformed values and corrective
+  examples use placeholders for task/message/answer bodies.
 
 - **Usage events (#60).** Task settlement emits `delegate:usage` on
   the shared `pi.events` bus: `{ticketId?, taskId?, provider, model,
@@ -357,3 +342,11 @@ with bermudi" — the handoff superseded that):
 - [x] Swap ceremony executed 2026-09-27: `SPEC.md` (v2) →
       `SPEC-V2.md`; this file → `SPEC.md`; AGENTS.md updated; #28/#30
       closed with pointers; #34 closed (spec written and ratified)
+
+### Surface simplification ratification — 2026-09-29 (#61)
+
+User approved items 1–4: canonical fields/exact agent names, profile defaults
+with retained full overrides, operator-selected compact/full schema exposure,
+and one background default independent of task count. This supersedes the
+original alias and cardinality ratifications above; no lifecycle rewrite,
+family-specific interface or weakened safety guarantee was authorized.

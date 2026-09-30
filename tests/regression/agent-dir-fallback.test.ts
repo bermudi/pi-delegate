@@ -77,6 +77,7 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
       try {
         subagents.respond([fauxAssistantMessage("FIRST")]);
         const first = await callDelegate(session, {
+          async: false,
           tasks: [
             { prompt: "remember ALPHA-MARKER", sessionId: "fallback-check" },
           ],
@@ -101,6 +102,7 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
         // again.
         subagents.respond([fauxAssistantMessage("SECOND")]);
         const second = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "again", sessionId: "fallback-check" }],
         });
         expect(second.isError).toBe(false);
@@ -181,6 +183,7 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
       try {
         subagents.respond([fauxAssistantMessage("LAYOUT")]);
         const result = await callDelegate(session, {
+          async: false,
           tasks: [
             { prompt: "remember BETA-MARKER", sessionId: "layout-check" },
           ],
@@ -222,6 +225,7 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
       try {
         subagents.respond([fauxAssistantMessage("PIENV")]);
         const result = await callDelegate(session, {
+          async: false,
           tasks: [
             { prompt: "remember DELTA-MARKER", sessionId: "pi-env-check" },
           ],

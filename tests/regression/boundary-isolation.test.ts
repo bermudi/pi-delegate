@@ -26,9 +26,11 @@ test("overlapping boundaries keep config and transcripts session-local", async (
 
     const results = await Promise.all([
       callDelegate(first, {
+        async: false,
         tasks: [{ agent: "coder", prompt: "first", sessionId: "pooled" }],
       }),
       callDelegate(second, {
+        async: false,
         tasks: [{ agent: "coder", prompt: "second", sessionId: "pooled" }],
       }),
     ]);

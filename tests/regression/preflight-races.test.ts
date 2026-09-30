@@ -34,6 +34,7 @@ test("deadline expires during resource loading without prompting a child", async
     const model = await installSubagentModel(session);
     model.respond([fauxAssistantMessage("late worker")]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "do nothing", tools: [], deadlineMs: 25 }],
     });
     expect(result.isError).toBe(true);
@@ -60,6 +61,7 @@ test("deadline returns even when the resource loader stays blocked", async () =>
     const model = await installSubagentModel(session);
     model.respond([fauxAssistantMessage("late worker")]);
     const dispatch = callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "do nothing", tools: [], deadlineMs: 25 }],
     });
     const result = await Promise.race([
@@ -112,7 +114,7 @@ test("shutdown during sync task resolution cannot start a late worker", async ()
     const tool = delegateTool(session) as unknown as DirectTool;
     const dispatch = tool.execute(
       "shutdown-sync-preflight",
-      { tasks: [{ prompt: "do nothing", tools: ["bash"] }] },
+      { async: false, tasks: [{ prompt: "do nothing", tools: ["bash"] }] },
       new AbortController().signal,
       () => {},
       host.extensionRunner.createContext(),

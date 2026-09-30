@@ -68,6 +68,7 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
       fauxAssistantMessage("WROTE-IT"),
     ]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "write files" }],
     });
     expect(result.isError).toBe(false);
@@ -103,6 +104,7 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
       fauxAssistantMessage("EDITED"),
     ]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "edit the file" }],
     });
     expect(result.isError).toBe(false);
@@ -127,6 +129,7 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
       fauxAssistantMessage("DONE"),
     ]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "write inside and outside", cwd: subdir }],
     });
     expect(result.isError).toBe(false);
@@ -154,6 +157,7 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
       fauxAssistantMessage("RAN-IT"),
     ]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "run a shell command" }],
     });
     expect(result.isError).toBe(false);
@@ -177,6 +181,7 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
       fauxAssistantMessage("DONE"),
     ]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "write and shell" }],
     });
     expect(result.isError).toBe(false);

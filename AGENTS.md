@@ -24,9 +24,10 @@ agent names, fan-out shapes, expected semantics — arrive pre-baked in the
 weights, and we have no RL flywheel to retrain them. Every design decision
 on the model-facing surface answers to this first:
 
-- Meet trained reflexes: accept pro-shaped attempts (alias common agent
-  names like `general`/`general-purpose` → `default`, `scout` → `explore`)
-  rather than erroring on them.
+- User-approved #61 (2026-09-29) supersedes automatic harness compatibility:
+  one canonical spelling per field and exact built-in/authored agent names.
+  Default compact schema; operator `"surface": "full"` plus `/reload` exposes
+  retained advanced controls. Omitted `async` always backgrounds nonempty work.
 - Converge where the idiom is arbitrary (names, argument shapes, defaults);
   differentiate only where the difference IS the product (admission,
   workspaces, tickets). Unjustified divergence is a permanent error-rate
@@ -41,8 +42,8 @@ Origin: 2026-09-27, the `general` first-call error in a v1 dispatch — a
 trained Claude-Code reflex colliding with our registry — and the
 17-repo comparison in `~/build/testing/subagents` (no other surface pays
 this tax; the pros ARE the training distribution). Candidate applications
-on record: agent-name aliases, batch-in-one-call description teaching
-(landed), misfire telemetry for rejected calls (landed — `misfires`
+on record: agent-name aliases (removed by #61), batch-in-one-call description
+teaching (landed), misfire telemetry for rejected calls (landed — `misfires`
 table, schema v5+).
 
 ## Deployment reality (learned 2026-09-27, the hard way)
@@ -84,6 +85,16 @@ patch covers three seams (verify each on every bump):
 Pi >= 0.87 also reads the parent transcript itself after each run
 (`_checkCompaction`), so "getEntries was never called" is no longer a
 valid delegate-only test signal; assert history non-injection by content.
+
+Pi 0.87 skips `tool_result` for prepare/schema failures, but emits
+`tool_execution_start`/`end`. Preflight misfire telemetry uses those events
+with sanitized metadata. Pi's default schema error appends a full
+`Received arguments` dump: Delegate validates prepared input first and emits
+paths/messages only, so neither tool results nor telemetry copy task bodies.
+Recovery guards and correction examples must not reintroduce those dumps.
+Preflight metadata stays owned until actual execute entry: later tool_call
+handlers can still block after earlier handlers approved a call.
+Recheck both seams on upgrades (`surface.test.ts`, `telemetry.test.ts`).
 
 ## Workflow
 
@@ -137,6 +148,9 @@ V1 is evidence for behavior, never a design source. When consulting it:
 - Contract tests whose subsystem isn't implemented use `pendingTest` and
   cite what they assert. Promote them to `test` when the behavior lands —
   or sooner if the assertions already hold.
+- Engine test boundaries explicitly select full mode via the startup fixture;
+  compact/default tests request compact. Inline tests pass `async:false`
+  explicitly—never hide the production default in the call helper.
 - In tests, the session's `agentDir` is its temporary cwd, so
   `<cwd>/delegate.json` stands in for the user-global config.
 - Update `TEST-MIGRATION.md`'s coverage map when migrating or promoting
@@ -160,8 +174,9 @@ V1 is evidence for behavior, never a design source. When consulting it:
   never imported. Frontmatter `model:`/`thinking`/`tools` are profile
   defaults below delegate.json pins. `models`/`modelsByParent` keys may name
   built-ins and globally defined profiles only — project profiles pin via
-  frontmatter `model:`. Discovered profiles outrank the alias table (#45):
-  an authored `general.md` claims `general` and the alias never fires.
+  frontmatter `model:`. Names resolve exactly (#61): authored `general.md`
+  and `scout.md` are ordinary profiles, not aliases. Profile tools/body supply
+  reusable defaults; full-mode task overrides remain available.
 - Subagents never nest dispatch (#45): `delegate`/`delegate_ticket`/
   `delegate_session` are stripped — silently — from every child toolset
   (explicit `tools`, profile frontmatter, mirrored parent inventory).

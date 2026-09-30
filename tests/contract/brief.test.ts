@@ -11,6 +11,7 @@ import {
   callDelegate,
   callDelegateTicket,
   installSubagentModel,
+  objectOf,
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
@@ -107,6 +108,7 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
         async: false,
       });
       expect(result.isError).toBe(false);
+      expect(objectOf(result.details, "details").brief).toBe("BRIEF-HEADER-CHECK");
       expect(occurrences(result.text, 'brief: "BRIEF-HEADER-CHECK"')).toBe(1);
       // One mention, in the head — the task sections themselves carry
       // no brief text (the children carry it, not the report).
@@ -121,7 +123,7 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
     "the async receipt and ticket view name the brief once, surviving recovery",
     async () => {
       // The receipt is the only sync surface an async call has (same
-      // rationale as the alias notes), and the ticket record persists
+      // rationale as other receipt metadata), and the ticket record persists
       // the brief so a post-restart view still names it.
       session = await openDelegateBoundary();
       const agentDir = session.cwd;
@@ -136,7 +138,8 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
         async: true,
       });
       expect(dispatched.isError).toBe(false);
-      expect(dispatched.text).toContain('brief: "ASYNC-BRIEF-MARKER"');
+      expect(occurrences(dispatched.text, 'brief: "ASYNC-BRIEF-MARKER"')).toBe(1);
+      expect(objectOf(dispatched.details, "details").brief).toBe("ASYNC-BRIEF-MARKER");
       const ticket = ticketIdOf(dispatched.text);
       const settled = await callDelegateTicket(session, {
         action: "wait",
@@ -155,75 +158,52 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
         ticket,
       });
       expect(recovered.isError).toBe(false);
-      expect(recovered.text).toContain('brief: "ASYNC-BRIEF-MARKER"');
+      expect(occurrences(recovered.text, 'brief: "ASYNC-BRIEF-MARKER"')).toBe(1);
       next.dispose();
     },
   );
 
-  test(
-    "context normalizes to brief with a visible field note",
-    async () => {
-      // SPEC v3 "Reflex meeting": `context` is the cross-harness
-      // spelling — it folds into `brief` and the rename is reported
-      // like every applied normalization.
+  for (const value of ["SHARED-BRIEF", "different text", null]) {
+    test(`context rejects before execution even beside canonical brief (${value})`, async () => {
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
-      const prompts: string[] = [];
-      subagents.respond([
-        (context) => {
-          prompts.push(firstUserText(context));
-          return fauxAssistantMessage("DONE");
-        },
-      ]);
-
       const result = await callDelegate(session, {
-        context: "CTX-SPELLING-BRIEF",
-        tasks: [{ prompt: "one" }],
-      });
-      expect(result.isError).toBe(false);
-      expect(result.text).toContain('field "context" → "brief"');
-      expect(result.text).toContain('brief: "CTX-SPELLING-BRIEF"');
-      expect(prompts[0]).toContain("CTX-SPELLING-BRIEF");
-      expect(prompts[0]).toContain("--- batch brief ---");
-    },
-  );
-
-  test(
-    "conflicting brief and context reject naming both",
-    async () => {
-      session = await openDelegateBoundary();
-      const result = await callDelegate(session, {
-        brief: "version A",
-        context: "version B",
-        tasks: [{ prompt: "work" }],
+        brief: "SHARED-BRIEF", context: value,
+        tasks: [{ prompt: "valid sibling" }, { prompt: "work" }],
       });
       expect(result.isError).toBe(true);
-      expect(result.text).toContain("'brief'");
-      expect(result.text).toContain("'context'");
-    },
-  );
+      expect(result.text).toContain("context");
+      expect(result.text).toContain("brief");
+      expect(subagents.state.callCount).toBe(0);
+    });
+  }
 
-  test(
-    "an absent brief leaves prompts and results untouched",
-    async () => {
-      session = await openDelegateBoundary();
-      const subagents = await installSubagentModel(session);
-      const prompts: string[] = [];
-      subagents.respond([
-        (context) => {
-          prompts.push(firstUserText(context));
-          return fauxAssistantMessage("DONE");
-        },
-      ]);
+  for (const brief of [undefined, "   "]) {
+    test(
+      `an absent or whitespace-only brief leaves prompts and results untouched (${brief})`,
+      async () => {
+        session = await openDelegateBoundary();
+        const subagents = await installSubagentModel(session);
+        const prompts: string[] = [];
+        subagents.respond([
+          (context) => {
+            prompts.push(firstUserText(context));
+            return fauxAssistantMessage("DONE");
+          },
+        ]);
 
-      const result = await callDelegate(session, {
-        tasks: [{ prompt: "plain task" }],
-      });
-      expect(result.isError).toBe(false);
-      expect(result.text).not.toContain("brief:");
-      expect(prompts[0]).toBe("plain task");
-    },
-  );
+        const result = await callDelegate(session, {
+          async: false,
+          tasks: [{ prompt: "plain task" }],
+          ...(brief === undefined ? {} : { brief }),
+        });
+        expect(result.isError).toBe(false);
+        expect(result.text).not.toContain("brief:");
+        expect(prompts[0]).toBe("plain task");
+      },
+    );
+
+  }
 
   test(
     "a dependent's prompt keeps the handoff appendix trailing the brief",

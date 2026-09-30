@@ -53,6 +53,7 @@ describe("regression: child sessions disable Pi's per-turn auto-retry", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "hit a transient provider error" }],
       });
 

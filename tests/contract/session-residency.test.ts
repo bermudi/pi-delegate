@@ -62,10 +62,12 @@ describe("pooled-session residency — idle sessions unload to disk (SPEC v3, is
 
       subagents.respond([fauxAssistantMessage("FIRST")]);
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "remember ALPHA-MARKER", sessionId: "s1" }],
       });
       subagents.respond([fauxAssistantMessage("SECOND")]);
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "s2" }],
       });
 
@@ -82,6 +84,7 @@ describe("pooled-session residency — idle sessions unload to disk (SPEC v3, is
         );
       subagents.respond([sawHistory]);
       const second = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "again", sessionId: "s1" }],
       });
       expect(second.isError).toBe(false);
@@ -105,13 +108,16 @@ describe("pooled-session residency — idle sessions unload to disk (SPEC v3, is
 
       subagents.respond([fauxAssistantMessage("hi"), fauxAssistantMessage("hi")]);
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "conv", tools: ["read"] }],
       });
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "other" }],
       });
       // 'conv' is now the unloaded record; reuse must still reject.
       const mismatched = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "x", sessionId: "conv", tools: ["read", "bash"] },
         ],
@@ -136,9 +142,11 @@ describe("pooled-session residency — idle sessions unload to disk (SPEC v3, is
         fauxAssistantMessage("TWO"),
       ]);
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "s1" }],
       });
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "s2" }],
       });
 
@@ -159,6 +167,7 @@ describe("pooled-session residency — idle sessions unload to disk (SPEC v3, is
       // on disk. s3 is read-only so admission does not pin it behind s2's
       // shared write reservation.
       const third = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "s3", tools: ["read"] }],
       });
       expect(third.isError).toBe(false);
@@ -198,9 +207,11 @@ describe("pooled-session residency — idle sessions unload to disk (SPEC v3, is
         fauxAssistantMessage("B"),
       ]);
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "one" }],
       });
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "two" }],
       });
       const listed = await callDelegateSession(session, { action: "list" });

@@ -33,6 +33,7 @@ describe("regression: parent model-runtime grab", () => {
       };
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "never starts" }],
       });
 

@@ -1,5 +1,34 @@
 # Delegate v2 compatibility contract
 
+## Simplified v3 surface (#61, user-approved 2026-09-29)
+
+This section supersedes the older alias and cardinality entries below.
+
+- BREAKING: omitted `async` now means background execution for one task as
+  well as many. Add `async: false` where inline results are required.
+- BREAKING: cross-harness field synonyms and built-in name translations are
+  removed. Use `agent`, `prompt`, `id`, `async`, `brief`, and
+  `timeoutMs`, plus exact built-in or authored profile names. Removed
+  fields reject the entire call, including null values. Existing saved
+  ticket metadata remains readable; it does not authorize new alias calls.
+- BREAKING: the default advertised and accepted surface is compact.
+  Set `"surface": "full"` in user-global `delegate.json` and reload to
+  retain all canonical advanced call controls. `"surface": "compact"`
+  is the default. Invalid surface values fail visibly; no per-model choice.
+- Malformed supplied non-array `tasks` reject instead of being discarded by
+  flat recovery. Schema diagnostics exclude request-body dumps; pre-schema
+  rejection telemetry stores those safe messages verbatim, never prompts or
+  base instructions. Non-object calls also record empty-shape misfires.
+  Recovery guards omit malformed values; correction examples retain relevant
+  addresses but use placeholders for task/message/answer bodies.
+- Reusable tools/base-instruction choices belong in Markdown profiles;
+  explicit per-task overrides remain available in full mode. Dependencies,
+  deadlines, budgets, resume, pooled sessions, output tailing and pause/resume
+  are not deleted. Compact ticket waits have no caller timeout; explicit
+  polling is immediate and full mode retains detach-only `timeoutMs`.
+- No changes to cancellation, workspace admission/application, session
+  freezing, model authorization, usage, durable results, or delivery.
+
 ## v2 → v3 changes (SPEC v3, ratified 2026-09-27)
 
 v3 is a contract layer on the same engine. Caller-visible changes:

@@ -2,8 +2,10 @@ import {
   Type,
   type Static,
   type TSchemaOptions,
+  type TSchema,
   type TUnsafe,
 } from "typebox";
+import * as Value from "typebox/value";
 import {
   defineTool,
   type AgentToolResult,
@@ -21,7 +23,9 @@ import {
   loadDelegateConfig,
   resolveAgentDir,
   telemetryConfigHint,
+  loadDelegateSurface,
   type DelegateConfig,
+  type DelegateSurface,
   type TelemetryConfig,
 } from "./src/config.ts";
 import type {
@@ -38,10 +42,8 @@ import {
   type DispatchOutcome,
 } from "./src/coordinator.ts";
 import {
-  aliasNote,
   briefNote,
   budgetNote,
-  fieldNotes,
   formatDispatchResult,
   serializedNotices,
 } from "./src/format.ts";
@@ -60,7 +62,7 @@ import {
 import { createActivityStore } from "./src/activity.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
 import { currentBootId } from "./src/owner.ts";
-import { canonicalAgentName, discoverProfiles } from "./src/profiles.ts";
+import { discoverProfiles } from "./src/profiles.ts";
 import {
   createMessageRenderer,
   createResultRenderer,
@@ -172,45 +174,11 @@ const taskSchema = Type.Object(
           "Ids of tasks in this batch that must succeed before this one starts; their outputs are handed off.",
       }),
     ),
-    // Cross-harness compatibility spellings (SPEC v3 "Reflex meeting"):
-    // other harnesses' trained field names normalize onto canonical ones
-    // at validation — the receipt and result say so per applied rename.
-    subagent_type: Type.Optional(
-      Type.String({
-        description:
-          "Cross-harness spelling of 'agent' (Claude Code Task field): normalizes to agent before resolution, so aliases apply. Both present and differing is an error.",
-      }),
-    ),
     description: Type.Optional(
       Type.String({
         maxLength: 200,
         description:
-          "Cross-harness spelling (Claude Code Task field): a short label shown in place of the task id in call rows and section headers. Not a correlation key — dependsOn, answer, and steer still use id.",
-      }),
-    ),
-    run_in_background: Type.Optional(
-      Type.Boolean({
-        description:
-          "Cross-harness spelling of 'async' (Claude Code Task field): normalizes to the dispatch-level async decision. Conflicting values across fields is an error.",
-      }),
-    ),
-    agent_type: Type.Optional(
-      Type.String({
-        description:
-          "Cross-harness spelling of 'agent' (Minimax/OpenCode Task field): normalizes to agent before resolution, so aliases apply. Both present and differing is an error.",
-      }),
-    ),
-    task_name: Type.Optional(
-      Type.String({
-        pattern: "^[A-Za-z0-9._-]{1,64}$",
-        description:
-          "Cross-harness spelling of 'id' (OpenAI Agents/Minimax spawn field): normalizes to the task id. Both present and differing is an error.",
-      }),
-    ),
-    message: Type.Optional(
-      Type.String({
-        description:
-          "Cross-harness spelling of 'prompt' when it appears inside a task object, or on a task-shaped flat call (spawn_agent style with 'task_name'). Both present and differing is an error.",
+          "Optional short label shown in place of the task id in call rows and section headers. Not a correlation key — dependsOn, answer, and steer still use id.",
       }),
     ),
   },
@@ -227,13 +195,7 @@ const delegateSchema = Type.Object(
     async: Type.Optional(
       Type.Boolean({
         description:
-          "Default depends on cardinality: one task runs synchronously and returns inline; a multi-task batch returns a ticket immediately and delivers the settled result automatically. Pass true to background a single task, false to block on a batch. Inspect or control tickets with delegate_ticket.",
-      }),
-    ),
-    run_in_background: Type.Optional(
-      Type.Boolean({
-        description:
-          "Cross-harness spelling of 'async' (Claude Code Task field): normalizes to the dispatch-level async decision; 'async' wins when both say the same, a value conflict is an error.",
+          "Every nonempty call returns a background ticket and delivers results automatically. Pass async: false to wait for inline results, regardless of task count. Inspect or control tickets with delegate_ticket.",
       }),
     ),
     workspace: Type.Optional(
@@ -246,12 +208,6 @@ const delegateSchema = Type.Object(
       Type.String({
         description:
           "Shared batch brief — context every task needs (spec, conventions, goal). Prepended to each task's prompt as a delimited preamble; the result header notes it once. Each task's 'prompt' stays required.",
-      }),
-    ),
-    context: Type.Optional(
-      Type.String({
-        description:
-          "Cross-harness spelling of 'brief': normalizes to the shared batch brief; sending both with different text is an error.",
       }),
     ),
     tokenBudget: Type.Optional(
@@ -294,12 +250,6 @@ const ticketSchema = Type.Object(
       Type.Number({
         description:
           "Maximum wait in milliseconds; only with action 'wait'. A timeout detaches the waiter only — the ticket keeps running.",
-      }),
-    ),
-    timeout_ms: Type.Optional(
-      Type.Number({
-        description:
-          "Cross-harness spelling of 'timeoutMs': normalizes to it; both present and differing is an error.",
       }),
     ),
     force: Type.Optional(
@@ -370,6 +320,95 @@ const sessionSchema = Type.Object(
   { additionalProperties: false },
 );
 
+// Compact schemas are actual declarations/validators, not documentation-only
+// hiding. Full schemas remain the single canonical normalization vocabulary.
+const compactTaskSchema = Type.Object({
+  ...Type.Pick(taskSchema, ["agent", "cwd", "workspace"]).properties,
+  prompt: Type.String({ description: "Self-contained task; children never see the parent conversation." }),
+}, { additionalProperties: false });
+const compactDelegateSchema = Type.Object({
+  tasks: Type.Array(compactTaskSchema, {
+    minItems: 0,
+    description: "Self-contained tasks. Batch related work in one call; [] shows the manual.",
+  }),
+  async: delegateSchema.properties.async,
+  workspace: delegateSchema.properties.workspace,
+  brief: delegateSchema.properties.brief,
+}, { additionalProperties: false });
+const compactTicketActions = ["poll", "wait", "cancel", "answer", "steer", "interrupt"] as const;
+const compactTicketSchema = Type.Object({
+  ...Type.Pick(ticketSchema, ["force", "questionId", "answer", "message"]).properties,
+  ticket: Type.Optional(Type.String({
+    description: "Ticket id; omit on poll to list tickets, or when taskId is a '<ticket>#<task>' address.",
+  })),
+  taskId: Type.Optional(Type.String({
+    description: "Task to answer, steer or interrupt. A '<ticket>#<task>' address also supplies the ticket.",
+  })),
+  action: stringEnum(compactTicketActions, {
+    description: "poll: current status; wait: settlement or a new question/interruption; cancel: preview, or cancel with force:true; answer: reply to a worker; steer: send instructions; interrupt: stop a turn, retaining its transcript.",
+  }),
+}, { additionalProperties: false });
+
+/**
+ * Validate before Pi's fallback error can append the entire request body.
+ * Use the same conversion/checker library as Pi, after our recovery guards;
+ * diagnostics contain schema paths/messages only, never argument dumps.
+ */
+function validatePreparedArguments<T extends TSchema>(
+  name: string,
+  schema: T,
+  value: unknown,
+): Static<T> {
+  const prepared: unknown = structuredClone(value);
+  Value.Convert(schema, prepared);
+  if (Value.Check(schema, prepared)) return prepared;
+  const errors = Value.Errors(schema, prepared);
+  throw new Error(`Validation failed for tool "${name}":\n${errors
+    .map((error) => `- ${error.instancePath || "/"}: ${error.message}`)
+    .join("\n")}`);
+}
+
+function rejectCompactFields(
+  value: unknown,
+  surface: DelegateSurface,
+  tool: "delegate" | "delegate_ticket",
+): void {
+  if (surface === "full" || !isRecord(value)) return;
+  const reject = (record: Record<string, unknown>, fields: readonly string[]): void => {
+    for (const field of fields) {
+      if (Object.hasOwn(record, field)) {
+        throw new Error(`'${field}' requires the full delegate surface. Set "surface": "full" in user-global delegate.json and /reload, or use a named profile for reusable tools/base instructions.`);
+      }
+    }
+  };
+  if (tool === "delegate_ticket") {
+    reject(value, Object.keys(ticketSchema.properties).filter(
+      (key) => !Object.hasOwn(compactTicketSchema.properties, key),
+    ));
+    if (typeof value.action === "string" &&
+        TICKET_ACTIONS.includes(value.action) &&
+        !(compactTicketActions as readonly string[]).includes(value.action)) {
+      throw new Error(`Ticket action "${value.action}" requires "surface": "full" in user-global delegate.json and /reload.`);
+    }
+    return;
+  }
+  const advancedTaskFields = Object.keys(taskSchema.properties).filter(
+    (key) => !Object.hasOwn(compactTaskSchema.properties, key),
+  );
+  reject(value, [
+    ...advancedTaskFields,
+    ...Object.keys(delegateSchema.properties).filter(
+      (key) => !Object.hasOwn(compactDelegateSchema.properties, key),
+    ),
+  ]);
+  const tasks = typeof value.tasks === "string" ? parseArray(value.tasks) : value.tasks;
+  if (Array.isArray(tasks)) {
+    for (const task of tasks) {
+      if (isRecord(task)) reject(task, advancedTaskFields);
+    }
+  }
+}
+
 type DelegateArguments = Static<typeof delegateSchema>;
 type TicketToolArguments = Static<typeof ticketSchema>;
 type SessionToolArguments = Static<typeof sessionSchema>;
@@ -423,12 +462,10 @@ const dispatchFieldNames = [
   "workspace",
   "operationId",
   "tokenBudget",
-  // `message` is a task field on delegate (spawn_agent's `prompt` spelling)
-  // but ticket-owned on delegate_ticket (steer) — it must not bounce there.
   ...taskFieldNames.filter(
-    (field) => field !== "sessionId" && field !== "message",
+    (field) => field !== "sessionId",
   ),
-  "context",
+  "brief",
 ] as const;
 
 /** Ticket-owned fields for delegate_session's foreign-field guidance. */
@@ -438,7 +475,6 @@ const ticketFieldNames = [
   "tickets",
   "force",
   "timeoutMs",
-  "timeout_ms",
   "taskId",
   "questionId",
   "answer",
@@ -457,7 +493,7 @@ function isBlank(value: unknown): boolean {
   return typeof value === "string" && value.trim() === "";
 }
 
-/** `null` means "not given" at every level of every tool's arguments. */
+/** Accepted fields may use null for "not given"; removed/hidden fields reject first. */
 function stripNulls(record: Record<string, unknown>): void {
   for (const key of Object.keys(record)) {
     if (record[key] === null) delete record[key];
@@ -525,26 +561,25 @@ function delegateTicketExample(args: Record<string, unknown>): string {
   if (action === "cancel" && args.force === true) fields.push("force: true");
   if (action === "wait") {
     if (Array.isArray(args.tickets) && args.tickets.length > 0) {
-      fields.push(`tickets: ${JSON.stringify(args.tickets)}`);
+      fields.push(`tickets: ${args.tickets.every((id) => typeof id === "string")
+        ? JSON.stringify(args.tickets) : '["<ticket>"]'}`);
     }
-    const timeout =
-      typeof args.timeoutMs === "number" ? args.timeoutMs : args.timeout_ms;
+    const timeout = args.timeoutMs;
     if (typeof timeout === "number") {
-      // Teach the canonical spelling even when `timeout_ms` was sent.
       fields.push(`timeoutMs: ${JSON.stringify(timeout)}`);
     }
   }
   if (action === "answer") {
     for (const key of ["taskId", "questionId", "answer"] as const) {
       if (typeof args[key] === "string" && !isBlank(args[key])) {
-        fields.push(`${key}: ${JSON.stringify(args[key])}`);
+        fields.push(`${key}: ${key === "answer" ? '"..."' : JSON.stringify(args[key])}`);
       }
     }
   }
   if (action === "steer") {
     for (const key of ["taskId", "message", "steerId"] as const) {
       if (typeof args[key] === "string" && !isBlank(args[key])) {
-        fields.push(`${key}: ${JSON.stringify(args[key])}`);
+        fields.push(`${key}: ${key === "message" ? '"..."' : JSON.stringify(args[key])}`);
       }
     }
   }
@@ -582,18 +617,9 @@ function delegateSessionExample(args: Record<string, unknown>): string {
   return `delegate_session({ ${fields.join(", ")} })`;
 }
 
-/** A `delegate` dispatch example built from the task fields the caller sent. */
-function delegateDispatchExample(args: Record<string, unknown>): string {
-  if (Array.isArray(args.tasks)) {
-    return `delegate({ tasks: ${JSON.stringify(args.tasks)} })`;
-  }
-  const task: Record<string, unknown> = {};
-  for (const key of taskFieldNames) {
-    if (args[key] !== undefined) task[key] = args[key];
-  }
-  return Object.keys(task).length > 0
-    ? `delegate({ tasks: [${JSON.stringify(task)}] })`
-    : `delegate({ tasks: [{ prompt: "..." }] })`;
+/** Corrective examples never copy task bodies into failure diagnostics. */
+function delegateDispatchExample(_args: Record<string, unknown>): string {
+  return 'delegate({ tasks: [{ prompt: "..." }] })';
 }
 
 /**
@@ -613,18 +639,27 @@ function unrunFieldsNote(
         .join(", ")} separately.`;
 }
 
-/** The removed task-level `context` field's trained values (v1 transcript sharing). */
-const OBSOLETE_CONTEXT_VALUES = ["fresh", "with-parent-transcript"] as const;
-
-/** Run before host schema coercion so obsolete fields receive migration guidance. */
+/** Context is removed at both levels; parent history never enters a child. */
 function rejectObsoleteContext(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "context")) {
     throw new Error(
-      'The context field has been removed (including "fresh" and "with-parent-transcript"). ' +
-        'Omit context and provide a self-contained task brief; parent conversation history is never shared. ' +
-        'For shared batch context, a top-level "brief" (or "context") prepends a preamble to every task. ' +
-        'Child-owned sessionId and resumeFrom history remain supported.',
+      'The context field has been removed. Omit context and provide a self-contained prompt; use the top-level "brief" for shared batch context. ' +
+        "parent conversation history is never shared. Child-owned sessionId and resumeFrom history remain supported.",
     );
+  }
+}
+
+/** Removed compatibility fields reject on presence, before null/blank recovery. */
+function rejectFieldAliases(record: Record<string, unknown>, task: boolean): void {
+  const replacements: Readonly<Record<string, string>> = {
+    subagent_type: "agent", agent_type: "agent", task_name: "id",
+    run_in_background: "async", timeout_ms: "timeoutMs",
+    ...(task ? { message: "prompt" } : {}),
+  };
+  for (const [field, replacement] of Object.entries(replacements)) {
+    if (Object.hasOwn(record, field)) {
+      throw new Error(`The ${field} field has been removed; use "${replacement}" instead.`);
+    }
   }
 }
 
@@ -660,6 +695,7 @@ function normalizeTask(value: unknown, index: number): unknown {
   const task = { ...value };
   // Presence of `context` rejects even when null — before null stripping.
   rejectObsoleteContext(task);
+  rejectFieldAliases(task, true);
   // Same for the foreign context-sharing spellings (#56).
   rejectForeignContextFields(task);
   stripNulls(task);
@@ -673,7 +709,7 @@ function normalizeTask(value: unknown, index: number): unknown {
     throw new Error(`tasks[${index}]: ${REASONING_EFFORT_FIELD_REJECTION}`);
   }
   if (typeof task.tools === "string") task.tools = normalizeTools(task.tools);
-  stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent", "subagent_type", "agent_type", "task_name", "description"]);
+  stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent", "description"]);
   return task;
 }
 
@@ -696,22 +732,17 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
     typeof args.operationId !== "string"
   ) {
     throw new Error(
-      `'operationId' must be a string of 1-64 letters, digits, dots, underscores, or hyphens, not ${JSON.stringify(args.operationId)}.`,
+      "'operationId' must be a string of 1-64 letters, digits, dots, underscores, or hyphens.",
     );
   }
   if (typeof args.async === "string") {
     throw new Error(
-      `'async' must be a boolean, not the string ${JSON.stringify(args.async)}.`,
-    );
-  }
-  if (typeof args.run_in_background === "string") {
-    throw new Error(
-      `'run_in_background' must be a boolean, not the string ${JSON.stringify(args.run_in_background)}.`,
+      "'async' must be a boolean, not a string.",
     );
   }
   if (typeof args.tokenBudget === "string") {
     throw new Error(
-      `'tokenBudget' must be a positive integer, not the string ${JSON.stringify(args.tokenBudget)}.`,
+      "'tokenBudget' must be a positive integer, not a string.",
     );
   }
   // The TypeBox Integer schema silently floors a fractional value on
@@ -732,17 +763,12 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
     // a surviving string is ambiguous by construction.
     if (typeof task.tools === "string") {
       throw new Error(
-        `${where}: 'tools' must be an array of tool names — a JSON array string or one bare name also works — not the ambiguous string ${JSON.stringify(task.tools)}.`,
+        `${where}: 'tools' must be an array of tool names — a JSON array string or one bare name also works — not an ambiguous string.`,
       );
     }
     if (typeof task.deadlineMs === "string") {
       throw new Error(
-        `${where}: 'deadlineMs' must be a positive number, not the string ${JSON.stringify(task.deadlineMs)}.`,
-      );
-    }
-    if (typeof task.run_in_background === "string") {
-      throw new Error(
-        `${where}: 'run_in_background' must be a boolean, not the string ${JSON.stringify(task.run_in_background)}.`,
+        `${where}: 'deadlineMs' must be a positive number, not a string.`,
       );
     }
   });
@@ -760,35 +786,16 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   if (!isRecord(value)) return value as DelegateArguments;
 
   const args = { ...value };
-  // Top-level `context` is the batch `brief` under a cross-harness
-  // spelling (#43) — validation folds it with a rename note. The removed
-  // task field's trained values still mean transcript sharing and keep
-  // the migration error, as does a non-string `context` (its misuse).
-  if (
-    Object.hasOwn(args, "context") &&
-    (typeof args.context !== "string" ||
-      (OBSOLETE_CONTEXT_VALUES as readonly string[]).includes(args.context))
-  ) {
-    rejectObsoleteContext(args);
+  rejectObsoleteContext(args);
+  rejectFieldAliases(args, false);
+  if (Object.hasOwn(args, "message")) {
+    throw new Error('The message field is not a dispatch field; use "prompt" for a task, or delegate_ticket({ action: "steer", ticket: "...", message: "..." }) to steer existing work.');
   }
   // Foreign context-sharing spellings reject at the top level too (#56)
   // — before null stripping, so a `null` presence still teaches.
   rejectForeignContextFields(args);
   stripNulls(args);
   stripBlank(args, ["operationId", "sessionId", "cwd", "resumeFrom", "agent"]);
-
-  // #44 misroute fix: `message` is steer-owned only when the call is not
-  // task-shaped. A spawn_agent-shaped call (`task_name`/`message`, or any
-  // task field beside it) folds `message` into the task's prompt below —
-  // the ticket guidance must not swallow it. `message` alone still bounces.
-  const taskShaped =
-    (Array.isArray(args.tasks) && args.tasks.length > 0) ||
-    taskFieldNames.some(
-      (field) =>
-        field !== "message" &&
-        field !== "run_in_background" &&
-        args[field] !== undefined,
-    );
 
   // Fields the pre-split tool owned: guidance with an example to the right
   // tool beats a bare additionalProperties failure.
@@ -803,7 +810,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     args.steerId !== undefined ||
     args.offset !== undefined ||
     args.waitMs !== undefined ||
-    (args.message !== undefined && !taskShaped)
+    args.message !== undefined
   ) {
     throw new Error(
       `Ticket operations moved to delegate_ticket: ${delegateTicketExample(args)}.` +
@@ -828,8 +835,8 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
         unrunFieldsNote(args, ["sessionAction"]),
     );
   }
-  if (args.timeoutMs !== undefined || args.timeout_ms !== undefined) {
-    const sent = args.timeoutMs ?? args.timeout_ms;
+  if (args.timeoutMs !== undefined) {
+    const sent = typeof args.timeoutMs === "number" ? args.timeoutMs : 1000;
     throw new Error(
       `A delegate run waits for every task and cannot be bounded with timeoutMs. ` +
         `Dispatch with async: true, then bound the wait on its ticket: ` +
@@ -860,16 +867,19 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     const parsed = parseArray(args.tasks);
     if (parsed) args.tasks = parsed;
   }
+  if (args.tasks !== undefined && !Array.isArray(args.tasks)) {
+    if (isRecord(args.tasks)) {
+      rejectObsoleteContext(args.tasks);
+      rejectFieldAliases(args.tasks, true);
+      rejectForeignContextFields(args.tasks);
+    }
+    throw new Error("Validation failed: 'tasks' must be an array of task objects (or a JSON-encoded array); malformed tasks cannot be discarded by flat-field recovery.");
+  }
 
   const hasTasks = Array.isArray(args.tasks) && args.tasks.length > 0;
   if (!hasTasks) {
     const task: Record<string, unknown> = {};
     for (const field of taskFieldNames) {
-      // run_in_background is a task field in the schema (per-task
-      // spelling) but a dispatch-level decision in flat calls — it stays
-      // top-level so `{run_in_background: true}` alone still fails as
-      // "async dispatch requires at least one task".
-      if (field === "run_in_background") continue;
       if (args[field] !== undefined) {
         task[field] = args[field];
         delete args[field];
@@ -880,12 +890,10 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     // Flat fields cannot merge into an explicit batch (SPEC: folding only
     // applies without a task array) — a stray task field beside one is a
     // caller mistake, so name it rather than surfacing a bare
-    // additionalProperties error. `workspace` and `run_in_background` are
-    // excluded: both are also legal top-level dispatch fields.
+    // additionalProperties error. workspace is also a legal batch field.
     const stray = taskFieldNames.filter(
       (field) =>
         field !== "workspace" &&
-        field !== "run_in_background" &&
         args[field] !== undefined,
     );
     if (stray.length > 0) {
@@ -916,6 +924,8 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
   if (!isRecord(value)) return value as TicketToolArguments;
 
   const args = { ...value };
+  rejectObsoleteContext(args);
+  rejectFieldAliases(args, false);
   stripNulls(args);
   // Blank `answer`/`message` survive: only validation may tell a
   // present-but-empty reply or steer from a missing one — a non-owning
@@ -965,17 +975,12 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
   }
   if (typeof args.force === "string") {
     throw new Error(
-      `'force' must be a boolean, not the string ${JSON.stringify(args.force)}.`,
+      "'force' must be a boolean, not a string.",
     );
   }
   if (typeof args.timeoutMs === "string") {
     throw new Error(
-      `'timeoutMs' must be a number, not the string ${JSON.stringify(args.timeoutMs)}.`,
-    );
-  }
-  if (typeof args.timeout_ms === "string") {
-    throw new Error(
-      `'timeout_ms' must be a number, not the string ${JSON.stringify(args.timeout_ms)}.`,
+      "'timeoutMs' must be a number, not a string.",
     );
   }
 
@@ -991,6 +996,8 @@ function prepareSessionArguments(value: unknown): SessionToolArguments {
   if (!isRecord(value)) return value as SessionToolArguments;
 
   const args = { ...value };
+  rejectObsoleteContext(args);
+  rejectFieldAliases(args, false);
   stripNulls(args);
   stripBlank(args, ["sessionId"]);
 
@@ -1048,46 +1055,46 @@ Three sibling tools share Delegate's machinery:
   resume, answer, steer, interrupt, tail.
 - \`delegate_session\` lists and closes pooled subagent sessions.
 
-## delegate — dispatch
-- \`tasks\` (required): a non-empty array dispatches work; \`[]\` shows this
-  manual. The default depends on cardinality: a single task waits and
-  returns its result inline; a multi-task batch returns a ticket
-  immediately and delivers the settled result automatically, so do not
-  poll in a loop. \`async\` overrides both ways: \`true\` backgrounds a
-  single task, \`false\` blocks on a batch (results in input order).
-- Task fields: \`prompt\` (required unless \`resumeFrom\`), \`id\` (correlation
-  key), \`agent\` (\`default\`/\`explore\`/\`coder\`/\`reviewer\`/\`verifier\`;
-  omit for inline), \`cwd\`, \`systemPrompt\`, \`tools\` (\`*\` writer group, \`ro\`
-  read-only group, or tool names), \`deadlineMs\` (ms),
-  \`sessionId\`, \`resumeFrom\`, \`workspace\` (shared/scratch/isolated),
-  \`dependsOn\` (task ids to run first). Cross-harness spellings also
-  work: \`subagent_type\`/\`agent_type\` → \`agent\`, \`task_name\` →
-  \`id\`, \`message\` beside task-shaped fields → \`prompt\`,
-  \`description\` labels the task in views, \`run_in_background\`
-  (top-level or per task) → \`async\`; each applied rename is reported
-  on the result.
-  A top-level \`workspace\` is the batch default.
-- \`brief\` shares context across the batch: it prepends to every task's
-  prompt inside a \`--- batch brief ---\` fence, and the result header
-  notes it once. \`context\` is the same field under a cross-harness
-  spelling — it normalizes to \`brief\` (a rename note reports it);
-  sending both with different text is an error.
-- \`tokenBudget\` caps the batch's total recorded token usage (positive
-  integer). Settled tasks charge their usage to it; when it is exhausted
-  the batch stops starting new tasks — queued ones settle
-  \`budget-exhausted\` and dependents block on them — while tasks already
-  running finish normally. The result and ticket header report
-  \`consumed/limit\`; omit the field for no cap.
-- \`dependsOn\` orders tasks in one batch: name earlier task ids (an
-  explicit \`id\`, or the generated \`task-1\`, \`task-2\`, ...). A task
-  starts only after every prerequisite finished successfully — applied
-  isolated work included — and its prompt carries each prerequisite's
-  bounded output. A prerequisite that failed, was cancelled, or left its
-  isolated proposal unapplied blocks the dependent with a visible reason;
-  unrelated branches still run.
-- \`operationId\` (1-64 letters/digits/./_/-) makes a dispatch duplicate-safe:
-  same id + same request returns the original in-flight or settled result;
-  same id + a changed request is an error. Dispatch-only.
+## Compact and full interfaces
+- Compact is the default. Set \`"surface": "full"\` in user-global
+  delegate.json and run /reload to enable advanced controls. Surface selection
+  never depends on model family, and changing the file does not change the
+  selected schema until reload. Hidden advanced fields reject; they do not
+  secretly execute. Full mode keeps the same engine and safety guarantees.
+  Choose the surface before launching work: /reload cancels active workers
+  and waits for safe cleanup.
+- Named Markdown profiles provide reusable tools and base instructions.
+  Use the profile instead of repeating those settings in ordinary calls;
+  full mode still accepts explicit one-off overrides.
+- Removed cross-harness aliases are not accepted. Use canonical fields and
+  exact built-in or authored profile names.
+
+## delegate — ordinary dispatch
+- \`tasks\` is required: [] shows this manual; a nonempty array runs work.
+  Every task count defaults to background execution, returning a ticket and
+  automatically delivering results. Do not poll in a loop. Pass
+  \`async: false\` to return results inline in input order.
+- Ordinary task fields: \`prompt\`, \`agent\` (default/explore/coder/reviewer/verifier
+  or an exact custom profile name; omit for inline), \`cwd\`, \`workspace\`.
+- Top-level \`workspace\` is the batch default. \`brief\` prepends shared context
+  to each prompt inside a delimited batch preamble; results note it once.
+
+## delegate — full-mode controls
+- Task \`id\` correlates results; \`description\` is a display label only.
+  \`tools\` and \`systemPrompt\` override profile defaults. Tool groups:
+  \`*\` selects read/bash/edit/write; \`ro\` selects read/grep/find/ls.
+- \`sessionId\` reuses a child session; \`resumeFrom\` resumes an absolute .jsonl
+  transcript. Only resumed tasks may omit prompt. \`deadlineMs\` limits worker
+  wall time after queueing; omission means no deadline.
+- \`dependsOn\` names same-batch task ids. All prerequisites must succeed
+  and stop safely before a dependent starts. Their bounded outputs are handed
+  off and their applied changes are visible. Failure blocks dependents,
+  not unrelated tasks.
+- Batch \`tokenBudget\` stops starting queued tasks once settled usage reaches
+  the positive-integer ceiling; running tasks finish normally.
+- \`operationId\` is a bounded host-lifetime retry key: same id/request reuses
+  the original execution/result, changed request conflicts. Unkeyed calls
+  always execute independently; it is not exactly-once crash recovery.
 - Models and effort: you never pick either — task \`model\`, \`thinking\`,
   and \`reasoning_effort\` fields are rejected. Tasks run on the parent's
   model at the parent's effort; a named agent may instead run on the model
@@ -1099,8 +1106,7 @@ Three sibling tools share Delegate's machinery:
   under the user-global agent directory. A profile needs \`name\` and
   \`description\`; \`tools\`, \`thinking\`, and \`model\` are optional
   frontmatter, the body is its system prompt. A discovered profile
-  claims its exact name ahead of the alias table — an authored
-  \`general.md\` is your agent, not the \`general\` → \`default\` alias.
+  resolves by its exact name; authored names receive no automatic translations.
 - Subagents never nest: \`delegate\`, \`delegate_ticket\`, and
   \`delegate_session\` are removed from every child toolset — explicit
   \`tools\`, profile frontmatter \`tools\`, and the mirrored parent
@@ -1123,10 +1129,13 @@ Three sibling tools share Delegate's machinery:
   Cannot use \`sessionId\` or \`resumeFrom\`.
 
 ## delegate_ticket — tickets
+Compact exposes poll/wait/cancel/answer/steer/interrupt. Full mode adds
+pause/resume/tail, wait-any tickets, timeoutMs, steerId, offset and waitMs.
+
 - \`{ action: "poll" }\` — the ticket roster, or one ticket's status with
   \`ticket\`. Never blocks.
 - \`{ action: "wait", ticket }\` — block until the ticket settles;
-  \`timeoutMs\` (ms, \`timeout_ms\` also accepted) detaches only the
+  \`timeoutMs\` (full mode, milliseconds) detaches only the
   waiter, the work continues. \`tickets: [ids]\` watches several and
   resolves on the first to settle — the result shows that ticket's
   view plus a one-line roster of the rest still running.
@@ -1242,6 +1251,7 @@ function customProfileSection(ctx: ExtensionContext): string {
 }
 
 export default function delegateExtension(api: ExtensionAPI): void {
+  let surfaceError: Error | undefined;
   // Host-compat probes (issue #9): exercise the reaches into Pi internals
   // that dispatch depends on — the private model-runtime handle and the
   // agent-directory resolution — on the first event that carries a ctx, so
@@ -1265,6 +1275,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
     };
     probe("parent model runtime", () => parentModelRuntime(ctx));
     probe("agent directory resolution", () => resolveAgentDir(ctx));
+    try {
+      const surface = loadDelegateSurface(resolveAgentDir(ctx).dir);
+      surfaceError = undefined;
+      registerTools(surface);
+      console.error(`[delegate] surface selected: ${surface} (fixed until /reload).`);
+    } catch (error) {
+      surfaceError = error instanceof Error ? error : new Error(String(error));
+      console.error(`[delegate] surface selection failed: ${surfaceError.message}. Fix delegate.json and /reload.`);
+    }
   });
 
   // TicketStore mutates first, visibility reads lazily — the observer arrow
@@ -1638,9 +1657,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
   /**
    * Misfire telemetry (SPEC v3 "Observability"): one row per dispatch
    * that ends before execution — validation rejections (including
-   * unknown agent names after alias expansion), config-load failures,
+   * unknown exact agent names and pre-schema errors), config-load failures,
    * and admission rejections. The row carries the verbatim
-   * caller-visible message and the requested batch shape (post-alias
+   * caller-visible message and the requested batch shape (exact
    * canonical agent names, effective workspaces, the resolved
    * sync/async mode). Telemetry failures must never mask the rejection
    * being recorded — a throw here would rewrite the caller-visible
@@ -1662,13 +1681,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         phase,
         message: error instanceof Error ? error.message : String(error),
         taskCount: tasks?.length ?? 0,
-        agents: (tasks ?? []).map((task) => {
-          // `subagent_type`/`agent_type` are the same field under
-          // cross-harness spellings — a rejected call's shape records the
-          // name the caller meant, not the spelling's absence from `agent`.
-          const named = task.agent ?? task.subagent_type ?? task.agent_type;
-          return named === undefined ? "inline" : canonicalAgentName(named);
-        }),
+        agents: (tasks ?? []).map((task) => task.agent ?? "inline"),
         workspaces: (tasks ?? []).map(
           (task) => task.workspace ?? batchWorkspace ?? "shared",
         ),
@@ -1681,6 +1694,57 @@ export default function delegateExtension(api: ExtensionAPI): void {
       );
     }
   };
+
+  // Pi skips tool_result for schema/preparation errors. Start/end events
+  // cover them; retain only sanitized batch metadata, never request bodies.
+  const preflightDispatches = new Map<string, {
+    tasks: readonly TaskInput[];
+    workspace: "shared" | "scratch" | "isolated" | undefined;
+    async: boolean;
+  }>();
+  api.on("tool_execution_start", (event) => {
+    if (event.toolName !== "delegate") return;
+    const raw: unknown = event.args;
+    if (!isRecord(raw)) {
+      preflightDispatches.set(event.toolCallId, { tasks: [], workspace: undefined, async: true });
+      return;
+    }
+    const rawTasks = typeof raw.tasks === "string" ? parseArray(raw.tasks) : raw.tasks;
+    const entries: unknown[] = Array.isArray(rawTasks) ? rawTasks
+      : taskFieldNames.some((field) => Object.hasOwn(raw, field)) ? [raw] : [];
+    const tasks: TaskInput[] = entries.map((entry) => {
+      if (!isRecord(entry)) return {};
+      return {
+        ...(typeof entry.agent === "string" ? { agent: entry.agent } : {}),
+        ...(entry.workspace === "shared" || entry.workspace === "scratch" || entry.workspace === "isolated"
+          ? { workspace: entry.workspace } : {}),
+      };
+    });
+    const workspace = raw.workspace;
+    preflightDispatches.set(event.toolCallId, {
+      tasks,
+      workspace: workspace === "shared" || workspace === "scratch" || workspace === "isolated" ? workspace : undefined,
+      async: raw.async !== false,
+    });
+  });
+  api.on("tool_execution_end", (event, ctx) => {
+    if (event.toolName !== "delegate") return;
+    const metadata = preflightDispatches.get(event.toolCallId);
+    preflightDispatches.delete(event.toolCallId);
+    if (!metadata || !event.isError) return;
+    try {
+      const agentDir = resolveAgentDir(ctx).dir;
+      const result: unknown = event.result;
+      const content = isRecord(result) && Array.isArray(result.content) ? result.content : [];
+      const message = content.flatMap((part: unknown) =>
+        isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : [],
+      ).join("\n");
+      noteMisfire(ctx, agentDir, telemetryConfigHint(agentDir), "validation",
+        new Error(message), metadata.tasks, metadata.workspace, metadata.async);
+    } catch (error) {
+      console.error(`[delegate] preflight misfire telemetry failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
 
   /**
    * The one dispatch pipeline, from barrier tracking to the coordinator
@@ -2187,487 +2251,473 @@ export default function delegateExtension(api: ExtensionAPI): void {
     telemetry.close();
   });
 
-  api.registerTool(
-    defineTool<typeof delegateSchema, DelegateDetails>({
-      name: "delegate",
-      label: "Delegate to Subagents",
-      description:
-        "Run subagent tasks. A single task runs synchronously and returns its result inline; a multi-task batch returns a ticket immediately (inspect or control it with delegate_ticket) and delivers the settled result automatically — pass async: false to block on a batch. tasks: [] shows the manual; pooled sessions are managed with delegate_session. Same-repo writers serialize under 'shared'; read-only tasks never serialize — parallel read-side fan-outs want 'ro' tools or the explore agent (the reviewer runs bash, so it serializes as a writer); 'isolated' runs independent edits in parallel; 'scratch' discards a disposable copy's changes.",
-      parameters: delegateSchema,
-      promptSnippet:
-        "Run subagent tasks: one task sync inline, batches backgrounded with automatic results",
-      promptGuidelines: [
-        "Subagents never see this conversation — give each delegate task a self-contained brief.",
-        "Async delegate results arrive automatically — do not poll in a loop; only wait on a ticket when the next step needs its result.",
-        'Use workspace "isolated" for independent edits in the same repo.',
-        "Split very large task batches across delegate calls; overlong tool calls get truncated.",
-      ],
-      prepareArguments: prepareDispatchArguments,
-      // The call row is static by contract: `delegate N tasks` plus up
-      // to four prompt previews — no spinner or live state.
-      renderCall: renderDelegateCall,
-      // The stock renderer only displays `content` — which is the
-      // spill-bounded projection — so expansion never showed the whole
-      // output. This renderer keeps the collapsed preview but renders the
-      // complete recorded outcomes from details when expanded.
-      renderResult: createResultRenderer(tickets),
+  function registerTools(surface: DelegateSurface): void {
+    api.registerTool(
+      defineTool<TUnsafe<DelegateArguments>, DelegateDetails>({
+        name: "delegate",
+        label: "Delegate to Subagents",
+        description:
+          "Run self-contained subagent tasks. Every nonempty call returns a background ticket and delivers results automatically; async: false returns inline results for any task count. Batch related work in one call: shared-tree writers serialize within a batch and overlapping writers in separate calls reject. The explore role is read-only and admits concurrently; reviewer uses bash and counts as a writer. Use isolated for parallel edits or scratch to discard changes. Named Markdown profiles supply tools and base instructions. tasks: [] shows the manual." +
+          (surface === "compact" ? " Compact surface; enable advanced controls with \"surface\": \"full\" in user-global delegate.json and /reload." : " Full surface; advanced task and batch controls are enabled."),
+        parameters: Type.Unsafe<DelegateArguments>(surface === "full" ? delegateSchema : compactDelegateSchema),
+        promptSnippet:
+          "Run self-contained tasks in background; async:false waits for inline results",
+        promptGuidelines: [
+          "Subagents never see this conversation — give each delegate task a self-contained brief.",
+          "Async delegate results arrive automatically — do not poll in a loop; only wait on a ticket when the next step needs its result.",
+          'Use workspace "isolated" for independent edits in the same repo.',
+          "Split very large task batches across delegate calls; overlong tool calls get truncated.",
+        ],
+        prepareArguments: (args) => {
+          if (surfaceError) throw surfaceError;
+          rejectCompactFields(args, surface, "delegate");
+          return validatePreparedArguments("delegate",
+            surface === "full" ? delegateSchema : compactDelegateSchema,
+            prepareDispatchArguments(args));
+        },
+        // The call row is static by contract: `delegate N tasks` plus up
+        // to four prompt previews — no spinner or live state.
+        renderCall: renderDelegateCall,
+        // The stock renderer only displays `content` — which is the
+        // spill-bounded projection — so expansion never showed the whole
+        // output. This renderer keeps the collapsed preview but renders the
+        // complete recorded outcomes from details when expanded.
+        renderResult: createResultRenderer(tickets),
 
-      async execute(_toolCallId, params, signal, onUpdate, ctx) {
-        // Synchronous prefix: everything before the first await runs in
-        // the same microtask as the host's tool dispatch, so a shutdown
-        // handler cannot interleave here. A dispatch that arrives after
-        // shutdown begins must fail on the latched value — not on a
-        // re-read after task-resolution or workspace-preparation awaits,
-        // by which time the shutdown handler would already have
-        // snapshotted the live set and missed it. The leaf/epoch stamp is
-        // likewise read here: stamping at ticket creation would name the
-        // branch navigated to mid-preparation and wake the wrong
-        // conversation on settlement.
-        const shutdownRejected = shuttingDown;
-        const dispatchLeafId = ctx.sessionManager.getLeafId();
-        const dispatchEpoch = navigationEpoch;
-        // Call-shape validation is the earliest rejection phase; its
-        // misfire row uses the salvaged telemetry hint because no config
-        // has been loaded yet (SPEC v3 "Observability"). The recording
-        // path is itself wrapped so a telemetry problem can never mask
-        // the caller-visible rejection.
-        let call: DispatchCall;
-        try {
-          call = validateDispatchCall(params);
-        } catch (error) {
+        async execute(toolCallId, params, signal, onUpdate, ctx) {
+          // Later tool_call handlers may block after our preflight. Only actual
+          // execute entry transfers error-record ownership to the engine.
+          preflightDispatches.delete(toolCallId);
+          // Synchronous prefix: everything before the first await runs in
+          // the same microtask as the host's tool dispatch, so a shutdown
+          // handler cannot interleave here. A dispatch that arrives after
+          // shutdown begins must fail on the latched value — not on a
+          // re-read after task-resolution or workspace-preparation awaits,
+          // by which time the shutdown handler would already have
+          // snapshotted the live set and missed it. The leaf/epoch stamp is
+          // likewise read here: stamping at ticket creation would name the
+          // branch navigated to mid-preparation and wake the wrong
+          // conversation on settlement.
+          const shutdownRejected = shuttingDown;
+          const dispatchLeafId = ctx.sessionManager.getLeafId();
+          const dispatchEpoch = navigationEpoch;
+          // Call-shape validation is the earliest rejection phase; its
+          // misfire row uses the salvaged telemetry hint because no config
+          // has been loaded yet (SPEC v3 "Observability"). The recording
+          // path is itself wrapped so a telemetry problem can never mask
+          // the caller-visible rejection.
+          let call: DispatchCall;
           try {
-            const agentDir = resolveAgentDir(ctx).dir;
-            noteMisfire(
-              ctx, agentDir, telemetryConfigHint(agentDir),
-              "validation", error, params.tasks, params.workspace,
-              params.async ??
-                params.run_in_background ??
-                params.tasks.find((task) => task.run_in_background !== undefined)
-                  ?.run_in_background ??
-                params.tasks.length > 1,
-            );
-          } catch {
-            // The original rejection stands; nothing here may throw.
+            call = validateDispatchCall(params);
+          } catch (error) {
+            try {
+              const agentDir = resolveAgentDir(ctx).dir;
+              noteMisfire(
+                ctx, agentDir, telemetryConfigHint(agentDir),
+                "validation", error, params.tasks, params.workspace,
+                params.async ?? true,
+              );
+            } catch {
+              // The original rejection stands; nothing here may throw.
+            }
+            throw error;
           }
-          throw error;
-        }
-        // Every tool call re-arms the footer context (v1 semantics: the
-        // execute context carries the full UI surface for our lifetime).
-        visibility.captureFooterCtx(ctx);
-        if (call.mode === "help") {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: help + customProfileSection(ctx),
-              },
-            ],
-            details: ({ mode: "help" as const } satisfies HelpDetails),
-          };
-        }
-        let operationTicket: Ticket | undefined;
-        const executeDispatch = async () => {
-          // Decided in execute's synchronous prefix (same microtask as
-          // the host's tool dispatch): a dispatch still preparing when
-          // shutdown begins must not start workers after the shutdown
-          // handler snapshotted the live set.
-          if (shutdownRejected) {
-            throw new Error(
-              "Delegate is shutting down with this session; new dispatches are not accepted. " +
-                "Existing tickets remain pollable for the rest of the session's lifetime.",
-            );
+          // Every tool call re-arms the footer context (v1 semantics: the
+          // execute context carries the full UI surface for our lifetime).
+          visibility.captureFooterCtx(ctx);
+          if (call.mode === "help") {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Current surface: ${surface}.\n\n` + help + customProfileSection(ctx),
+                },
+              ],
+              details: ({ mode: "help" as const } satisfies HelpDetails),
+            };
           }
+          let operationTicket: Ticket | undefined;
+          const executeDispatch = async () => {
+            // Decided in execute's synchronous prefix (same microtask as
+            // the host's tool dispatch): a dispatch still preparing when
+            // shutdown begins must not start workers after the shutdown
+            // handler snapshotted the live set.
+            if (shutdownRejected) {
+              throw new Error(
+                "Delegate is shutting down with this session; new dispatches are not accepted. " +
+                  "Existing tickets remain pollable for the rest of the session's lifetime.",
+              );
+            }
 
-          // Async edge — background delivery. Armed once the pipeline has
-          // handed the batch to the coordinator; it waits for caller
-          // settlement AND the finished gate, so the delivered view always
-          // carries the safe-to-expose outcome: finalized isolated
-          // integrations, retained errors, and (on cancellation) partial
-          // results rather than a bare status. Delivery itself is the
-          // closure-level coalescing queue (SPEC v3 "Wake delivery"):
-          // the ticket joins the current flush window rather than
-          // sending alone.
-          const armDelivery = (ticket: Ticket): void => {
-            void Promise.all([
-              tickets.settledPromise(ticket),
-              tickets.finishedPromise(ticket),
-            ])
-              .then(() => enqueueDelivery(ticket, ctx))
-              .catch((error: unknown) => {
+            // Async edge — background delivery. Armed once the pipeline has
+            // handed the batch to the coordinator; it waits for caller
+            // settlement AND the finished gate, so the delivered view always
+            // carries the safe-to-expose outcome: finalized isolated
+            // integrations, retained errors, and (on cancellation) partial
+            // results rather than a bare status. Delivery itself is the
+            // closure-level coalescing queue (SPEC v3 "Wake delivery"):
+            // the ticket joins the current flush window rather than
+            // sending alone.
+            const armDelivery = (ticket: Ticket): void => {
+              void Promise.all([
+                tickets.settledPromise(ticket),
+                tickets.finishedPromise(ticket),
+              ])
+                .then(() => enqueueDelivery(ticket, ctx))
+                .catch((error: unknown) => {
+                  console.error(
+                    `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                });
+            };
+
+            const { completion, ticket, notices, tasks, outputBounds } =
+              await runDispatchPipeline({
+              requestedTasks: call.tasks,
+              ctx,
+              brief: call.brief,
+              tokenBudget: call.tokenBudget,
+              // One signal source in the pipeline: the caller's host signal
+              // for a sync batch, the ticket's cancellation for an async one.
+              signal: call.async ? undefined : signal,
+              // Surface same-call serialization immediately — a serialized
+              // batch of independent writers is the expensive way to learn
+              // about "isolated". Async batches carry the notices on the
+              // ticket (and its created text) instead.
+              onNotices:
+                call.async === false
+                  ? (current) => {
+                      if (current.length > 0) {
+                        onUpdate?.({
+                          content: [
+                            { type: "text" as const, text: current.join("\n") },
+                          ],
+                          details: {},
+                        });
+                      }
+                    }
+                  : undefined,
+              createTicket:
+                call.async === false
+                  ? undefined
+                  : (tasks, relabel, config) => {
+                      const created = tickets.create(tasks, {
+                        // Hold settlement through the coordinator's
+                        // finally when the batch has workspace
+                        // reconciliation or a token budget — the final
+                        // account must land on the record before any
+                        // racing `wait` renders the settled view.
+                        holdSettlement:
+                          workspaceNeedsSettlementHold(tasks) ||
+                          call.tokenBudget !== undefined,
+                        outputBounds: config.output,
+                        // The shared batch brief — persisted on the ticket so
+                        // views and post-restart recovery render the header
+                        // note (SPEC v3 "Batch brief").
+                        brief: call.brief,
+                        // #54 owner liveness: the dispatching host's identity
+                        // rides the journal record so a later startup
+                        // interrupts this ticket only when the owner is
+                        // provably dead — a live sibling pane's ticket is
+                        // left untouched.
+                        owner: {
+                          pid: process.pid,
+                          bootId: currentBootId(),
+                          sessionId: ctx.sessionManager.getSessionId(),
+                        },
+                      });
+                      operationTicket = created;
+                      questionContexts.set(created.id, ctx);
+                      // The barrier now has its durable name for the
+                      // shutdown status.
+                      relabel(`ticket "${created.id}"`);
+                      // The session-tree position at dispatch: delivery may
+                      // wake the parent only while it is still on this
+                      // branch with no tree transition or shutdown observed
+                      // since. Recorded on the ticket so delivery
+                      // diagnostics can be reconstructed from the ticket
+                      // alone (stamped in execute's synchronous prefix).
+                      tickets.recordOrigin(created, {
+                        leafId: dispatchLeafId,
+                        epoch: dispatchEpoch,
+                      });
+                      return created;
+                    },
+            });
+
+            if (ticket !== undefined) {
+              // The settled ticket's views (and its journal record) carry
+              // the final token-budget account — the coordinator persists
+              // it inside its own finally, before the settlement hold
+              // lifts, so a racing `wait` never misses it.
+              void completion.catch((error: unknown) => {
+                // The coordinator's task-quiescence chain owns the barrier
+                // and resolves it on this same rejection path; here the
+                // ticket just settles failed and the crash is reported.
+                tickets.settle(ticket, "failed");
                 console.error(
-                  `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
+                  `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
                 );
               });
-          };
-
-          const { completion, ticket, notices, tasks, outputBounds } =
-            await runDispatchPipeline({
-            requestedTasks: call.tasks,
-            ctx,
-            brief: call.brief,
-            tokenBudget: call.tokenBudget,
-            // One signal source in the pipeline: the caller's host signal
-            // for a sync batch, the ticket's cancellation for an async one.
-            signal: call.async ? undefined : signal,
-            // Surface same-call serialization immediately — a serialized
-            // batch of independent writers is the expensive way to learn
-            // about "isolated". Async batches carry the notices on the
-            // ticket (and its created text) instead.
-            onNotices:
-              call.async === false
-                ? (current) => {
-                    if (current.length > 0) {
-                      onUpdate?.({
-                        content: [
-                          { type: "text" as const, text: current.join("\n") },
-                        ],
-                        details: {},
-                      });
-                    }
-                  }
-                : undefined,
-            createTicket:
-              call.async === false
-                ? undefined
-                : (tasks, relabel, config) => {
-                    const created = tickets.create(tasks, {
-                      // Hold settlement through the coordinator's
-                      // finally when the batch has workspace
-                      // reconciliation or a token budget — the final
-                      // account must land on the record before any
-                      // racing `wait` renders the settled view.
-                      holdSettlement:
-                        workspaceNeedsSettlementHold(tasks) ||
-                        call.tokenBudget !== undefined,
-                      outputBounds: config.output,
-                      // The shared batch brief — persisted on the ticket so
-                      // views and post-restart recovery render the header
-                      // note (SPEC v3 "Batch brief").
-                      brief: call.brief,
-                      // #54 owner liveness: the dispatching host's identity
-                      // rides the journal record so a later startup
-                      // interrupts this ticket only when the owner is
-                      // provably dead — a live sibling pane's ticket is
-                      // left untouched.
-                      owner: {
-                        pid: process.pid,
-                        bootId: currentBootId(),
-                        sessionId: ctx.sessionManager.getSessionId(),
-                      },
-                    });
-                    operationTicket = created;
-                    questionContexts.set(created.id, ctx);
-                    // The barrier now has its durable name for the
-                    // shutdown status.
-                    relabel(`ticket "${created.id}"`);
-                    // The session-tree position at dispatch: delivery may
-                    // wake the parent only while it is still on this
-                    // branch with no tree transition or shutdown observed
-                    // since. Recorded on the ticket so delivery
-                    // diagnostics can be reconstructed from the ticket
-                    // alone (stamped in execute's synchronous prefix).
-                    tickets.recordOrigin(created, {
-                      leafId: dispatchLeafId,
-                      epoch: dispatchEpoch,
-                    });
-                    return created;
+              armDelivery(ticket);
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text:
+                      `Ticket "${ticket.id}" created: ${ticket.totalTasks} task(s) running in the background.\n` +
+                      (briefNote(call.brief) !== undefined
+                        ? `${briefNote(call.brief)}\n`
+                        : "") +
+                      (call.tokenBudget !== undefined
+                        ? `${budgetNote({ limit: call.tokenBudget, consumed: 0 })}\n`
+                        : "") +
+                      `Results will be delivered automatically when the batch settles; keep working. ` +
+                      `delegate_ticket can wait on or cancel it if needed (action "wait" / "cancel").` +
+                      (ticket.notices.length > 0
+                        ? `\n${ticket.notices.join("\n")}`
+                        : ""),
                   },
-          });
+                ],
+                details: ({
+                  mode: "dispatch" as const,
+                  async: true,
+                  ticket: ticket.id,
+                  tasks: ticket.tasks.map((task) => task.id),
+                  ...(call.brief !== undefined ? { brief: call.brief } : {}),
+                } satisfies AsyncDispatchDetails),
+              };
+            }
 
-          if (ticket !== undefined) {
-            // The settled ticket's views (and its journal record) carry
-            // the final token-budget account — the coordinator persists
-            // it inside its own finally, before the settlement hold
-            // lifts, so a racing `wait` never misses it.
-            void completion.catch((error: unknown) => {
-              // The coordinator's task-quiescence chain owns the barrier
-              // and resolves it on this same rejection path; here the
-              // ticket just settles failed and the crash is reported.
-              tickets.settle(ticket, "failed");
-              console.error(
-                `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
-              );
-            });
-            armDelivery(ticket);
-            // The teaching notes the settled views carry (SPEC v3
-            // "Reflex meeting") must also reach the caller at dispatch —
-            // the receipt is the only sync surface an async call has:
-            // applied field normalizations (call-level first), then the
-            // alias expansions they enabled.
-            const teachNotes = [
-              ...call.callNotes.map(
-                (note) => `field "${note.field}" → "${note.to}"`,
-              ),
-              ...ticket.tasks.flatMap((task) => [
-                ...fieldNotes(task.normalizedFrom).map(
-                  (line) => `${task.id}: ${line}`,
-                ),
-                ...(aliasNote(task.aliasedFrom, task.agent) !== ""
-                  ? [`${task.id}: ${aliasNote(task.aliasedFrom, task.agent)}`]
-                  : []),
-              ]),
-            ];
+            const result = await completion;
+            // SPEC: error-valued only when every task failed or was blocked —
+            // cancelled and partially failed batches are normal results
+            // carrying each task's own status, mirroring a ticket's `partial`
+            // settlement.
+            const allFailed = result.outcomes.every(
+              (outcome) =>
+                outcome.status === "failed" || outcome.status === "blocked",
+            );
+            const textNotices = notices;
             return {
               content: [
                 {
                   type: "text" as const,
                   text:
-                    `Ticket "${ticket.id}" created: ${ticket.totalTasks} task(s) running in the background.\n` +
-                    (teachNotes.length > 0 ? `${teachNotes.join("\n")}\n` : "") +
-                    (briefNote(call.brief) !== undefined
-                      ? `${briefNote(call.brief)}\n`
-                      : "") +
-                    (call.tokenBudget !== undefined
-                      ? `${budgetNote({ limit: call.tokenBudget, consumed: 0 })}\n`
-                      : "") +
-                    `Results will be delivered automatically when the batch settles; keep working. ` +
-                    `delegate_ticket can wait on or cancel it if needed (action "wait" / "cancel").` +
-                    (ticket.notices.length > 0
-                      ? `\n${ticket.notices.join("\n")}`
-                      : ""),
+                    (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
+                    formatDispatchResult(result.outcomes, tasks, outputBounds, call.brief, result.tokenBudget),
                 },
               ],
               details: ({
                 mode: "dispatch" as const,
-                async: true,
-                ticket: ticket.id,
-                tasks: ticket.tasks.map((task) => task.id),
+                async: false,
+                tasks: result.outcomes.map((outcome) => ({
+                  id: outcome.id,
+                  status: outcome.status,
+                })),
+                // The batch brief as sent — the replayed/expanded render
+                // re-heads the result with it (SPEC v3 "Batch brief").
                 ...(call.brief !== undefined ? { brief: call.brief } : {}),
-              } satisfies AsyncDispatchDetails),
+                // SPEC v3 "Batch token budget": the final account —
+                // {limit, consumed, exhaustedAt} — when the call set one.
+                ...(result.tokenBudget !== undefined
+                  ? { tokenBudget: result.tokenBudget }
+                  : {}),
+                // The rendered content is spill-bounded; details keep the
+                // complete outcomes for the expanded view and recovery.
+                results: result.outcomes,
+                // SPEC v3 "Observability — Completion evidence": the
+                // machine-readable half of the per-task `files:` lines —
+                // absolute write/edit paths plus the bash-uncertainty flag.
+                attributedFiles: result.outcomes.map((outcome) => ({
+                  taskId: outcome.id,
+                  files: [...(outcome.attributedFiles ?? [])],
+                  uncertain: outcome.uncertainFiles === true,
+                })),
+                // SPEC v3 "Observability — Completion evidence — verifier
+                // verdict" (#49): the machine half of the `verdict:` lines —
+                // {verdict, taskId} per verifier task that produced one.
+                // Absent when no task carried a verdict.
+                ...(() => {
+                  const verdict = result.outcomes.flatMap((outcome) =>
+                    outcome.verdict !== undefined
+                      ? [{ verdict: outcome.verdict, taskId: outcome.id }]
+                      : [],
+                  );
+                  return verdict.length > 0 ? { verdict } : {};
+                })(),
+                // When any worker's accounting is incomplete the usage total
+                // below is a lower bound — the flag lets a machine caller see
+                // what the result text's note says in prose.
+                ...(result.outcomes.some((outcome) => outcome.quarantined)
+                  ? { usageLowerBound: true }
+                  : {}),
+                ...(textNotices.length > 0 ? { notices: textNotices } : {}),
+              } satisfies SyncDispatchDetails),
+              usage: result.usage,
+              isError: allFailed,
             };
-          }
-
-          const result = await completion;
-          // SPEC: error-valued only when every task failed or was blocked —
-          // cancelled and partially failed batches are normal results
-          // carrying each task's own status, mirroring a ticket's `partial`
-          // settlement.
-          const allFailed = result.outcomes.every(
-            (outcome) =>
-              outcome.status === "failed" || outcome.status === "blocked",
-          );
-          // Dispatch-level normalizations (e.g. top-level
-          // run_in_background → async) precede the admission notices —
-          // they were decided before execution (SPEC v3 "Reflex meeting").
-          const callNoteLines = call.callNotes.map(
-            (note) => `field "${note.field}" → "${note.to}"`,
-          );
-          const textNotices = [...callNoteLines, ...notices];
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text:
-                  (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
-                  formatDispatchResult(result.outcomes, tasks, outputBounds, call.brief, result.tokenBudget),
-              },
-            ],
-            details: ({
-              mode: "dispatch" as const,
-              async: false,
-              tasks: result.outcomes.map((outcome) => ({
-                id: outcome.id,
-                status: outcome.status,
-              })),
-              // The batch brief as sent — the replayed/expanded render
-              // re-heads the result with it (SPEC v3 "Batch brief").
-              ...(call.brief !== undefined ? { brief: call.brief } : {}),
-              // SPEC v3 "Batch token budget": the final account —
-              // {limit, consumed, exhaustedAt} — when the call set one.
-              ...(result.tokenBudget !== undefined
-                ? { tokenBudget: result.tokenBudget }
-                : {}),
-              // The rendered content is spill-bounded; details keep the
-              // complete outcomes for the expanded view and recovery.
-              results: result.outcomes,
-              // SPEC v3 "Observability — Completion evidence": the
-              // machine-readable half of the per-task `files:` lines —
-              // absolute write/edit paths plus the bash-uncertainty flag.
-              attributedFiles: result.outcomes.map((outcome) => ({
-                taskId: outcome.id,
-                files: [...(outcome.attributedFiles ?? [])],
-                uncertain: outcome.uncertainFiles === true,
-              })),
-              // SPEC v3 "Observability — Completion evidence — verifier
-              // verdict" (#49): the machine half of the `verdict:` lines —
-              // {verdict, taskId} per verifier task that produced one.
-              // Absent when no task carried a verdict.
-              ...(() => {
-                const verdict = result.outcomes.flatMap((outcome) =>
-                  outcome.verdict !== undefined
-                    ? [{ verdict: outcome.verdict, taskId: outcome.id }]
-                    : [],
-                );
-                return verdict.length > 0 ? { verdict } : {};
-              })(),
-              // When any worker's accounting is incomplete the usage total
-              // below is a lower bound — the flag lets a machine caller see
-              // what the result text's note says in prose.
-              ...(result.outcomes.some((outcome) => outcome.quarantined)
-                ? { usageLowerBound: true }
-                : {}),
-              ...(textNotices.length > 0 ? { notices: textNotices } : {}),
-            } satisfies SyncDispatchDetails),
-            usage: result.usage,
-            isError: allFailed,
           };
-        };
 
-        if (call.operationId === undefined) return executeDispatch();
-        // An operationId/fingerprint conflict rejects synchronously —
-        // a dispatch that ends before execution, so it records a
-        // validation misfire. `run` returns a promise for the dispatch
-        // itself; this catch sees only the synchronous conflict throw,
-        // never an execution-phase rejection.
-        try {
-          return operations.run(
-            call.operationId,
-            // The fingerprint covers the post-normalization request, so
-            // compat spellings (`subagent_type`, `run_in_background`) of
-            // the same dispatch dedupe — `normalizedFrom` is teaching
-            // metadata, not request content.
-            dispatchFingerprint({
-              async: call.async,
-              // The brief is request content — a call differing only in
-              // its brief is a different dispatch, not a duplicate.
-              brief: call.brief,
-              // Same for the batch token ceiling (#47).
-              tokenBudget: call.tokenBudget,
-              tasks: call.tasks.map(
-                ({ normalizedFrom: _normalized, ...task }) => task,
-              ),
-            }),
-            executeDispatch,
-            () =>
-              operationTicket
-                ? tickets.finishedPromise(operationTicket)
-                : Promise.resolve(),
-          );
-        } catch (error) {
+          if (call.operationId === undefined) return executeDispatch();
+          // An operationId/fingerprint conflict rejects synchronously —
+          // a dispatch that ends before execution, so it records a
+          // validation misfire. `run` returns a promise for the dispatch
+          // itself; this catch sees only the synchronous conflict throw,
+          // never an execution-phase rejection.
           try {
-            const agentDir = resolveAgentDir(ctx).dir;
-            noteMisfire(
-              ctx, agentDir, telemetryConfigHint(agentDir),
-              "validation", error, call.tasks, undefined, call.async,
+            return operations.run(
+              call.operationId,
+              // Fingerprint canonical normalized content, not render metadata.
+              dispatchFingerprint({
+                async: call.async,
+                // The brief is request content — a call differing only in
+                // its brief is a different dispatch, not a duplicate.
+                brief: call.brief,
+                // Same for the batch token ceiling (#47).
+                tokenBudget: call.tokenBudget,
+                tasks: call.tasks,
+              }),
+              executeDispatch,
+              () =>
+                operationTicket
+                  ? tickets.finishedPromise(operationTicket)
+                  : Promise.resolve(),
             );
-          } catch {
-            // The original rejection stands; nothing here may throw.
+          } catch (error) {
+            try {
+              const agentDir = resolveAgentDir(ctx).dir;
+              noteMisfire(
+                ctx, agentDir, telemetryConfigHint(agentDir),
+                "validation", error, call.tasks, undefined, call.async,
+              );
+            } catch {
+              // The original rejection stands; nothing here may throw.
+            }
+            throw error;
           }
-          throw error;
-        }
-      },
-    }),
-  );
+        },
+      }),
+    );
 
-  api.registerTool(
-    defineTool<typeof ticketSchema, DelegateDetails>({
-      name: "delegate_ticket",
-      label: "Delegate Tickets",
-      description:
-        "Operate on a delegate async ticket: poll (the roster, or one ticket), wait for settlement, cancel, pause, resume, answer a worker question, steer a running task with a message (optional steerId is the retry key — derived from the call when omitted; the receipt reports steered/activated/duplicate/not-applied), interrupt one task's in-flight turn (settles it interrupted, keeping the worker resumable — cancel tears the ticket down instead), or tail a task's assistant output incrementally (offset/nextOffset page a bounded chunk; waitMs parks until new output lands). Dispatch new work with delegate; manage pooled sessions with delegate_session.",
-      parameters: ticketSchema,
-      promptSnippet:
-        "Poll, wait on, cancel, pause/resume, answer questions, steer, interrupt, or tail output of tasks on async delegate tickets",
-      prepareArguments: prepareTicketArguments,
-      renderCall: renderTicketCall,
-      renderResult: createResultRenderer(tickets),
+    api.registerTool(
+      defineTool<TUnsafe<TicketToolArguments>, DelegateDetails>({
+        name: "delegate_ticket",
+        label: "Delegate Tickets",
+        description:
+          "Inspect or control background delegate work. poll returns status immediately; wait returns on settlement or a new worker question/interruption. cancel previews unless force:true. answer replies to a worker question; steer sends instructions at turn boundaries; interrupt stops a turn while retaining its transcript. Results arrive automatically; do not poll in a loop." +
+          (surface === "full" ? " Full mode also offers pause/resume, wait-any, timed waits, steering retry keys and incremental output tailing." : " Advanced controls require \"surface\": \"full\" in user-global delegate.json and /reload."),
+        parameters: Type.Unsafe<TicketToolArguments>(surface === "full" ? ticketSchema : compactTicketSchema),
+        promptSnippet:
+          surface === "full" ? "Inspect, wait, control and tail background delegate work" : "Inspect, wait, cancel, answer, steer or interrupt background delegate work",
+        prepareArguments: (args) => {
+          if (surfaceError) throw surfaceError;
+          rejectCompactFields(args, surface, "delegate_ticket");
+          return validatePreparedArguments("delegate_ticket",
+            surface === "full" ? ticketSchema : compactTicketSchema,
+            prepareTicketArguments(args));
+        },
+        renderCall: renderTicketCall,
+        renderResult: createResultRenderer(tickets),
 
-      async execute(toolCallId, params, signal, _onUpdate, ctx) {
-        const call = validateTicketCall(params);
-        visibility.captureFooterCtx(ctx);
-        // Ticket RPCs need the saved journal; a corrupt or inaccessible one
-        // fails this call visibly but does not affect dispatch or sessions.
-        tickets.connect(resolveAgentDir(ctx).dir);
-        // `toolCallId` seeds the derived steerId (#44) — an omitted key
-        // becomes `steer:<toolCallId>`, so a transport-level retry of the
-        // same tool call replays rather than re-injecting.
-        const result = await handleTicketRpc(call, tickets, signal, toolCallId);
-        const noteText =
-          call.notes.length === 0
-            ? ""
-            : `${fieldNotes(call.notes).join("\n")}\n\n`;
-        return {
-          content: [{ type: "text" as const, text: `${noteText}${result.text}` }],
-          details: ({
-            mode: "ticket" as const,
-            action: call.action,
-            ticket: result.ticket?.id,
-            // The rendered text may be spill-bounded; the record is not —
-            // details keep the complete outcomes for the expanded view.
-            // Only poll/wait carry them: cancel/pause/resume expand to
-            // their action response text, not the ticket document.
-            results:
-              call.action === "poll" || call.action === "wait"
-                ? result.ticket?.outcomes
-                : undefined,
-            // SPEC v3 "Observability — Completion evidence":
-            // machine-readable attribution per task — recorded outcomes,
-            // plus observed-so-far evidence for tasks still running.
-            attributedFiles:
-              (call.action === "poll" || call.action === "wait") &&
-              result.ticket !== undefined
-                ? tickets.attributionDetails(result.ticket)
-                : undefined,
-            // Verifier verdicts (#49) — {verdict, taskId} per recorded
-            // outcome that parsed one; poll/wait only, same as results.
-            verdict:
-              (call.action === "poll" || call.action === "wait") &&
-              result.ticket !== undefined
-                ? tickets.verdictDetails(result.ticket)
-                : undefined,
-            ...(result.ticket !== undefined &&
-            result.ticket.notices.length > 0
-              ? { notices: result.ticket.notices }
-              : {}),
-            // SPEC v3 "Batch token budget": the settled batch's final
-            // account rides the view (poll/wait), same as the sync result.
-            ...(result.ticket?.tokenBudget !== undefined
-              ? { tokenBudget: result.ticket.tokenBudget }
-              : {}),
-            ...(call.action === "poll" || call.action === "wait"
-              ? { questions: result.ticket?.questions }
-              : {}),
-            // SPEC v3 "Steering": the receipt's machine half rides
-            // details.steer (status, taskId, replayed original status);
-            // an interrupt's rides details.interrupt the same way. A tail
-            // read's {text, nextOffset, done, taskState} rides
-            // details.tail (#52).
-            ...(result.steer !== undefined ? { steer: result.steer } : {}),
-            ...(result.interrupt !== undefined ? { interrupt: result.interrupt } : {}),
-            ...(result.tail !== undefined ? { tail: result.tail } : {}),
-          } satisfies TicketDetails),
-          isError: result.isError,
-        };
-      },
-    }),
-  );
+        async execute(toolCallId, params, signal, _onUpdate, ctx) {
+          const call = validateTicketCall(params);
+          visibility.captureFooterCtx(ctx);
+          // Ticket RPCs need the saved journal; a corrupt or inaccessible one
+          // fails this call visibly but does not affect dispatch or sessions.
+          tickets.connect(resolveAgentDir(ctx).dir);
+          // `toolCallId` seeds the derived steerId (#44) — an omitted key
+          // becomes `steer:<toolCallId>`, so a transport-level retry of the
+          // same tool call replays rather than re-injecting.
+          const result = await handleTicketRpc(call, tickets, signal, toolCallId);
+          return {
+            content: [{ type: "text" as const, text: result.text }],
+            details: ({
+              mode: "ticket" as const,
+              action: call.action,
+              ticket: result.ticket?.id,
+              // The rendered text may be spill-bounded; the record is not —
+              // details keep the complete outcomes for the expanded view.
+              // Only poll/wait carry them: cancel/pause/resume expand to
+              // their action response text, not the ticket document.
+              results:
+                call.action === "poll" || call.action === "wait"
+                  ? result.ticket?.outcomes
+                  : undefined,
+              // SPEC v3 "Observability — Completion evidence":
+              // machine-readable attribution per task — recorded outcomes,
+              // plus observed-so-far evidence for tasks still running.
+              attributedFiles:
+                (call.action === "poll" || call.action === "wait") &&
+                result.ticket !== undefined
+                  ? tickets.attributionDetails(result.ticket)
+                  : undefined,
+              // Verifier verdicts (#49) — {verdict, taskId} per recorded
+              // outcome that parsed one; poll/wait only, same as results.
+              verdict:
+                (call.action === "poll" || call.action === "wait") &&
+                result.ticket !== undefined
+                  ? tickets.verdictDetails(result.ticket)
+                  : undefined,
+              ...(result.ticket !== undefined &&
+              result.ticket.notices.length > 0
+                ? { notices: result.ticket.notices }
+                : {}),
+              // SPEC v3 "Batch token budget": the settled batch's final
+              // account rides the view (poll/wait), same as the sync result.
+              ...(result.ticket?.tokenBudget !== undefined
+                ? { tokenBudget: result.ticket.tokenBudget }
+                : {}),
+              ...(call.action === "poll" || call.action === "wait"
+                ? { questions: result.ticket?.questions }
+                : {}),
+              // SPEC v3 "Steering": the receipt's machine half rides
+              // details.steer (status, taskId, replayed original status);
+              // an interrupt's rides details.interrupt the same way. A tail
+              // read's {text, nextOffset, done, taskState} rides
+              // details.tail (#52).
+              ...(result.steer !== undefined ? { steer: result.steer } : {}),
+              ...(result.interrupt !== undefined ? { interrupt: result.interrupt } : {}),
+              ...(result.tail !== undefined ? { tail: result.tail } : {}),
+            } satisfies TicketDetails),
+            isError: result.isError,
+          };
+        },
+      }),
+    );
 
-  api.registerTool(
-    defineTool<typeof sessionSchema, DelegateDetails>({
-      name: "delegate_session",
-      label: "Delegate Sessions",
-      description:
-        "List or close pooled delegate sessions created by task sessionId fields. Dispatch tasks with delegate; operate on async tickets with delegate_ticket.",
-      parameters: sessionSchema,
-      promptSnippet: "List or close pooled delegate subagent sessions",
-      prepareArguments: prepareSessionArguments,
-      renderCall: renderSessionCall,
-      renderResult: createResultRenderer(tickets),
+    api.registerTool(
+      defineTool<typeof sessionSchema, DelegateDetails>({
+        name: "delegate_session",
+        label: "Delegate Sessions",
+        description:
+          "List or close pooled delegate sessions created by task sessionId fields. Dispatch tasks with delegate; operate on async tickets with delegate_ticket.",
+        parameters: sessionSchema,
+        promptSnippet: "List or close pooled delegate subagent sessions",
+        prepareArguments: (args) => validatePreparedArguments("delegate_session",
+          sessionSchema, prepareSessionArguments(args)),
+        renderCall: renderSessionCall,
+        renderResult: createResultRenderer(tickets),
 
-      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const call = validateSessionCall(params);
-        visibility.captureFooterCtx(ctx);
-        const result = handleSessionRpc(call, sessions, admission);
-        return {
-          content: [{ type: "text" as const, text: result.text }],
-          details: ({
-            mode: "session" as const,
-            action: call.action,
-            sessionId: call.sessionId,
-          } satisfies SessionDetails),
-          isError: result.isError,
-        };
-      },
-    }),
-  );
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+          const call = validateSessionCall(params);
+          visibility.captureFooterCtx(ctx);
+          const result = handleSessionRpc(call, sessions, admission);
+          return {
+            content: [{ type: "text" as const, text: result.text }],
+            details: ({
+              mode: "session" as const,
+              action: call.action,
+              sessionId: call.sessionId,
+            } satisfies SessionDetails),
+            isError: result.isError,
+          };
+        },
+      }),
+    );
+  }
+
+  // Pi supports replacing same-name definitions at session_start. This keeps
+  // one schema/validator per name and preserves all stores and active tools.
+  registerTools("compact");
 }

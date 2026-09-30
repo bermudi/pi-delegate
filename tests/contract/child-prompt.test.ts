@@ -82,6 +82,7 @@ describe("composed child base prompt contract (#33)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "say ok" }],
       });
 
@@ -106,6 +107,7 @@ describe("composed child base prompt contract (#33)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "say ok" }],
       });
 
@@ -138,6 +140,7 @@ describe("composed child base prompt contract (#33)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "explore it", agent: "explore" },
           { prompt: "code it", agent: "coder" },
@@ -179,6 +182,7 @@ describe("composed child base prompt contract (#33)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "say ok", systemPrompt: "AUTHORED-PROMPT: do the thing." },
         ],
@@ -212,6 +216,7 @@ describe("composed child base prompt contract (#33)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "carve", agent: "stonemason" }],
       });
 
@@ -242,6 +247,7 @@ describe("composed child base prompt contract (#33)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "say ok" }],
       });
 
@@ -272,6 +278,7 @@ describe("composed child base prompt contract (#33)", () => {
         ]);
 
         const result = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "say ok" }],
         });
 

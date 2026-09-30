@@ -3,12 +3,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 export type Workspace = "shared" | "scratch" | "isolated";
 
-/**
- * One applied cross-harness field spelling (SPEC v3 "Reflex meeting"):
- * `field` is the compatibility name the caller wrote, `to` the canonical
- * field it normalized to — rendered `field "<field>" → "<to>"` so the
- * receipt teaches the real name.
- */
+/** Historical saved-ticket rename metadata; new calls do not produce it. */
 export interface FieldNormalization {
   readonly field: string;
   readonly to: string;
@@ -20,24 +15,14 @@ export interface ResolvedTask {
   /** Caller-provided correlation id, or `task-<n>`. */
   readonly id: string;
   readonly prompt: string;
-  /** Canonical agent name (alias-expanded — SPEC v3 "Reflex meeting"). */
+  /** Exact built-in or authored profile name. */
   readonly agent: string;
-  /**
-   * The raw agent name the caller wrote when it was an alias (e.g.
-   * "general" for "default"); undefined when the name was already
-   * canonical or omitted. Rendered as `agent "<raw>" → "<canonical>"` in
-   * task sections so the expansion teaches the real name.
-   */
+  /** Historical ticket-reader field; undefined on newly resolved tasks. */
   readonly aliasedFrom: string | undefined;
-  /**
-   * Cross-harness spellings folded into this task's canonical fields at
-   * validation (e.g. `subagent_type` → `agent`), rendered as
-   * `field "<field>" → "<to>"` beside the alias note. Undefined when the
-   * call used canonical spellings only.
-   */
+  /** Historical ticket-reader field; undefined on newly resolved tasks. */
   readonly normalizedFrom: readonly FieldNormalization[] | undefined;
   /**
-   * The caller's `description` label (cross-harness field): display-only —
+   * The caller's `description` display label: display-only —
    * preferred over the correlation id in call rows and section headers,
    * never an identity or dependency key.
    */

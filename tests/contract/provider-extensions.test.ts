@@ -114,6 +114,7 @@ describe("providerExtensions (#59)", () => {
 
       configureDelegate(session, { providerExtensions: "nope" });
       const notObject = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
       expect(notObject.isError).toBe(true);
@@ -125,6 +126,7 @@ describe("providerExtensions (#59)", () => {
         providerExtensions: { "delegate-faux": "npm:x" },
       });
       const notArray = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
       expect(notArray.isError).toBe(true);
@@ -136,6 +138,7 @@ describe("providerExtensions (#59)", () => {
         providerExtensions: { "delegate-faux": ["npm:x", 42] },
       });
       const badEntry = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
       expect(badEntry.isError).toBe(true);
@@ -150,6 +153,7 @@ describe("providerExtensions (#59)", () => {
         },
       });
       const duplicate = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
       expect(duplicate.isError).toBe(true);
@@ -173,6 +177,7 @@ describe("providerExtensions (#59)", () => {
         },
       });
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
       expect(result.isError).toBe(true);
@@ -196,6 +201,7 @@ describe("providerExtensions (#59)", () => {
         models: { coder: "openai-codex/faux-1" },
       });
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "coder", prompt: "x", tools: ["read"] }],
       });
       expect(result.isError).toBe(false);
@@ -219,6 +225,7 @@ describe("providerExtensions (#59)", () => {
         providerExtensions: { "openai-codex": ["npm:@bermudi/pi-codex"] },
       });
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "coder", prompt: "x", tools: ["read"] }],
       });
       expect(result.isError).toBe(true);
@@ -241,6 +248,7 @@ describe("providerExtensions (#59)", () => {
         providerExtensions: { "openai-codex": [] },
       });
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "coder", prompt: "x", tools: ["read"] }],
       });
       expect(result.isError).toBe(false);
@@ -261,6 +269,7 @@ describe("providerExtensions (#59)", () => {
         providerExtensions: { "openai-codex": ["npm:@bermudi/pi-codex"] },
       });
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", tools: ["read"] }],
       });
       expect(result.isError).toBe(false);
@@ -277,6 +286,7 @@ describe("providerExtensions (#59)", () => {
       const subagents = await installSubagentModel(session);
       subagents.respond([fauxAssistantMessage("UNREACHABLE")]);
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", tools: ["web_search"] }],
       });
       expect(result.isError).toBe(true);
@@ -302,6 +312,7 @@ describe("providerExtensions (#59)", () => {
         fauxAssistantMessage("CHILD-DONE"),
       ]);
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", tools: ["web_search"] }],
       });
       expect(result.isError).toBe(false);
@@ -330,6 +341,7 @@ describe("providerExtensions (#59)", () => {
         fauxAssistantMessage("DONE"),
       ]);
       const stripped = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "default", prompt: "a" }],
       });
       expect(stripped.isError).toBe(false);
@@ -346,6 +358,7 @@ describe("providerExtensions (#59)", () => {
         fauxAssistantMessage("DONE-TWO"),
       ]);
       const own = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "b", tools: ["web_search"] }],
       });
       expect(own.isError).toBe(false);
@@ -405,6 +418,7 @@ describe("providerExtensions (#59)", () => {
       });
       subagents.respond([fauxAssistantMessage("S1")]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "a", sessionId: "s-1" }],
       });
       expect(first.isError).toBe(false);
@@ -421,6 +435,7 @@ describe("providerExtensions (#59)", () => {
       });
       subagents.respond([fauxAssistantMessage("S2")]);
       const second = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "b", sessionId: "s-1" }],
       });
       expect(second.text).toContain("providerExtensions: changed");
@@ -450,6 +465,7 @@ describe("delegate:usage events (#60)", () => {
 
       subagents.respond([fauxAssistantMessage("A1")]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "a" }],
       });
       expect(first.isError).toBe(false);
@@ -467,6 +483,7 @@ describe("delegate:usage events (#60)", () => {
 
       subagents.respond([fauxAssistantMessage("A2")]);
       const second = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "b" }],
       });
       expect(second.isError).toBe(false);
@@ -477,6 +494,7 @@ describe("delegate:usage events (#60)", () => {
       setSystemTime(Date.now() + 31_000);
       subagents.respond([fauxAssistantMessage("A3")]);
       const third = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "c" }],
       });
       expect(third.isError).toBe(false);

@@ -12,6 +12,7 @@ try {
   subagents.respond([fauxAssistantMessage("RACE-CHILD-OK")]);
   configureDelegate(session, { telemetry: { enabled: true } });
   const result = await callDelegate(session, {
+    async: false,
     tasks: [{ prompt: "concurrent telemetry writer" }],
   });
   if (result.isError) {

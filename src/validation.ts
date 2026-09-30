@@ -1,8 +1,7 @@
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { resolveDependencyGraph } from "./graph.ts";
-import { canonicalAgentName, expandTools } from "./profiles.ts";
-import type { FieldNormalization } from "./types.ts";
+import { expandTools } from "./profiles.ts";
 
 export interface TaskInput {
   readonly id?: string;
@@ -10,34 +9,13 @@ export interface TaskInput {
   readonly agent?: string;
   readonly cwd?: string;
   readonly systemPrompt?: string;
-  readonly model?: string;
   readonly tools?: string[];
-  readonly thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly sessionId?: string;
   readonly resumeFrom?: string;
   readonly deadlineMs?: number;
   readonly workspace?: "shared" | "scratch" | "isolated";
   readonly dependsOn?: string[];
-  // Cross-harness compatibility spellings (SPEC v3 "Reflex meeting") —
-  // folded into canonical fields by validateDispatchCall before any
-  // semantic read, with each applied rename recorded on normalizedFrom.
-  readonly subagent_type?: string;
-  readonly agent_type?: string;
-  readonly task_name?: string;
-  readonly message?: string;
   readonly description?: string;
-  readonly run_in_background?: boolean;
-  /**
-   * Trained effort selector under a second spelling (#44): rejected like
-   * `thinking` wherever it appears — callers never pick subagent effort.
-   */
-  readonly reasoning_effort?: string;
-  /**
-   * Internal: compat spellings already folded into this task. Stamped by
-   * validation, never accepted from the wire (the task schema's
-   * additionalProperties: false rejects it there).
-   */
-  readonly normalizedFrom?: readonly FieldNormalization[];
 }
 
 export type DispatchCall =
@@ -47,21 +25,13 @@ export type DispatchCall =
       readonly tasks: readonly TaskInput[];
       readonly async: boolean;
       /**
-       * The shared batch brief (SPEC v3 "Batch brief") — normalized: the
-       * `context` compat spelling lands here too; a whitespace-only value
-       * is absent. Prepended to every task's prompt at dispatch.
+       * The shared batch brief (SPEC v3 "Batch brief"); a whitespace-only
+       * value is absent. Prepended to every task's prompt at dispatch.
        */
       readonly brief: string | undefined;
       readonly operationId: string | undefined;
       /** The batch's shared token ceiling (SPEC v3 "Batch token budget"). */
       readonly tokenBudget: number | undefined;
-      /**
-       * Applied dispatch-level compat renames (top-level
-       * `run_in_background` → `async`); per-task renames ride each
-       * task's `normalizedFrom`. Rendered as teaching notes on the
-       * result/receipt (SPEC v3 "Reflex meeting").
-       */
-      readonly callNotes: readonly FieldNormalization[];
     };
 
 /** Post-schema delegate_ticket arguments. */
@@ -80,8 +50,6 @@ export interface TicketArguments {
   /** Wait-any (#58): several ticket ids — the wait resolves on the first to settle. */
   readonly tickets?: readonly string[];
   readonly timeoutMs?: number;
-  /** Cross-harness spelling of `timeoutMs`; folds with a rename note. */
-  readonly timeout_ms?: number;
   readonly force?: boolean;
   readonly taskId?: string;
   readonly questionId?: string;
@@ -102,8 +70,6 @@ export interface SessionArguments {
 export interface DispatchArguments {
   readonly tasks: readonly TaskInput[];
   readonly async?: boolean;
-  /** Cross-harness spelling of `async`; normalizes into the dispatch decision. */
-  readonly run_in_background?: boolean;
   /** Batch-level workspace default; a task's own `workspace` wins. */
   readonly workspace?: "shared" | "scratch" | "isolated";
   /**
@@ -111,8 +77,6 @@ export interface DispatchArguments {
    * prepended to each prompt as a delimited preamble.
    */
   readonly brief?: string;
-  /** Cross-harness spelling of `brief`; normalizes into it. */
-  readonly context?: string;
   readonly operationId?: string;
   /**
    * Shared batch token ceiling (SPEC v3 "Batch token budget"): settled
@@ -150,12 +114,6 @@ export interface TicketCall {
   readonly steerId: string | undefined;
   readonly offset: number | undefined;
   readonly waitMs: number | undefined;
-  /**
-   * Applied compat renames on the ticket boundary (currently
-   * `timeout_ms` → `timeoutMs`), rendered as teaching notes on the
-   * receipt — the same convention as dispatch's `normalizedFrom`.
-   */
-  readonly notes: readonly FieldNormalization[];
 }
 
 /** A validated delegate_session call. */
@@ -175,8 +133,8 @@ function isBlank(value: unknown): boolean {
 
 /**
  * Callers never select subagent models (SPEC "Dispatch"). The same text
- * rejects `model` wherever it appears — inside a task, folded into one, or
- * stranded at the top level — so it is shared with the boundary layer.
+ * rejects `model` wherever it appears — inside a task or stranded at the
+ * top level — so it is shared with the boundary layer.
  */
 export const MODEL_FIELD_REJECTION =
   `the model field is not accepted — callers do not select subagent models. ` +
@@ -222,8 +180,7 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
   // `tickets` is wait-any (#58): watch several ids, resolve on the first
   // to settle. `ticket` and `tickets` name the same target under two
   // spellings — agreement folds to the single-ticket wait; divergence is
-  // a validation error naming both, the same rule as the other
-  // cross-spelling folds. Blank entries count as absent (the usual
+  // a validation error naming both. Blank entries count as absent (the usual
   // identifier rule); duplicates collapse.
   const ticketIds = [
     ...new Set(
@@ -256,27 +213,9 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
   if (args.force === true && args.action !== "cancel") {
     fail(`force is valid only with action "cancel".`);
   }
-  // `timeout_ms` is `timeoutMs` under a cross-harness spelling (SPEC v3
-  // "Reflex meeting"): it folds with a rename note; both spellings holding
-  // different values conflicts, like the dispatch-level folds.
-  const notes: FieldNormalization[] = [];
-  if (
-    args.timeoutMs !== undefined &&
-    args.timeout_ms !== undefined &&
-    args.timeoutMs !== args.timeout_ms
-  ) {
-    fail(
-      `'timeoutMs' (${args.timeoutMs}) and 'timeout_ms' (${args.timeout_ms}) disagree — they are the same field under two spellings; send one.`,
-    );
-  }
-  const timeoutMs = args.timeoutMs ?? args.timeout_ms;
-  if (args.timeout_ms !== undefined) {
-    notes.push({ field: "timeout_ms", to: "timeoutMs" });
-  }
+  const timeoutMs = args.timeoutMs;
   if (timeoutMs !== undefined && args.action !== "wait") {
-    fail(
-      `${args.timeout_ms !== undefined && args.timeoutMs === undefined ? "timeout_ms" : "timeoutMs"} is valid only with action "wait".`,
-    );
+    fail(`timeoutMs is valid only with action "wait".`);
   }
   if (
     taskId !== undefined &&
@@ -376,7 +315,6 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     steerId,
     offset: args.offset,
     waitMs: args.waitMs,
-    notes,
   };
 }
 
@@ -401,13 +339,13 @@ export function validateSessionCall(args: SessionArguments): SessionCall {
  */
 export function validateDispatchCall(args: DispatchArguments): DispatchCall {
   if (args.tasks.length === 0) {
-    if (args.async === true || args.run_in_background === true) {
+    if (args.async === true) {
       fail(`async dispatch requires at least one task.`);
     }
     if (args.workspace !== undefined) {
       fail(`workspace requires at least one task; it is a dispatch field.`);
     }
-    if (args.brief !== undefined || args.context !== undefined) {
+    if (args.brief !== undefined) {
       fail(`brief requires at least one task; it is a dispatch field.`);
     }
     if (args.operationId !== undefined) {
@@ -419,131 +357,17 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
     return { mode: "help" };
   }
 
-  // SPEC v3 "Reflex meeting": cross-harness field spellings fold into the
-  // canonical fields here — before agent resolution reads `agent`, so the
-  // alias table applies to `subagent_type` values too — and each applied
-  // rename records a teaching note on the task's `normalizedFrom`.
-  const effectiveTasks = args.tasks.map((task, index) => {
-    const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
-    const notes: FieldNormalization[] = [];
-    // `agent` has three spellings (SPEC v3 "Reflex meeting"): `agent`,
-    // `subagent_type`, `agent_type`. All present spellings must name the
-    // same canonical agent; each compat spelling records a rename note.
-    const agentSpellings = (
-      [
-        ["agent", task.agent],
-        ["subagent_type", task.subagent_type],
-        ["agent_type", task.agent_type],
-      ] as readonly (readonly [string, string | undefined])[]
-    ).filter((pair): pair is readonly [string, string] => pair[1] !== undefined);
-    const distinctAgents = new Set(
-      agentSpellings.map(([, value]) => canonicalAgentName(value)),
-    );
-    if (distinctAgents.size > 1) {
-      fail(
-        `${where}: ${agentSpellings
-          .map(([field, value]) => `'${field}' (${JSON.stringify(value)})`)
-          .join(", ")} name different agents — they are the same field under different spellings; send one.`,
-      );
-    }
-    const agent = agentSpellings[0]?.[1];
-    for (const [field] of agentSpellings) {
-      if (field !== "agent") notes.push({ field, to: "agent" });
-    }
-    // `task_name`/`message` are spawn_agent's spellings of `id`/`prompt`
-    // (#44): same fold — both present and differing is a conflict.
-    let id = task.id;
-    if (task.task_name !== undefined) {
-      if (task.id !== undefined && task.id !== task.task_name) {
-        fail(
-          `${where}: 'id' (${JSON.stringify(task.id)}) and 'task_name' (${JSON.stringify(task.task_name)}) name different ids — they are the same field under two spellings; send one.`,
-        );
-      }
-      id = task.id ?? task.task_name;
-      notes.push({ field: "task_name", to: "id" });
-    }
-    let prompt = task.prompt;
-    if (task.message !== undefined) {
-      if (task.prompt !== undefined && task.prompt !== task.message) {
-        fail(
-          `${where}: 'prompt' and 'message' hold different text — they are the same field under two spellings; send one.`,
-        );
-      }
-      prompt = task.prompt ?? task.message;
-      notes.push({ field: "message", to: "prompt" });
-    }
-    if (task.run_in_background !== undefined) {
-      notes.push({ field: "run_in_background", to: "async" });
-    }
-    const {
-      subagent_type: _subagent_type,
-      agent_type: _agent_type,
-      task_name: _task_name,
-      message: _message,
-      run_in_background,
-      ...rest
-    } = task;
-    const normalized: TaskInput = {
-      ...rest,
-      ...(id === undefined ? {} : { id }),
-      ...(prompt === undefined ? {} : { prompt }),
-      ...(agent === undefined ? {} : { agent }),
-    };
-    return {
-      ...normalized,
-      ...(notes.length > 0 ? { normalizedFrom: notes } : {}),
-      ...(task.workspace === undefined && args.workspace !== undefined
-        ? { workspace: args.workspace }
-        : {}),
-    };
-  });
+  const effectiveTasks = args.tasks.map((task) => ({
+    ...task,
+    ...(task.workspace === undefined && args.workspace !== undefined
+      ? { workspace: args.workspace }
+      : {}),
+  }));
   validateTasks(effectiveTasks);
 
-  // `run_in_background` is the same dispatch-level `async` under a
-  // cross-harness spelling — legal at top level and per task. Every
-  // occurrence names one decision, so all must agree; `async` wins when
-  // it agrees, and a value conflict names both fields.
-  const ribs: { readonly value: boolean; readonly where: string }[] = [];
-  if (args.run_in_background !== undefined) {
-    ribs.push({ value: args.run_in_background, where: "the top level" });
-  }
-  args.tasks.forEach((task, index) => {
-    if (task.run_in_background !== undefined) {
-      ribs.push({ value: task.run_in_background, where: `tasks[${index}]` });
-    }
-  });
-  const firstRib = ribs[0];
-  const clash = ribs.find((rib) => rib.value !== firstRib?.value);
-  if (firstRib !== undefined && clash !== undefined) {
-    fail(
-      `'run_in_background' conflicts: ${firstRib.where} sets ${firstRib.value} but ${clash.where} sets ${clash.value} — it is one dispatch-level decision (it normalizes to 'async'); set it once.`,
-    );
-  }
-  if (
-    args.async !== undefined &&
-    firstRib !== undefined &&
-    args.async !== firstRib.value
-  ) {
-    fail(
-      `'async': ${args.async} conflicts with 'run_in_background': ${firstRib.value} — the same dispatch field under two spellings; send one.`,
-    );
-  }
-  // `context` is the batch `brief` under a cross-harness spelling
-  // (SPEC v3 "Reflex meeting"): it folds into `brief` with a teaching
-  // note, and both spellings holding different text conflicts. A
-  // whitespace-only brief prepends nothing — it reads as absent.
-  if (
-    args.brief !== undefined &&
-    args.context !== undefined &&
-    args.brief !== args.context
-  ) {
-    fail(
-      `'brief' and 'context' hold different text — they are the same batch field under two spellings; send one.`,
-    );
-  }
-  const rawBrief = args.brief ?? args.context;
+  // A whitespace-only brief prepends nothing; nonblank text stays verbatim.
   const brief =
-    rawBrief !== undefined && rawBrief.trim() !== "" ? rawBrief : undefined;
+    args.brief !== undefined && args.brief.trim() !== "" ? args.brief : undefined;
   // SPEC v3 "Batch token budget": the field is a positive integer — the
   // schema constrains it, but callers that bypass schema validation get
   // the same loud answer here rather than a silently-instant exhaustion.
@@ -553,28 +377,18 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
   ) {
     fail(`'tokenBudget' must be a positive integer; got ${JSON.stringify(args.tokenBudget)}.`);
   }
-  const callNotes: FieldNormalization[] = [
-    ...(args.run_in_background === undefined
-      ? []
-      : [{ field: "run_in_background", to: "async" }]),
-    ...(args.context === undefined ? [] : [{ field: "context", to: "brief" }]),
-  ];
   return {
     mode: "dispatch",
     tasks: effectiveTasks,
     brief,
-    // SPEC v3 "Interaction grammar" — cardinality defaults: a single task
-    // runs sync inline; a multi-task batch returns a ticket and
-    // auto-delivers. `async` (or its run_in_background spelling)
-    // overrides in both directions.
-    async: args.async ?? firstRib?.value ?? effectiveTasks.length > 1,
+    // Background execution is the default independently of task count.
+    async: args.async ?? true,
     operationId: args.operationId,
     tokenBudget: args.tokenBudget,
-    callNotes,
   };
 }
 
-/** Batch-level checks over normalized tasks; all run before any task starts. */
+/** Batch-level checks over canonical tasks; all run before any task starts. */
 function validateTasks(tasks: readonly TaskInput[]): void {
   const ids = new Set<string>();
   const sessionIds = new Set<string>();
@@ -597,13 +411,13 @@ function validateTasks(tasks: readonly TaskInput[]): void {
       }
       sessionIds.add(task.sessionId);
     }
-    if (task.model !== undefined) {
+    if ("model" in task && task.model !== undefined) {
       fail(`${where}: ${MODEL_FIELD_REJECTION}`);
     }
-    if (task.thinking !== undefined) {
+    if ("thinking" in task && task.thinking !== undefined) {
       fail(`${where}: ${THINKING_FIELD_REJECTION}`);
     }
-    if (task.reasoning_effort !== undefined) {
+    if ("reasoning_effort" in task && task.reasoning_effort !== undefined) {
       fail(`${where}: ${REASONING_EFFORT_FIELD_REJECTION}`);
     }
     if (task.prompt !== undefined && task.prompt.trim() === "") {

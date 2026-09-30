@@ -71,6 +71,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ id: "check", agent: "verifier", prompt: "verify claim X" }],
       });
       expect(result.isError).toBe(false);
@@ -94,6 +95,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       model.respond([fauxAssistantMessage("Evidence contradicts it.\nVERDICT: FAIL")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "verifier", prompt: "verify claim Y" }],
       });
       expect(result.isError).toBe(false);
@@ -119,6 +121,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       ]);
 
       const ambiguous = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "verifier", prompt: "verify Z" }],
       });
       expect(ambiguous.text).toContain("verdict: AMBIGUOUS");
@@ -128,6 +131,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       ]);
 
       const counted = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "verifier", prompt: "verify W" }],
       });
       expect(counted.text).toContain("verdict: FAIL — claim not corroborated");
@@ -155,6 +159,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       ]);
 
       const lastWins = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "verifier", prompt: "verify M" }],
       });
       expect(lastWins.text).toContain("verdict: FAIL");
@@ -164,6 +169,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       ]);
 
       const malformedTail = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "verifier", prompt: "verify N" }],
       });
       expect(malformedTail.text).toContain("verdict: PASS");
@@ -186,6 +192,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       ]);
 
       const none = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "verifier", prompt: "verify P" }],
       });
       expect(none.isError).toBe(false);
@@ -193,6 +200,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       expect(verdictsOf(none.details)).toBeUndefined();
 
       const wrongCase = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "verifier", prompt: "verify Q" }],
       });
       // The child's own output echoes its lines verbatim — what must NOT
@@ -218,6 +226,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       ]);
 
       const inline = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "check it" }],
       });
       expect(inline.isError).toBe(false);
@@ -227,6 +236,7 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       expect(inlineOutcomes[0]!.verdict).toBeUndefined();
 
       const reviewer = await callDelegate(session, {
+        async: false,
         tasks: [{ agent: "reviewer", prompt: "look" }],
       });
       expect(reviewer.text).not.toContain("verdict:");

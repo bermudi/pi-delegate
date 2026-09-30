@@ -76,6 +76,7 @@ describe("delegate visibility signals", () => {
     subagents.respond([fauxAssistantMessage("DONE")]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "quick" }],
     });
     expect(result.isError).toBe(false);

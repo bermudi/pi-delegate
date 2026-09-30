@@ -52,6 +52,40 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
 
 ## Coverage map
 
+### Canonical compact/full surface (#61, 2026-09-29)
+
+- **Contract:** one canonical spelling per field, exact authored/built-in
+  names, compact advertised AND validated schemas by default, operator
+  `surface: "full"` plus reload for advanced controls, stable background
+  default for every nonempty task count. Existing engine features/invariants
+  remain unchanged. Tools/base instructions are profile defaults; full-mode
+  task overrides retain their precedence.
+- **Covered now:** `surface.test.ts` proves actual compact/full declarations,
+  strict advanced-field/action exclusion (including flat/stringified/null),
+  profile defaults, authored scout config pins, instance independence, reload
+  selection, invalid-selection visibility, and gated background return.
+  `grammar.test.ts` covers one/two/three-task defaults in both modes, explicit
+  inline results, exact names/case, and canonical model pins. Engine suites
+  explicitly select full mode through `tests/support/full-surface.ts`;
+  inline calls explicitly pass async:false, never a helper-injected default.
+- **Removed-alias regression:** grammar/reflex-tail/brief/no-nesting suites
+  replace former positive folds with rejection (agreement/null included),
+  while preserving authored former-alias profile names and canonical features.
+  `tool-boundary.test.ts` pins the full canonical schema.
+- **Telemetry:** pre-schema/preparation rejections use real host start/end
+  events, retaining sanitized batch metadata only, without duplicate execute
+  rows. `telemetry.test.ts` proves removed-field rows, non-object root rows,
+  safe schema diagnostics without prompt/base-instruction dumps, and existing
+  phases. Recovery-guard and wrong-tool examples also avoid copying private
+  bodies; a later extension blocking tool_call still records exactly one row,
+  because execution—not preflight approval—transfers telemetry ownership.
+  `surface.test.ts` also rejects malformed supplied task lists instead
+  of discarding them during flat recovery, and verifies omitted/true async
+  operation equivalence versus explicit-false conflict.
+- **Provenance:** user-approved simplification supersedes #35/#41/#43/#44
+  alias acceptance and cardinality defaults.
+
+
 ### Dispatch preflight races
 
 - **Contract:** An explicit deadline covers resource loading after a task
@@ -166,12 +200,8 @@ gaps.
 
 ### Synchronous dispatch
 
-- **Contract:** v3 cardinality default — a single-task call is
-  synchronous unless `async: true`; input-ordered per-task results;
-  per-task outcomes; aggregate usage where the host supports it; caller
-  task ids echoed for correlation. (v3 "Interaction grammar" supersedes
-  the blanket v1/v2 sync default: multi-task calls are async unless
-  `async: false`.)
+- **Contract:** explicit async:false returns input-ordered inline outcomes
+  for every task count; omission backgrounds every nonempty dispatch (#61).
 - **Regression:** failed task does not fail siblings or destroy index
   alignment; partial output/usage preserved on failure (v1 additionally
   preserved touched-file lists — the heavier physical tracking was dropped
@@ -229,8 +259,8 @@ gaps.
 
 ### Async tickets
 
-- **Contract:** `async: true` — and a multi-task call under the v3
-  cardinality default — returns a ticket immediately; auto-delivery;
+- **Contract:** `async: true` — and every nonempty call under the v3
+  stable background default — returns a ticket immediately; auto-delivery;
   poll roster and single-ticket views; wait blocks to settlement or timeout;
   tickets stay pollable after settlement; natural settlement is `completed`
   (every task ok), `partial` (at least one ok and at least one not),
@@ -595,7 +625,7 @@ gaps.
   after reconciliation; an unfinished span is dropped when the destination
   changes before its batch finishes; task rows whose workers have unconfirmed
   quiescence are marked provisional; a dispatch rejected before execution —
-  config load, call-shape/semantic validation (agents recorded post-alias),
+  config load, call-shape/semantic validation (exact requested agent names recorded),
   or admission — writes a `misfires` row with the phase, the verbatim
   caller-visible message, and the batch shape, and a completed dispatch
   writes none (#35, `SPEC.md` "Observability").
@@ -799,54 +829,13 @@ and the file that carries it.
   `tests/contract/dependencies.test.ts` (mutation-verified: recording
   blocked outcomes as `failed` fails the view assertions).
 
-### Interaction grammar (v3, #35, 2026-09-27)
+### Interaction grammar (#35, updated by #61)
 
-New v3 contract — no v1 evidence; SPEC.md "Interaction grammar",
-"Reflex meeting", and "Observability" define the surface.
-
-- **Contract:** single-task calls are synchronous unless `async: true`,
-  multi-task calls return a ticket unless `async: false`, and an explicit
-  `async` overrides both defaults; the tool description teaches the rule.
-  Agent-name aliases expand exact, case-sensitively —
-  `general`/`general-purpose`/`worker` → `default`, `explorer`/`plan`/`scout` →
-  `explore`, `implement` → `coder` — before unknown-agent errors, surface a
-  `agent "x" → "y"` note in results and ticket views, and resolve
-  `models`/`modelsByParent` pins against the canonical name; unknown
-  names still error naming the available built-ins. The read-only
-  built-in is `explore` (#40 — `scout` survives as a reverse alias);
-  `models.scout`/`modelsByParent` `scout` keys fail loudly naming the
-  new key. Dispatches rejected
-  at config load, validation (including post-expansion unknown agents),
-  or admission record a `misfires` row — timestamp, phase, verbatim
-  caller-visible message, and batch shape — in the same store and
-  retention policy as dispatch rows.
-- **Covered now:** `tests/contract/grammar.test.ts` — all four
-  cardinality cases, the description text, all seven aliases, the
-  expansion note in sync results and settled ticket views, a canonical
-  model pin resolving on the aliased name, the unknown-agent built-in
-  list, and case sensitivity (`General` errors). Misfire rows for
-  validation, admission, config-load, and call-shape rejections plus the
-  successful-dispatch no-row case live in
-  `tests/contract/telemetry.test.ts`.
-- **Cross-harness field spellings (v3, #41):** `tests/contract/
-  grammar.test.ts` also covers the Claude-Code-shaped call
-  (`subagent_type` + `description` + `prompt` → alias expansion +
-  `field "…" → "…"` notes + description section head), top-level and
-  per-task `run_in_background` → `async` (ticket returned; the note
-  persists into the settled ticket view), `run_in_background: false`
-  pinning a batch sync, the `agent`/`subagent_type` and
-  `async`/`run_in_background` conflicts naming both fields,
-  agreeing-spellings acceptance, and `priority`-style unknown fields
-  failing at the schema boundary. Foreign context-sharing spellings
-  (#56): `fork_turns`, `fork_context`, `history`, and `parent_context`
-  each reject — at task level, top level, under flat/stringified/null
-  shapes — naming the field, restating no-inheritance, and pointing at
-  the top-level `brief`. The `maxConcurrent` default of 8 is
-  pinned through the boundary in `tests/contract/dispatch.test.ts`
-  (nine read-only tasks reach exactly eight in flight).
-- **Gap:** pre-`execute` rejections (host schema validation and
-  `prepareArguments` recoveries such as `ticketAction`→`delegate_ticket`)
-  have no context to locate the telemetry config and record no row.
+The #61 coverage entry above describes current defaults, exact agent names,
+strict field rejection and preflight telemetry. Foreign history-fork spellings
+still reject at every level with guidance to brief. Concurrency-default proofs
+remain in dispatch.test.ts. The old alias/cardinality tests have been replaced,
+not retained as misleading current promises.
 
 ### Steering with delivery receipts (v3, #37, 2026-09-27)
 
@@ -959,48 +948,26 @@ even at top level.
   and the brief→prompt→handoff ordering on a dependent. Schema pin in
   `tests/contract/tool-boundary.test.ts`.
 
-### Trained-reflex long tail (v3, #44)
+### Canonical boundary long tail (#44, updated by #61)
 
-New v3 contract — no v1 evidence; SPEC.md "Reflex meeting" defines the
-spellings and the derived steering key.
-
-- **Contract:** `agent_type` folds to `agent` with `subagent_type`'s
-  machinery (same-visible-note, conflict names every spelling sent);
-  `explorer` → `explore` joins the alias table. `task_name` → `id` and
-  a task-shaped `message` → `prompt` make the spawn_agent-shaped
-  `delegate` call dispatch — a bare `message` without task shape keeps
-  the steer-migration rejection, and `message` on `delegate_ticket`
-  stays steer-owned. `timeout_ms` → `timeoutMs` on `wait` with the
-  rename note; elsewhere it rejects naming the sent spelling.
-  `reasoning_effort` rejects with `thinking`'s teaching at task, top,
-  and sibling-tool levels. `steerId` is optional: a steer without one
-  derives `steer:<toolCallId>`, the receipt names the key, and the
-  same derived key + message replays the original receipt without
-  re-injecting.
-- **Covered now:** `tests/contract/reflex-tail.test.ts` — the
-  `agent_type` fold and conflict, the spawn_agent-shaped dispatch, the
-  explicit-task `message` fold, bare-`message` steer guidance, the
-  `prompt`/`message` conflict, `timeout_ms` (fold, non-`wait`
-  rejection, agree/disagree), `reasoning_effort` at every level, the
-  derived `steer:<toolCallId>` receipt and its replay, and the
-  unmarked explicit `steerId`. `explorer` joins the alias loop in
-  `tests/contract/grammar.test.ts`; schema and `steerId` optionality
-  pins in `tests/contract/tool-boundary.test.ts` and
-  `tests/contract/steering.test.ts`.
+reflex-tail.test.ts rejects agent_type/task_name/task message and timeout_ms,
+including agreeing canonical fields, flat/stringified shapes and null. It
+retains bare-message steer guidance, canonical ticket message, reasoning_effort
+rejection and derived/explicit steering retry-key behavior.
 
 ### No nested dispatch + profile precedence (v3, #45)
 
 New v3 contract — no v1 evidence; SPEC.md "Surface rules — No nesting"
-and "Reflex meeting — alias precedence" define it.
+and "Canonical surface — Exact agent names" define it.
 
 - **Contract:** `delegate`, `delegate_ticket`, and `delegate_session`
   are stripped — silently — from every inventory a child can be given:
   explicit task `tools`, Markdown-profile frontmatter `tools`, and the
   mirrored parent set (excluded by construction). A discovered profile
-  claims its exact name ahead of the alias table, so an authored
+  resolves by its exact name, so an authored
   `general.md` resolves to that profile with no expansion note;
   built-ins still win same-named collisions, and the unknown-agent
-  error lists built-ins with only the aliases that still expand.
+  error lists exact built-in and authored names without alias annotations.
 - **Covered now:** `tests/contract/no-nesting.test.ts` — the explicit
   `tools` strip, the inline `*`-group child, the mirrored-parent strip
   (parent inventory carries all three delegate tools), the profile
@@ -1711,8 +1678,8 @@ parent-scoped pins and removal of the task `thinking` field (issue #32;
 named Markdown agent profiles with project/global discovery, built-in
 collision precedence, and frontmatter model/thinking/tools (issue #7;
 `tests/contract/profiles.test.ts`); v3 interaction grammar — cardinality
-defaults, agent-name aliases, and misfire telemetry (issue #35;
-`SPEC.md` "Interaction grammar"/"Reflex meeting"/"Observability",
+defaults (now always background), exact agent names, and misfire telemetry (issue #35;
+`SPEC.md` "Interaction grammar"/"Canonical surface"/"Observability",
 `tests/contract/grammar.test.ts`, `tests/contract/telemetry.test.ts`);
 wake coalescing — simultaneous settlements batch into one followUp wake
 grouped by leaf routing (issue #36; `SPEC.md` "Wake delivery",

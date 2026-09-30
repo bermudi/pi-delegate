@@ -85,7 +85,7 @@ describe("regression: parent tool mirroring", () => {
         observed = getCurrentTools(context.messages).map((tool) => tool.name).sort();
         return fauxAssistantMessage("EXPECTED-CHILD");
       }]);
-      const result = await callDelegate(session, { tasks: [{ prompt: "inspect capabilities", ...task }] });
+      const result = await callDelegate(session, { async: false, tasks: [{ prompt: "inspect capabilities", ...task }] });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("EXPECTED-CHILD");
       expect(observed).toEqual([...tools].sort());
@@ -104,7 +104,7 @@ describe("regression: parent tool mirroring", () => {
       observed = getCurrentTools(context.messages).map((tool) => tool.name);
       return fauxAssistantMessage("READ-ONLY-CHILD");
     }]);
-    const result = await callDelegate(session, { tasks: [{ prompt: "inspect", agent: "default" }] });
+    const result = await callDelegate(session, { async: false, tasks: [{ prompt: "inspect", agent: "default" }] });
     expect(result.isError).toBe(false);
     expect(result.text).toContain("READ-ONLY-CHILD");
     expect(observed).toEqual(["read"]);
@@ -124,7 +124,7 @@ describe("regression: parent tool mirroring", () => {
         observed = getCurrentTools(context.messages).map((tool) => tool.name);
         return fauxAssistantMessage("NO-TOOLS-CHILD");
       }]);
-      const result = await callDelegate(session, { tasks: [{ prompt: "inspect", agent: "default" }] });
+      const result = await callDelegate(session, { async: false, tasks: [{ prompt: "inspect", agent: "default" }] });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("NO-TOOLS-CHILD");
       expect(subagents.state.callCount).toBe(1);
@@ -149,7 +149,7 @@ describe("regression: parent tool mirroring", () => {
       observed = getCurrentTools(context.messages).map((tool) => tool.name);
       return fauxAssistantMessage("HOST-LIMITED-CHILD");
     }]);
-    const result = await callDelegate(session, { tasks: [{ prompt: "inspect", agent: "default" }] });
+    const result = await callDelegate(session, { async: false, tasks: [{ prompt: "inspect", agent: "default" }] });
     expect(result.isError).toBe(false);
     expect(result.text).toContain("HOST-LIMITED-CHILD");
     expect(subagents.state.callCount).toBe(1);

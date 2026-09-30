@@ -55,6 +55,7 @@ describe("regression: session-start host-compat probe", () => {
         ).toBe(false);
 
         const result = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "never starts" }],
         });
 

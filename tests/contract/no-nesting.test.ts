@@ -14,12 +14,12 @@ import {
 import { mockParentTools } from "../support/parent-tools.ts";
 
 /**
- * Contract: no nesting and alias precedence (issue #45, SPEC v3
+ * Contract: no nesting and exact authored profiles (issue #45, SPEC v3
  * "Surface rules" / "Reflex meeting"). `delegate`, `delegate_ticket`,
  * and `delegate_session` are stripped — silently — from every inventory
  * a child can be given: explicit task `tools`, profile frontmatter
  * `tools`, and the mirrored parent set. And a discovered Markdown
- * profile claims its exact name ahead of the alias table, while
+ * profile resolves by its exact name without translations, while
  * built-ins still win same-named collisions.
  *
  * The child's provider-visible toolset is observed through the
@@ -80,6 +80,7 @@ describe("no nested dispatch and profile precedence (SPEC v3, issue #45)", () =>
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [
         {
           prompt: "work",
@@ -108,6 +109,7 @@ describe("no nested dispatch and profile precedence (SPEC v3, issue #45)", () =>
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "work" }],
     });
 
@@ -137,6 +139,7 @@ describe("no nested dispatch and profile precedence (SPEC v3, issue #45)", () =>
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "work", agent: "default" }],
     });
 
@@ -169,6 +172,7 @@ describe("no nested dispatch and profile precedence (SPEC v3, issue #45)", () =>
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "work", agent: "recruiter" }],
     });
 
@@ -177,50 +181,49 @@ describe("no nested dispatch and profile precedence (SPEC v3, issue #45)", () =>
     expect(observed).toEqual(["read"]);
   });
 
-  test("a user profile named `general` claims the name — the alias never fires", async () => {
-    // #45: discovered profiles rank above the alias table. `general.md`
-    // is the user's agent; the `general` → `default` expansion must not
-    // run, so no alias note and the profile's own prompt/tools apply.
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-    writeProfile(
-      globalDir(session),
-      "general.md",
-      [
-        "name: general",
-        "description: the user's own generalist",
-        "tools: ro",
-      ].join("\n"),
-      "You are USER-GENERAL-PROFILE.",
-    );
-    let observed: string[] | undefined;
-    let seenPrompt = "";
-    subagents.respond([
-      (context) => {
-        observed = getCurrentTools(context.messages).map((tool) => tool.name).sort();
-        seenPrompt = systemPromptText(
-          context.messages.find((m) => m.role === "system"),
-        );
-        return fauxAssistantMessage("CLAIMED");
-      },
-    ]);
+  for (const name of ["general", "scout"]) {
+    test(`an authored ${name} profile resolves exactly, without translation`, async () => {
+      // #61: removal of built-in translations does not reserve these names.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      writeProfile(
+        globalDir(session),
+        `${name}.md`,
+        [
+          `name: ${name}`,
+          "description: the user's own generalist",
+          "tools: ro",
+        ].join("\n"),
+        `You are USER-${name}-PROFILE.`,
+      );
+      let observed: string[] | undefined;
+      let seenPrompt = "";
+      subagents.respond([
+        (context) => {
+          observed = getCurrentTools(context.messages).map((tool) => tool.name).sort();
+          seenPrompt = systemPromptText(
+            context.messages.find((m) => m.role === "system"),
+          );
+          return fauxAssistantMessage("CLAIMED");
+        },
+      ]);
 
-    const result = await callDelegate(session, {
-      tasks: [{ prompt: "work", agent: "general" }],
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [{ prompt: "work", agent: name }],
+      });
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("CLAIMED");
+      expect(result.text).not.toContain(`agent "${name}" →`);
+      expect(seenPrompt).toContain(`USER-${name}-PROFILE.`);
+      // The profile's `ro` frontmatter ran, not the default mirror.
+      expect(observed).toEqual(["find", "grep", "ls", "read"]);
     });
+  }
 
-    expect(result.isError).toBe(false);
-    expect(result.text).toContain("CLAIMED");
-    expect(result.text).not.toContain('agent "general" →');
-    expect(seenPrompt).toContain("USER-GENERAL-PROFILE.");
-    // The profile's `ro` frontmatter ran, not the default mirror.
-    expect(observed).toEqual(["find", "grep", "ls", "read"]);
-  });
-
-  test("a claimed alias name is listed as itself, not under the built-in's aliases", async () => {
-    // #45: the unknown-agent error still teaches the catalog — but a
-    // profile-claimed alias name (`general`) must not be advertised as
-    // `default`'s alias, since it resolves to the profile.
+  test("unknown-agent guidance lists exact authored names and no automatic aliases", async () => {
+    // #61: the catalog advertises only actual definitions.
     session = await openDelegateBoundary();
     await installSubagentModel(session);
     writeProfile(
@@ -231,13 +234,16 @@ describe("no nested dispatch and profile precedence (SPEC v3, issue #45)", () =>
     );
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "x", agent: "nonexistent-agent" }],
     });
 
     expect(result.isError).toBe(true);
     expect(result.text).toContain("unknown agent 'nonexistent-agent'");
-    expect(result.text).toContain("general-purpose");
-    expect(result.text).toContain("worker");
-    expect(result.text).not.toMatch(/default \(aliases: [^)]*\bgeneral(,|\))/);
+    expect(result.text).toContain("general");
+    expect(result.text).toContain("default");
+    expect(result.text).not.toContain("general-purpose");
+    expect(result.text).not.toContain("worker");
+    expect(result.text).not.toContain("aliases:");
   });
 });

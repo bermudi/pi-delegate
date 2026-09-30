@@ -106,6 +106,7 @@ describe("delegate output bounding", () => {
     subagents.respond([fauxAssistantMessage("SMALL-OUTPUT")]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "small" }],
     });
     expect(result.isError).toBe(false);
@@ -131,6 +132,7 @@ describe("delegate output bounding", () => {
       subagents.respond([fauxAssistantMessage(output)]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "big" }],
       });
       expect(result.isError).toBe(false);
@@ -177,6 +179,7 @@ describe("delegate output bounding", () => {
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "fails with partial output" }],
     });
     expect(result.isError).toBe(true);
@@ -329,6 +332,7 @@ describe("delegate output bounding", () => {
     subagents.respond([fauxAssistantMessage(output)]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "big" }],
     });
     expect(result.isError).toBe(false);
@@ -352,6 +356,7 @@ describe("delegate output bounding", () => {
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "emoji" }],
     });
     expect(result.isError).toBe(false);
@@ -374,6 +379,7 @@ describe("delegate output bounding", () => {
     subagents.respond([fauxAssistantMessage("(no output)")]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "quiet" }],
     });
     expect(result.isError).toBe(false);
@@ -396,6 +402,7 @@ describe("delegate output bounding", () => {
     subagents.respond([fauxAssistantMessage(output)]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "spaces" }],
     });
     expect(result.isError).toBe(false);
@@ -435,6 +442,7 @@ describe("delegate output bounding", () => {
     ] as const) {
       configureDelegate(session, { output });
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "never" }],
       });
       expect(result.isError).toBe(true);

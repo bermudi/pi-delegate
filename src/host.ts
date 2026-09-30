@@ -21,9 +21,7 @@ import {
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
-  agentListEntry,
   CHILD_TOOLS,
-  claimAgentName,
   DELEGATE_TOOL_NAMES,
   expandTools,
   isWriter,
@@ -253,25 +251,14 @@ export async function resolveTasks(
   config: DelegateConfig,
   catalog: ProfileCatalog,
 ): Promise<ResolvedTask[]> {
-  // Resolve every requested name against the catalog once up front (#45):
-  // an exact profile or built-in claims its name ahead of the alias table,
-  // so an authored `general.md` resolves to that profile — never the
-  // `general` → `default` alias — and does not inherit the default
-  // profile's parent-tool mirror either.
-  const claimed = tasks.map((task) =>
-    task.agent === undefined
-      ? undefined
-      : claimAgentName(task.agent, catalog.profiles),
-  );
-
   let parentActive: string[] = [];
-  // Explicit `default` (or an alias for it that no profile claims) mirrors
+  // Explicit `default` mirrors
   // the parent's active tools; an omitted agent is an inline task with the
   // standard tool set. web_search passes the mirror filter so a parent
   // that has it (through its own provider extension) can hand it to a
   // child whose provider resolved an extension allowlist — tasks without
   // one strip it per-task below.
-  if (tasks.some((task, index) => task.agent !== undefined && claimed[index]?.agent === "default" && task.tools === undefined)) {
+  if (tasks.some((task) => task.agent === "default" && task.tools === undefined)) {
     try {
       parentActive = env
         .getActiveTools()
@@ -307,15 +294,11 @@ export async function resolveTasks(
   const resolved: ResolvedTask[] = [];
   for (const [index, task] of tasks.entries()) {
     const where = `tasks[${index}]${task.id ? ` (id '${task.id}')` : ""}`;
-    // SPEC v3 "Reflex meeting": alias expansion happens before any
-    // unknown-agent error, but only for names no profile claims — the
-    // raw name stays on `aliasedFrom` for the teaching note in the result.
-    const agent = claimed[index]?.agent;
-    const aliasedFrom = claimed[index]?.aliasedFrom;
+    const agent = task.agent;
     const profile = agent ? catalog.profiles.get(agent) : undefined;
     if (agent && !profile) {
       throw new Error(
-        `${where}: unknown agent '${agent}'. Known agents: ${[...catalog.profiles.keys()].map((name) => agentListEntry(name, catalog.profiles)).join(", ")}.`,
+        `${where}: unknown agent '${agent}'. Known agents: ${[...catalog.profiles.keys()].join(", ")}.`,
       );
     }
 
@@ -329,8 +312,7 @@ export async function resolveTasks(
       parentModel === undefined
         ? undefined
         : `${parentModel.provider}/${parentModel.id}`.toLowerCase();
-    // The config pin resolves against the CANONICAL name: a models.explore
-    // entry applies to agent "scout" just as it does to "explore".
+    // Config pins resolve against the exact built-in or authored profile name.
     const agentName = agent ?? "default";
     const assignment = configuredModelFor(agent, parentKey, config);
     const modelRef = assignment?.ref ?? profile?.modelPin;
@@ -469,8 +451,8 @@ export async function resolveTasks(
       agent:
         agent ??
         (resumeTag !== undefined ? `resume:${resumeTag}` : "inline"),
-      aliasedFrom,
-      normalizedFrom: task.normalizedFrom,
+      aliasedFrom: undefined,
+      normalizedFrom: undefined,
       description: task.description,
       cwd: canonicalPath(cwd),
       model,

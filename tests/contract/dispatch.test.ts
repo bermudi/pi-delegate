@@ -70,6 +70,7 @@ describe("delegate dispatch contract", () => {
       // Bare `~` resolves to the home directory, which exists everywhere:
       // the child runs there and the call succeeds.
       const ok = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "run from home", cwd: "~" }],
       });
       expect(ok.isError).toBe(false);
@@ -79,6 +80,7 @@ describe("delegate dispatch contract", () => {
       // without expansion the error would carry `<parent cwd>/~/missing…`.
       const home = homedir();
       const missing = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "run from a missing home path", cwd: "~/missing-delegate-probe" }],
       });
       expect(missing.isError).toBe(true);
@@ -132,6 +134,7 @@ describe("delegate dispatch contract", () => {
     ]);
 
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "doomed" }],
     });
     expect(result.isError).toBe(true);
@@ -148,6 +151,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([fauxAssistantMessage("OUTPUT-ID")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ id: "corr-1", prompt: "x" }],
       });
 
@@ -168,6 +172,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([fauxAssistantMessage("done")]);
 
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
 
@@ -376,6 +381,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "nope", model: subagents.spec }],
       });
 
@@ -432,6 +438,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", agent: "explore" }],
       });
 
@@ -463,6 +470,7 @@ describe("delegate dispatch contract", () => {
       subagents.alt.respond([fauxAssistantMessage("UNSCOPED-LOSES")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "look around", agent: "explore" }],
       });
 
@@ -489,6 +497,7 @@ describe("delegate dispatch contract", () => {
       subagents.alt.respond([fauxAssistantMessage("UNSCOPED-APPLIES")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "look around", agent: "explore" }],
       });
 
@@ -573,6 +582,7 @@ describe("delegate dispatch contract", () => {
           modelsByParent: { [key]: { explore: subagents.spec } },
         });
         const result = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "look", agent: "explore" }],
         });
         expect(result.isError).toBe(true);
@@ -602,6 +612,7 @@ describe("delegate dispatch contract", () => {
       });
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "look", agent: "explore" }],
       });
 
@@ -684,6 +695,7 @@ describe("delegate dispatch contract", () => {
       });
       subagents.respond([fauxAssistantMessage("SLASH-ID-KEY-LOADS")]);
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "look", agent: "explore" }],
       });
       // The scoped key simply never matches this parent; dispatch
@@ -737,6 +749,7 @@ describe("delegate dispatch contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "look", agent: "explore" }],
       });
 
@@ -761,6 +774,7 @@ describe("delegate dispatch contract", () => {
       return fauxAssistantMessage("FRESH-CHILD");
     }]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "SELF-CONTAINED-BRIEF", tools: [] }],
     });
     expect(result.isError).toBe(false);
@@ -825,6 +839,7 @@ describe("delegate dispatch contract", () => {
       subagents.respond([gated]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "hang", tools: ["write"], deadlineMs: 300 }],
       });
       expect(result.text).toMatch(/deadline/i);

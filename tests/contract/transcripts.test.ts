@@ -84,6 +84,7 @@ describe("transcript exclusivity contract", () => {
       const transcript = writeTranscript(session.cwd, "shared-prior.jsonl");
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { id: "a", prompt: "continue", tools: ["read"], resumeFrom: transcript },
           { id: "b", prompt: "continue too", tools: ["read"], resumeFrom: transcript },
@@ -131,6 +132,7 @@ describe("transcript exclusivity contract", () => {
       // While the worker is live, resuming its transcript rejects and
       // names the owning work — before any second child starts.
       const busy = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "resume mid-flight", tools: ["read"], resumeFrom: transcript }],
       });
       expect(busy.isError).toBe(true);
@@ -143,6 +145,7 @@ describe("transcript exclusivity contract", () => {
 
       // Settled and quiesced: the transcript is resumable again.
       const after = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "resume now", tools: ["read"], resumeFrom: transcript }],
       });
       expect(after.isError).toBe(false);
@@ -181,6 +184,7 @@ describe("transcript exclusivity contract", () => {
       );
 
       const busy = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "resume via alias", tools: ["read"], resumeFrom: alias }],
       });
       expect(busy.isError).toBe(true);
@@ -218,6 +222,7 @@ describe("transcript exclusivity contract", () => {
 
       // Create the pooled session: a successful run persists its file.
       const first = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "seed the pool", tools: ["read"], sessionId: "pool-1" }],
       });
       expect(first.isError).toBe(false);
@@ -245,6 +250,7 @@ describe("transcript exclusivity contract", () => {
       );
 
       const busy = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "resume the pooled file", tools: ["read"], resumeFrom: pooledFile }],
       });
       expect(busy.isError).toBe(true);
@@ -255,6 +261,7 @@ describe("transcript exclusivity contract", () => {
       await callDelegateTicket(session, { action: "wait", ticket });
 
       const after = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "resume the settled pool file", tools: ["read"], resumeFrom: pooledFile }],
       });
       expect(after.isError).toBe(false);
@@ -280,6 +287,7 @@ describe("transcript exclusivity contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "die on the first call", tools: ["read"] }],
       });
       expect(result.isError).toBe(true);
@@ -297,6 +305,7 @@ describe("transcript exclusivity contract", () => {
       // Round-trip: the advertised path is a real transcript
       // SessionManager.open can continue — not a dead pointer.
       const resumed = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "continue", tools: ["read"], resumeFrom: sessionLine! },
         ],
@@ -324,6 +333,7 @@ describe("transcript exclusivity contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "die in scratch",
@@ -358,6 +368,7 @@ describe("transcript exclusivity contract", () => {
       // Sync result section head.
       subagents.respond([fauxAssistantMessage("RESUMED-SYNC")]);
       const sync = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "continue", tools: ["read"], resumeFrom: transcript }],
       });
       expect(sync.isError).toBe(false);

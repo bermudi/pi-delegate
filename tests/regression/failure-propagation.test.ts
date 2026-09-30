@@ -34,6 +34,7 @@ describe("regression: failure propagation and retries", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "flaky" }],
       });
       expect(result.isError).toBe(false);
@@ -60,6 +61,7 @@ describe("regression: failure propagation and retries", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "quota-bound" }],
       });
       expect(result.text).toMatch(/usage limit|quota|upgrade/i);
@@ -122,6 +124,7 @@ describe("regression: failure propagation and retries", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "flaky",  deadlineMs: 100 },
         ],
@@ -142,6 +145,7 @@ describe("regression: failure propagation and retries", () => {
       subagents.respond([fauxAssistantMessage("SHOULD-NOT-RUN")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "ok" },
           { prompt: "bad", agent: "nonexistent-agent" },

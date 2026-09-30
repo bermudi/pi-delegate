@@ -17,6 +17,7 @@ import {
 } from "@earendil-works/pi-ai";
 
 const extensionPath = resolve(import.meta.dirname, "../../delegate.ts");
+const fullSurfaceFixture = resolve(import.meta.dirname, "./full-surface.ts");
 
 export interface PublicTool {
   readonly name: string;
@@ -29,16 +30,25 @@ export interface PublicTool {
 
 export async function openDelegateBoundary(
   options: {
+    /** Engine suites use full mode; compact tests must request compact explicitly. */
+    surface?: "compact" | "full";
     inMemoryAgentDir?: boolean;
     mockUI?: MockUIConfig;
     /** Extensions loaded before delegate.ts (fault injection at the host boundary). */
     leadingExtensions?: string[];
+    /** Extensions loaded after delegate.ts (later-handler boundary regressions). */
+    trailingExtensions?: string[];
     /** Parent session custom base prompt (the user-authored persona channel). */
     systemPrompt?: string;
   } = {},
 ): Promise<TestSession> {
   const session = await createTestSession({
-    extensions: [...(options.leadingExtensions ?? []), extensionPath],
+    extensions: [
+      ...(options.surface === "compact" ? [] : [fullSurfaceFixture]),
+      ...(options.leadingExtensions ?? []),
+      extensionPath,
+      ...(options.trailingExtensions ?? []),
+    ],
     propagateErrors: false,
     mockUI: options.mockUI,
     systemPrompt: options.systemPrompt,

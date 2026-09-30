@@ -96,6 +96,7 @@ describe("markdown agent profiles contract (#7)", () => {
       subagents.respond([capture]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "find the route", agent: "navigator" }],
       });
 
@@ -132,6 +133,7 @@ describe("markdown agent profiles contract (#7)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "audit", agent: "auditor" }],
       });
 
@@ -176,6 +178,7 @@ describe("markdown agent profiles contract (#7)", () => {
       subagents.alt.respond([fauxAssistantMessage("WRONG-SENTINEL")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "watch", agent: "sentinel" }],
       });
 
@@ -212,6 +215,7 @@ describe("markdown agent profiles contract (#7)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "explore it", agent: "explore" }],
       });
 
@@ -246,6 +250,7 @@ describe("markdown agent profiles contract (#7)", () => {
       subagents.alt.respond([fauxAssistantMessage("PROFILE-WON")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "audit", agent: "auditor" }],
       });
 
@@ -291,6 +296,7 @@ describe("markdown agent profiles contract (#7)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "navigate", agent: "navigator" }],
       });
 
@@ -319,6 +325,7 @@ describe("markdown agent profiles contract (#7)", () => {
       );
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "try it", agent: "broken" }],
       });
 
@@ -349,6 +356,7 @@ describe("markdown agent profiles contract (#7)", () => {
       chmodSync(locked, 0o000);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "try it", agent: "locked" }],
       });
 
@@ -380,6 +388,7 @@ describe("markdown agent profiles contract (#7)", () => {
       try {
         for (let attempt = 0; attempt < 2; attempt++) {
           await callDelegate(session, {
+            async: false,
             tasks: [{ prompt: "again", agent: "broken" }],
           });
         }
@@ -425,6 +434,7 @@ describe("markdown agent profiles contract (#7)", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "go", agent: "twin" }],
       });
 
@@ -458,7 +468,7 @@ describe("markdown agent profiles contract (#7)", () => {
       );
       const warn = spyOn(console, "warn").mockImplementation(() => {});
       try {
-        const help = await callDelegate(session, { tasks: [] });
+        const help = await callDelegate(session, { async: false, tasks: [] });
 
         expect(help.isError).toBe(false);
         expect(help.text).toContain("Delegate Manual");
@@ -472,6 +482,7 @@ describe("markdown agent profiles contract (#7)", () => {
 
         // The dispatch after help still reports the broken file once.
         await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "try it", agent: "broken" }],
         });
         expect(
@@ -522,7 +533,7 @@ describe("markdown agent profiles contract (#7)", () => {
         },
       });
 
-      const help = await callDelegate(session, { tasks: [] });
+      const help = await callDelegate(session, { async: false, tasks: [] });
       expect(help.isError).toBe(false);
       expect(help.text).toContain("## Your agent profiles");
       // Unscoped pin: model ref + :effort + config origin.

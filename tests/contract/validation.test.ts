@@ -99,6 +99,7 @@ describe("delegate validation contract", () => {
       // v1 evidence: schema.test.ts task id validation; SPEC batch-before-start.
       session = await openDelegateBoundary();
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { id: "dup", prompt: "a" },
           { id: "dup", prompt: "b" },
@@ -116,6 +117,7 @@ describe("delegate validation contract", () => {
       // v1 evidence: task-resolution validateTasks duplicate-session checks.
       session = await openDelegateBoundary();
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "a", sessionId: "shared-one" },
           { prompt: "b", sessionId: "shared-one" },
@@ -132,6 +134,7 @@ describe("delegate validation contract", () => {
     // task dispatches with no session instead of failing.
     session = await openDelegateBoundary();
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "x", sessionId: "" }],
     });
     expect(result.text).not.toContain("Validation failed");
@@ -143,6 +146,7 @@ describe("delegate validation contract", () => {
     session = await openDelegateBoundary();
     for (const deadlineMs of [0, -50]) {
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", deadlineMs }],
       });
       expect(result.isError).toBe(true);
@@ -165,7 +169,7 @@ describe("delegate validation contract", () => {
         { prompt: "x", workspace: "isolated", sessionId: "s1" },
         { prompt: "x", workspace: "isolated", resumeFrom: "/tmp/x.jsonl" },
       ]) {
-        const result = await callDelegate(session, { tasks: [task] });
+        const result = await callDelegate(session, { async: false, tasks: [task] });
         expect(result.isError).toBe(true);
         expect(result.text).toMatch(/workspace|session|resume/i);
         expect(result.text).not.toContain("dispatch is not implemented");
@@ -216,6 +220,7 @@ describe("delegate validation contract", () => {
       // itself rather than surfacing a bare additionalProperties error.
       session = await openDelegateBoundary();
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "inside" }],
         prompt: "outside",
         sessionId: "s1",
@@ -235,6 +240,7 @@ describe("delegate validation contract", () => {
       // appears, including stranded at the top level next to `tasks`.
       session = await openDelegateBoundary();
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
         model: "some/model",
       });
@@ -280,6 +286,7 @@ describe("delegate validation contract", () => {
     // close/list/resume) throws". SPEC: prompt is optional only with resumeFrom.
     session = await openDelegateBoundary();
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ agent: "explore" }],
     });
     expect(result.isError).toBe(true);
@@ -295,6 +302,7 @@ describe("delegate validation contract", () => {
       // error".
       session = await openDelegateBoundary();
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", agent: "nonexistent-agent" }],
       });
       expect(result.isError).toBe(true);
@@ -335,6 +343,7 @@ describe("delegate validation contract", () => {
       const subagents = await installSubagentModel(session);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "never runs",

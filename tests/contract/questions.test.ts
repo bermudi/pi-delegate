@@ -155,6 +155,7 @@ describe("async worker questions (#17)", () => {
     // A dispatch carrying a ticket-only field gets cross-tool guidance, not
     // a worker start.
     expect((await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "no start" }], answer: "oops",
     })).isError).toBe(true);
     // Whitespace is a string the schema accepts, so only validation can
@@ -224,6 +225,7 @@ describe("async worker questions (#17)", () => {
       fauxAssistantMessage("SECOND-DONE"),
     ]);
     const first = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "first", sessionId: "reuse", tools: ["read"] }],
     });
     expect(first.text).toContain("FIRST-DONE");

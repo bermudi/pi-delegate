@@ -12,7 +12,7 @@ copy, or a private Git worktree. `SPEC.md` is the v3 behavioral contract;
 ## Quickstart
 
 ```ts
-// One task — synchronous by default: blocks until it settles and returns inline.
+// One task or many — returns a background ticket; results arrive automatically.
 delegate({
   tasks: [{ agent: "explore", prompt: "Map the authentication flow" }],
 });
@@ -29,30 +29,41 @@ delegate({
 });
 ```
 
-`async` overrides either default: `async: true` backgrounds a single task;
-`async: false` blocks on a batch.
+`async: false` waits for inline results for any task count. Omitted `async`
+always means background execution. `tasks: []` shows the manual.
+
+## Compact and full interfaces
+
+Compact is the default: batch `tasks`, `async`, `workspace`, `brief`; each task
+has `prompt`, `agent`, `cwd`, `workspace`. Named Markdown profiles supply the
+usual tools and base instructions.
+
+To enable all advanced controls, set `"surface": "full"` in user-global
+`delegate.json`, then `/reload`. Both interfaces use the same engine. Hidden
+advanced inputs reject with instructions rather than silently executing. This
+is an operator setting, not a model-family switch.
+Choose before launching work: `/reload` cancels active workers and waits for
+safe cleanup, as it does for any extension reload.
+
+Full mode adds task ids/display labels, explicit tools/base-prompt overrides,
+session reuse, transcript resume, deadlines and dependencies; batch token
+budgets/retry keys; ticket pause/resume/tail, wait-any, timed waits and explicit
+steering retry keys. No execution or safety features are removed.
 
 ## Dispatch
 
-A call resolves each task's agent, tools, workspace, and claims, then admits and
-runs the batch in task order. Task fields: `prompt` (required), `id` (auto
-`task-1`…), `agent`, `cwd` (defaults to the parent cwd), `systemPrompt`, `tools`,
-`sessionId`, `resumeFrom`, `deadlineMs`, `workspace`, `dependsOn`. Top-level
-`workspace` defaults the batch's mode for tasks that don't name their own, and
-top-level `operationId` deduplicates the whole call against retries.
-Cross-harness spellings are accepted and normalized at validation —
-`subagent_type`/`agent_type` → `agent` (aliases still apply),
-`task_name` → `id`, `message` beside task-shaped fields → `prompt`,
-`description` (≤200 chars)
-labels the task in call rows and section headers, `run_in_background`
-(top-level or per task) → `async`, and `context` → `brief`; each applied
-rename is reported on the result (`field "subagent_type" → "agent"`),
-conflicting spellings error, and unknown fields still fail
-(`additionalProperties: false`). A bare `message` without task shape is
-steer-shaped — the call is rejected with guidance toward
-`delegate_ticket`, and caller-supplied `model`, `thinking`, or
-`reasoning_effort` reject likewise: models and effort are configured,
-never call arguments. Top-level `brief` is shared batch
+A call resolves profiles, tools, workspaces and write claims before running
+work. Compact mode covers ordinary calls. Full-mode task fields are `prompt`
+(required unless `resumeFrom`), `id` (auto `task-1`…), `description` (display
+label, ≤200 chars), `agent`, `cwd`, `systemPrompt`, `tools`, `sessionId`,
+`resumeFrom`, `deadlineMs`, `workspace`, `dependsOn`. Batch `workspace`
+is the default for tasks without their own; full-mode `operationId` is a
+host-lifetime dispatch retry key.
+
+Only canonical field names are accepted. Removed cross-harness spellings
+reject before any worker starts, even when null or accompanied by the
+canonical field. Models/effort remain operator-configured, never call fields.
+Top-level `brief` is shared batch
 context: it prepends to every task's prompt inside a `--- batch brief ---`
 fence (task sections and headers note it once; it never merges into the
 prompt's prose). Top-level `tokenBudget` (positive integer) caps the
@@ -89,17 +100,16 @@ Built-in profiles:
 | `reviewer` | `read`, `bash` | Review that can run checks — carries `bash`, so it serializes as a writer. |
 | `verifier` | `read`, `bash` | Rules on a claim; its result carries a parsed `VERDICT:` line beside file evidence — reporting only, never gating. |
 
-Aliases expand to a canonical built-in, and the expansion is named in the
-result: `general`, `general-purpose`, `worker` → `default`; `explorer`,
-`plan`, `scout` → `explore`; `implement` → `coder`. Matching is exact and
-case-sensitive.
+Agent names are exact and case-sensitive: built-ins or authored profiles,
+without automatic translations. Unknown names list available profiles.
 
 Markdown profiles come from `.pi/agents/*.md` under the working directory first,
 then `<agentDir>/agents/*.md` — first definition wins; built-ins win name
 collisions. Frontmatter requires `name` and `description` and may set `tools`,
 `model`, `thinking`; the body is the system prompt. `.claude/agents` is never
-imported. A discovered profile claims its exact name ahead of the alias
-table — a `general.md` is your agent, not the `general` → `default` alias.
+imported. An authored `general.md` or `scout.md` is an ordinary exact-name
+profile, not an alias. Profile tools/body are defaults; full-mode task
+overrides retain precedence.
 
 ## Steering
 
@@ -165,6 +175,7 @@ values fail loudly at the dispatch boundary.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `surface` | `"compact"` | Advertised and validated interface: `"compact"` or `"full"`; changes take effect on `/reload`. |
 | `maxConcurrent` | `8` | Global cap on simultaneous tasks. |
 | `concurrency.default` | unset | Fallback in-flight bound. |
 | `concurrency.providers` | `{}` | Per-provider bound, e.g. `{"anthropic": 2}`. |
@@ -189,6 +200,9 @@ and disables telemetry without changing delegation results. Inspect with
 `sqlite3 <db> 'SELECT * FROM calls'` (or `tasks` / `misfires`).
 
 ## Tickets
+
+Compact supports poll/wait/cancel/answer/steer/interrupt. The optional timed
+wait, wait-any, pause/resume and tail controls below require full mode.
 
 `delegate_ticket({ ticket, action, ... })` operates on a ticket:
 

@@ -201,6 +201,7 @@ describe("delegate workspace and shared-write contract", () => {
       gitInit(dir);
 
       const result = await callDelegate(session, {
+        async: false,
         workspace: "isolated",
         tasks: [
           {
@@ -250,6 +251,7 @@ describe("delegate workspace and shared-write contract", () => {
       const callsBefore = subagents.state.callCount;
 
       const rejected = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "now", cwd: dir,  tools: ["write"] },
         ],
@@ -297,6 +299,7 @@ describe("delegate workspace and shared-write contract", () => {
       expect(subagents.state.callCount).toBe(1);
 
       const rejected = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "now", cwd: dir, tools: ["write"] }],
       });
       expect(rejected.isError).toBe(true);
@@ -324,6 +327,7 @@ describe("delegate workspace and shared-write contract", () => {
       gitInit(dir);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "shared",
@@ -370,7 +374,7 @@ describe("delegate workspace and shared-write contract", () => {
           workspace: "scratch",
         },
       ]) {
-        const result = await callDelegate(session, { tasks: [task] });
+        const result = await callDelegate(session, { async: false, tasks: [task] });
         expect(result.isError).toBe(true);
         expect(result.text).toMatch(/scratch/i);
         expect(result.text).toMatch(/read.only/i);
@@ -394,6 +398,7 @@ describe("delegate workspace and shared-write contract", () => {
       execSync("git worktree add --detach linked HEAD", { cwd: dir });
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "write a file",
@@ -424,6 +429,7 @@ describe("delegate workspace and shared-write contract", () => {
       process.env.GIT_DIR = join(dir, "bogus-git-dir");
       try {
         const result = await callDelegate(session, {
+          async: false,
           tasks: [
             {
               prompt: "first",
@@ -642,6 +648,7 @@ describe("delegate workspace and shared-write contract", () => {
 
       subagents.respond([fauxAssistantMessage("OK")]);
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "hi",
@@ -783,6 +790,7 @@ describe("delegate workspace and shared-write contract", () => {
       ]);
 
       const dispatched = callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "change victim.txt first line",
@@ -907,7 +915,7 @@ exec '${realGit}' "$@"
               fauxToolCall("write", { path: "b.txt", content: "worker\n" }),
             ]);
       subagents.respond([write, write, write]);
-      const result = await callDelegate(session, { tasks: [{ prompt: "edit both", cwd: dir, workspace: "isolated", tools: ["write"] }] });
+      const result = await callDelegate(session, { async: false, tasks: [{ prompt: "edit both", cwd: dir, workspace: "isolated", tools: ["write"] }] });
       expect(result.text).toMatch(/apply_failed/);
       expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("base\n");
       expect(statSync(join(dir, "a.txt")).mode & 0o777).toBe(0o600);
@@ -949,6 +957,7 @@ exec '${realGit}' "$@"
             ]);
       subagents.respond([write, write]);
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "delete and edit", cwd: dir, workspace: "isolated", tools: ["bash", "write"] }],
       });
       expect(result.text).toMatch(/apply_failed/);
@@ -1055,7 +1064,7 @@ exec '${realGit}' "$@"
         ? fauxAssistantMessage("DONE")
         : fauxAssistantMessage([fauxToolCall("bash", { command: "ln -sfn next.txt link.txt" })]);
     subagents.respond([write, write]);
-    const result = await callDelegate(session, { tasks: [{ prompt: "update symlink", cwd: dir, workspace: "isolated", tools: ["bash"] }] });
+    const result = await callDelegate(session, { async: false, tasks: [{ prompt: "update symlink", cwd: dir, workspace: "isolated", tools: ["bash"] }] });
     expect(result.text).toMatch(/applied_unverified/);
     expect(readlinkSync(join(dir, "link.txt"))).toBe("next.txt");
   });
@@ -1075,6 +1084,7 @@ exec '${realGit}' "$@"
           ]);
     subagents.respond([step, step]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "replace file with directory", cwd: dir, workspace: "isolated", tools: ["bash"] }],
     });
     expect(result.text).toContain("applied_unverified");
@@ -1097,6 +1107,7 @@ exec '${realGit}' "$@"
           ]);
     subagents.respond([step, step]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "replace directory with file", cwd: dir, workspace: "isolated", tools: ["bash"] }],
     });
     expect(result.text).toContain("applied_unverified");
@@ -1132,6 +1143,7 @@ exec '${realGit}' "$@"
             ]);
       subagents.respond([step, step]);
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "replace file with directory", cwd: dir, workspace: "isolated", tools: ["bash"] }],
       });
       expect(result.text).toContain("apply_failed");
@@ -1156,6 +1168,7 @@ exec '${realGit}' "$@"
         : fauxAssistantMessage([fauxToolCall("bash", { command: "ln -sfn new.txt link" })]);
     subagents.respond([step, step]);
     const result = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "retarget link", cwd: dir, workspace: "isolated", tools: ["bash"] }],
     });
     expect(result.text).toContain("applied_unverified");
@@ -1631,11 +1644,13 @@ exec '${realGit}' "$@"
       // leaked reservation outlives the budget and fails here.
       const budget = Date.now() + 3000;
       let next = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "write again", cwd: dir, tools: ["write"] }],
       });
       while (next.isError && Date.now() < budget) {
         await new Promise((r) => setTimeout(r, 25));
         next = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "write again", cwd: dir, tools: ["write"] }],
         });
       }

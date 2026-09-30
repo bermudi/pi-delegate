@@ -94,7 +94,7 @@ describe("delegate explicit operation identity", () => {
         fauxAssistantMessage("UNKEYED-FIRST"),
         fauxAssistantMessage("UNKEYED-SECOND"),
       ]);
-      const args = { tasks: [{ prompt: "same work", tools: ["read"] }] };
+      const args = { async: false, tasks: [{ prompt: "same work", tools: ["read"] }] };
 
       const first = await callDelegate(session, args);
       const second = await callDelegate(session, args);
@@ -116,6 +116,7 @@ describe("delegate explicit operation identity", () => {
       subagents.respond([step]);
       const direct = directDispatcher(session);
       const args = {
+        async: false,
         tasks: [{ prompt: "shared work", tools: ["read"] }],
         operationId: "op-race",
       };
@@ -181,10 +182,12 @@ describe("delegate explicit operation identity", () => {
       subagents.respond([step]);
       const direct = directDispatcher(session);
       const original = {
+        async: false,
         tasks: [{ prompt: "alpha", tools: ["read"] }],
         operationId: "op-conflict",
       };
       const changed = {
+        async: false,
         tasks: [{ prompt: "beta", tools: ["read"] }],
         operationId: "op-conflict",
       };
@@ -233,11 +236,13 @@ describe("delegate explicit operation identity", () => {
       ]);
 
       const flat = await callDelegate(session, {
+        async: false,
         prompt: "norm task",
         tools: ["read"],
         operationId: "op-flat",
       });
       const wrapped = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "norm task", tools: ["read"] }],
         operationId: "op-flat",
       });
@@ -246,11 +251,13 @@ describe("delegate explicit operation identity", () => {
       expect(wrapped.text).toContain("NORM-FLAT");
 
       const batchDefault = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "ws task", tools: ["read"] }],
         workspace: "shared",
         operationId: "op-ws",
       });
       const taskLevel = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "ws task", tools: ["read"], workspace: "shared" }],
         operationId: "op-ws",
       });
@@ -312,6 +319,7 @@ describe("delegate explicit operation identity", () => {
         fauxAssistantMessage("EXPIRE-SECOND"),
       ]);
       const args = {
+        async: false,
         tasks: [{ prompt: "timed", tools: ["read"] }],
         operationId: "op-expire",
       };
@@ -359,6 +367,7 @@ describe("delegate explicit operation identity", () => {
 
       for (let n = 0; n <= 256; n += 1) {
         const outcome = await direct({
+          async: false,
           tasks: [{ prompt: `filler ${n}`, agent: "explore", tools: ["read"] }],
           operationId: `press-${String(n).padStart(4, "0")}`,
         }).then(
@@ -400,6 +409,7 @@ describe("delegate explicit operation identity", () => {
       ]);
 
       const oldest = await direct({
+        async: false,
         tasks: [{ prompt: "zero", tools: ["read"] }],
         operationId: "cap-0000",
       });
@@ -407,6 +417,7 @@ describe("delegate explicit operation identity", () => {
 
       for (let n = 1; n <= 255; n += 1) {
         const outcome = await direct({
+          async: false,
           tasks: [{ prompt: `filler ${n}`, agent: "explore", tools: ["read"] }],
           operationId: `cap-${String(n).padStart(4, "0")}`,
         }).then(
@@ -417,6 +428,7 @@ describe("delegate explicit operation identity", () => {
       }
 
       const newest = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "newest", tools: ["read"] }],
         operationId: "cap-0256",
       });
@@ -424,6 +436,7 @@ describe("delegate explicit operation identity", () => {
       expect(subagents.state.callCount).toBe(2);
 
       const newestRetry = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "newest", tools: ["read"] }],
         operationId: "cap-0256",
       });
@@ -431,6 +444,7 @@ describe("delegate explicit operation identity", () => {
       expect(subagents.state.callCount).toBe(2);
 
       const oldestRetry = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "zero", tools: ["read"] }],
         operationId: "cap-0000",
       });
@@ -486,6 +500,7 @@ describe("delegate explicit operation identity", () => {
         models: { explore: "ghost-provider/model-x" },
       });
       const args = {
+        async: false,
         tasks: [{ prompt: "x", agent: "explore", tools: ["read"] }],
         operationId: "op-failed",
       };
@@ -507,18 +522,20 @@ describe("delegate explicit operation identity", () => {
     async () => {
       for (const arguments_ of [
         {
+          async: false,
           tasks: [{ prompt: "x", tools: ["read"] }],
           operationId: "bad id!",
         },
         // `operationId: ""` is absent by the blank rule and covered by the
         // unkeyed dispatch path, not by this invalid-shapes loop.
         {
+          async: false,
           tasks: [{ prompt: "x", tools: ["read"] }],
           operationId: "k".repeat(65),
         },
-        { tasks: [{ prompt: "x", tools: ["read"] }], operationId: 123 },
-        { tasks: [{ prompt: "x", tools: ["read"] }], operationId: true },
-        { tasks: [{ prompt: "x", tools: ["read"] }], operationId: ["k"] },
+        { async: false, tasks: [{ prompt: "x", tools: ["read"] }], operationId: 123 },
+        { async: false, tasks: [{ prompt: "x", tools: ["read"] }], operationId: true },
+        { async: false, tasks: [{ prompt: "x", tools: ["read"] }], operationId: ["k"] },
       ]) {
         session?.dispose();
         session = await openDelegateBoundary();
@@ -549,13 +566,14 @@ describe("delegate explicit operation identity", () => {
       expect(sessionConflict.isError).toBe(true);
       expect(sessionConflict.text).toContain("operationId");
 
-      const helpConflict = await callDelegate(session, { operationId: "k" });
+      const helpConflict = await callDelegate(session, { async: false, operationId: "k" });
       expect(helpConflict.isError).toBe(true);
       expect(helpConflict.text).toContain(
         "operationId requires a non-empty dispatch task list",
       );
 
       const emptyTasks = await callDelegate(session, {
+        async: false,
         tasks: [],
         operationId: "k",
       });

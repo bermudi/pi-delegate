@@ -36,6 +36,7 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("FIRST-TURN")]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "remember ALPHA-MARKER", sessionId: "conv" },
         ],
@@ -55,6 +56,7 @@ describe("delegate session contract", () => {
       };
       subagents.respond([sawHistory]);
       const second = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "again", sessionId: "conv" }],
       });
       expect(second.isError).toBe(false);
@@ -72,6 +74,7 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("SESQUIPEDALIAN")]);
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "conv" }],
       });
 
@@ -92,6 +95,7 @@ describe("delegate session contract", () => {
         );
       subagents.respond([fresh]);
       const reopened = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "conv" }],
       });
       expect(reopened.text).toContain("FRESH");
@@ -109,12 +113,14 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("hi")]);
       await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "x", sessionId: "conv",  tools: ["read"] },
         ],
       });
 
       const mismatched = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "x",
@@ -143,6 +149,7 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("hi")]);
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "conv", agent: "explore" }],
       });
 
@@ -150,6 +157,7 @@ describe("delegate session contract", () => {
         models: { explore: subagents.alt.spec },
       });
       const mismatched = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x", sessionId: "conv", agent: "explore" }],
       });
       expect(mismatched.isError).toBe(true);
@@ -169,6 +177,7 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("POOLED")]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "remember EVICT-MARKER",
@@ -242,6 +251,7 @@ describe("delegate session contract", () => {
         );
       subagents.respond([inspect]);
       const reused = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "again", sessionId: "conv" },
         ],
@@ -275,6 +285,7 @@ describe("delegate session contract", () => {
       const subagents = await installSubagentModel(session);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "continue",
@@ -335,6 +346,7 @@ describe("delegate session contract", () => {
       subagents.respond([inspect]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ resumeFrom: transcript }],
       });
       expect(result.isError).toBe(false);
@@ -367,6 +379,7 @@ describe("delegate session contract", () => {
       });
 
       const conflict = await callDelegate(session, {
+        async: false,
         tasks: [
           { prompt: "now", sessionId: "busy-one" },
         ],
@@ -390,6 +403,7 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("STALL-POOL-MARKER")]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "remember STALL-POOL-MARKER", sessionId: "conv" }],
       });
       expect(first.isError).toBe(false);
@@ -440,6 +454,7 @@ describe("delegate session contract", () => {
         );
       subagents.respond([inspect]);
       const reused = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "again", sessionId: "conv" }],
       });
       expect(reused.isError).toBe(false);
@@ -459,6 +474,7 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("DEADLINE-POOL-MARKER")]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "remember DEADLINE-POOL-MARKER", sessionId: "conv" }],
       });
       expect(first.isError).toBe(false);
@@ -468,6 +484,7 @@ describe("delegate session contract", () => {
       // TaskExecution exists, so the checkout is never taken and no prompt
       // is attempted.
       const expired = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "work", sessionId: "conv", deadlineMs: 1 }],
       });
       expect(expired.text).toMatch(/deadline exceeded/i);
@@ -484,6 +501,7 @@ describe("delegate session contract", () => {
         );
       subagents.respond([inspect]);
       const reused = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "again", sessionId: "conv" }],
       });
       expect(reused.isError).toBe(false);
@@ -501,6 +519,7 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("KEEP-POOL-MARKER")]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "remember KEEP-POOL-MARKER", sessionId: "conv" }],
       });
       expect(first.isError).toBe(false);
@@ -512,6 +531,7 @@ describe("delegate session contract", () => {
         }),
       ]);
       const failed = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "fail once", sessionId: "conv" }],
       });
       expect(failed.isError).toBe(true);
@@ -530,6 +550,7 @@ describe("delegate session contract", () => {
         );
       subagents.respond([inspect]);
       const reused = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "again", sessionId: "conv" }],
       });
       expect(reused.isError).toBe(false);
@@ -550,6 +571,7 @@ describe("delegate session contract", () => {
 
       subagents.respond([fauxAssistantMessage("SERIAL-POOL-MARKER")]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "remember SERIAL-POOL-MARKER", sessionId: "conv" }],
       });
       expect(first.isError).toBe(false);
@@ -568,6 +590,7 @@ describe("delegate session contract", () => {
       const ticket = ticketIdOf(dispatched.text);
 
       const busy = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "now", sessionId: "conv" }],
       });
       expect(busy.isError).toBe(true);
@@ -592,11 +615,13 @@ describe("delegate session contract", () => {
       subagents.respond([inspect]);
       const budget = Date.now() + 3000;
       let reused = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "again", sessionId: "conv" }],
       });
       while (reused.isError && Date.now() < budget) {
         await new Promise((r) => setTimeout(r, 25));
         reused = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "again", sessionId: "conv" }],
         });
       }
@@ -622,9 +647,11 @@ describe("delegate session contract", () => {
         fauxAssistantMessage("IDLE-B"),
       ]);
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "pool a", sessionId: "idle-a" }],
       });
       await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "pool b", sessionId: "idle-b" }],
       });
 
@@ -669,6 +696,7 @@ describe("delegate session contract", () => {
       expect(cancelled.text).toContain("cancelled");
       // New reusable-session dispatches are refused after shutdown.
       const refused = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "nope", sessionId: "fresh-after-shutdown" }],
       });
       expect(refused.isError).toBe(true);

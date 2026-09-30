@@ -52,7 +52,7 @@ describe("async result delivery", () => {
     session = await openDelegateBoundary({ mockUI });
     const host = session.session as AgentSession;
     if (navigateFirst) {
-      await callDelegate(session, { tasks: [] });
+      await callDelegate(session, { async: false, tasks: [] });
       const target = host.sessionManager
         .getEntries()
         .find((entry) => entry.type === "message");
@@ -300,6 +300,7 @@ describe("async result delivery", () => {
       reason: "quit",
     });
     const dispatched = await callDelegate(session, {
+      async: false,
       tasks: [{ prompt: "late work", tools: [] }],
     });
     expect(dispatched.isError).toBe(true);

@@ -2,10 +2,10 @@
 
 v3 ships as `@bermudi/pi-delegate@0.2.0`, displacing v1 (0.1.22) for
 every machine on next `pi update`. The 0.x major bump signals the
-breaking surface (cardinality defaults, config-key failures, alias
-precedence) per semver 0.x convention. Package metadata is staged
-(name/version/description/files, private removed); the tarball packs
-clean at 623 kB / 29 files (delegate.ts, src/, README, COMPATIBILITY).
+breaking surface (background defaults, compact/full exposure, removed
+compatibility synonyms) per semver 0.x convention. Package metadata is staged
+(name/version/description/files, private removed); recheck the current tarball
+under the gates below (delegate.ts, src/, README, COMPATIBILITY).
 
 ## Pre-publish gates (run all, in order)
 
@@ -25,10 +25,12 @@ clean at 623 kB / 29 files (delegate.ts, src/, README, COMPATIBILITY).
 1. `sleep 60`, then `npm view @bermudi/pi-delegate version` → 0.2.0.
 2. In a scratch directory (NOT this repo): `pi install
    npm:@bermudi/pi-delegate`, start `pi`, dispatch one single-task and
-   one two-task call — verify sync inline, ticket+wake, and that the
-   alias note fires on a `general-purpose` agent name.
+   one two-task call — verify both return tickets and wake with results.
+   Verify `async:false` returns inline, removed aliases reject, compact hides
+   and rejects advanced controls, and `"surface":"full"` plus reload enables
+   the retained advanced controls.
 3. Confirm the OLD v1 behavior is gone in that install (sync-default
-   batches) — the displacement worked.
+   batches and kitchen-sink tool schema) — the displacement worked.
 
 ## Rollback
 

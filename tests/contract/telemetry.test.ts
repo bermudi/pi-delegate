@@ -119,6 +119,7 @@ describe("delegate telemetry contract", () => {
       subagents.respond([fauxAssistantMessage("DONE")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
 
@@ -233,6 +234,7 @@ describe("delegate telemetry contract", () => {
         process.env.DELEGATE_TELEMETRY_DB = envPath;
         subagents.respond([fauxAssistantMessage("FIRST")]);
         const first = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
         expect(first.isError).toBe(false);
@@ -242,6 +244,7 @@ describe("delegate telemetry contract", () => {
         configureDelegate(session, { telemetry: { enabled: true } });
         subagents.respond([fauxAssistantMessage("SECOND")]);
         const second = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
         expect(second.isError).toBe(false);
@@ -251,6 +254,7 @@ describe("delegate telemetry contract", () => {
         delete process.env.DELEGATE_TELEMETRY_DB;
         subagents.respond([fauxAssistantMessage("THIRD")]);
         const third = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
         expect(third.isError).toBe(false);
@@ -289,6 +293,7 @@ describe("delegate telemetry contract", () => {
         subagents.respond([fauxAssistantMessage("STILL-DONE")]);
 
         const result = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
 
@@ -323,6 +328,7 @@ describe("delegate telemetry contract", () => {
         subagents.respond([fauxAssistantMessage("CORRUPT-OK")]);
 
         const result = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
 
@@ -362,6 +368,7 @@ describe("delegate telemetry contract", () => {
         subagents.respond([fauxAssistantMessage("FUTURE-OK")]);
 
         const result = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
 
@@ -466,6 +473,7 @@ describe("delegate telemetry contract", () => {
       });
       subagents.respond([fauxAssistantMessage("MIGRATED-OK")]);
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
       expect(result.isError).toBe(false);
@@ -594,6 +602,7 @@ describe("delegate telemetry contract", () => {
       subagents.respond([fauxAssistantMessage("DONE")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
 
@@ -670,6 +679,7 @@ describe("delegate telemetry contract", () => {
         });
         subagents.respond([fauxAssistantMessage("A-FAILED")]);
         const first = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
         expect(first.isError).toBe(false);
@@ -684,6 +694,7 @@ describe("delegate telemetry contract", () => {
         });
         subagents.respond([fauxAssistantMessage("B-WORKS")]);
         const second = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
         expect(second.isError).toBe(false);
@@ -700,6 +711,7 @@ describe("delegate telemetry contract", () => {
         });
         subagents.respond([fauxAssistantMessage("A-RECOVERED")]);
         const third = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
         expect(third.isError).toBe(false);
@@ -731,6 +743,7 @@ describe("delegate telemetry contract", () => {
       ]) {
         configureDelegate(session, patch);
         const result = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "x" }],
         });
         expect(result.isError).toBe(true);
@@ -774,6 +787,7 @@ describe("delegate telemetry contract", () => {
       });
       subagents.respond([fauxAssistantMessage("SECOND-BATCH")]);
       const second = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "fast", tools: ["read"] }],
       });
       expect(second.isError).toBe(false);
@@ -828,6 +842,7 @@ describe("delegate telemetry contract", () => {
       subagents.respond([writeThenDone, writeThenDone]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "make a change",
@@ -870,6 +885,7 @@ describe("delegate telemetry contract", () => {
       subagents.respond([gated, fauxAssistantMessage("CLEANUP")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "hang", tools: ["write"], deadlineMs: 500 }],
       });
       expect(result.text).toMatch(/deadline|cancel/i);
@@ -909,6 +925,7 @@ describe("delegate telemetry contract", () => {
       ]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [
           {
             prompt: "check telemetry files",
@@ -936,13 +953,11 @@ describe("delegate telemetry contract", () => {
   );
 
   test(
-    "a validation rejection records a misfire row with the verbatim message and post-alias batch shape",
+    "a former agent alias rejects and records verbatim misfire metadata without translation",
     async () => {
       // SPEC v3 "Observability": a dispatch ending before execution
       // leaves a misfire row — phase, the caller-visible message, and the
-      // requested batch shape. The unknown agent lands after alias
-      // expansion, so the row's agents are the canonical names the
-      // caller's names resolved to ("scout" → "explore").
+      // requested batch shape. #61 rejects scout rather than translating it.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const dbPath = join(trackedTempDir(), "misfires.db");
@@ -959,7 +974,7 @@ describe("delegate telemetry contract", () => {
       });
 
       expect(result.isError).toBe(true);
-      expect(result.text).toContain("unknown agent 'bogus-agent'");
+      expect(result.text).toContain("unknown agent 'scout'");
       expect(subagents.state.callCount).toBe(0);
 
       const db = new DatabaseSync(dbPath);
@@ -968,17 +983,17 @@ describe("delegate telemetry contract", () => {
         expect(misfires).toHaveLength(1);
         const row = misfires[0];
         expect(row?.phase).toBe("validation");
-        expect(row?.message).toContain("unknown agent 'bogus-agent'");
+        expect(row?.message).toBe(result.text);
         expect(row?.task_count).toBe(2);
         expect(JSON.parse(String(row?.agents))).toEqual([
-          "explore",
+          "scout",
           "bogus-agent",
         ]);
         expect(JSON.parse(String(row?.workspaces))).toEqual([
           "shared",
           "shared",
         ]);
-        // Two tasks → the v3 cardinality default made this call async.
+        // Omitted async is true independently of task count.
         expect(row?.async).toBe(1);
         expect(row?.parent_cwd).toBe(session.cwd);
         expect(typeof row?.ts).toBe("number");
@@ -992,6 +1007,168 @@ describe("delegate telemetry contract", () => {
       }
     },
   );
+
+  // #61: removed field presence must still produce a validation misfire,
+  // including null and agreement with the canonical spelling.
+  for (const [field, canonical, value] of [
+    ["subagent_type", "agent", "explore"],
+    ["agent_type", "agent", "explore"],
+    ["task_name", "id", "correlation-private"],
+    ["message", "prompt", "work"],
+    ["run_in_background", "async", true],
+    ["context", "brief", "brief-private"],
+  ] as const) {
+    test(`${field} rejection retains misfire metadata for agreeing and null values`, async () => {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "misfires.db");
+      configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+      const messages: string[] = [];
+      for (const aliasValue of [value, null]) {
+        const topLevel = field === "run_in_background" || field === "context";
+        const task = { prompt: "work", agent: "explore" };
+        const result = await callDelegate(session, topLevel
+          ? { tasks: [task], [canonical]: value, [field]: aliasValue }
+          : { tasks: [{ ...task, [canonical]: value, [field]: aliasValue }] });
+        expect(result.isError).toBe(true);
+        expect(result.text).toContain(field);
+        expect(result.text).toContain(canonical);
+        messages.push(result.text);
+      }
+      expect(subagents.state.callCount).toBe(0);
+      expect(existsSync(dbPath), "validation misfires must create the configured database").toBe(true);
+      const db = new DatabaseSync(dbPath);
+      try {
+        const misfires = rowsOf(db, "misfires");
+        expect(misfires).toHaveLength(2);
+        expect(misfires.map((row) => row.message).sort()).toEqual(messages.sort());
+        for (const row of misfires) {
+          expect(row.phase).toBe("validation");
+          expect(row.task_count).toBe(1);
+          expect(JSON.parse(String(row.agents))).toEqual(["explore"]);
+          expect(JSON.parse(String(row.workspaces))).toEqual(["shared"]);
+          expect(row.async).toBe(1);
+          expect(typeof row.ts).toBe("number");
+          expect(row.version).toBe(EXTENSION_VERSION);
+          expect(row.pi_version).toBe(PI_VERSION);
+        }
+        expect(rowsOf(db, "calls")).toHaveLength(0);
+        expect(rowsOf(db, "tasks")).toHaveLength(0);
+      } finally {
+        db.close();
+      }
+    });
+  }
+
+  test("schema rejection diagnostics never copy prompt or system-prompt content into telemetry", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dbPath = join(trackedTempDir(), "misfires.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    const result = await callDelegate(session, {
+      tasks: [{
+        prompt: "PRIVATE-PROMPT-SENTINEL",
+        systemPrompt: "PRIVATE-BASE-SENTINEL",
+        unknownField: "PRIVATE-UNKNOWN-SENTINEL",
+      }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/validation failed/i);
+    expect(result.text).not.toContain("PRIVATE-");
+    expect(result.text).not.toContain("Received arguments");
+    expect(subagents.state.callCount).toBe(0);
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = rowsOf(db, "misfires");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.message).toBe(result.text);
+      expect(JSON.stringify(rows)).not.toContain("PRIVATE-");
+      expect(rowsOf(db, "calls")).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("non-object wire arguments record one empty-shape validation misfire", async () => {
+    session = await openDelegateBoundary();
+    const dbPath = join(trackedTempDir(), "misfires.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    // Deliberately malformed wire input; the registered host boundary validates it.
+    const result = await callDelegate(session, [] as unknown as Record<string, unknown>);
+    expect(result.isError).toBe(true);
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = rowsOf(db, "misfires");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.message).toBe(result.text);
+      expect(rows[0]?.phase).toBe("validation");
+      expect(rows[0]?.task_count).toBe(0);
+      expect(JSON.parse(String(rows[0]?.agents))).toEqual([]);
+      expect(rowsOf(db, "calls")).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("recovery guards and corrective examples do not copy private bodies", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dbPath = join(trackedTempDir(), "misfires.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    for (const patch of [
+      { operationId: { prompt: "PRIVATE-NESTED-PROMPT" } },
+      { async: "PRIVATE-BOOLEAN-TEXT" },
+      { timeoutMs: { systemPrompt: "PRIVATE-BASE-TEXT" } },
+      { tasks: [{ prompt: "PRIVATE-PROMPT", tools: "PRIVATE AMBIGUOUS TOOLS" }] },
+    ]) {
+      const result = await callDelegate(session, {
+        tasks: [{ prompt: "PRIVATE-PROMPT", systemPrompt: "PRIVATE-BASE" }],
+        ...patch,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).not.toContain("PRIVATE");
+    }
+    const misrouted = await callDelegateTicket(session, {
+      action: "poll", tasks: [{ prompt: "PRIVATE-PROMPT", systemPrompt: "PRIVATE-BASE" }],
+    });
+    expect(misrouted.isError).toBe(true);
+    expect(misrouted.text).toContain('prompt: "..."');
+    expect(misrouted.text).not.toContain("PRIVATE");
+    const db = new DatabaseSync(dbPath);
+    try {
+      expect(rowsOf(db, "misfires")).toHaveLength(4);
+      expect(JSON.stringify(rowsOf(db, "misfires"))).not.toContain("PRIVATE");
+      expect(rowsOf(db, "calls")).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+    expect(subagents.state.callCount).toBe(0);
+  });
+
+  test("a later extension blocking tool_call still records one pre-execution misfire", async () => {
+    session = await openDelegateBoundary({
+      trailingExtensions: [join(import.meta.dirname, "../support/block-delegate.ts")],
+    });
+    const subagents = await installSubagentModel(session);
+    const dbPath = join(trackedTempDir(), "misfires.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    const result = await callDelegate(session, {
+      tasks: [{ prompt: "PRIVATE-PROMPT", agent: "explore" }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("blocked by a later extension");
+    expect(subagents.state.callCount).toBe(0);
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = rowsOf(db, "misfires");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.message).toBe(result.text);
+      expect(rows[0]?.task_count).toBe(1);
+      expect(rowsOf(db, "calls")).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
 
   test(
     "an admission rejection records a misfire row",
@@ -1079,7 +1256,7 @@ describe("delegate telemetry contract", () => {
         expect(row?.message).toContain("maxConcurrent");
         expect(row?.task_count).toBe(1);
         expect(JSON.parse(String(row?.agents))).toEqual(["inline"]);
-        expect(row?.async).toBe(0);
+        expect(row?.async).toBe(1);
       } finally {
         db.close();
       }
@@ -1137,6 +1314,7 @@ describe("delegate telemetry contract", () => {
       subagents.respond([fauxAssistantMessage("CLEAN-RUN")]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "x" }],
       });
       expect(result.isError).toBe(false);

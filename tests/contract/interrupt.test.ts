@@ -156,6 +156,7 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
         fauxAssistantMessage("POOLED-TWO"),
       ]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "seed", sessionId: "conv" }],
       });
       expect(first.isError).toBe(false);
@@ -195,6 +196,7 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       const subagents = await installSubagentModel(session);
       subagents.respond([fauxAssistantMessage("FIRST-TURN")]);
       const first = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "remember ALPHA-MARKER", sessionId: "conv" }],
       });
       expect(first.isError).toBe(false);
@@ -242,6 +244,7 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       let second;
       for (let i = 0; i < 100; i++) {
         second = await callDelegate(session, {
+          async: false,
           tasks: [{ prompt: "again", sessionId: "conv" }],
         });
         if (second.isError && second.text.includes("already running")) {
@@ -276,6 +279,7 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       const held = gate("TASK-ONE");
       subagents.respond([held.step, fauxAssistantMessage("TASK-TWO")]);
       const dispatched = await callDelegate(session, {
+        async: true,
         tasks: [{ prompt: "one" }, { id: "second", prompt: "two" }],
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -339,6 +343,7 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       const held = gate("NEVER-FINISHES");
       subagents.respond([held.step]);
       const dispatched = await callDelegate(session, {
+        async: true,
         tasks: [
           { id: "a", prompt: "first" },
           { id: "b", prompt: "second", dependsOn: ["a"] },

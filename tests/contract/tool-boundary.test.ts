@@ -54,45 +54,31 @@ describe("delegate public tool contract", () => {
     const task = objectOf(tasks.items, "task schema");
     const taskFields = objectOf(task.properties, "task properties");
 
-    // Top level: `brief` is the shared batch preamble (#43), `context`
-    // its cross-harness spelling, `tokenBudget` the batch cost ceiling
-    // (#47).
+    // Full mode exposes all canonical controls, without compatibility spellings.
     expect(Object.keys(top).sort()).toEqual(
       [
         "async",
         "brief",
-        "context",
         "operationId",
-        "run_in_background",
         "tasks",
         "tokenBudget",
         "workspace",
       ].sort(),
     );
 
-    // The task shape stays what it was — minus `model` and `thinking`,
-    // which callers no longer select (an explicit one gets a validation
-    // error instead) — plus the #41/#44 cross-harness compatibility
-    // spellings `subagent_type`/`agent_type`/`task_name`/`message`/
-    // `description`/`run_in_background`, which normalize to
-    // `agent`/`id`/`prompt`/a display label/`async` with visible notes.
+    // Profile overrides and workflow controls remain available in full mode.
     expect(Object.keys(taskFields).sort()).toEqual(
       [
         "agent",
-        "agent_type",
         "cwd",
         "deadlineMs",
         "dependsOn",
         "description",
         "id",
-        "message",
         "prompt",
         "resumeFrom",
-        "run_in_background",
         "sessionId",
-        "subagent_type",
         "systemPrompt",
-        "task_name",
         "tools",
         "workspace",
       ].sort(),
@@ -115,7 +101,6 @@ describe("delegate public tool contract", () => {
         "ticket",
         "tickets",
         "timeoutMs",
-        "timeout_ms",
         "waitMs",
       ].sort(),
     );

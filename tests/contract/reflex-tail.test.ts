@@ -48,187 +48,79 @@ function steerDetails(result: { details?: unknown }): Record<string, unknown> {
   return objectOf(objectOf(result.details, "result.details").steer, "details.steer");
 }
 
-/**
- * Issue #44 — the trained-reflex long tail: `agent_type`/`task_name`/
- * `message`/`timeout_ms` spellings, the `explorer` alias, the
- * `reasoning_effort` wall, the `message` misroute fix, and the derived
- * `steerId` fallback. Each acceptance item gets a boundary test.
- */
-describe("trained-reflex long tail (SPEC v3 'Reflex meeting', issue #44)", () => {
+/** #61 removes cross-harness spellings; #44 steering identities survive. */
+describe("canonical reflex boundary (SPEC v3, #61 / #44)", () => {
   let session: TestSession | undefined;
-
   afterEach(() => {
     session?.dispose();
     session = undefined;
   });
 
-  test("`agent_type` folds to `agent` before resolution — aliases still apply", async () => {
-    // #44.1: same machinery as `subagent_type` — the value folds pre-
-    // resolution so the alias table sees it; each rename notes on the result.
+  for (const [field, canonical, value] of [
+    ["agent_type", "agent", "explore"],
+    ["task_name", "id", "named-task"],
+    ["message", "prompt", "work"],
+  ] as const) {
+    for (const shape of ["task", "flat", "stringified"] as const) {
+      test(`${field} rejects ${shape} dispatch, including agreement and null`, async () => {
+        session = await openDelegateBoundary();
+        const subagents = await installSubagentModel(session);
+        for (const aliasValue of [value, null]) {
+          const task = { prompt: "work", [canonical]: value, [field]: aliasValue };
+          const result = await callDelegate(session, shape === "flat"
+            ? task
+            : { tasks: shape === "stringified" ? JSON.stringify([task]) : [{ prompt: "valid sibling" }, task] });
+          expect(result.isError, `${shape} ${field}=${JSON.stringify(aliasValue)} must reject`).toBe(true);
+          expect(result.text).toContain(field);
+          expect(result.text).toContain(canonical);
+          expect(subagents.state.callCount).toBe(0);
+        }
+      });
+    }
+  }
+
+  test("spawn_agent-shaped task_name + message rejects instead of dispatching", async () => {
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
-    subagents.respond([fauxAssistantMessage("VIA-EXPLORER")]);
-
     const result = await callDelegate(session, {
-      tasks: [{ prompt: "work", agent_type: "explorer", tools: ["read"] }],
+      task_name: "spawned-one", message: "summarize the tree",
     });
-
-    expect(result.isError).toBe(false);
-    expect(result.text).toContain("VIA-EXPLORER");
-    expect(result.text).toContain('field "agent_type" → "agent"');
-    expect(result.text).toContain('agent "explorer" → "explore"');
-  });
-
-  test("`agent_type` conflicting with `agent` rejects naming both spellings", async () => {
-    // #44.1: conflict rules identical to `subagent_type` — the same field
-    // under two spellings must agree.
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-    subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
-
-    const result = await callDelegate(session, {
-      tasks: [{ prompt: "x", agent: "coder", agent_type: "explore" }],
-    });
-
     expect(result.isError).toBe(true);
-    expect(result.text).toContain("'agent'");
-    expect(result.text).toContain("'agent_type'");
-    expect(result.text).toMatch(/same field under (two|different) spellings/);
+    expect(result.text).toMatch(/task_name|message/);
+    expect(result.text).toMatch(/id|prompt/);
     expect(subagents.state.callCount).toBe(0);
   });
 
-  test("a spawn_agent-shaped call (`task_name` + `message`) dispatches as a task, not steer guidance", async () => {
-    // #44.5 misroute fix: `message` is steer-owned only when the call is
-    // not task-shaped. `task_name`/`message` fold to `id`/`prompt` with
-    // rename notes; nothing routes to delegate_ticket.
+  test("bare message on delegate retains steer migration guidance", async () => {
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
-    subagents.respond([fauxAssistantMessage("SPAWN-SHAPE-OK")]);
-
-    const result = await callDelegate(session, {
-      task_name: "spawned-one",
-      message: "summarize the tree",
-    });
-
-    expect(result.isError).toBe(false);
-    expect(result.text).toContain("SPAWN-SHAPE-OK");
-    expect(result.text).toContain('field "task_name" → "id"');
-    expect(result.text).toContain('field "message" → "prompt"');
-    expect(result.text).toContain("spawned-one");
-    expect(result.text).not.toContain("delegate_ticket");
-  });
-
-  test("`message` inside an explicit task object folds to `prompt`", async () => {
-    // #44.5: the task-level spelling folds in the tasks array too.
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-    subagents.respond([fauxAssistantMessage("TASK-MESSAGE-OK")]);
-
-    const result = await callDelegate(session, {
-      tasks: [{ task_name: "msg-task", message: "describe the repo" }],
-    });
-
-    expect(result.isError).toBe(false);
-    expect(result.text).toContain("TASK-MESSAGE-OK");
-    expect(result.text).toContain('field "message" → "prompt"');
-  });
-
-  test("`message` alone on delegate still routes to steer guidance", async () => {
-    // #44.5: only task-shaped calls fold — a bare `message` is the
-    // pre-split steer reflex and keeps its delegate_ticket teaching.
-    session = await openDelegateBoundary();
-
-    const result = await callDelegate(session, {
-      message: "keep going on the fix",
-    });
-
+    const result = await callDelegate(session, { message: "keep going" });
     expect(result.isError).toBe(true);
     expect(result.text).toContain("delegate_ticket");
     expect(result.text).toContain("steer");
-  });
-
-  test("`message` conflicting with `prompt` in one task rejects", async () => {
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-    subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
-
-    const result = await callDelegate(session, {
-      tasks: [{ prompt: "alpha", message: "beta" }],
-    });
-
-    expect(result.isError).toBe(true);
-    expect(result.text).toContain("'prompt'");
-    expect(result.text).toContain("'message'");
     expect(subagents.state.callCount).toBe(0);
   });
 
-  test("`timeout_ms` folds to `timeoutMs` on wait with a rename note", async () => {
-    // #44.3: the cross-harness spelling is accepted and the receipt
-    // teaches the canonical name — the same fold convention as dispatch.
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-    subagents.respond([fauxAssistantMessage("WAITED-OUT")]);
-
-    const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "work" }],
-      async: true,
+  for (const action of ["wait", "poll"] as const) {
+    test(`timeout_ms rejects on ${action}, even agreeing with timeoutMs or null`, async () => {
+      session = await openDelegateBoundary();
+      for (const value of [1000, 2000, null]) {
+        const result = await callDelegateTicket(session, {
+          action, ticket: "ticket-none", timeoutMs: 1000, timeout_ms: value,
+        });
+        expect(result.isError).toBe(true);
+        expect(result.text).toContain("timeout_ms");
+        expect(result.text).toContain("timeoutMs");
+        expect(result.text).not.toContain('field "timeout_ms" →');
+      }
     });
-    const ticket = ticketIdOf(dispatched.text);
-    const settled = await callDelegateTicket(session, {
-      action: "wait",
-      ticket,
-      timeout_ms: 5000,
-    });
-
-    expect(settled.isError).toBe(false);
-    expect(settled.text).toContain('field "timeout_ms" → "timeoutMs"');
-    expect(settled.text).toContain("WAITED-OUT");
-  });
-
-  test("`timeout_ms` on a non-wait action rejects naming the sent spelling", async () => {
-    session = await openDelegateBoundary();
-
-    const result = await callDelegateTicket(session, {
-      action: "poll",
-      timeout_ms: 1000,
-    });
-
-    expect(result.isError).toBe(true);
-    expect(result.text).toContain("timeout_ms");
-    expect(result.text).toContain("wait");
-  });
-
-  test("`timeoutMs` and `timeout_ms` disagreeing rejects; agreeing folds", async () => {
-    session = await openDelegateBoundary();
-
-    const clash = await callDelegateTicket(session, {
-      action: "wait",
-      ticket: "ticket-none",
-      timeoutMs: 1000,
-      timeout_ms: 2000,
-    });
-    expect(clash.isError).toBe(true);
-    expect(clash.text).toContain("timeoutMs");
-    expect(clash.text).toContain("timeout_ms");
-    expect(clash.text).toContain("same field");
-
-    // Same value under both spellings is not a conflict — the rename
-    // note still teaches the canonical field.
-    const ok = await callDelegateTicket(session, {
-      action: "wait",
-      ticket: "ticket-none",
-      timeoutMs: 1000,
-      timeout_ms: 1000,
-    });
-    expect(ok.text).toContain('field "timeout_ms" → "timeoutMs"');
-    expect(ok.isError).toBe(true); // no such ticket — validation passed
-    expect(ok.text).not.toContain("same field");
-  });
+  }
 
   test("`reasoning_effort` rejects with the effort wall everywhere (#44.4)", async () => {
     // Same teaching as `thinking`, in its own spelling — inside a task,
     // flat-folded, stranded at the top level, and on the sibling tools.
     session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
     for (const arguments_ of [
       { tasks: [{ prompt: "x", reasoning_effort: "high" }] },
       { prompt: "x", reasoning_effort: "high" },
@@ -253,6 +145,7 @@ describe("trained-reflex long tail (SPEC v3 'Reflex meeting', issue #44)", () =>
     expect(sessionResult.text).toContain(
       "reasoning_effort field is not accepted",
     );
+    expect(subagents.state.callCount).toBe(0);
   });
 
   test("steer without `steerId` derives `steer:<toolCallId>` and the receipt names it", async () => {

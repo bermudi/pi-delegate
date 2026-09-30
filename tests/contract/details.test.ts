@@ -80,7 +80,7 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
       // the completion-evidence fields: per-task outcomes (usage,
       // attribution, verdict), details.attributedFiles, details.verdict,
       // details.brief, details.tokenBudget, and details.notices (the
-      // `context` → `brief` rename note exercises that slot).
+      // same-call shared-write serialization exercises that slot).
       session = await openDelegateBoundary();
       const model = await installSubagentModel(session);
       model.respond([
@@ -100,9 +100,9 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
           { prompt: "write a file" },
           { id: "check", agent: "verifier", prompt: "verify claim X" },
         ],
-        // Two tasks default the call to async — ask for the sync path.
+        // Explicit inline mode; overlapping writers still serialize.
         async: false,
-        context: "SHARED-BRIEF",
+        brief: "SHARED-BRIEF",
         tokenBudget: 10_000_000,
       });
       expect(result.isError).toBe(false);
@@ -112,6 +112,7 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
       const details = objectOf(result.details, "details");
       expect(details.brief).toBe("SHARED-BRIEF");
       expect(Array.isArray(details.notices)).toBe(true);
+      expect((details.notices as string[]).join(" ")).toMatch(/serializ/i);
       const budget = objectOf(details.tokenBudget, "details.tokenBudget");
       expect(budget.limit).toBe(10_000_000);
       const verdict = details.verdict as { verdict: string; taskId: string }[];
@@ -366,6 +367,7 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
       subagents.respond([held.step]);
 
       const result = await callDelegate(session, {
+        async: false,
         tasks: [{ prompt: "hang", deadlineMs: 500 }],
       });
       const details = objectOf(result.details, "details");

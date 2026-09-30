@@ -54,6 +54,16 @@ use any design that makes these properties true and testable.
   saved tickets MUST NOT deduplicate a new dispatch by operationId, and no
   exactly-once execution claim may be made.
 
+## Surface selection
+
+- Removed aliases MUST reject the whole call before any work starts.
+- Advertised and validated schemas MUST match the operator-selected compact
+  or full surface. Hidden fields/actions MUST NOT execute through recovery
+  normalization; full mode MUST preserve all canonical advanced features.
+- Surface selection MUST NOT depend on model family or weaken any execution
+  invariant. A nonempty call with omitted async MUST run in background,
+  independently of task count.
+
 ## Conversation isolation
 
 - Dispatch MUST NOT extract or inject the parent conversation into children.
