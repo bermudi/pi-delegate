@@ -355,7 +355,23 @@ gaps.
   spinners, or live state.
 - **Covered now:** `tests/contract/rendering.test.ts` — the registered
   tools' `renderCall` return `Text` components whose lines match the
-  contract for empty, single, four-plus, and resume-only calls.
+  contract for empty, single, four-plus, and resume-only calls. #63
+  relabels rows by description → caller id → agent → `inline` (positional
+  `task-N` dropped — compact callers cannot set ids), pads labels to a
+  common width, and shortens ticket ids in display only (`t-<first8>`,
+  including compound `<ticket>#<task>` steer/interrupt/tail/answer
+  targets).
+- **Collapsed result views (#63):** the collapsed `renderResult`/`message`
+  renderers draw their own document, not a truncated content preview:
+  `✓`/`✗`/`⊘`/`○` status glyphs with description/agent/id labels and a
+  first-output-line summary (markdown markers stripped), `· N file(s)` and
+  exceptional integration/`source drift` meta, a `ticket t-<8> · status
+  done/total` header over live-ticket results, a one-line
+  `↳ background ticket …` async receipt, a muted `manual` stub for help,
+  and first-line-plus-hint for receipts/rosters — expanded views unchanged.
+  Covered: per-status icons and labels, ticket header + running slots,
+  async one-liner, receipt/roster truncation, delivered-message collapsed
+  lines.
 - **Gap:** none identified.
 
 ### Cancellation

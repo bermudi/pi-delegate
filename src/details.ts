@@ -298,7 +298,14 @@ export const syncDispatchDetailsSchema = Type.Object(
     async: Type.Literal(false),
     tasks: readonlyArray(
       Type.Object(
-        { id: Type.String(), status: taskStatusSchema },
+        {
+          id: Type.String(),
+          status: taskStatusSchema,
+          // #63: display labels for the collapsed view — the renderer
+          // shows description, then agent, then id.
+          agent: Type.Optional(Type.String()),
+          description: Type.Optional(Type.String()),
+        },
         { additionalProperties: false },
       ),
     ),

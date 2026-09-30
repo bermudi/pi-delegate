@@ -2528,6 +2528,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 tasks: result.outcomes.map((outcome) => ({
                   id: outcome.id,
                   status: outcome.status,
+                  // #63: the collapsed human view labels tasks by
+                  // description, then agent, then id.
+                  ...(tasks[outcome.index]?.agent !== undefined
+                    ? { agent: tasks[outcome.index]!.agent }
+                    : {}),
+                  ...(tasks[outcome.index]?.description !== undefined
+                    ? { description: tasks[outcome.index]!.description }
+                    : {}),
                 })),
                 // The batch brief as sent — the replayed/expanded render
                 // re-heads the result with it (SPEC v3 "Batch brief").
