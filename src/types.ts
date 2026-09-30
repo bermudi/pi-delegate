@@ -144,10 +144,10 @@ export interface TaskIntegration {
   readonly worktreePath?: string;
   /**
    * Source-relative paths that changed in the original tree while this
-   * isolated worker ran a shell (#62). Shell commands are not confined to
-   * the worker copy, so drift beside the proposal is reported as evidence —
-   * never applied and never silently absorbed into the outcome. Sorted,
-   * bounded.
+   * worker ran a shell (#62) — isolated or scratch. Shell commands are not
+   * confined to the worker copy, so drift beside the proposal is reported
+   * as evidence — never applied and never silently absorbed into the
+   * outcome. Sorted, bounded.
    */
   readonly sourceDrift?: readonly string[];
 }
@@ -169,7 +169,8 @@ export interface TaskOutcome {
   readonly error?: string;
   readonly retries: number;
   readonly usage?: Usage;
-  /** Isolated-workspace reconciliation result, when the task ran isolated. */
+  /** Isolated-workspace reconciliation result, when the task ran isolated;
+   * scratch workers carry it only as source-drift evidence (#62). */
   readonly integration?: TaskIntegration;
   /**
    * For a `blocked` outcome: the prerequisite task ids whose terminal

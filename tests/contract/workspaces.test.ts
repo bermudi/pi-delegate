@@ -1998,6 +1998,186 @@ exec '${realGit}' "$@"
   );
 
   test(
+    "a scratch worker's shell escape is reported as source drift",
+    async () => {
+      // The same hole as isolated (#62) with worse stakes: scratch changes
+      // are supposed to be discarded, so a shell write into the original
+      // is the one mutation that would otherwise vanish silently. The
+      // drift window must catch it and pin it on the shell-running
+      // outcome — run async so the evidence also survives journal
+      // round-trip through ticket delivery.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const escape: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("ESCAPED-SCRATCH")
+          : fauxAssistantMessage([
+              fauxToolCall("bash", {
+                command: `printf 'escape\\n' > '${dir}/escaped.txt'`,
+              }),
+            ]);
+      subagents.respond([escape, escape]);
+
+      const dispatched = await callDelegate(session, {
+        async: true,
+        tasks: [
+          {
+            prompt: "run a command",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["bash"],
+          },
+        ],
+      });
+      expect(dispatched.isError).toBe(false);
+      const result = await callDelegateTicket(session, {
+        action: "wait",
+        ticket: ticketIdOf(dispatched.text),
+      });
+      expect(result.isError).toBe(false);
+      // The escape really happened — the point is reporting, not undo.
+      expect(readFileSync(join(dir, "escaped.txt"), "utf8")).toBe("escape\n");
+      expect(result.text).toContain("source drift:");
+      expect(result.text).toContain("escaped.txt");
+      expect(result.text).toContain("Shell commands are not confined");
+      const outcomes = (
+        result.details as {
+          results?: ({ integration?: { sourceDrift?: string[] } } | null)[];
+        }
+      ).results;
+      expect(outcomes?.[0]?.integration?.sourceDrift).toContain("escaped.txt");
+    },
+  );
+
+  test(
+    "scratch source drift is not pinned on a worker that never ran a shell",
+    async () => {
+      // Same attribution rule as isolated: the caller edits a source file
+      // mid-run while the scratch worker runs no shell. The drift signal
+      // exists in the window, but a shell-less worker cannot have escaped
+      // — it must not be pinned with drift evidence.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      let workerStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        workerStarted = resolve;
+      });
+      let releaseWorker!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseWorker = resolve;
+      });
+      const gated: FauxResponseFactory = async () => {
+        workerStarted();
+        await gate;
+        return fauxAssistantMessage("CLEAN-SCRATCH");
+      };
+      subagents.respond([gated]);
+
+      const dispatched = callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "observe only",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["write"],
+          },
+        ],
+      });
+      await started;
+      // Caller-side edit while the scratch worker is gated.
+      writeFileSync(join(dir, "caller-drift.txt"), "caller\n");
+      releaseWorker();
+      const result = await dispatched;
+
+      expect(result.isError).toBe(false);
+      expect(result.text).not.toContain("source drift:");
+      const outcomes = (
+        result.details as {
+          results?: ({ integration?: { sourceDrift?: string[] } } | null)[];
+        }
+      ).results;
+      expect(outcomes?.[0]?.integration?.sourceDrift).toBeUndefined();
+    },
+  );
+
+  test(
+    "an isolated proposal applied in the same phase is not scratch drift",
+    async () => {
+      // Ordering pin: scratch drift windows must close before isolated
+      // reconciliation applies proposals into the source — otherwise every
+      // legitimate apply inside a mixed batch would report as a scratch
+      // escape. The isolated write applies for real; the scratch worker
+      // stays clean.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const byPrompt: FauxResponseFactory = async (context) => {
+        const scratch = JSON.stringify(context.messages).includes(
+          "SCRATCH-MARKER",
+        );
+        // Turn-aware like the guard tests: first turns make tool calls,
+        // second turns (after tool results) finish. The scratch worker
+        // runs a harmless shell — it must be shell-capable for drift
+        // attribution to even be possible, otherwise this test could not
+        // distinguish "window closed early" from "nothing attributable".
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage(scratch ? "SCRATCH-DONE" : "WRITER-DONE");
+        }
+        return scratch
+          ? fauxAssistantMessage([
+              fauxToolCall("bash", { command: "true" }),
+            ])
+          : fauxAssistantMessage([
+              fauxToolCall("write", {
+                path: "worked.txt",
+                content: "worked\n",
+              }),
+            ]);
+      };
+      subagents.respond([byPrompt, byPrompt, byPrompt, byPrompt]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "SCRATCH-MARKER observe only",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["bash"],
+          },
+          {
+            prompt: "write worked.txt",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["write"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // The isolated proposal really applied to the source…
+      expect(result.text).toMatch(/applied_unverified/);
+      expect(readFileSync(join(dir, "worked.txt"), "utf8")).toBe("worked\n");
+      // …but the scratch worker's window closed first: no drift pinned.
+      expect(result.text).not.toContain("source drift:");
+      const outcomes = (
+        result.details as {
+          results?: ({ integration?: { sourceDrift?: string[] } } | null)[];
+        }
+      ).results;
+      expect(outcomes?.[0]?.integration?.sourceDrift).toBeUndefined();
+    },
+  );
+
+  test(
     "spelled source paths — @-prefix, file://, unicode space — are refused",
     async () => {
       // The guard must compare the path the tool resolves, not the spelled

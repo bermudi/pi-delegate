@@ -254,14 +254,14 @@ export function integrationLines(integration: TaskIntegration): string[] {
   for (const conflict of integration.conflicts ?? []) {
     lines.push(`conflict: ${conflict.path}: ${conflict.reason}`);
   }
-  // #62: source drift is reported on shell-capable isolated workers only —
-  // a bash escape the write/edit guard cannot see must not pass as a clean
-  // no-op.
+  // #62: source drift is reported on shell-capable workers only (isolated
+  // and scratch) — a bash escape the write/edit guard cannot see must not
+  // pass as a clean no-op.
   if (integration.sourceDrift !== undefined && integration.sourceDrift.length > 0) {
     const shown = integration.sourceDrift.slice(0, 10);
     const rest = integration.sourceDrift.length - shown.length;
     lines.push(
-      `source drift: ${shown.join(", ")}${rest > 0 ? ` (+${rest} more)` : ""} changed in the original while isolated workers ran. Shell commands are not confined — if you didn't make these edits, a worker wrote to the original directly.`,
+      `source drift: ${shown.join(", ")}${rest > 0 ? ` (+${rest} more)` : ""} changed in the original while workers ran. Shell commands are not confined — if you didn't make these edits, a worker wrote to the original directly.`,
     );
   }
   if (integration.status === "applied_unverified") {

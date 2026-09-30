@@ -335,9 +335,15 @@ contract:
   unguarded. The child prompt carries a workspace note mapping source
   paths to copy paths (appended under authored `systemPrompt`s too).
   Shell commands remain unconfined: when source drift is observed
-  during an isolated run in which a worker used a shell, that worker's
-  `integration.sourceDrift` reports the source-relative paths —
-  evidence beside the proposal machinery, never silently applied.
+  during an isolated run — or a scratch run on a usable Git repository —
+  in which a worker used a shell, that worker's `integration.sourceDrift`
+  reports the source-relative paths — evidence beside the proposal
+  machinery, never silently applied. Scratch drift windows close before
+  isolated proposals apply in the same phase, so legitimate applies are
+  never mistaken for escapes; scratch sources without a usable Git
+  repository have no drift evidence (logged once). Ticketed scratch
+  batches hold settlement through finalize, so `wait` never renders a
+  pre-reconcile record without the evidence.
 - **Session-scoped roster (#64).** The ticket store also holds
   journaled records owned by other Pi sessions — live sibling tickets
   still running elsewhere and settled records kept pollable (axiom 2).

@@ -1,13 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
   canonicalPath,
+  DELEGATE_TREES,
   exec,
   gitProbeEnv,
   isWithin,
   stopWorkspaceProcesses,
 } from "./fsx.ts";
+import { changedFiles, snapshotTree } from "./isolated.ts";
 import type { ResolvedTask, TaskOutcome } from "./types.ts";
 
 // Probes fail fast and produce tiny output; the shared exec takes explicit
@@ -41,7 +43,7 @@ function log(context: string, error: unknown): void {
 async function copySourceOf(
   cwd: string,
   signal?: AbortSignal,
-): Promise<{ root: string; cwd: string }> {
+): Promise<{ root: string; cwd: string; gitRoot: boolean }> {
   const physicalCwd = await fs.promises.realpath(cwd);
   let root: string | undefined;
   try {
@@ -60,6 +62,7 @@ async function copySourceOf(
     if (signal?.aborted) throw error;
     // Not a repository, or Git unusable: the cwd alone is the copy.
   }
+  const gitRoot = root !== undefined;
   root ??= physicalCwd;
   const dotGit = await fs.promises
     .lstat(path.join(root, ".git"))
@@ -69,7 +72,7 @@ async function copySourceOf(
       `workspace "scratch" cannot copy '${root}': its .git is a file redirecting into another repository (linked worktree or submodule), so Git commands inside the copy would mutate the real repository. ${FALLBACK_REMEDY}`,
     );
   }
-  return { root, cwd: physicalCwd };
+  return { root, cwd: physicalCwd, gitRoot };
 }
 
 /**
@@ -154,14 +157,104 @@ async function pruneEmpty(dir: string): Promise<void> {
 
 interface ScratchWorker {
   readonly taskIndex: number;
+  /** The tree this worker copied — the drift window it belongs to. */
+  readonly sourceRoot: string;
   readonly copyRoot: string;
   /** Settled caller-visibly with quiescence unconfirmed — copy stays on disk. */
   retained: boolean;
 }
 
+/**
+ * One scratch source root's drift window (#62): the working-state tree the
+ * phase's copies were taken from, plus the settled drift once captured.
+ * Scratch proposals are discarded by definition, so a shell escape into
+ * the original tree is the one mutation that would otherwise vanish
+ * silently — the window gives it the same evidence the isolated check
+ * reports.
+ */
+interface ScratchDrift {
+  readonly sourceRoot: string;
+  /** Repository-relative pathspecs kept out of both drift snapshots. */
+  readonly excluded: readonly string[];
+  /** Index path shared by the start and end snapshots (each rm's it first). */
+  readonly indexPath: string;
+  /** Start-of-phase working-state tree oid. */
+  readonly startTree: string;
+  /** Source-relative changed paths — sorted, bounded — once captured. */
+  drift?: readonly string[];
+}
+
+/** Same evidence bound as the isolated check (#62). */
+const SOURCE_DRIFT_LIMIT = 20;
+
+/**
+ * Open one source root's drift window: snapshot the working state the
+ * phase's copies were taken from. Delegate-owned trees that churn mid-run
+ * (every agent-dir tree, telemetry-owned paths) are excluded so our own
+ * bookkeeping can never pose as drift. Seeded from HEAD when the
+ * repository has commits — a warm index — and an empty index otherwise.
+ * Best-effort like the copy itself: evidence that cannot be gathered
+ * logs and skips, it never fails containment.
+ */
+async function openDriftWindow(
+  sourceRoot: string,
+  scratchBase: string,
+  batchRoot: string,
+  excludedPaths: readonly string[],
+  indexPath: string,
+  signal?: AbortSignal,
+): Promise<ScratchDrift> {
+  const delegateDir = path.dirname(canonicalPath(scratchBase));
+  const excluded: string[] = [];
+  for (const base of [
+    scratchBase,
+    batchRoot,
+    ...Object.values(DELEGATE_TREES).map((tree) =>
+      path.join(delegateDir, tree),
+    ),
+    ...excludedPaths,
+  ]) {
+    const resolved = canonicalPath(base);
+    const relative = path.relative(sourceRoot, resolved);
+    if (relative !== "" && isWithin(sourceRoot, resolved)) {
+      excluded.push(relative);
+    }
+  }
+  let head: string | undefined;
+  try {
+    head =
+      (
+        await exec("git", ["-C", sourceRoot, "rev-parse", "HEAD"], {
+          ...PROBE_EXEC,
+          env: gitProbeEnv(),
+          signal,
+        })
+      ).stdout.trim() || undefined;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    // Unborn repository (no commits): the empty-index seed covers it.
+  }
+  const startTree = await snapshotTree(
+    sourceRoot,
+    head,
+    indexPath,
+    signal,
+    excluded,
+  );
+  return { sourceRoot, excluded, indexPath, startTree };
+}
+
 export interface ScratchPlan {
   /** The task list with each scratch task's cwd remapped into its copy. */
   readonly tasks: readonly ResolvedTask[];
+  /**
+   * Close every drift window (#62): re-snapshot each Git-backed source and
+   * diff against the start tree. Must run before isolated reconciliation
+   * applies proposals into the source — after an apply, drift cannot tell
+   * a legitimate apply from a shell escape. Never throws: a check that
+   * fails logs and leaves that window's drift unset.
+   */
+  captureDrift(): Promise<void>;
   /**
    * Discard every copy whose worker is confirmed quiescent; copies of
    * quarantined workers stay until `cleanupWorker`. Never throws — cleanup
@@ -187,6 +280,7 @@ export async function prepareScratch(
   scratchBase: string,
   signal: AbortSignal | undefined,
   phase: number,
+  excludedPaths: readonly string[] = [],
 ): Promise<ScratchPlan | undefined> {
   const scratchIndexes = tasks
     .map((task, index) =>
@@ -200,11 +294,14 @@ export async function prepareScratch(
   const batchRoot = path.join(procRoot, randomUUID());
   const workers = new Map<number, ScratchWorker>();
   const translated = [...tasks];
+  // One drift window per distinct Git-backed source root in this phase.
+  const drifts = new Map<string, ScratchDrift>();
+  const noDriftWarned = new Set<string>();
 
   try {
     for (const taskIndex of scratchIndexes) {
       const task = tasks[taskIndex]!;
-      const { root, cwd } = await copySourceOf(task.cwd, signal);
+      const { root, cwd, gitRoot } = await copySourceOf(task.cwd, signal);
       if (isWithin(root, canonicalPath(scratchBase))) {
         throw new Error(
           `workspace "scratch" cannot copy '${root}': the scratch directory '${scratchBase}' sits inside the copied tree. ${FALLBACK_REMEDY}`,
@@ -221,7 +318,39 @@ export async function prepareScratch(
       }
       const workerCwd = path.join(copyRoot, path.relative(root, cwd));
       await fs.promises.mkdir(workerCwd, { recursive: true });
-      workers.set(taskIndex, { taskIndex, copyRoot, retained: false });
+      workers.set(taskIndex, { taskIndex, sourceRoot: root, copyRoot, retained: false });
+      // #62: open the drift window for the first Git-backed copy of this
+      // root. Best-effort — evidence that cannot be gathered logs and
+      // skips; containment never depended on it.
+      if (gitRoot) {
+        if (!drifts.has(root)) {
+          const indexPath = path.join(
+            batchRoot,
+            `drift-${createHash("sha256").update(root).digest("hex").slice(0, 12)}.index`,
+          );
+          try {
+            drifts.set(
+              root,
+              await openDriftWindow(
+                root,
+                scratchBase,
+                batchRoot,
+                excludedPaths,
+                indexPath,
+                signal,
+              ),
+            );
+          } catch (error) {
+            if (signal?.aborted) throw error;
+            log(`scratch drift evidence unavailable for '${root}'`, error);
+          }
+        }
+      } else if (!noDriftWarned.has(root)) {
+        noDriftWarned.add(root);
+        console.error(
+          `[delegate] scratch drift evidence unavailable for '${root}': not a usable Git repository`,
+        );
+      }
       translated[taskIndex] = {
         ...task,
         cwd: workerCwd,
@@ -276,6 +405,31 @@ export async function prepareScratch(
 
   return {
     tasks: translated,
+    async captureDrift(): Promise<void> {
+      for (const drift of drifts.values()) {
+        try {
+          // Deliberately NOT on the batch signal, mirroring the isolated
+          // check: a cancelled batch still owes the drift report — the
+          // surviving shell edits are exactly what the caller needs to
+          // see. The end snapshot reuses the start index path (each
+          // snapshotTree call removes it first).
+          const endTree = await snapshotTree(
+            drift.sourceRoot,
+            drift.startTree,
+            drift.indexPath,
+            undefined,
+            drift.excluded,
+          );
+          drift.drift = (
+            await changedFiles(drift.sourceRoot, drift.startTree, endTree)
+          )
+            .sort()
+            .slice(0, SOURCE_DRIFT_LIMIT);
+        } catch (error) {
+          log(`scratch drift check failed for '${drift.sourceRoot}'`, error);
+        }
+      }
+    },
     async finalize(outcomes: TaskOutcome[]): Promise<readonly TaskOutcome[]> {
       for (const worker of workers.values()) {
         const outcome = outcomes[worker.taskIndex];
@@ -285,6 +439,38 @@ export async function prepareScratch(
         }
         await discard(worker);
       }
+      // #62: attach drift evidence to the shell-capable workers of each
+      // drifted source — the same attribution rule as isolated: a worker
+      // without a shell cannot have escaped, and drift beside no
+      // shell-capable worker is the caller's own editing, not ours to pin.
+      // Scratch outcomes carry no proposal integration, so a minimal one
+      // ("discarded", nothing proposed or applied) grounds the evidence.
+      for (const drift of drifts.values()) {
+        if (drift.drift === undefined || drift.drift.length === 0) continue;
+        for (const worker of workers.values()) {
+          if (worker.sourceRoot !== drift.sourceRoot) continue;
+          const outcome = outcomes[worker.taskIndex];
+          if (!outcome || outcome.uncertainFiles !== true) continue;
+          outcomes[worker.taskIndex] = {
+            ...outcome,
+            integration: {
+              ...(outcome.integration ?? {
+                status: "discarded",
+                proposedFiles: [],
+                appliedFiles: [],
+              }),
+              sourceDrift: drift.drift,
+            },
+          };
+        }
+      }
+      await Promise.all(
+        [...drifts.values()].map((drift) =>
+          fs.promises.rm(drift.indexPath, { force: true }).catch((error) => {
+            log(`failed to remove scratch drift index '${drift.indexPath}'`, error);
+          }),
+        ),
+      );
       await prune();
       return outcomes;
     },

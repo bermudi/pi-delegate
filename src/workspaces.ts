@@ -57,10 +57,20 @@ export interface WorkspacePlan {
   dispose(): Promise<void>;
 }
 
+/**
+ * True when the batch's outcomes can still be annotated after the last
+ * worker settles: isolated reconciliation applies proposals into the
+ * source, and scratch finalize attaches drift evidence (#62). A ticketed
+ * batch like this holds settlement until the reconciled outcomes land —
+ * otherwise a racing `wait` renders the pre-reconcile record (missing
+ * integration) while the batch is still reconciling.
+ */
 export function workspaceNeedsSettlementHold(
   tasks: readonly ResolvedTask[],
 ): boolean {
-  return tasks.some((task) => task.workspace === "isolated");
+  return tasks.some(
+    (task) => task.workspace === "isolated" || task.workspace === "scratch",
+  );
 }
 
 interface PhasePlans {
@@ -91,6 +101,7 @@ export async function prepareWorkspaces(
       join(agentDir, DELEGATE_TREES.scratch),
       signal,
       phase,
+      excludedPaths,
     );
     if (scratchPlan) {
       for (const [index, task] of scratchPlan.tasks.entries()) {
@@ -141,6 +152,11 @@ export async function prepareWorkspaces(
       if (reconciledPhases.has(phase)) return outcomes;
       reconciledPhases.add(phase);
       const plan = plans.get(phase);
+      // Scratch drift windows close FIRST (#62): isolated reconciliation
+      // applies proposals into the source tree below, and after an apply
+      // the drift snapshot can no longer tell a legitimate apply from a
+      // shell escape. The capture is read-only and never abort-gated.
+      await plan?.scratch?.captureDrift();
       // The one adaptation site between dispatch-level facts and the
       // isolated sub-plan's reconcile options: field-picked explicitly, so
       // a context field can never leak into reconcile unnoticed, and a new

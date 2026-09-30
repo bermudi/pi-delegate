@@ -115,10 +115,16 @@ function privateRef(batchId: string, suffix: string): string {
  * repository-relative pathspecs kept out of the snapshot — the artifact
  * root is excluded when it lives inside the source tree, so retained
  * artifacts and live worktrees can never leak into a baseline.
+ *
+ * `base` seeds the temporary index; `undefined` starts from an empty index
+ * (`read-tree --empty`) for repositories with no commits. Shared with the
+ * scratch drift check (#62), which has no baseline commit to grow from:
+ * its end snapshot passes the start tree as `base`, so both snapshots see
+ * the same content set regardless of how the first was seeded.
  */
-async function snapshotTree(
+export async function snapshotTree(
   root: string,
-  baseCommit: string,
+  base: string | undefined,
   indexPath: string,
   signal?: AbortSignal,
   excludePaths: readonly string[] = [],
@@ -128,7 +134,10 @@ async function snapshotTree(
     GIT_INDEX_FILE: indexPath,
     GIT_WORK_TREE: root,
   };
-  await git(["read-tree", baseCommit], { cwd: root, env, signal });
+  await git(
+    ["read-tree", ...(base === undefined ? ["--empty"] : [base])],
+    { cwd: root, env, signal },
+  );
   await git(
     [
       "add",
@@ -196,7 +205,13 @@ async function removeWorktree(
   }
 }
 
-async function changedFiles(
+/**
+ * Repository-relative paths that differ between two trees — raw
+ * NUL-separated names (no C-quoting corruption) and a rename reports both
+ * its deleted and created paths. Shared with the scratch drift check
+ * (#62).
+ */
+export async function changedFiles(
   root: string,
   from: string,
   to: string,
