@@ -84,9 +84,19 @@ describe("canonical ticket#task addressing (#53)", () => {
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
-      // alpha parks on ask_parent; beta/gamma settle.
+      // alpha parks on ask_parent; beta/gamma settle. A wait ends at once
+      // on alpha's pending question, so poll until beta's completed
+      // outcome is on record before the tail assertions below.
       await untilQuestion(session, ticket);
-      await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 4000 });
+      const deadline = Date.now() + 4000;
+      for (;;) {
+        const view = await callDelegateTicket(session, { action: "poll", ticket });
+        if (view.text.includes(`### Task beta — completed`)) break;
+        if (Date.now() >= deadline) {
+          throw new Error("beta's completed outcome was never recorded");
+        }
+        await Bun.sleep(10);
+      }
 
       // steer: compound target, no ticket field — parked on a question, the
       // task has no live turn, so the receipt reports "activated".

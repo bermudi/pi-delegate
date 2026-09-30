@@ -124,16 +124,16 @@ contract-tested (`tests/contract/visibility.test.ts`); the browser's TUI
 surface and the switch/fork guards cannot be driven through the harness —
 an accepted gap, recorded in `TEST-MIGRATION.md`.
 
-### 3d. Found by the 2026-09-27 gap audit — pending disposition
+### 3d. Found by the 2026-09-27 gap audit — all dispositioned
 
 A full per-test classification of all 1,093 v1 test cases (see §5) found
 v1 behaviors with no v2 coverage **and no recorded drop decision**. Each
-needs an explicit keep/restore-or-record decision before this section can
-close:
+received an explicit keep/restore-or-record decision on audit day; the
+dispositions:
 
 | # | v1 behavior | v2 status |
 | --- | --- | --- |
-| 1 | Touched-file attribution: results/views named the physical files each task touched (symlink-resolved, conservative "uncertain" flags, external-write reporting through worker links) and warned when tasks shared files | **Decided out 2026-09-27** — recorded as a deliberate breaking change in COMPATIBILITY with migration guidance; possible future restoration |
+| 1 | Touched-file attribution: results/views named the physical files each task touched (symlink-resolved, conservative "uncertain" flags, external-write reporting through worker links) and warned when tasks shared files | **Decided out + partially restored 2026-09-27** — v1's physical tracking (physical-path identity, symlink resolution, worker-link external writes) is a recorded deliberate drop in COMPATIBILITY; the lighter per-task attribution was restored under #38 (SPEC v3 "Observability — Completion evidence"): each settled task's record carries the paths observed in its write/edit calls, with bash-sourced changes marked uncertain, shown in result/wake/ticket views and `details.attributedFiles` |
 | 2 | `reviewer` built-in had `read`+`bash` ("run focused checks") | **Fixed 2026-09-27** — reviewer restored to read+bash; SPEC/manual now state it serializes as a writer |
 | 3 | Task `cwd` expanded `~` to the home directory | **Fixed 2026-09-27** — tilde expansion restored (host resolution + SPEC + contract test) |
 | 4 | Malformed `maxConcurrent`/`stallTimeoutMs`/`concurrency` numbers kept the previous valid config and warned | **Decided out 2026-09-27** — v2's fail-the-whole-call at config load is recorded as deliberate in COMPATIBILITY (a silently weakened bound is worse than a visible error); SPEC now names all numeric keys, their defaults, and the fail-loudly rule |
@@ -195,7 +195,7 @@ reviewers, with spot-verification of the highest-impact findings.
 Outcome: ~37% covered by live v2 tests or contract, ~19% deliberate
 recorded drops, ~39% internal (v1 helpers/decomposition — non-binding by
 rule), and 55 rows (≈5%) clustering into the ten findings in §3d. No
-un dispositioned behavior remains outside §3d; module-level dispositions
+undispositioned behavior remains outside §3d; module-level dispositions
 follow their test files (v1 tests are organized per module). The obligation
 side was checked independently: 259 normative sentences extracted from
 SPEC/INVARIANTS/COMPATIBILITY joined against the test suite — every

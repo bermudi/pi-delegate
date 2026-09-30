@@ -445,8 +445,9 @@ function parseProviderExtensions(
       throw new Error(`${path}: providerExtensions has a blank provider key.`);
     }
     if (!Array.isArray(entries)) {
+      const got = entries === null ? "null" : typeof entries;
       throw new Error(
-        `${path}: providerExtensions.${key} must be an array of extension source strings; got ${JSON.stringify(entries)}.`,
+        `${path}: providerExtensions.${key} must be an array of extension source strings; got ${got}.`,
       );
     }
     const sources: string[] = [];

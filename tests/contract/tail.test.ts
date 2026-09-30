@@ -54,6 +54,27 @@ async function untilQuestion(session: TestSession, ticket: string): Promise<stri
   throw new Error(`Worker did not ask a question on ticket ${ticket}`);
 }
 
+/** Bounded poll until every named task has a pending question on the ticket. */
+async function untilQuestions(
+  session: TestSession,
+  ticket: string,
+  tasks: readonly string[],
+): Promise<void> {
+  const until = Date.now() + 4000;
+  while (Date.now() < until) {
+    const view = await callDelegateTicket(session, { action: "poll", ticket });
+    if (
+      tasks.every((task) =>
+        view.text.includes(`Waiting for parent answer: task ${ticket}#${task},`),
+      )
+    ) {
+      return;
+    }
+    await Bun.sleep(10);
+  }
+  throw new Error(`Not every worker asked a question on ticket ${ticket}`);
+}
+
 function tailDetails(result: { details?: unknown }): Record<string, unknown> {
   const details = objectOf(result.details, "result.details");
   const tail = objectOf(details.tail, "details.tail");
@@ -428,7 +449,9 @@ describe("delegate_ticket tail — streamed output tails (#52)", () => {
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
-      await untilQuestion(session, ticket);
+      // Both workers must be parked: untilQuestion returns on the first
+      // question, so wait for beta's too before its stream is asserted.
+      await untilQuestions(session, ticket, ["alpha", "beta"]);
 
       // Ambiguous: two running tasks, no taskId — names both as
       // canonical <ticket>#<task> addresses (#53).
