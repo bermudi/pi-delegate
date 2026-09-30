@@ -2257,6 +2257,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
   });
 
   function registerTools(surface: DelegateSurface): void {
+    // The store outlives registration: restamp the surface so ticket
+    // views and receipts render hints valid for the active schema.
+    tickets.setSurface(surface);
     api.registerTool(
       defineTool<TUnsafe<DelegateArguments>, DelegateDetails>({
         name: "delegate",
@@ -2512,7 +2515,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   type: "text" as const,
                   text:
                     (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
-                    formatDispatchResult(result.outcomes, tasks, outputBounds, call.brief, result.tokenBudget),
+                    formatDispatchResult(result.outcomes, tasks, outputBounds, surface, call.brief, result.tokenBudget),
                 },
               ],
               details: ({

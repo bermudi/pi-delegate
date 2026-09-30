@@ -18,6 +18,7 @@ import {
   truncateLine,
 } from "./format.ts";
 import type { ActivityRow, ActivityStore } from "./activity.ts";
+import type { DelegateSurface } from "./config.ts";
 // The receipt details types derive from the TypeBox schemas in
 // details.ts — the emitted shape and the pinned contract share one
 // definition (SPEC v3 "Observability"; issue #51).
@@ -180,6 +181,7 @@ function taskSection(
   ticket: Ticket,
   outcome: TaskOutcome,
   whole: boolean,
+  surface: DelegateSurface,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
 ): string {
   const record = ticket.tasks[outcome.index];
@@ -243,7 +245,7 @@ function taskSection(
   const detail = outcome.error ?? "no output";
   const session =
     outcome.sessionFile !== undefined
-      ? `\n${recoveryLines(outcome.sessionFile).join("\n")}`
+      ? `\n${recoveryLines(outcome.sessionFile, surface).join("\n")}`
       : "";
   const partial = outcome.output ? `\n${render(outcome.output)}` : "";
   return `${head}${files}\n${detail}${session}${partial}${quarantined}${integration}`;
@@ -359,6 +361,7 @@ function liveCounts(ticket: Ticket, live: LiveState | undefined): string {
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */
 function ticketView(
   ticket: Ticket,
+  surface: DelegateSurface,
   whole = false,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
   live?: LiveState,
@@ -381,7 +384,7 @@ function ticketView(
   for (let index = 0; index < ticket.outcomes.length; index++) {
     const outcome = ticket.outcomes[index];
     if (outcome) {
-      lines.push("", taskSection(ticket, outcome, whole, renderedOutputs));
+      lines.push("", taskSection(ticket, outcome, whole, surface, renderedOutputs));
     } else if (!isTerminal(ticket.status)) {
       // A running ticket shows each unfinished task's live line — a
       // polling caller can tell a healthy worker from a spinning one.
@@ -440,6 +443,13 @@ function knownTickets(store: TicketStore): string {
 export class TicketStore {
   private readonly tickets = new Map<string, TicketEntry>();
   private journal: TicketJournal | undefined;
+  /**
+   * The session-fixed delegate surface (#61), restamped by
+   * `registerTools` on every (re)load. Views and not-applied receipts
+   * render through it so no recovery hint teaches a field the active
+   * boundary would reject.
+   */
+  private surfaceMode: DelegateSurface = "compact";
 
   /**
    * Optional lifecycle observer (extension-owned): fired after every
@@ -458,6 +468,16 @@ export class TicketStore {
     private readonly pooledTranscript?: (sessionId: string) => string | undefined,
   ) {}
 
+  /** `registerTools` restamps the session-fixed surface on every (re)load. */
+  setSurface(surface: DelegateSurface): void {
+    this.surfaceMode = surface;
+  }
+
+  /** The active surface — renderers emit surface-valid resume hints through it. */
+  get surface(): DelegateSurface {
+    return this.surfaceMode;
+  }
+
   /**
    * #57 — the continuation pointer a not-applied steer/interrupt receipt
    * appends: "nothing was applied" is a dead end unless the caller can
@@ -465,7 +485,9 @@ export class TicketStore {
    * session still holds its conversation — the receipt teaches
    * re-dispatch with `sessionId`; a fresh task with a durable transcript
    * teaches `resumeFrom` (the same pointer failure views render); a task
-   * with neither gets today's text unchanged. Recovered records never
+   * with neither gets today's text unchanged. Under the compact surface
+   * the `resumeFrom` pointer names the full-mode requirement first — the
+   * bare call would reject. Recovered records never
    * hint — the pool and the run belong to another session lifetime.
    */
   private continuationFor(
@@ -495,10 +517,12 @@ export class TicketStore {
     }
     const sessionFile = record.outcomes[index]?.sessionFile;
     if (sessionFile !== undefined && isResumableTranscript(sessionFile)) {
-      return (
-        ` To continue it, re-dispatch a task with resumeFrom ` +
-        `${JSON.stringify(sessionFile)} — the transcript is durable.`
-      );
+      return this.surface === "full"
+        ? ` To continue it, re-dispatch a task with resumeFrom ` +
+          `${JSON.stringify(sessionFile)} — the transcript is durable.`
+        : ` To continue it, set "surface": "full" in user-global delegate.json ` +
+          `and /reload — resumeFrom is a full-surface field — then re-dispatch ` +
+          `a task with resumeFrom ${JSON.stringify(sessionFile)}.`;
     }
     return "";
   }
@@ -716,10 +740,10 @@ export class TicketStore {
       rt.finishedGate.resolved &&
       rt.executions.size === 0
     ) {
-      rt.settledView ??= ticketView(record, false, rt.renderedOutputs, live);
+      rt.settledView ??= ticketView(record, this.surface, false, rt.renderedOutputs, live);
       return rt.settledView;
     }
-    return ticketView(record, false, rt.renderedOutputs, live);
+    return ticketView(record, this.surface, false, rt.renderedOutputs, live);
   }
 
   /**
@@ -730,7 +754,7 @@ export class TicketStore {
    */
   fullView(ticket: Ticket): string {
     const { record, rt } = this.entry(ticket);
-    return ticketView(record, true, undefined, {
+    return ticketView(record, this.surface, true, undefined, {
       activity: this.activity,
       executions: rt.executions,
     });

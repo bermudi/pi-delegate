@@ -208,9 +208,9 @@ wait, wait-any, pause/resume and tail controls below require full mode.
 
 - `poll` — the ticket roster, or one ticket's task list and settled results.
 - `wait` — block until the ticket settles; `timeoutMs` bounds the wait (unset
-  means wait for settlement; `timeout_ms` is the same field and reports the
-  rename). A `tickets` array watches several and returns when the first
-  watched ticket settles — a one-id list folds into the single-ticket wait.
+  means wait for settlement) and a `tickets` array watches several, returning
+  when the first watched ticket settles — a one-id list folds into the
+  single-ticket wait. Both `timeoutMs` and `tickets` are full-mode controls.
   Timing out or detaching never affects the task.
 - `cancel` — the first call previews what would stop and warns that writes and
   commands are not rolled back; `force: true` terminates the ticket and asks

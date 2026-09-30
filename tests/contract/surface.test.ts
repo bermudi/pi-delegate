@@ -113,6 +113,30 @@ describe("compact/full delegate surface", () => {
     expect((await callDelegateTicket(session, { action: "poll" })).isError).toBe(false);
   });
 
+  test("a compact failure view's resume hint names the full-surface requirement", async () => {
+    // resumeFrom is a full-mode field: a compact caller following a bare
+    // resumeFrom hint would hit the boundary rejection, so the hint names
+    // the requirement instead. Full mode keeps the copy-pasteable call.
+    const session = await open();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([
+      fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: "provider blew up",
+      }),
+    ]);
+    const result = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "fail" }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("session: ");
+    expect(result.text).toContain("→ To retry:");
+    expect(result.text).toContain("requires the full delegate surface");
+    expect(result.text).toContain('"surface": "full"');
+    expect(result.text).toContain("resumeFrom");
+  });
+
   test("malformed supplied tasks cannot hide aliases behind flat recovery", async () => {
     for (const surface of ["compact", "full"] as const) {
       const session = await open(surface);

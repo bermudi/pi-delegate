@@ -933,19 +933,23 @@ even at top level.
 
 - **Contract:** top-level `brief` prepends a `--- batch brief ---
   …--- end batch brief ---` preamble to every task's prompt (before
-  its own prose; the dependent handoff still trails). Top-level
-  `context` normalizes to `brief` with the usual `field "context" →
-  "brief"` note; both spellings holding different text is an error
-  naming both. The sync result, async receipt, and ticket views name
+  its own prose; the dependent handoff still trails). `context` is a
+  removed spelling, not a fold: its presence rejects at every level —
+  top-level or inside a task, valued or null, beside a canonical
+  `brief` or alone — with guidance toward `brief` for shared batch
+  context. The sync result, async receipt, and ticket views name
   the brief once (~80-char head, `details.brief` carries it on
   dispatch results); the journal persists it for recovered views.
   A whitespace-only brief is absent.
 - **Covered now:** `tests/contract/brief.test.ts` — every child's
   provider-visible first message carries the fenced brief before its
   prompt (both tasks of a batch), the once-in-the-header rule, the
-  async receipt + recovered-ticket header, the `context` fold with
-  its note, the `brief`/`context` conflict, absent-brief behavior,
-  and the brief→prompt→handoff ordering on a dependent. Schema pin in
+  async receipt + recovered-ticket header, `context` rejection beside
+  a canonical `brief` (valued and null, before any execution),
+  absent-brief behavior, and the brief→prompt→handoff ordering on a
+  dependent. Task-level, flat, and stringified `context` rejection
+  live in `tests/contract/dispatch.test.ts`; its misfire-telemetry
+  rows in `tests/contract/telemetry.test.ts`. Schema pin in
   `tests/contract/tool-boundary.test.ts`.
 
 ### Canonical boundary long tail (#44, updated by #61)
@@ -1095,8 +1099,8 @@ against them.
   profile's delegate.json pin (`model[:effort]` + its config origin);
   unpinned profiles render unchanged.
 - **Covered now:** `tests/contract/details.test.ts` — `Check` against
-  the exported schemas on a real help call, sync dispatch (brief via the
-  `context` rename, tokenBudget, write attribution, verifier verdict,
+  the exported schemas on a real help call, sync dispatch (brief,
+  tokenBudget, write attribution, verifier verdict,
   bash uncertainty), async dispatch + poll/wait + delivered wake, steer
   and interrupt receipts, a worker-question notification, a session
   list, and a quarantined-outcome `usageLowerBound`. The capacity
@@ -1690,7 +1694,8 @@ receipts — turn-boundary `steered`, parked `activated`, idempotent
 `tests/contract/recovery.test.ts`); ticket interrupt — a cooperative
 per-task abort settling `interrupted` with resumable workers (issue
 #42; `SPEC.md` "Interrupt", `tests/contract/interrupt.test.ts`); the
-shared batch `brief` with its `context` spelling (issue #43; `SPEC.md`
+shared batch `brief` — with `context` covered as a rejected spelling,
+not a fold (issue #43; `SPEC.md`
 "Batch brief", `tests/contract/brief.test.ts`).
 
 Remaining:

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { relative } from "node:path";
+import type { DelegateSurface } from "./config.ts";
 import { renderOutputForLLM } from "./spill.ts";
 import type {
   FieldNormalization,
@@ -92,13 +93,23 @@ export function isResumableTranscript(sessionFile: string): boolean {
  * transcript: the `session:` path and either a copy-pasteable resume hint
  * or an explicit note that the saved transcript holds no prior messages —
  * so the caller re-dispatches fresh rather than chasing an empty resume.
+ * `resumeFrom` is a full-surface field (#61): under compact the hint names
+ * that requirement instead of handing the caller a call that would reject.
  */
-export function recoveryLines(sessionFile: string | undefined): string[] {
+export function recoveryLines(
+  sessionFile: string | undefined,
+  surface: DelegateSurface,
+): string[] {
   if (sessionFile === undefined) return [];
   const lines = [`session: ${sessionFile}`];
   if (isResumableTranscript(sessionFile)) {
+    const retry =
+      `delegate({ tasks: [{ resumeFrom: ${JSON.stringify(sessionFile)}, prompt: "continue" }] })`;
     lines.push(
-      `→ To retry: delegate({ tasks: [{ resumeFrom: ${JSON.stringify(sessionFile)}, prompt: "continue" }] })`,
+      surface === "full"
+        ? `→ To retry: ${retry}`
+        : `→ To retry: resumeFrom requires the full delegate surface — ` +
+          `set "surface": "full" in user-global delegate.json and /reload, then ${retry}`,
     );
   } else {
     lines.push(
@@ -368,6 +379,7 @@ export function formatDispatchResult(
   outcomes: readonly TaskOutcome[],
   tasks: Ticket["tasks"],
   bounds: OutputBounds,
+  surface: DelegateSurface,
   brief?: string,
   tokenBudget?: TokenBudgetReport,
 ): string {
@@ -409,7 +421,7 @@ export function formatDispatchResult(
     const detail = outcome.error ?? "no output";
     const session =
       outcome.sessionFile !== undefined
-        ? `\n${recoveryLines(outcome.sessionFile).join("\n")}`
+        ? `\n${recoveryLines(outcome.sessionFile, surface).join("\n")}`
         : "";
     const partial = outcome.output
       ? `\n\nPartial output:\n${renderOutputForLLM(outcome.output, label, bounds)}`
