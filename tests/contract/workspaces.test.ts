@@ -2053,6 +2053,54 @@ exec '${realGit}' "$@"
   );
 
   test(
+    "a scratch shell escape is drift evidence in a repository with no commits",
+    async () => {
+      // The unborn-repo branch of the drift window: `rev-parse HEAD`
+      // fails, so the start snapshot seeds from an empty index
+      // (`read-tree --empty`) instead of a commit. The escape must still
+      // be caught — evidence must not depend on the repo having history.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      execSync("git init -q && git config user.email t@t && git config user.name t", {
+        cwd: dir,
+      });
+
+      const escape: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("ESCAPED-UNBORN")
+          : fauxAssistantMessage([
+              fauxToolCall("bash", {
+                command: `printf 'escape\\n' > '${dir}/escaped.txt'`,
+              }),
+            ]);
+      subagents.respond([escape, escape]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "run a command",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["bash"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(readFileSync(join(dir, "escaped.txt"), "utf8")).toBe("escape\n");
+      expect(result.text).toContain("source drift:");
+      expect(result.text).toContain("escaped.txt");
+      const outcomes = (
+        result.details as {
+          results?: { integration?: { sourceDrift?: string[] } }[];
+        }
+      ).results;
+      expect(outcomes?.[0]?.integration?.sourceDrift).toContain("escaped.txt");
+    },
+  );
+
+  test(
     "scratch source drift is not pinned on a worker that never ran a shell",
     async () => {
       // Same attribution rule as isolated: the caller edits a source file
@@ -2174,6 +2222,128 @@ exec '${realGit}' "$@"
         }
       ).results;
       expect(outcomes?.[0]?.integration?.sourceDrift).toBeUndefined();
+    },
+  );
+
+  test(
+    "a same-batch shared writer's files are not scratch drift",
+    async () => {
+      // Review P1 on the scratch drift patch: admission seats a shared
+      // writer beside a scratch task on the same repo (scratch holds no
+      // source reservation), so the shared task's legitimate writes land
+      // in the source inside the scratch window. Those files are not
+      // escapes — subtracting the sibling's attributed files must leave
+      // nothing to pin on the shell-capable scratch worker.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const byPrompt: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("DONE");
+        }
+        return JSON.stringify(context.messages).includes("SHARED-MARKER")
+          ? fauxAssistantMessage([
+              fauxToolCall("write", {
+                path: "shared-file.txt",
+                content: "shared\n",
+              }),
+            ])
+          : fauxAssistantMessage([
+              fauxToolCall("bash", { command: "true" }),
+            ]);
+      };
+      subagents.respond([byPrompt, byPrompt, byPrompt, byPrompt]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "SHARED-MARKER write shared-file.txt",
+            cwd: dir,
+            tools: ["write"],
+          },
+          {
+            prompt: "run a command",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["bash"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // The shared write landed in the source, beside the scratch worker.
+      expect(readFileSync(join(dir, "shared-file.txt"), "utf8")).toBe(
+        "shared\n",
+      );
+      expect(result.text).not.toContain("source drift:");
+      const outcomes = (
+        result.details as {
+          results?: ({ integration?: { sourceDrift?: string[] } } | null)[];
+        }
+      ).results;
+      expect(outcomes?.[1]?.integration?.sourceDrift).toBeUndefined();
+    },
+  );
+
+  test(
+    "a shell-capable shared sibling de-scopes scratch drift for the root",
+    async () => {
+      // The subtraction carve-out has a hard case: a shared sibling that
+      // ran a shell writes unobservably — its bash edits are invisible to
+      // attribution, so drift on that root cannot be told apart from an
+      // escape. Pinning is suppressed for the whole root (logged), even
+      // when the scratch worker really did escape: a false accusation is
+      // worse than missing evidence.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const byPrompt: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage("DONE");
+        }
+        return JSON.stringify(context.messages).includes("SHARED-MARKER")
+          ? fauxAssistantMessage([
+              fauxToolCall("bash", { command: "true" }),
+            ])
+          : fauxAssistantMessage([
+              fauxToolCall("bash", {
+                command: `printf 'escape\\n' > '${dir}/escaped.txt'`,
+              }),
+            ]);
+      };
+      subagents.respond([byPrompt, byPrompt, byPrompt, byPrompt]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "SHARED-MARKER run a command",
+            cwd: dir,
+            tools: ["bash"],
+          },
+          {
+            prompt: "run a command",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["bash"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // The escape really happened, but the root is unattributable —
+      // suppressed, never pinned on the scratch worker.
+      expect(readFileSync(join(dir, "escaped.txt"), "utf8")).toBe("escape\n");
+      expect(result.text).not.toContain("source drift:");
+      const outcomes = (
+        result.details as {
+          results?: ({ integration?: { sourceDrift?: string[] } } | null)[];
+        }
+      ).results;
+      expect(outcomes?.[1]?.integration?.sourceDrift).toBeUndefined();
     },
   );
 

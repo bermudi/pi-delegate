@@ -564,7 +564,7 @@ async function restorePreApplyState(
  * bounded so a repo-scale spill stays one bounded field. A failure here
  * is logged and skipped: drift reporting must never fail reconciliation.
  */
-const SOURCE_DRIFT_LIMIT = 20;
+export const SOURCE_DRIFT_LIMIT = 20;
 
 async function detectSourceDrift(
   group: IsolatedGroup,

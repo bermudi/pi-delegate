@@ -587,7 +587,17 @@ gaps.
   conflict with an overlapping shared writer; copies from dead processes
   are swept; copies land under the agent dir, never beside the source;
   an `edit` to the absolute source path is refused naming the copy-mapped
-  path and leaves the source untouched (#62).
+  path and leaves the source untouched (#62); a shell escape into the
+  source is drift evidence on the shell-capable worker's integration
+  (`integration.sourceDrift`), journal-delivered on async tickets
+  (settlement holds through scratch finalize), with repositories lacking
+  commits seeding from an empty index; the window closes before
+  same-phase isolated proposals apply, so legitimate applies never pose
+  as escapes; a same-batch shared writer's attributed files are
+  subtracted from drift, and a shell-capable shared sibling de-scopes
+  pinning for the overlapped root entirely (unattributable, logged); a
+  shell-less worker is never pinned; non-Git sources get no evidence and
+  log once.
 - **Gap:** nested repositories whose `.git` files use absolute gitdirs
   (accepted risk: an ordinary copy preserves them, and scratch is not a
   security boundary).
@@ -612,9 +622,9 @@ gaps.
   `appliedFiles` and already-present wording, never a fresh apply.
   Workspace guard (#62): a `write` to the absolute source path is refused
   naming the copy-mapped path, the mapped write reconciles normally, and
-  the refused path is not attributed; scratch gets the same refusal; both
-  surfaces' child prompts carry the workspace note with real roots
-  (authored `systemPrompt`s included); a worker's shell write into the
+  the refused path is not attributed; both surfaces' child prompts carry
+  the workspace note with real roots (authored `systemPrompt`s
+  included); a worker's shell write into the
   source is reported as `sourceDrift` on its integration and renders as
   `source drift:` — while a worker that never ran a shell is not blamed
   for drift it could not have caused. Path spellings normalize like pi's

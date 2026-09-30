@@ -341,9 +341,12 @@ contract:
   machinery, never silently applied. Scratch drift windows close before
   isolated proposals apply in the same phase, so legitimate applies are
   never mistaken for escapes; scratch sources without a usable Git
-  repository have no drift evidence (logged once). Ticketed scratch
-  batches hold settlement through finalize, so `wait` never renders a
-  pre-reconcile record without the evidence.
+  repository have no drift evidence (logged once). Same-batch shared
+  siblings complicate attribution: their attributed files are excluded
+  from drift, and a root overlapped by a shell-capable shared sibling is
+  unattributable — its pinning is de-scoped and logged, not guessed.
+  Ticketed scratch batches hold settlement through finalize, so `wait`
+  never renders a pre-reconcile record without the evidence.
 - **Session-scoped roster (#64).** The ticket store also holds
   journaled records owned by other Pi sessions — live sibling tickets
   still running elsewhere and settled records kept pollable (axiom 2).

@@ -9,7 +9,11 @@ import {
   isWithin,
   stopWorkspaceProcesses,
 } from "./fsx.ts";
-import { changedFiles, snapshotTree } from "./isolated.ts";
+import {
+  changedFiles,
+  snapshotTree,
+  SOURCE_DRIFT_LIMIT,
+} from "./isolated.ts";
 import type { ResolvedTask, TaskOutcome } from "./types.ts";
 
 // Probes fail fast and produce tiny output; the shared exec takes explicit
@@ -174,6 +178,8 @@ interface ScratchWorker {
  */
 interface ScratchDrift {
   readonly sourceRoot: string;
+  /** The phase this window belongs to — only same-phase siblings overlap it. */
+  readonly phase: number;
   /** Repository-relative pathspecs kept out of both drift snapshots. */
   readonly excluded: readonly string[];
   /** Index path shared by the start and end snapshots (each rm's it first). */
@@ -183,9 +189,6 @@ interface ScratchDrift {
   /** Source-relative changed paths — sorted, bounded — once captured. */
   drift?: readonly string[];
 }
-
-/** Same evidence bound as the isolated check (#62). */
-const SOURCE_DRIFT_LIMIT = 20;
 
 /**
  * Open one source root's drift window: snapshot the working state the
@@ -198,6 +201,7 @@ const SOURCE_DRIFT_LIMIT = 20;
  */
 async function openDriftWindow(
   sourceRoot: string,
+  phase: number,
   scratchBase: string,
   batchRoot: string,
   excludedPaths: readonly string[],
@@ -241,7 +245,7 @@ async function openDriftWindow(
     signal,
     excluded,
   );
-  return { sourceRoot, excluded, indexPath, startTree };
+  return { sourceRoot, phase, excluded, indexPath, startTree };
 }
 
 export interface ScratchPlan {
@@ -333,6 +337,7 @@ export async function prepareScratch(
               root,
               await openDriftWindow(
                 root,
+                phase,
                 scratchBase,
                 batchRoot,
                 excludedPaths,
@@ -447,6 +452,60 @@ export async function prepareScratch(
       // ("discarded", nothing proposed or applied) grounds the evidence.
       for (const drift of drifts.values()) {
         if (drift.drift === undefined || drift.drift.length === 0) continue;
+        // Review carve-out: a same-phase shared sibling writes the source
+        // legitimately — admission seats it beside scratch on purpose —
+        // so its attributed files are not escapes. Subtract those; but a
+        // shell-capable sibling makes attribution for this root
+        // impossible (its bash writes are unobservable), so pinning is
+        // de-scoped for the whole root and says so once, like the non-Git
+        // case. Only same-phase siblings matter: earlier phases finished
+        // before this window opened, later ones write after it closed.
+        const rootCanon = canonicalPath(drift.sourceRoot);
+        const underRoot = (candidate: string): boolean =>
+          isWithin(rootCanon, canonicalPath(candidate));
+        const siblingAttributed = new Set<string>();
+        let unattributable = false;
+        for (const [index, sibling] of tasks.entries()) {
+          if (
+            sibling.workspace !== "shared" ||
+            sibling.phase !== drift.phase
+          ) {
+            continue;
+          }
+          const siblingOutcome = outcomes[index];
+          if (!siblingOutcome) continue;
+          const attributed = siblingOutcome.attributedFiles ?? [];
+          const overlapsRoot =
+            underRoot(sibling.cwd) || attributed.some(underRoot);
+          if (!overlapsRoot) continue;
+          if (siblingOutcome.uncertainFiles === true) {
+            unattributable = true;
+            break;
+          }
+          for (const file of attributed) {
+            if (underRoot(file)) {
+              siblingAttributed.add(path.relative(rootCanon, canonicalPath(file)));
+            }
+          }
+        }
+        if (unattributable) {
+          console.error(
+            `[delegate] scratch drift evidence suppressed for '${drift.sourceRoot}': a same-batch shared worker ran a shell in this tree`,
+          );
+          continue;
+        }
+        if (siblingAttributed.size > 0) {
+          const remaining = drift.drift.filter(
+            (changed) => !siblingAttributed.has(changed),
+          );
+          if (remaining.length === 0) continue;
+          if (remaining.length !== drift.drift.length) {
+            console.error(
+              `[delegate] scratch drift for '${drift.sourceRoot}': excluded ${drift.drift.length - remaining.length} file(s) attributed to same-batch shared workers`,
+            );
+          }
+          drift.drift = remaining;
+        }
         for (const worker of workers.values()) {
           if (worker.sourceRoot !== drift.sourceRoot) continue;
           const outcome = outcomes[worker.taskIndex];
