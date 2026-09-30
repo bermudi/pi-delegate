@@ -291,9 +291,10 @@ interface IsolatedGroup {
   readonly baselineRef: string;
   /**
    * The same repository-relative exclude pathspecs the baseline snapshot
-   * used (artifact roots, excludedPaths). The reconcile-time drift check
-   * re-snapshots with them so artifact directories can never masquerade
-   * as source drift (#62).
+   * used (artifact roots, agent-dir delegate trees, excludedPaths). The
+   * reconcile-time drift check re-snapshots with them so artifact
+   * directories and delegate-owned churn can never masquerade as source
+   * drift (#62).
    */
   readonly snapshotExcludes: readonly string[];
   readonly taskIndexes: number[];
@@ -1479,16 +1480,21 @@ export async function prepareIsolated(
         // The artifact root can live inside the source tree (e.g. an
         // agentDir under the repo): never snapshot retained artifacts or
         // live worktrees into a baseline, or a worker could "delete" them
-        // into a proposal. Sibling delegate trees are excluded by name via
-        // DELEGATE_TREES so a future workspace mode cannot reintroduce the
-        // leak. The batch root is excluded separately for the pathological
-        // case where the artifact base IS the source root.
+        // into a proposal. Every delegate-owned tree under the agent
+        // directory is excluded by name via DELEGATE_TREES so a future
+        // tree cannot reintroduce the leak — and the ticket journal's
+        // per-outcome rewrites, which land mid-run, cannot masquerade as
+        // source drift (#62). The batch root is excluded separately for
+        // the pathological case where the artifact base IS the source
+        // root.
+        const delegateDir = path.dirname(artifactBase);
         const excluded: string[] = [];
         for (const base of [
           artifactBase,
           batchRoot,
-          path.join(path.dirname(artifactBase), DELEGATE_TREES.scratch),
-          path.join(path.dirname(artifactBase), DELEGATE_TREES.sessions),
+          ...Object.values(DELEGATE_TREES).map((tree) =>
+            path.join(delegateDir, tree),
+          ),
           ...excludedPaths,
         ]) {
           const resolved = canonicalPath(base);

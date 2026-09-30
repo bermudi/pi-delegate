@@ -1950,4 +1950,50 @@ exec '${realGit}' "$@"
       expect(outcomes?.[0]?.integration?.sourceDrift).toBeUndefined();
     },
   );
+
+  test(
+    "delegate-owned agent-dir churn inside the source repo is not source drift",
+    async () => {
+      // The agent directory can live inside the source repository (the
+      // ctx.cwd fallback, or DELEGATE_AGENT_DIR under the project — in the
+      // harness it IS session.cwd). An async isolated batch rewrites
+      // delegate-tickets/t-*.json on every recorded outcome; that churn is
+      // delegate's own and must never be pinned on a shell-capable worker
+      // as drift.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      gitInit(session.cwd);
+
+      const shell: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("INREPO-CLEAN")
+          : fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]);
+      subagents.respond([shell, shell]);
+
+      const dispatched = await callDelegate(session, {
+        async: true,
+        tasks: [
+          {
+            prompt: "run a command",
+            cwd: session.cwd,
+            workspace: "isolated",
+            tools: ["bash"],
+          },
+        ],
+      });
+      expect(dispatched.isError).toBe(false);
+      const settled = await callDelegateTicket(session, {
+        action: "wait",
+        ticket: ticketIdOf(dispatched.text),
+      });
+      expect(settled.text).toContain("INREPO-CLEAN");
+      expect(settled.text).not.toContain("source drift:");
+      const outcomes = (
+        settled.details as {
+          results?: ({ integration?: { sourceDrift?: string[] } } | null)[];
+        }
+      ).results;
+      expect(outcomes?.[0]?.integration?.sourceDrift).toBeUndefined();
+    },
+  );
 });

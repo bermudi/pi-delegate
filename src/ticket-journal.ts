@@ -6,6 +6,7 @@ import {
 import { join } from "node:path";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { DELEGATE_TREES } from "./fsx.ts";
 import type { Ticket } from "./types.ts";
 
 const usage = Type.Object({
@@ -123,7 +124,7 @@ export class TicketJournal {
   readonly dir: string;
 
   constructor(agentDir: string) {
-    this.dir = join(agentDir, "delegate-tickets");
+    this.dir = join(agentDir, DELEGATE_TREES.tickets);
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const stat = lstatSync(this.dir);
     if (!stat.isDirectory() || (stat.mode & 0o077) !== 0 ||

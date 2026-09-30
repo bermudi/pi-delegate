@@ -1234,6 +1234,14 @@ const HELP_SESSIONS = `## delegate_session — sessions
 - \`{ action: "list" }\` lists live sessions; \`{ action: "close", sessionId }\`
   closes one.`;
 
+// #64: the compact edition documents only controls the compact schema
+// accepts — task `sessionId` pooling is a full-surface field, so the
+// compact sessions section describes list/close without teaching a call
+// that rejects.
+const HELP_SESSIONS_COMPACT = `## delegate_session — sessions
+- \`{ action: "list" }\` lists pooled sessions; \`{ action: "close", sessionId }\`
+  closes one. Creating pooled sessions requires the full surface.`;
+
 const HELP_TELEMETRY = `## Telemetry
 - Disabled by default; enable only via "telemetry" in delegate.json.
 - Local content-free metadata only: batch and task outcome records in a
@@ -1280,7 +1288,7 @@ ${HELP_WORKSPACES}
 
 ${HELP_TICKETS_COMPACT}
 
-${HELP_SESSIONS}
+${HELP_SESSIONS_COMPACT}
 
 ${HELP_TELEMETRY}
 

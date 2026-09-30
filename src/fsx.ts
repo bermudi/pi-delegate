@@ -22,6 +22,8 @@ export const DELEGATE_TREES = Object.freeze({
   scratch: "delegate-scratch",
   /** Git worktrees and artifacts for isolated tasks. */
   isolated: "delegate-isolated",
+  /** Durable ticket journal — rewritten on every recorded outcome. */
+  tickets: "delegate-tickets",
 } as const);
 
 /** Canonical path for admission comparisons (resolves symlinks). */

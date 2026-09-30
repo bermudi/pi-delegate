@@ -29,6 +29,7 @@ import type {
   TailDetails,
 } from "./details.ts";
 import { TicketJournal } from "./ticket-journal.ts";
+import { DELEGATE_TREES } from "./fsx.ts";
 import { currentBootId, ownerIsDead } from "./owner.ts";
 import { assistantTextFromTranscript } from "./sessions.ts";
 import { renderOutputForLLM, renderOutputForPoll } from "./spill.ts";
@@ -566,7 +567,7 @@ export class TicketStore {
   /** Load once per extension lifetime. Never adopt another agent directory. */
   connect(agentDir: string): void {
     if (this.journal !== undefined) {
-      if (this.journal.dir !== join(agentDir, "delegate-tickets")) {
+      if (this.journal.dir !== join(agentDir, DELEGATE_TREES.tickets)) {
         throw new Error("Delegate agent directory changed during this session; ticket recovery requires a single agent directory.");
       }
       return;

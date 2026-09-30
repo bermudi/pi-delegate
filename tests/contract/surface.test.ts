@@ -71,6 +71,16 @@ describe("compact/full delegate surface", () => {
     expect(manual.text).not.toContain("watches several");
     expect(manual.text).not.toContain("`timeoutMs`");
     expect(manual.text).not.toContain("char offset into");
+    // The sessions section teaches only list/close — task `sessionId`
+    // pooling is a full-mode control the compact schema rejects, so a
+    // caller following the manual must not be led into a rejecting call.
+    // (delegate_session's own close argument stays compact-legal, and the
+    // closing line may still name sessionId in the full-surface delta.)
+    const sessionsSection = manual.text.slice(
+      manual.text.indexOf("## delegate_session"),
+      manual.text.indexOf("## Telemetry"),
+    );
+    expect(sessionsSection).not.toContain("keeps its session");
     // The closing line names what full adds and how to enable it.
     expect(manual.text).toContain("Full surface adds:");
     expect(manual.text).toContain('"surface": "full"');
