@@ -1,6 +1,6 @@
 # Publishing v3 (gated — do not run without bermudi's explicit yes)
 
-v3 ships as `@bermudi/pi-delegate@0.3.0`, displacing v1 (0.1.23) for
+v3 ships as `@bermudi/pi-delegate@0.3.1`, displacing v1 (0.1.23) for
 every machine on next `pi update` or repin. The minor bump inside the
 0.x line continues v1's versioning; the v3 surface is documented in
 COMPATIBILITY.md.
@@ -21,13 +21,13 @@ auth is not needed and `npm publish` should not be run by hand.
 
 ## Publish
 
-    git tag pi-delegate-v0.3.0 && git push origin main pi-delegate-v0.3.0
+    git tag pi-delegate-v0.3.1 && git push origin main pi-delegate-v0.3.1
 
-Watch the workflow run; npm lists 0.3.0 when it finishes.
+Watch the workflow run; npm lists 0.3.1 when it finishes.
 
 ## Post-publish verification
 
-1. `npm view @bermudi/pi-delegate version` → 0.3.0.
+1. `npm view @bermudi/pi-delegate version` → 0.3.1.
 2. In a scratch directory (NOT this repo): `pi install
    npm:@bermudi/pi-delegate`, start `pi`, dispatch one single-task and
    one two-task call — verify both return tickets and wake with results.
@@ -40,7 +40,7 @@ Watch the workflow run; npm lists 0.3.0 when it finishes.
 ## Rollback
 
 npm cannot unpublish after 72h. Before that window: `npm unpublish
-@bermudi/pi-delegate@0.3.0` restores 0.1.23 as latest. The local
+@bermudi/pi-delegate@0.3.1` restores 0.1.23 as latest. The local
 rollback is flipping the settings.json pin back to
 `npm:@bermudi/pi-delegate@0.1.23`. Document any rollback in
 COMPATIBILITY.

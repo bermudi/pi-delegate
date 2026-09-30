@@ -4,9 +4,6 @@
   "workspaces": {
     "": {
       "name": "pi-delegate-v2",
-      "dependencies": {
-        "typebox": "1.3.27",
-      },
       "devDependencies": {
         "@earendil-works/pi-agent-core": "0.87.0",
         "@earendil-works/pi-ai": "0.87.0",
@@ -15,6 +12,7 @@
         "@marcfargas/pi-test-harness": "0.6.1",
         "@types/bun": "1.4.0",
         "esbuild": "^0.28.2",
+        "typebox": "1.3.27",
         "typescript": "5.9.3",
       },
       "peerDependencies": {

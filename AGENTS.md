@@ -97,9 +97,13 @@ key pending components by content-block identity, or rekey on id change.
 
 ## Stack
 
-TypeScript (strict), Bun, TypeBox. Our `typebox` pin must mirror Pi's
-exact pin (pi-coding-agent's dependency) — schema symbol identity across
-instances is why; re-align on every Pi bump. Tests run in-process via
+TypeScript (strict), Bun, TypeBox. Host-provided packages go in
+`peerDependencies` with `"*"` — pi maps `typebox` imports onto its own
+shipped copy, and a physical `dependencies` entry warns at every load
+("Installed copies can bypass the extension loader and create duplicate
+runtime modules", seen 2026-09-30 on 0.3.0). The devDep pin must mirror
+Pi's exact shipped typebox — schema symbol identity across instances is
+why; re-align on every Pi bump. Tests run in-process via
 `@marcfargas/pi-test-harness`, which carries a local compatibility patch
 (`patches/`) required until upstream supports the pinned Pi version. The
 patch covers three seams (verify each on every bump):
