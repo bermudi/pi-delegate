@@ -102,6 +102,15 @@ function shortTicketAddress(id: string): string {
 }
 
 /**
+ * Inline id shortening for rendered content text (#63 rework): every
+ * `t-<uuid>` occurrence collapses to `t-<first 8 hex>` — including the
+ * ticket part of a `<ticket>#<task>` address, where `#` ends the match.
+ */
+function shortenTicketIds(text: string): string {
+  return text.replace(/t-([0-9a-f]{8})[0-9a-f-]{24,}/gi, "t-$1");
+}
+
+/**
  * The expanded document for a result's or delivered message's `details`,
  * or undefined when it carries no recoverable outcomes — in which case the
  * bounded content text is the most faithful expanded view available.
@@ -319,27 +328,34 @@ interface CollapsedTaskMeta {
 function collapsedTaskLabel(
   outcome: TaskOutcome | undefined,
   meta: CollapsedTaskMeta | undefined,
+  index: number,
 ): string {
+  // An unsettled slot carries no store/meta label — a positional task-N
+  // beats the anonymous "task" the first cut rendered (#63).
   return truncateLine(
     descriptionLabel(meta?.description) ??
       meta?.agent ??
       outcome?.id ??
       meta?.id ??
-      "task",
+      `task-${index + 1}`,
     RESULT_LABEL_LIMIT,
   );
 }
 
 /**
- * The first non-empty output line with leading markdown markers stripped —
- * headings, bullets, and quotes are formatting, not content (#63).
+ * The summary a collapsed task line shows: the first substantive output
+ * line — markdown headings/bullets/quotes stripped, `**`/`__` emphasis
+ * dropped, and a lead-in ending in ":" ("Here's my report:") skipped in
+ * favor of the first non-lead-in line among the first five (#63).
  */
 function summaryLine(output: string | undefined): string {
-  for (const raw of (output ?? "").split("\n")) {
-    const line = raw.replace(/^[#\-*>\s]+/, "").trim();
-    if (line !== "") return line;
-  }
-  return "";
+  const lines = (output ?? "")
+    .split("\n")
+    .map((raw) => raw.replace(/^[#\-*>\s]+/, "").trim())
+    .filter((line) => line !== "");
+  const picked =
+    lines.slice(0, 5).find((line) => !line.endsWith(":")) ?? lines[0] ?? "";
+  return picked.replace(/\*\*|__/g, "").trim();
 }
 
 /**
@@ -349,22 +365,37 @@ function summaryLine(output: string | undefined): string {
  */
 function collapsedOutcomeMeta(
   outcome: TaskOutcome,
-): { muted: string; warnings: string[] } {
+): {
+  muted: string;
+  spans: { text: string; color: "success" | "error" | "warning" }[];
+} {
   const files = outcome.attributedFiles?.length ?? 0;
   const muted = files > 0 ? ` · ${files} file${files === 1 ? "" : "s"}` : "";
-  const warnings: string[] = [];
+  const spans: { text: string; color: "success" | "error" | "warning" }[] = [];
   const integration: TaskIntegration | undefined = outcome.integration;
   if (
     integration !== undefined &&
     integration.status !== "applied_unverified" &&
     integration.status !== "no_changes"
   ) {
-    warnings.push(` · ${integration.status}`);
+    spans.push({ text: ` · ${integration.status}`, color: "warning" });
   }
   if (integration?.sourceDrift !== undefined && integration.sourceDrift.length > 0) {
-    warnings.push(" · source drift");
+    spans.push({ text: " · source drift", color: "warning" });
   }
-  return { muted, warnings };
+  // The verifier profile's parsed verdict rides the same trailer (#63).
+  if (outcome.verdict !== undefined) {
+    spans.push({
+      text: ` · VERDICT ${outcome.verdict}`,
+      color:
+        outcome.verdict === "PASS"
+          ? "success"
+          : outcome.verdict === "FAIL"
+            ? "error"
+            : "warning",
+    });
+  }
+  return { muted, spans };
 }
 
 type CollapsedStatus = TaskStatus | "running";
@@ -394,16 +425,17 @@ function collapsedGlyph(status: CollapsedStatus): { glyph: string; color: "succe
 function collapsedTaskLine(
   slot: TaskOutcome | undefined | null,
   meta: CollapsedTaskMeta | undefined,
+  index: number,
   theme: Theme,
 ): string {
   const outcome = slot === null ? undefined : slot;
   const { glyph, color } = collapsedGlyph(outcome?.status ?? "running");
-  const label = collapsedTaskLabel(outcome, meta);
+  const label = collapsedTaskLabel(outcome, meta, index);
   const extras =
     outcome !== undefined
       ? collapsedOutcomeMeta(outcome)
-      : { muted: "", warnings: [] };
-  const metaText = extras.muted + extras.warnings.join("");
+      : { muted: "", spans: [] };
+  const metaText = extras.muted + extras.spans.map((span) => span.text).join("");
   const summary =
     outcome === undefined
       ? "running"
@@ -425,7 +457,7 @@ function collapsedTaskLine(
       ? theme.fg("muted", summaryText)
       : theme.fg("toolOutput", summaryText);
   if (extras.muted !== "") line += theme.fg("muted", extras.muted);
-  for (const warning of extras.warnings) line += theme.fg("warning", warning);
+  for (const span of extras.spans) line += theme.fg(span.color, span.text);
   return line;
 }
 
@@ -457,7 +489,13 @@ function collapsedBody(
   const details = result.details;
   if (!isRecord(details)) return undefined;
   if (details.mode === "help") {
-    return theme.fg("muted", "manual") + expandHint(theme);
+    // The call row already says "delegate manual" — collapsed carries only
+    // the expand hint (#63).
+    const keys = keyText("app.tools.expand");
+    return theme.fg(
+      "muted",
+      keys !== "" ? `(${keys} to read)` : "(expand to read)",
+    );
   }
   if (
     details.mode === "dispatch" &&
@@ -490,6 +528,7 @@ function collapsedBody(
           ticket !== undefined
             ? ticket.tasks[outcome?.index ?? index]
             : syncTasks?.[index],
+          index,
           theme,
         ),
       );
@@ -497,6 +536,29 @@ function collapsedBody(
     return lines.join("\n") + "\n" + expandHint(theme).trimStart();
   }
   return undefined;
+}
+
+/**
+ * A bare-poll roster collapses to its entry lines — ids display-shortened,
+ * capped at five — plus the other-sessions note a #64-scoped roster
+ * appends, rather than the bare `Tickets:` header (#63).
+ */
+function collapsedRoster(text: string, theme: Theme): string {
+  const lines = text.split("\n");
+  const entries = lines.filter((line) => line.startsWith("- "));
+  const hidden = lines.find((line) =>
+    line.includes("from other sessions not shown"),
+  );
+  const body = [
+    ...entries
+      .slice(0, 5)
+      .map((line) => theme.fg("toolOutput", shortenTicketIds(line))),
+    ...(entries.length > 5
+      ? [theme.fg("muted", `  … and ${entries.length - 5} more`)]
+      : []),
+    ...(hidden !== undefined ? [theme.fg("muted", hidden)] : []),
+  ];
+  return body.join("\n") + expandHint(theme);
 }
 
 /**
@@ -522,14 +584,21 @@ export function createResultRenderer(tickets: TicketStore) {
         component.setText(collapsed);
         return component;
       }
-      // Receipts, rosters, sessions: the first content line bounded to
-      // the collapsed budget, plus the expand hint when more exists.
+      // A roster poll keeps its entry lines — the bare "Tickets:" header
+      // alone carries nothing (#63).
       const text = contentText(result);
+      if (text.startsWith("Tickets:")) {
+        component.setText(collapsedRoster(text, theme));
+        return component;
+      }
+      // Receipts and sessions: the first content line — ticket ids
+      // display-shortened — bounded to the collapsed budget, plus the
+      // expand hint when more exists.
       const lines = text.split("\n");
       const first = lines.find((line) => line.trim() !== "") ?? "";
       component.setText(
         styled(
-          truncateLine(first, COLLAPSED_LINE_LIMIT) +
+          truncateLine(shortenTicketIds(first), COLLAPSED_LINE_LIMIT) +
             (lines.length > 1 ? expandHint(theme) : ""),
           theme,
         ),
@@ -584,7 +653,7 @@ export function createMessageRenderer(tickets: TicketStore): MessageRenderer {
         lines.push(collapsedTicketHeader(ticket, theme));
         ticket.outcomes.forEach((outcome, index) => {
           lines.push(
-            collapsedTaskLine(outcome, ticket.tasks[index], theme),
+            collapsedTaskLine(outcome, ticket.tasks[index], index, theme),
           );
         });
       }
@@ -595,10 +664,10 @@ export function createMessageRenderer(tickets: TicketStore): MessageRenderer {
         isRecord(details) &&
         Array.isArray(details.results)
       ) {
-        for (const slot of details.results as unknown[]) {
+        (details.results as unknown[]).forEach((slot, index) => {
           const outcome = isOutcome(slot) ? slot : undefined;
-          lines.push(collapsedTaskLine(outcome, undefined, theme));
-        }
+          lines.push(collapsedTaskLine(outcome, undefined, index, theme));
+        });
       }
       if (lines.length === 0) return undefined;
       const label = theme.fg(

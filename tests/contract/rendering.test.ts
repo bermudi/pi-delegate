@@ -563,7 +563,10 @@ test(
     const collapsed = renderToolResult(session, preview, false);
     const lines = collapsed.split("\n").filter((line) => line !== "");
     expect(lines.length).toBeLessThanOrEqual(2);
-    expect(lines[0]).toContain(`Ticket "${ticket}" is running`);
+    // Display-only shortening (#63): the receipt's ticket id renders as
+    // `t-<first 8 hex>`; the model-facing text keeps the full id.
+    expect(lines[0]).toContain(`Ticket "${ticket.slice(0, 10)}" is running`);
+    expect(preview.text).toContain(ticket);
 
     blocked.release();
     await callDelegateTicket(session, {
@@ -571,5 +574,168 @@ test(
       ticket,
       force: true,
     });
+  },
+);
+
+test(
+  "a collapsed task line skips colon lead-ins and strips emphasis",
+  async () => {
+    // #63 rework: filler openers ("Here's my report:") are skipped for the
+    // first non-lead-in line among the first five, and `**`/`__` emphasis
+    // markers never leak into the summary.
+    session = await openDelegateBoundary();
+    const collapsed = renderSyntheticResult(session, {
+      mode: "dispatch",
+      async: false,
+      results: [
+        {
+          index: 0,
+          id: "a",
+          status: "ok",
+          retries: 0,
+          output:
+            "All checks are complete. Here's my report:\n" +
+            "Findings below:\n" +
+            "**Result:** the __fix__ landed cleanly",
+        },
+      ],
+    });
+    expect(collapsed).toContain("✓ a  Result: the fix landed cleanly");
+    expect(collapsed).not.toContain("Here's my report");
+    expect(collapsed).not.toContain("**");
+    expect(collapsed).not.toContain("__");
+
+    // Five-plus lead-ins exhaust the window: the first line is the fallback.
+    const fallback = renderSyntheticResult(session, {
+      mode: "dispatch",
+      async: false,
+      results: [
+        {
+          index: 0,
+          id: "a",
+          status: "ok",
+          retries: 0,
+          output:
+            "one:\ntwo:\nthree:\nfour:\nfive:\nsix: the actual content",
+        },
+      ],
+    });
+    expect(fallback).toContain("one:");
+  },
+);
+
+test(
+  "a collapsed task line appends the verifier verdict to its meta",
+  async () => {
+    // #63 rework: outcome.verdict renders as ` · VERDICT <value>` — PASS
+    // success-green, FAIL error-red, AMBIGUOUS warning — beside the file
+    // count and integration spans.
+    session = await openDelegateBoundary();
+    const collapsed = renderSyntheticResult(session, {
+      mode: "dispatch",
+      async: false,
+      results: [
+        { index: 0, id: "a", status: "ok", retries: 0, output: "done", verdict: "PASS", attributedFiles: ["x.ts"] },
+        { index: 1, id: "b", status: "ok", retries: 0, output: "done", verdict: "FAIL" },
+        { index: 2, id: "c", status: "ok", retries: 0, output: "done", verdict: "AMBIGUOUS" },
+      ],
+    });
+    expect(collapsed).toContain("✓ a  done · 1 file · VERDICT PASS");
+    expect(collapsed).toContain("✓ b  done · VERDICT FAIL");
+    expect(collapsed).toContain("✓ c  done · VERDICT AMBIGUOUS");
+
+    // The color mapping is contract: tag the theme to observe it.
+    const tagTheme = {
+      fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
+      bold: (text: string) => text,
+    };
+    const tool = delegateTool(session) as unknown as ResultRenderingTool;
+    const tagged = tool
+      .renderResult(
+        {
+          content: [{ type: "text", text: "" }],
+          details: {
+            mode: "dispatch",
+            async: false,
+            results: [
+              { index: 0, id: "a", status: "ok", retries: 0, output: "x", verdict: "PASS" },
+              { index: 1, id: "b", status: "ok", retries: 0, output: "x", verdict: "FAIL" },
+              { index: 2, id: "c", status: "ok", retries: 0, output: "x", verdict: "AMBIGUOUS" },
+            ],
+          },
+        },
+        { expanded: false, isPartial: false },
+        tagTheme,
+        { lastComponent: undefined },
+      )
+      .render(8192)
+      .join("\n");
+    expect(tagged).toContain("<success> · VERDICT PASS</success>");
+    expect(tagged).toContain("<error> · VERDICT FAIL</error>");
+    expect(tagged).toContain("<warning> · VERDICT AMBIGUOUS</warning>");
+  },
+);
+
+test(
+  "an unsettled slot without labels falls back to its positional task id",
+  async () => {
+    // #63 rework: a running ticket slot whose task record carries neither
+    // description nor agent rendered as the bare `task`; it now names its
+    // position — `task-2` for the second slot.
+    session = await openDelegateBoundary();
+    const collapsed = renderSyntheticResult(session, {
+      mode: "dispatch",
+      async: false,
+      results: [
+        { index: 0, id: "a", status: "ok", retries: 0, output: "done" },
+        null,
+      ],
+    });
+    const lines = collapsed.split("\n").filter((line) => line !== "");
+    expect(lines[0]).toContain("✓ a  done");
+    expect(lines[1]).toContain("○ task-2  running");
+    expect(lines[1]).not.toContain("○ task  ");
+  },
+);
+
+test(
+  "a collapsed roster poll lists entry lines with shortened ids",
+  async () => {
+    // #63 rework: the roster shows up to five `- "<id>" …` entries with
+    // display-shortened ticket ids, `… and N more` past that, and the
+    // session-scope note a #64 roster appends — not the bare "Tickets:".
+    session = await openDelegateBoundary();
+    const entry = (hex: string, status: string) =>
+      `- "t-${hex}-36ca-422d-a98f-1ee3906ee83e" ${status} — 2/2 tasks finished`;
+    const collapsed = renderSyntheticResult(
+      session,
+      { mode: "ticket" },
+      [
+        "Tickets:",
+        ...["81a83dbe", "22222222", "33333333", "44444444", "55555555", "66666666"].map(
+          (hex) => entry(hex, "completed"),
+        ),
+        "(1 ticket(s) from other sessions not shown; poll one by id to read it.)",
+      ].join("\n"),
+    );
+    const lines = collapsed.split("\n").filter((line) => line !== "");
+    expect(lines[0]).toBe('- "t-81a83dbe" completed — 2/2 tasks finished');
+    expect(lines[4]).toContain('"t-55555555"');
+    expect(lines[5]).toContain("… and 1 more");
+    expect(lines[6]).toContain("(1 ticket(s) from other sessions not shown");
+    expect(collapsed).not.toContain("Tickets:");
+    expect(collapsed).not.toContain("36ca-422d");
+  },
+);
+
+test(
+  "a collapsed help result renders only the expand hint",
+  async () => {
+    // #63 rework: the call row already says "delegate manual" — the
+    // collapsed result is the hint alone, not a second "manual" label.
+    session = await openDelegateBoundary();
+    const collapsed = renderSyntheticResult(session, { mode: "help" }, "text");
+    expect(collapsed.trim()).toMatch(/^\(.*to read\)$/);
+    expect(collapsed).not.toContain("manual");
   },
 );
