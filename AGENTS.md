@@ -63,6 +63,17 @@ dispatching a real batch. The 2026-09-27 dogfood caught the deployment
 gap, a missing receipt note (#39), and confirmed the wake loop live in
 one run.
 
+For isolated live checks, set `DELEGATE_AGENT_DIR` to an owner-only scratch
+directory containing the test `delegate.json`; leave the parent's native
+credential/model runtime unchanged. This scopes Delegate profiles, tickets,
+transcripts, and telemetry without copying auth files or changing global
+settings. Verify the parent model from actual assistant events and workers
+from `tasks.model`; legacy telemetry columns including `parent_model`,
+`tool_uses`, and `session_file` are currently NULL placeholders. Real tool
+usage is in the transcript pointed to by public result `sessionFile`.
+#61 passed on stock Pi 0.99.1 with user-approved `zai/glm-5.3-flash`;
+see `docs/verification/surface-61-live.md`.
+
 ## Stack
 
 TypeScript (strict), Bun, TypeBox. Our `typebox` pin must mirror Pi's
