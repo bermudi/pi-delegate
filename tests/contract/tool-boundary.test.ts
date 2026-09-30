@@ -39,11 +39,14 @@ describe("delegate public tool contract", () => {
   test("delegate's prompt guidance names its workflow rules", async () => {
     session = await openDelegateBoundary();
     const guidelines = delegateTool(session).promptGuidelines ?? [];
-    expect(guidelines.length).toBe(4);
+    expect(guidelines.length).toBe(6);
     expect(guidelines.join(" ")).toMatch(/never see|self-contained/i);
     expect(guidelines.join(" ")).toMatch(/poll/i);
     expect(guidelines.join(" ")).toMatch(/isolated/);
     expect(guidelines.join(" ")).toMatch(/truncat/i);
+    expect(guidelines.join(" ")).toMatch(/yourself/i);
+    expect(guidelines.join(" ")).toMatch(/final message/i);
+    expect(guidelines.join(" ")).toMatch(/Parallelize reads/);
   });
 
   test("publishes the canonical operation and task fields", async () => {

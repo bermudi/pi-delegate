@@ -203,7 +203,8 @@ mid-flight the parent can steer. The grammar:
 - **Boundary teaching.** Every contract that diverges from the
   incumbent default is legible in the tool description — it is the only
   channel that reaches trained weights. (Landed 2026-09-27: read-only
-  concurrency, batch-in-one-call.)
+  concurrency, batch-in-one-call.) Landed 2026-09-29: when-to-delegate,
+  answer-shape, and parallel-reads/serial-writes guidance.
 - **No model-facing knobs for machinery.** Internal tuning lives in
   `delegate.json`, not the schema. The schema stays reflex-shaped.
 - **Concurrency default.** `maxConcurrent` defaults to 8 (#41): the

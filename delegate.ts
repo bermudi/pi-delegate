@@ -1078,6 +1078,11 @@ Three sibling tools share Delegate's machinery:
   or an exact custom profile name; omit for inline), \`cwd\`, \`workspace\`.
 - Top-level \`workspace\` is the batch default. \`brief\` prepends shared context
   to each prompt inside a delimited batch preamble; results note it once.
+- When to delegate: side work that would flood your context. Do one-file
+  checks and small edits yourself. Only each task's final message returns,
+  so ask for the answer shape you need. Run reads in parallel; keep
+  dependent edits in one shared-workspace call (they run in task order) and
+  use \`isolated\` only for independent edits.
 
 ## delegate — full-mode controls
 - Task \`id\` correlates results; \`description\` is a display label only.
@@ -2263,9 +2268,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
         promptSnippet:
           "Run self-contained tasks in background; async:false waits for inline results",
         promptGuidelines: [
-          "Subagents never see this conversation — give each delegate task a self-contained brief.",
+          "Delegate side work that would flood your context — broad searches, long logs, independent parallel jobs. Do one-file checks and small edits yourself; writing the brief costs more than the work.",
+          "Subagents never see this conversation — give each delegate task a self-contained brief (use brief for context the whole batch shares).",
+          "Only a subagent's final message comes back: name the answer shape you need (file list, yes/no, short verdict) so reports stay short.",
           "Async delegate results arrive automatically — do not poll in a loop; only wait on a ticket when the next step needs its result.",
-          'Use workspace "isolated" for independent edits in the same repo.',
+          'Parallelize reads freely; keep edits to one writer where possible. Put dependent edits in one call on the shared workspace (they run in task order); use workspace "isolated" only for independent edits — overlapping changes still conflict at merge.',
           "Split very large task batches across delegate calls; overlong tool calls get truncated.",
         ],
         prepareArguments: (args) => {
