@@ -107,6 +107,14 @@ v3 is a contract layer on the same engine. Caller-visible changes:
 - Landed since: steering receipts (#37), `delegate_ticket interrupt`
   (#42 — abort one task's in-flight turn; it settles `interrupted`,
   resumable, distinct from `cancel`'s ticket teardown).
+- **Changed — shutdown quiescence is bounded (#52, 0.3.2).** Session
+  shutdown waits for live dispatches' confirmed quiescence up to ~30s
+  (`DELEGATE_SHUTDOWN_QUIESCENCE_MS`), then proceeds, logging the
+  still-unconfirmed dispatch names. Previously the wait was unbounded: a
+  worker whose provider/tool ignored abort wedged host exit forever.
+  No reservation is ever released by the expiry — confirmed quiescence
+  remains the only release, so the bound costs protection only against
+  workers that would outlive any bound anyway.
 
 ## Status and rule
 

@@ -128,9 +128,13 @@ use any design that makes these properties true and testable.
   ticket into a successful completion.
 - Shutdown cancellation settles immediately, resolves waiters, and performs no
   follow-up delivery.
-- Session shutdown or replacement MUST NOT complete while any worker's
-  quiescence is unconfirmed. Workspace reservations are released only by
-  confirmed quiescence, never by a session boundary, and are never handed to
+- Session shutdown or replacement MUST wait for every dispatch's
+  confirmed quiescence, bounded by a fixed budget (~30s; see
+  `DELEGATE_SHUTDOWN_QUIESCENCE_MS`). Past the budget the boundary MAY
+  proceed only by naming the still-unconfirmed work loudly — a
+  permanently wedged worker MUST NOT wedge host exit (#52). Workspace
+  reservations are still released only by confirmed quiescence, never by
+  a session boundary or by the budget expiring, and are never handed to
   a replacement extension instance.
 - A terminal cancellation response MUST NOT falsely imply that unsafe worker
   cleanup has completed. Later safe-to-expose results must remain visible.

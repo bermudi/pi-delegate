@@ -437,6 +437,24 @@ const DELIVERY_FLUSH_MS = 100;
 const USAGE_EVENT_NAME = "delegate:usage";
 const USAGE_EVENT_MIN_INTERVAL_MS = 30_000;
 
+/**
+ * Upper bound on the shutdown quiescence hold (INVARIANTS "Ticket
+ * state"). Long enough for abort-honoring workers to wind down and
+ * confirm; past it a permanently wedged worker must not wedge host exit
+ * — a session boundary that never completes is a worse failure than a
+ * loudly-named unconfirmed stop. Matches v1's cancelled-unwind budget
+ * (30s). `DELEGATE_SHUTDOWN_QUIESCENCE_MS` overrides it — the test seam
+ * for the expiry path.
+ */
+const SHUTDOWN_QUIESCENCE_BUDGET_MS = 30_000;
+function shutdownQuiescenceBudgetMs(): number {
+  const raw = process.env.DELEGATE_SHUTDOWN_QUIESCENCE_MS;
+  const parsed = raw === undefined ? NaN : Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : SHUTDOWN_QUIESCENCE_BUDGET_MS;
+}
+
 type TaskSchemaArguments = Static<typeof taskSchema>;
 
 /**
@@ -2347,7 +2365,30 @@ export default function delegateExtension(api: ExtensionAPI): void {
       console.error(
         `[delegate] shutdown waiting for ${pending.length} dispatch(es) to reach quiescence (${names})`,
       );
-      await Promise.all(pending.map(([promise]) => promise));
+      const budgetMs = shutdownQuiescenceBudgetMs();
+      const quiesced = await Promise.race([
+        Promise.all(pending.map(([promise]) => promise)).then(() => true),
+        new Promise<false>((resolve) =>
+          setTimeout(() => resolve(false), budgetMs),
+        ),
+      ]);
+      if (!quiesced) {
+        // The invariant holds in the only direction it can: reservations
+        // are never released without confirmed quiescence, so nothing is
+        // unblocked by proceeding — the host simply stops waiting on work
+        // that may never stop.
+        console.error(
+          `[delegate] shutdown quiescence budget (${budgetMs}ms) expired with ${pending.length} dispatch(es) still unconfirmed (${names}) — proceeding; their workers may still be mutating`,
+        );
+        try {
+          ctx.ui.notify(
+            `Delegate: exiting with ${pending.length} dispatch(es) still stopping (${names}); they may still be mutating.`,
+            "warning",
+          );
+        } catch {
+          // The UI may already be gone; the stderr line above carries it.
+        }
+      }
     }
     telemetry.close();
   });

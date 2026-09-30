@@ -223,6 +223,48 @@ describe("async result delivery", () => {
     expect(sends).not.toHaveBeenCalled();
   });
 
+  test("shutdown proceeds past the quiescence budget when a worker never stops (#52)", async () => {
+    // INVARIANTS "Ticket state" (bounded form, #52): the shutdown hold is
+    // bounded — a worker that never confirms quiescence must not wedge host
+    // exit. The gate is never released here, so the worker stays unquiesced
+    // for the whole test and expiry is the only way out. The budget env var
+    // is the test seam; the default is 30s, far beyond test duration.
+    const { host, blocked, ticket } = await setup();
+    process.env.DELEGATE_SHUTDOWN_QUIESCENCE_MS = "150";
+    try {
+      let shutdownSettled = false;
+      const shutdown = host.extensionRunner
+        .emit({ type: "session_shutdown", reason: "quit" })
+        .then(() => {
+          shutdownSettled = true;
+        });
+      await Bun.sleep(50);
+      // Still inside the budget: the hold is genuine, not skipped.
+      expect(shutdownSettled).toBe(false);
+      await shutdown;
+      expect(shutdownSettled).toBe(true);
+      // Expiry proceeds loudly and names the still-unconfirmed work.
+      expect(
+        session.events.ui.some(
+          (entry) =>
+            JSON.stringify(entry).includes("still stopping") &&
+            JSON.stringify(entry).includes(ticket),
+        ),
+      ).toBe(true);
+      const poll = await callDelegateTicket(session, {
+        action: "poll",
+        ticket,
+      });
+      expect(poll.text).toContain("cancelled");
+      // The wedged worker finishing *after* the boundary already proceeded
+      // must not crash or retroactively block — its barrier just resolves.
+      blocked.release();
+      await Bun.sleep(50);
+    } finally {
+      delete process.env.DELEGATE_SHUTDOWN_QUIESCENCE_MS;
+    }
+  });
+
   test("shutdown holds through the batch's finalization, not just worker completion", async () => {
     // Regression: the shutdown barrier used to resolve at per-task quiescence,
     // so shutdown could complete while isolated reconciliation was still
