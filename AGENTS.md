@@ -1,142 +1,229 @@
-# AGENTS.md
+# pi-delegate
 
-## Project
+A [Pi](https://github.com/earendil-works/pi) extension providing the
+`delegate`, `delegate_ticket`, and `delegate_session` tools: subagent
+dispatch, async tickets, pooled sessions, and workspace isolation.
+This is a specification-first project. `SPEC.md` (v3) is the sole
+behavioral authority; `SPEC-V2.md` is the engine-as-built contract v3
+inherits. This repository is the package's home (`@bermudi/pi-delegate`
+on npm): the v3 implementation was merged in over the retired v1
+(≤0.1.23) on 2026-09-30, and v1 survives only in this repo's own
+pre-merge history — consulted as historical evidence for restorations,
+never a design source. v1→v3 migration guidance lives in
+`COMPATIBILITY.md`. v3 is owned by the project agent (stewardship
+delegated 2026-09-27; decisions per SPEC.md's ratification record).
 
-A delegate tool extension for the [Pi](https://github.com/earendil-works/pi) coding agent. Spawns subagents to run tasks in parallel — with async ticketing, session pooling, retries, and per-model concurrency limits. Production installs use a pinned Git commit or release tag as a Pi package; the generated bundle is a disposable verification artifact, not a live install target.
+Before implementing or changing behavior, read `SPEC.md`, `INVARIANTS.md`,
+and `COMPATIBILITY.md` — they are authoritative and describe outcomes, not
+mechanisms. Before migrating or writing tests, read `TEST-MIGRATION.md`.
+
+## Guiding principle: the weights are the platform
+
+The models calling this extension were RL-trained on the incumbent
+professional harnesses (Claude Code's Task tool, codex's spawn agents,
+letta's general-purpose, background-default fan-outs). Their reflexes —
+agent names, fan-out shapes, expected semantics — arrive pre-baked in the
+weights, and we have no RL flywheel to retrain them. Every design decision
+on the model-facing surface answers to this first:
+
+- User-approved #61 (2026-09-29) supersedes automatic harness compatibility:
+  one canonical spelling per field and exact built-in/authored agent names.
+  Default compact schema; operator `"surface": "full"` plus `/reload` exposes
+  retained advanced controls. Omitted `async` always backgrounds nonempty work.
+- Converge where the idiom is arbitrary (names, argument shapes, defaults);
+  differentiate only where the difference IS the product (admission,
+  workspaces, tickets). Unjustified divergence is a permanent error-rate
+  tax on every caller.
+- Teach the delta at the boundary: every contract that differs from the
+  incumbent default must be legible in the tool description — it is the
+  only channel that reaches trained weights.
+- Watch for collisions: where a trained reflex hits our walls, prefer
+  bending the surface over blaming the model.
+
+Origin: 2026-09-27, the `general` first-call error in a v1 dispatch — a
+trained Claude-Code reflex colliding with our registry — and the
+17-repo comparison in `~/build/testing/subagents` (no other surface pays
+this tax; the pros ARE the training distribution). Candidate applications
+on record: agent-name aliases (removed by #61), batch-in-one-call description
+teaching (landed), misfire telemetry for rejected calls (landed — `misfires`
+table, schema v5+).
+
+## Deployment reality (learned 2026-09-27, the hard way)
+
+Pi loads the published `npm:@bermudi/pi-delegate` tarball into
+`~/.pi/agent/npm/` — **not this tree**. A green suite says nothing about
+the installed artifact. Publishing is CI-driven: push a
+`pi-delegate-v<version>` tag and `publish-npm.yml` gates
+typecheck/test/build then `npm publish`es via OIDC (no local npm auth);
+the tag must equal `package.json`'s version. `pi-delegate-v0.3.0` was the
+v3 cutover tag (see PUBLISH.md). Run the tree per-session with
+`pi -ne -e <repo>/delegate.ts`; do NOT add a `.pi/extensions/` shim
+here — pi hard-errors on duplicate tool names between project and user
+extensions, which bricks every normal session in the repo.
+
+Before calling any unit shipped, dogfood it: a fresh `pi -ne -e` session
+dispatching a real batch. The 2026-09-27 dogfood caught the deployment
+gap, a missing receipt note (#39), and confirmed the wake loop live in
+one run.
+
+For isolated live checks, set `DELEGATE_AGENT_DIR` to an owner-only scratch
+directory containing the test `delegate.json`; leave the parent's native
+credential/model runtime unchanged. This scopes Delegate profiles, tickets,
+transcripts, and telemetry without copying auth files or changing global
+settings. Verify the parent model from actual assistant events and workers
+from `tasks.model`; legacy telemetry columns including `parent_model`,
+`tool_uses`, and `session_file` are currently NULL placeholders. Real tool
+usage is in the transcript pointed to by public result `sessionFile`.
+#61 passed on stock Pi 0.99.1 with user-approved `zai/glm-5.3-flash`;
+see `docs/verification/surface-61-live.md`.
+
+Render checks need no model: replay a copied session jsonl in tmux —
+`pi -ne -e <goodies>/index.ts -e <repo>/delegate.ts --session <copy>`
+with `DELEGATE_AGENT_DIR` pointed at scratch — then `tmux capture-pane -p`
+(add `-e` for colors). Loading bermudis-pi-goodies puts clean-tui next to
+our rows, which is how bermudi actually sees them. Replay has no live ticket
+store, so it exercises the recorded-details fallbacks only. Diagnosed
+2026-09-30: the duplicate header-only pending `delegate N tasks` box seen on
+live zai streams is a Pi host bug, not ours — pi-ai's openai-completions
+stream creates the toolCall block with `id: ""` when the first delta chunk
+lacks `id` and backfills the real `call_*` id into the same block later
+(`id: toolCall.id || ""`, `if (!block.id) block.id = ...`); interactive-mode
+keys `pendingTools` by `content.id`, so the id flip orphans the first
+component (pending forever, above the real row) and creates a second. Replay
+can't reproduce it because the session-load path renders final messages only.
+Verified in installed 0.99.1 with a synthetic SSE stream (first tool_calls
+chunk without `id`). Affects every tool, not just delegate. Upstream fix:
+key pending components by content-block identity, or rekey on id change.
 
 ## Stack
 
-TypeScript (strict), Bun, esbuild. The optional bundle is a single-file smoke-test artifact for Pi's Node process — external packages (`pi-agent-core`, `pi-ai`, `pi-tui`) are shared with the parent. Production Pi loads `delegate.ts` from the installed package. Tests use `@marcfargas/pi-test-harness` (Pi-specific). `@sinclair/typebox` for schema validation. Host-provided packages (`@earendil-works/*`, `@sinclair/typebox`, `typebox`) must be declared in `peerDependencies` with a `"*"` range and never in `dependencies` — pi maps their imports onto its own copies (jiti aliases / virtual modules) and warns on physical dependencies (fixed 2026-10-03). The devDep pins the mapped runtime through an npm alias (`"@sinclair/typebox": "npm:typebox@<pi's shipped version>"`; pi serves the renamed typebox 1.x line). TypeBox 1.x types `TSchema` as opaque: structural reads of JSON-Schema fields (`.enum`/`.type`/`.description`) go through a local view type (see `manual.ts`), while `SchemaOptions` is now `TSchemaOptions`.
+TypeScript (strict), Bun, TypeBox. Our `typebox` pin must mirror Pi's
+exact pin (pi-coding-agent's dependency) — schema symbol identity across
+instances is why; re-align on every Pi bump. Tests run in-process via
+`@marcfargas/pi-test-harness`, which carries a local compatibility patch
+(`patches/`) required until upstream supports the pinned Pi version. The
+patch covers three seams (verify each on every bump):
 
-## Architecture
+- `getModel` from `pi-ai/compat` + `_modelRuntime.setRuntimeApiKey` +
+  `agent.streamFunction` — Pi 0.84 auth preflight and renames (pre-0.86).
+- Globally unique playbook tool-call ids (`playbook.js`) — Pi >= 0.87
+  executes extension tools outside the `agent.setTools()` wrappers, so the
+  harness records them only via session events, which dedupe on toolCallId;
+  per-run id restarts made later runs' results vanish.
+- The event mirror honors `result.isError` (`session.js`) — Pi sets
+  `tool_execution_end.isError` only for THROWN errors in every version, and
+  delegate reports errors as returned results, not throws.
 
-This is **not a standalone app** — it's a Pi extension. Entry points:
+Pi >= 0.87 also reads the parent transcript itself after each run
+(`_checkCompaction`), so "getEntries was never called" is no longer a
+valid delegate-only test signal; assert history non-injection by content.
 
-- **`delegate.ts`** — public API surface (barrel re-exports). The build entry point.
-- **`extension.ts`** — thin tool-definition orchestrator. Wires `registerTool` and dispatches `execute` to the focused modules below; owns only the poll/wait/pause/resume/cancel/session-RPC/help short-circuits (session RPC is bridged to the one runner via an internal `DispatchableTask`) and the session-shutdown handler.
-- **`schema.ts`** — `delegateArgumentsSchema` (single source of truth — `DelegateArguments`/`TaskDef` in `types.ts` are `Static<>` projections) plus the mode-first classifier `validateDelegateOperation` (semantic validation after normalization; each mode gets a small total validator, and unknown task keys are rejected with corrective messages — a task-level `async: true` was observed silently degrading to a sync run). Session RPC is top-level only (`sessionAction: "close" | "list"` + `sessionId`, #32): task-level spellings are plain unknown-field errors naming the top-level field (#42 removed the one-release migration shim before any release shipped it, collapsing the deprecation window by decision — saved prompts/scripts using task-level `sessionAction` break, as promised on record; the normalizer also recovers stringified `tasks` arrays, wraps flat task fields into one task unless ticket/session intent says otherwise, repairs stringified/bare-token `tools`, and drops `agent: ""`). Without flat-field recovery, a malformed call silently degrades to the manual and models misread that as "the tool is broken". Description strings are budgeted (each ≤130 chars, total ≤2000 — enforced in `delegate.test.ts`) as a proxy for the repeated provider tool-definition payload; keep copy lean but informative and resize the budget to the copy, not the copy to the budget (1900→1950 paid for the self-correcting workspace value list; 1950→2000 paid for pause/resume ticket controls). Enum-valued fields must open with the closed value list ("shared/scratch/isolated.") and never contain a bare word that reads like a value — glm-5.3 parsed the old "none confine access" gloss as a fourth workspace option and sent `workspace:"none"`, then `""`; providers ignore the JSON-schema `enum` array more readily than description prose. Kitchen-sink callers (models that fill every optional field with a default) self-conflict against presence-based mode selection; when tasks are present without a ticket id, the ticket-control conflict error appends the intent correction (dispatch already blocks; `async:true` produces the ticket) because restating the field rule alone did not stop glm-5.3 from repeating the identical rejected call six times. The `agent` field and manual steer calling models toward `default` for general tasks — specialists are opt-in by role fit, since only `default` is guaranteed to run the parent's exact model/thinking. The four modes:
-
-  | Mode | Selector | Own fields |
-  | --- | --- | --- |
-  | Dispatch | non-empty `tasks` | all task fields + top-level `async` |
-  | Ticket RPC | `ticketAction` | `ticket`, `force`, `timeoutMs` |
-  | Session RPC | `sessionAction` | `sessionId` |
-  | Help | absent/empty `tasks` | none |
-
-  Classification runs after normalization with fixed precedence (`ticketAction` → ticket; `sessionAction` → session; tasks → dispatch; else help), so ordering is not load-bearing across checks. **Split-trigger policy:** a tool split happens only when a third RPC family appears — never for another task field. The internal bridge (extension.ts → `DispatchableTask`) executes session RPC through the one runner, so lifecycle's literal per-action branches stay behavior, not set membership.
-- **`usage.ts`** — nested-model usage accounting: snapshots cumulative `AgentSession.getSessionStats()`, computes per-task deltas, and aggregates `Usage` for the sync tool result. Pi 0.81+ persists the top-level `usage` on the toolResult message and folds it into the parent footer/session totals. The per-task `tokens` display and `usage.totalTokens` now share the same compaction-inclusive stats delta; the `Usage` object additionally preserves provider breakdown and cost.
-- **`telemetry.ts`** — local SQLite usage/health store. One live backend follows the current `delegate.json` telemetry config; a mid-call `dbPath` change deliberately drops that span's remaining rows instead of retaining or reopening the old database. Write/open failure logs once and disables telemetry until config changes. The database path resolves as config `dbPath` > `DELEGATE_TELEMETRY_DB` env > default; the test suite sets the env var via `bunfig.toml` `[test] preload` (`test-preload.ts`) so tests never touch the production database — the pi harness builds sessions in-process, and Bun 1.4+ ships `node:sqlite`, so unisolated in-process tests write real rows. Node 26+ uses `DatabaseSync` with WAL and a 5s busy timeout. Schema v3 adds `tasks.error_snippet` (whitespace-collapsed, ≤200-char error text derived in `recordTask` — never prompt/output content) and `calls.parent_cwd` (dispatch cwd, flows through the async call-record snapshot); legacy rows stay NULL and existing databases self-migrate on open.
-- **`manual.ts`** — schema-driven help generation and the dynamic configured-agent list.
-- **`task-resolution.ts`** — `validateTasks` (duplicate sessions, busy conflicts, unknown agents) and `resolveTasks` (agent/model/tools/system-prompt resolution per task).
-- **`model.ts`** — model-reference resolution. Case-insensitive by design, mirroring pi's own reference grammar (`model-resolver.ts` lowercases everything; models echo parent model strings in arbitrary casing, e.g. `modal/zai-org/glm-5.3-flash:max` vs canonical `zai-org/GLM-5.3-Flash`). Includes a whole-spec id fallback for ids containing slashes. Still exact matching — no fuzzy/partial resolution; do not "simplify" back to `registry.find` alone.
-- **`shared-write-safety.ts`** — small in-process admission boundary for explicit/default shared writers and isolated source reservations. After task resolution it canonicalizes the physical Git top-level (or non-Git cwd); when an external `core.worktree` puts that top-level outside the physical cwd, it also tracks the cwd as a reachable root. `findSharedWriteConflicts` returns connected overlapping groups (equal/ancestor/descendant roots) in task order; dispatch classifies them — same-call shared-writer groups serialize, groups touching active sync/async dispatches or mixing isolated/shared reject — and it fails closed on ambiguous Git discovery, unless the operator enables `allowUnsafeSharedWrites`. Known read-only tools are allowlisted; unknown tools fail closed as mutating. Inherited Git redirects reject bash-capable multi-writer checks. It does not attempt path claims, confinement, or cross-process locking; `workspace:"isolated"` is the durable parallel-writer mechanism.
-- **`isolated-workspace.ts`** — explicit sync/async one-shot Git isolation. Builds a synthetic dirty baseline with a temporary index, creates detached worker worktrees, terminates processes still rooted in each worker, snapshots successful proposals to private refs/full binary patches, and reconciles in task order through disposable candidate worktrees. Each proposal is all-or-nothing. Conflicts retain their ref/patch/worktree. Source apply first revalidates the baseline and uses a temporary index so the user's index/branch stay untouched; failed apply moves partial files into recovery artifacts before restoring the baseline. Async tickets keep their source reservation and `workersSettled:false` through background preparation, execution, and reconciliation; cancellation before source apply retains completed proposals as private refs/patches and never applies unfinished work. Clean application is `applied_unverified`, never a correctness claim. V1 rejects submodules, sessions, and whole-task retries. Worktrees separate ordinary relative writes but are not confinement.
-- **`dispatch.ts`** — `initProgress`, `makeFireUpdater`, `dispatchAsync`, `dispatchSync`. Sync/async execution orchestration, including shared-writer serialization: same-call overlapping shared writers are chained in task order via a predecessor gate awaited before global slot acquisition (so a serialized batch never pins the global semaphore), and completed results carry a batch-local `serializedGroup` so overlap warnings suppress only ordered pairs (never incomplete/quarantined evidence). The batch-level `serializedNotice` rides the same five surfaces as `dispatchWarning`. Rejection prose is classed per conflict kind and composes after the admission lock releases: `active-writer` conflicts (async ticket / running sync dispatch / quarantined task) get a wait-then-re-dispatch remedy with copy-pasteable `ticketAction: "wait"` snippets for the blocking tickets, while same-call isolated/shared mixes get a make-workspaces-uniform remedy. Neither class suggests workspace escapes — admission rejects shared AND isolated incoming tasks against active writers, so the old one-size prose's `workspace: "isolated"` advice was a guaranteed re-rejection loop for models that followed it (observed 2026-09-21 in goblin-v2); scratch is never offered on this path because a copy taken mid-conflict races the conflicting writers. The scratch-viability I/O survives only on the fail-closed `sharedWriteSafetyFailure` path.
-- **`tickets.ts`** — async ticket registry, busy index, waiters, delivery, cancel, wait, and `settleTicket` — the idempotent single owner of the terminal transition (status, `completedAt`, error, busy index) that dispatch's normal-completion and unexpected-error paths and shutdown all route through, so their side-effect lists cannot drift apart. `handlePoll` is the orchestrator; LLM-facing listing copy lives in `ticket-format.ts`.
-- **`pause.ts`** — in-memory cooperative async-ticket pause controller (#46). Pause state (`running` / `pausing` / `paused`) is orthogonal to ticket lifecycle status: paused tickets remain `running` for admission, busy indexes, limits, wait, cancellation, and shutdown. Dispatch gates queued tasks before global acquisition (and rechecks after acquisition), tracks active preparation/reconciliation, and holds all reservations/workspaces. Runner gates the core `Agent.subscribe` awaited `turn_start` event, not `AgentSession.subscribe` (notification-only), so the current response/tools finish before the next agent turn. Do not gate final `turn_end`: naturally completed tasks must settle. Abort releases parked listeners without starting another model request. Inactivity checks stop while parked; explicit wall-clock deadlines still count. Slots remain held for already-started tasks; pause does not freeze subprocesses or survive exit/reload. Core-loop tests use local deterministic streams, never provider calls.
-- **`ticket-format.ts`** — poll roster/live-ticket/cancel-preview string composition (status icons, agent rosters, copy-pasteable `delegate({ ticketAction: … })` snippets). Pure over ticket snapshots; `tickets.ts` only assembles the tool result.
-- **`lifecycle.ts`** — per-task execution: resolves a usable `AgentSession` (pool hit / resume-from-`.jsonl` / fresh), runs the prompt via `runner.ts`, and commits the outcome. Owns session **materialization** and the whole-task retry loop. `acquireAgentSession` dispatches to `checkoutPooledSession` / `resumeFromSessionFile` / `createFreshSession`; `runResolvedTaskCore` is the orchestrator over session-action, busy-guard, and `runWithWholeTaskRetries`. `scratchSetupFailureResult` is the single remedy wrap point: every non-aborted scratch setup failure gets `— to retry without scratch containment, use workspace: "shared".` appended (skipped when the message already names it). Telemetry task rows are recorded exactly once per `runResolvedTask`, at the outer boundary on the final (post-scratch-wrap) result — never per attempt, and never provisionally inside core where a scratch rewrite would force a correction upsert.
-- **`runner.ts`** — drives one `AgentSession.prompt()`, maps Pi events to progress, accounts usage/files, and owns inactivity/deadline detection. Stall cancellation is cooperative: it cancels compaction/branch summaries, calls `AgentSession.abort()`, and waits on the quiescence barrier rather than returning while a provider/tool/extension may still mutate state.
-- **`quiescence.ts`** — the post-prompt **quiescence barrier**. `prompt()` can resolve while an `agent_settled` extension is still compacting or launching a continuation (`ctx.compact()` is `void (async …)()` in pi 0.84 — no promise, no counter, and `waitForIdle()` cannot distinguish "done" from "continuation not started yet"), so runner does not return ownership to lifecycle until the session is idle, non-compacting, and event-quiet across stable event-loop turns. Feeds on two calls from runner — `noteEvent()` for every session event and `noteCancellationRequested()` after each dispatched abort — and re-aborts work that starts post-cancellation. A **cancelled** unwind is bounded (`cancelledUnwindBudgetMs`, default 30s) and returns `"abandoned"` with a loud log rather than hanging the task forever on an extension that keeps launching continuations; a **healthy** wait is deliberately unbounded, because a legitimate remote compaction can take minutes and the stall watchdog already rescues a wedged session by cancelling it. This is a mitigation, not a proof — the deterministic fix belongs upstream. Do not "simplify" it to `waitForIdle()` or a single quiet turn: `compaction_end` fires _before_ `ctx.compact`'s `onComplete`, so one quiet turn lands in that gap.
-- **`pool.ts`** — the **SessionPool**: a deep module owning pooled-session state + policy (freeze-on-insert, validate-on-reuse, insert-on-success, stats, explicit close/shutdown cleanup, per-`sessionId` lock) behind `checkout` / `commit` / `configFor`. The raw `Map` is private; the public barrel exposes behavior, not state. See `docs/adr/0001` + `CONTEXT.md`.
-- **`status.ts`** — background-work visibility for async tickets: the persistent footer status (`ctx.ui.setStatus`, deduped by text, event-driven — no timers), the once-per-ticket `agent_settled` warning, the confirm guards on the cancellable session-replacement paths (`session_before_switch` / `session_before_fork`), the three-way `session_before_tree` prompt (hold results / cancel subagents / stay — navigation re-targets results rather than killing them), and the cross-leaf completion notice. Quit and `/reload` are NOT interceptable (pi's `session_shutdown` is advisory) — `extension.ts` leaves a stderr trace on quit and a warning notify on reload instead.
-- **`browser.ts` / `browser-state.ts` / `assistant-preview.ts`** — human-only live subagent browser (#48), opened with `/subagents` or Ctrl+Shift+B. An overlay uses Pi's `SelectList` for task selection, bounded plain-text activity/response views, scrollback/live-follow, and `p` for **whole-ticket** cooperative pause/resume through the existing ticket handler. It never sends a model request, reads transcript files, replaces the editor, or intercepts raw Down (terminal listeners cannot reliably distinguish editor focus from other menus). The 200ms refresh timer exists only while the overlay is open and is disposed on close/shutdown; footer status remains event-driven. Async data stays owned by the ticket registry. TUI-only sync dispatch updates feed `BrowserHistory`, which retains twenty completed calls as bounded display snapshots rather than pinning full tool arguments/results after parent compaction; a generation check rejects callbacks from before shutdown. Runner publishes a ≤32K-character assistant-text tail per attempt (no thinking blocks) plus activity phase; lifecycle carries these into progress. Dispatch's serialization gate annotates `TaskProgress.waitingFor` with the actual predecessor and clears it after the gate, so the browser names a real dependency rather than inferring one from a warning. Tests exercise both Pi TUI renderers with a fake terminal, checking focus/draft restoration without providers. `TUI` is a type-only export in Pi 0.84+; instantiate `TuiMainScreen` / `TuiAltScreen` in tests, not `TUI`.
-- **`leaf.ts`** — session-tree leaf affinity. pi exposes no "which leaf am I on?" query, so the current leaf is tracked from `session_tree` (`newLeafId`), which also fires for extension-driven `ctx.navigateTree` and therefore covers navigation that bypassed the confirm guard. Tickets record `spawnLeafId` at dispatch; `deliverTicketResults` compares at delivery. Navigating away and back reports cross-leaf (accepted false positive — the cross-leaf path only downgrades delivery).
-- **`render-result.ts`** + **`render-branches.ts`** — TUI rendering. `renderDelegateCall` (minimal call display), `renderDelegateResult` (skeleton + spinner lifecycle), and the async custom-message adapter live in `render-result.ts`; the heavy partial/final progress trees live in `render-branches.ts`. Sync tool results and auto-delivered async messages deliberately share the same compact/expanded result UI while retaining the full async text in model context.
-- **`host.ts`** — construction of the child host deps (`modelRuntime` / `settingsManager` / `resourceLoader`) for one subagent profile, plus the child-resource load loop and the global-context filter. Owns no source parsing and no path trust logic.
-- **`provider-extensions.ts`** — resolution + verification of the provider-scoped extension allowlist: user-scope-only lookup, path trust checks, Git origin/ref verification, npm range verification, provenance-based fail-closed vs silent-drop, the load-failure partition, and the best-effort-loaded notifier. All the "may this package become executable subagent code?" logic lives here.
-- **`pi-package-source.ts`** — the **single seam** onto Pi's package-source grammar (`DefaultPackageManager.parseSource`, private upstream). Delegate owns no Git URL parser, no npm spec regex, and no `npm:`/`git:` prefix matching — see the module header for what happened the last time it did. One cast, one error type (`PiPackageSourceError`, tagged with the source kind so callers can report the failure in terms of the verification it defeated).
-- **`trusted-paths.ts`** — canonical path containment primitives for the subagent trust boundary (`canonicalPath`, `isPathWithinDirectory`). Compares realpaths so a symlink cannot launder itself through an innocent-looking path; `canonicalPath` returns `undefined` on realpath failure so an unresolvable path fails closed rather than falling back to lexical resolution. `isPathWithinDirectoryLexical` is the no-symlink-resolution variant for already-trusted or loader-reported paths that may not exist on disk (e.g. `partitionExtensionLoadFailures` error attribution) — never a trust decision.
-- **`host-cache.ts`** — `GenerationCache`: a generation-guarded async memo with in-flight dedup, and the single invalidation path for host deps. Extracted because two test-only helpers used to clear the maps directly without bumping the generation, re-opening the stale-write window the guard exists to close.
-- **`.build/delegate.bundle.ts`** — optional esbuild smoke-test output. Never edit by hand or install it into a running Pi.
-
-**Key architectural decisions:**
-
-- **Subagents avoid parent extensions by default.** Host deps are built with `noExtensions: true`, so subagents do not run the parent's interactive extension inventory and cannot cross-wire into the parent's runtime.
-- **Provider-scoped extension allowlist:** for provider-specific integrations, `provider-extensions.ts` resolves the roots that `host.ts` injects as `additionalExtensionPaths` after `noExtensions` — a narrow exception. Today, the `openai-codex` provider gets `npm:@bermudi/pi-codex` (remote compaction is a nice-to-have, not a requirement), while every other provider receives none. This policy is configurable in `~/.pi/agent/delegate.json` as `providerExtensions` (`{ "provider": ["source", ...] }`); defaults live in `DEFAULT_PROVIDER_EXTENSIONS`. Semantics are **replace, not append**: a provider's list substitutes the default entirely — to keep the default source alongside a custom one, re-list both (re-listed sources become required; see below). An empty array is dropped, so the default persists. **Provenance decides failure semantics** (`getSubagentProviderExtensionSourcesForProvider` in `config.ts` — classification by config presence, never string identity, because the config singleton stores the user-only map and merges defaults only at the getters): every source the user lists is required and fails closed when missing, unverifiable, or broken — including an exact re-listing of a shipped default. Shipped defaults for providers the user never mentioned are best-effort: a missing, unverifiable, or broken default is dropped **silently** and that provider's subagents run extension-free on Pi's native compaction. Silent is deliberate, not an oversight: absence of an optional integration is not a warning condition (most users never install it), and an installed-but-broken package already fails in the parent's own extension inventory where Pi shows it. Do not re-add drop traces. The inverse IS surfaced: when a best-effort default actually loads, `provider-extensions.ts` fires one info notice per process per provider+root (`⚡ <pkg> integration active for <provider> subagents`) via `registerProviderExtensionNotifier`, primed from `execute` in `extension.ts` (the only ui-bearing ctx) with status.ts-style fail-open semantics. Sources are resolved from the user scope only; project-local installations are rejected.
-- **Extension-free host deps are cached within one delegate dispatch** per `(agentDir, cwd, systemPrompt)`, then invalidated before the next dispatch so auth/model/settings/context edits become visible without restarting Pi. A generation guard prevents an older in-flight build from repopulating or clearing a newer cache. `ModelRuntime` (the unified model+auth runtime), `SettingsManager`, and `ResourceLoader` are shared across extension-free subagents with the same profile in that dispatch. Child resource settings are always constructed with `projectTrusted: false`; project packages and `npmCommand` never execute during delegation. The child loader keeps cwd/ancestor project context but filters user-global `AGENTS.md` files (including the legacy `~/.agents/AGENTS.md`), and parent prompt inheritance strips the already-assembled context section before the child adds its own. Provider-configured or allowlisted-extension sessions receive fresh host deps: Pi binds mutable extension callbacks onto the loader runtime, so sharing those deps would cross-wire sessions. The `ModelRuntime` is built with `allowModelNetwork: false` — subagents receive an explicit model (resolved by the parent) and never need remote catalog discovery. Since pi 0.80.8, `createAgentSession` takes a single `modelRuntime` in place of the removed `authStorage`/`modelRegistry` options; the parent's `ctx.modelRegistry` remains the source for model selection and its runtime-only provider registrations are copied into the child runtime. Extensions themselves remain disabled unless explicitly allowlisted.
-- **Session pooling** is a deep module (`pool.ts`): live `AgentSession`s keyed by `sessionId`, behind a small interface (`checkout` / `commit` / `recordUse` / `configFor`). The pool owns **policy** (freeze-on-insert, validate-on-reuse, insert-on-success, all-attempt stats for existing entries, explicit close/shutdown cleanup, and the `open → closing → closed` barrier); **session materialization** (pool-hit reuse / resume / fresh-create) lives in `lifecycle.ts`. Shutdown aborts pooled sessions immediately, waits behind every active session lock, rejects late pool-miss commits, and then disposes entries. Sessions stay live until close or parent shutdown. See `docs/adr/0001` + `CONTEXT.md` — don't fold materialization into the pool.
-- **Host-compat guard** (`host-compat.ts`): the bundle imports pi internals from the package root, and pi can drop/rename a symbol or static factory on any bump — jiti can then produce `undefined`, crashing as a cryptic `Cannot read properties of undefined (reading 'create')`. `hostCompatError()` runs once per process at the top of `execute` and validates both exports and required static members (`ModelRuntime.create`, `SettingsManager.create`, `SessionManager.create/open`). Optional rendering hooks such as `getMarkdownTheme` degrade to plain text instead of blocking delegation. The bundle runs against the _installed_ pi, which may differ from the repo's pinned/typecheck target — keep `REQUIRED_EXPORTS` in sync with actual hard dereferences. Since pi 0.87 the request's `systemPrompt` shorthand is folded into a leading system message whose text renders from `content` plus named `sections` (`getSystemMessageText` in pi-ai) — anything inspecting a request-level system prompt must use that renderer, not `content` (the lifecycle test captures learned this the hard way; production code was unaffected because base prompts flow through the loader's `customPrompt`).
-- **Async tickets are fire-and-forget.** `async: true` spawns background execution and returns a ticket ID immediately. Results are pushed via `sendMessage({deliverAs:"steer", triggerTurn:true})` — except when the session has navigated to a different `/tree` leaf since the ticket was spawned, in which case delivery is downgraded to `deliverAs:"nextTurn"` (no wake-up) plus a `ui.notify`, so a background result never wakes the parent on a branch the task was never part of (`leaf.ts`, issue #30). Control tickets with top-level `ticketAction: "poll"`, `"wait"`, `"pause"`, `"resume"`, or `"cancel"`. Pause/resume is cooperative and in-memory (see `pause.ts`). Because `CustomMessage` (the `sendMessage` shape) has no `usage` slot, **async subagent usage cannot be auto-counted** in the parent total — only sync dispatch attaches top-level `usage` to the tool result.
-- **Overlapping shared writers serialize within a call; cross-call overlaps reject.** After resolving presets, agent/config overrides, pooled tools, workspace defaults, and cwd, Delegate classifies each conflict group from `findSharedWriteConflicts` (a `workspace:"shared"` task with a mutating or unknown tool whose canonical Git/directory scope overlaps another task's — equal or ancestor/descendant). A group made only of same-call shared writers is **serialized in task order** (a failed predecessor does not stop successors; the result reports the notice) instead of rejecting. A group involving an active writer (async ticket, running sync dispatch, quarantined task) or mixing isolated and shared tasks still **rejects the whole call** before any progress frame, worker, or async ticket exists — queueing behind unknown-duration work or interleaving with an isolated reservation window cannot be ordered safely. `allowUnsafeSharedWrites` skips admission entirely (parallel + warning). External processes remain outside the gate.
-- **Built-in agents:** `default`, `scout`, `coder`, and `reviewer` are reserved names with shipped defaults, but a same-named Markdown file in any agent dir can override them (first definition wins). Prompt-only overrides keep the built-in tools/workspace so capability does not silently escalate. `default` mirrors the live parent's exact model object, thinking level, delegatable native tools, and sanitized base prompt and bypasses both `delegate.json` agent override maps; task fields still win, and explicit same-named Markdown fields can override the mirrored values. `scout` is read-only (`read`/`grep`/`find`/`ls`), `coder` is shared-workspace implementation (`read`/`write`/`edit`/`bash`), and `reviewer` runs `read`/`bash` in the shared tree by default (flipped from scratch — scratch/isolated are explicit opt-ins; a `reviewer.md` with `workspace: scratch` restores the old per-user behavior). Fresh non-default built-ins inherit the exact parent model/thinking unless task or `delegate.json` overrides win.
-- **Custom agents are discovered from Markdown files.** `discoverAgents()` walks sources in order, first definition wins: project `.pi/agents/` → global `~/.pi/agent/agents/` → legacy `~/.agents/` → project `.claude/agents/` → global `~/.claude/agents`. A same-named `.md` in a higher-priority dir supersedes anything below it. Custom agents can also be defined inline in a task; Markdown agents are examples of custom agents. A same-named Markdown file for a built-in (`default`/`scout`/`coder`/`reviewer`) overrides that built-in; if a built-in has already been overridden, lower-priority duplicates are ignored.
-- **Claude Code interchange.** `.claude/agents/*.md` files are imported with field adaptation: capitalized tool names are mapped (`Read`→`read`, `Glob`→`find`, …), unmappable tools dropped, `disallowedTools` honored as a denylist layered on the resolved set, and `model: inherit` stripped to mean parent-inherit. See `loadClaudeAgentFile` in `agents.ts`.
-
-## Conventions
-
-- **Production installation rule:** Install this extension into Pi from a pinned Git commit or release tag. Never point a running Pi at an agent's working tree or at a bundle that agents build in place. Build bundles only as disposable verification artifacts outside any live extension path; push/tag only when the extension is ready, then update the installed Pi package explicitly. Treat the old global bundle-symlink workflow as legacy.
-- **Flat package** — all `.ts` files at root. No `src/` directory.
-- **Discriminated unions** for variant types (`sessionAction`-discriminated `SessionAction`, `status`-discriminated ticket states).
-- **Thinking precedence** — for fresh non-`default` built-ins: task `thinking` > exact parent-model override (`delegate.json` `agentOverridesByParentModel`) > unconditional agent override (`delegate.json` `agentOverrides`) > explicit Markdown thinking > a `:level` model suffix > parent thinking. `default` bypasses both override maps, so its order is task > explicit Markdown > model suffix > live parent thinking. Legacy `delegate.json` `agent` model maps remain for custom agents and do not replace built-in parent inheritance. Other named agents retain the existing frontmatter/frozen-pool behavior. The suffix is lowest on purpose, and an ignored suffix emits a warning.
-- **Tools surface** — the core delegatable set is the 7 native tools (`read`/`write`/`edit`/`bash`/`grep`/`find`/`ls`) rebuilt from `TOOL_FACTORIES`; MCP/skills aren't tools and aren't inherited. Provider extensions may add an explicit, provider-scoped name: `openai-codex` tasks can request pi-codex's `web_search`. Other extension tools remain dormant. Pi activates only names passed at session creation, so the task `tools` list is the exact capability contract. `*`=read+write+edit+bash, `ro`=read+grep+find+ls (no shell). `bash` subsumes mutation and transitively unlocks MCP (mcporter), and shared workspaces have **no filesystem isolation**, so any set with `bash` is full-capability — "read-only" is honest only for `ro`.
-- **Scratch workspaces** — per-task `workspace: "scratch"` creates an adjacent GNU `cp --archive --reflink=always` copy of the containing Git root (or cwd outside Git), translates a nested task cwd into it, runs the one-shot subagent there, maps reported touched paths back to the source tree, and deletes the copy after session quiescence. It never merges changes. Because `cp --archive` copies link text verbatim, an **absolute symlink whose target is inside the source root is retargeted** at its copied counterpart (relative link text) during validation — bun/pnpm local-package installs produce these, and rejecting them made every monorepo unusable for scratch. Only links that still resolve outside the copy after that projection are fatal. This protects against ordinary relative writes; it is **not a security boundary** because absolute paths and unrestricted bash can still reach the host. Scratch uses in-memory transcripts (never offers `resumeFrom`) and rejects `sessionId`, `resumeFrom`, session actions, linked Git worktrees (their `.git` file shares metadata), project symlinks that resolve outside the copy, non-Linux hosts or hosts without `/proc/self/fd`, and filesystems without strict reflink support. A **pre-check** runs the same tree rule read-only against the source before any container/lease/copy exists (one walker shared with the post-copy validation; the retarget side effect is the only copy-mode difference), so deterministic blockers fail in milliseconds — the post-copy validation stays the authority for trees that change mid-copy, and the git-redirect check runs against source and copy alike. The same pre-flight is exported as `checkScratchWorkspaceSupport` and gates rejection-message recommendations on the shared-write safety-failure path only (shared-write conflicts never suggest scratch at all — a copy raced against active writers is unsound, not merely unverified): a reject that would suggest `workspace: "scratch"` verifies viability first (bounded, fail-closed — uncertainty drops the clause and names the blocking reason), so advice never vouches for a mode this checkout cannot run (linked worktrees, nested repos, non-Linux hosts). The generic copy-failure message appends the failed command's real stderr (`cp failed: …`), so reflink misdiagnoses are visible instead of guessed.
-- **Isolated workspaces** — `workspace:"isolated"` is explicit opt-in and never automatic. It preserves dirty source state in a synthetic baseline, runs workers concurrently in detached worktrees, and applies clean proposals in task order. It is one-shot/Git-only in v1 and supports sync or async dispatch. Async preparation and reconciliation belong to the ticket completion lifecycle; the original resolved tasks remain its source-root reservation until `workersSettled` becomes true. Cancellation before source application retains completed proposals without applying them. A small admission reservation still excludes explicit shared writers for the isolated batch's lifetime; this is conservative and can shrink to apply-only when the apply boundary gains its own published reservation.
+Pi 0.87 skips `tool_result` for prepare/schema failures, but emits
+`tool_execution_start`/`end`. Preflight misfire telemetry uses those events
+with sanitized metadata. Pi's default schema error appends a full
+`Received arguments` dump: Delegate validates prepared input first and emits
+paths/messages only, so neither tool results nor telemetry copy task bodies.
+Recovery guards and correction examples must not reintroduce those dumps.
+Preflight metadata stays owned until actual execute entry: later tool_call
+handlers can still block after earlier handlers approved a call.
+Recheck both seams on upgrades (`surface.test.ts`, `telemetry.test.ts`).
 
 ## Workflow
 
-Production installation uses a pinned Git commit or release tag:
-
-```bash
-# Replace this with a reviewed commit or release tag; never use a moving branch.
-pi install git:github.com/bermudi/pi-delegate@<reviewed-commit-or-tag>
-```
-
-Remove any old `delegate.ts` symlink from `~/.pi/agent/extensions/` before starting Pi. Pi loads `delegate.ts` from the isolated Git package checkout; do not point it at this working tree or at `.build/delegate.bundle.ts`.
-
-For local development:
-
 ```bash
 bun install
+bun test                        # pending contract tests list as (todo)
 bun run typecheck
-bun test
-bun run build       # optional disposable bundle smoke test
+DELEGATE_RUN_PENDING=1 bun test # run pending tests for real — they should
+                                # fail meaningfully on unimplemented ops
 ```
 
-`delegate.ts` is the package entry point. `.build/delegate.bundle.ts` is generated and ignored; keep it only as a verification artifact. Push/tag only after the extension is ready, then update Pi to that exact Git ref and start a fresh Pi process. Do not use an in-place build or a long-running session's `/reload` as the deployment mechanism.
+### Workflow
 
-### End-to-end verification (Herdr)
+Substantial work is planned in GitHub issues: reconcile existing issues before
+creating more, plan a bounded unit, build it with meaningful verification, then
+review. Small fixes need no issue. GitHub issues are the only backlog; if
+`gh` is unavailable, report the blocker rather than creating a local queue.
 
-Unit tests stub the host-deps / `modelRuntime` path, so they can't catch a regression where pi drops or renames a symbol the bundle imports (the class of bug that broke delegation in the 0.80.3→0.80.8 `authStorage`/`modelRegistry`→`modelRuntime` refactor — it surfaced as a lying `0/1 completed · ~4ms` with `Cannot read properties of undefined (reading 'create')`). The only real proof is firing a `delegate` call inside a running pi. This agent runs in Herdr, so drive one from a sibling pane:
+`SPEC.md`, `INVARIANTS.md`, and `COMPATIBILITY.md` remain the sole behavioral
+authorities; issue proposals and plans do not override them. Behavioral
+changes require explicit reconciliation in the root contracts.
 
-```bash
-e2e_dir=$(mktemp -d /tmp/pi-delegate-e2e-XXXXXX)
-herdr pane split --current --direction right --no-focus  # capture result.pane.pane_id
-herdr pane run <pane> "cd '$e2e_dir' && pi"
-herdr agent wait <pane> --until idle --timeout 30000
-herdr agent prompt <pane> "Use delegate to spawn one task with tools read/write/edit/bash and prompt: Reply with exactly CONNECTIVITY OK. Report the output verbatim."
-herdr agent wait <pane> --until idle --until done --until blocked --timeout 180000
-herdr pane read <pane> --source recent-unwrapped --lines 50
-herdr pane close <pane>
-trash "$e2e_dir"
-```
+Approved sequencing (not a second backlog): reconcile existing issues →
+background delivery/reliability → worker questions → automatic handoffs →
+restart recovery/live browser → later steering/team messages. This is planning
+order, not a claim of implemented or newly promised behavior.
 
-Green = `1/1 completed · … · ✓ inline … ⎿ CONNECTIVITY OK`. Run from an isolated temp directory: loading the repository context distracts the parent model from the connectivity task and unnecessarily exposes the worktree to a full-capability subagent. The subagent inherits the parent model, so the parent model must be authenticated — run pi with no `--model` flag so it uses the configured default (a hardcoded e2e model rots: `opencode/deepseek-v4-flash-free` died and the pane burned five retries on "Model is unavailable" before anyone noticed). Run this against a fresh Pi process and the installed package; do not rebuild a bundle that a running Pi is using.
+## Consulting v1
 
-## Stable Reference Facts
+V1 is evidence for behavior, never a design source. When consulting it:
 
-- **Extension dir:** `~/.pi/agent/extensions/`
-- **Delegate config:** `~/.pi/agent/delegate.json` is the **single config file** (user-edited; `config.ts` reads it — no programmatic mutators; `reloadDelegateConfig()` re-reads it at each dispatch boundary so edits apply from the next delegate call). It is **user-scope and global by design — no project-level discovery**: repo files must never become subagent configuration (same trust stance as the user-scope-only `providerExtensions` resolution). `providerExtensions` controls the provider-scoped allowlist for subagent extensions. `agentOverrides` provides unconditional per-agent model/thinking/tool overrides for every non-`default` agent, built-ins included; `agentOverridesByParentModel` scopes them by the parent's exact `provider/model-id`; per-agent skill filtering is unsupported and warned/rejected. `allowUnsafeSharedWrites` is an operator-only escape hatch that permits overlapping shared writers and adds visible result warnings. The legacy `agent` map (flat agent→model) still feeds custom agents, while `default` mirrors the parent; non-`default` built-ins ignore it — use `agentOverrides` for those.
-- **Custom agents** are defined either inline in a task or persisted as Markdown files in `.pi/agents/` (project) and `~/.pi/agent/agents/` (global). Markdown agents are examples of custom agents.
-- **Markdown agents** are Markdown files with YAML frontmatter — required fields `name`, `description`; optional `thinking`, `tools`, and rarely `model` (subagents inherit the parent model by default)
-- **Model overrides:** `agentOverrides` and `agentOverridesByParentModel` live in `~/.pi/agent/delegate.json` (see _Delegate config_ above for precedence and scope).
-- **Telemetry DB override:** `DELEGATE_TELEMETRY_DB` env var redirects the default telemetry database (used when config has no `dbPath`). Precedence: config `dbPath` > env > `~/.pi/agent/delegate-usage.db`. The test suite sets it via `bunfig.toml` preload; set it manually to run the extension against a scratch database.
+- extract externally observable behavior, invariants, and regression
+  scenarios;
+- do not copy its module boundaries, internal APIs, abstractions, globals,
+  state machines, test seams, algorithms, or fixtures without independently
+  justifying them for v2;
+- migrated tests exercise v2 through its public boundary whenever possible.
 
-## Tracking work
+## Tests
 
-Open work is tracked in GitHub Issues, not in-repo markdown plans. Feature work, refactors, bugs, and follow-ups are tracked as issues — no `*-PLAN.md` or `UX-REVIEW.md` files. Priorities are labels (`P0`/`P1`/`P2`/`P3`), not a tracker issue. Triage with `gh issue list --state open --label P1` (or P0/P2/P3); theme grouping uses the existing labels (`architecture`, `refactor`, `tooling`, `tests`, `perf`, `quality`, `enhancement`, `bug`). See https://github.com/bermudi/pi-delegate/issues.
+- Classify v1 evidence as contract, regression, or internal per
+  `TEST-MIGRATION.md`; discard tests that only pin helpers, private state,
+  or decomposition.
+- Tests go through the registered `delegate`, `delegate_ticket`, and
+  `delegate_session` tools — never import production
+  internals, and never add a production export solely for tests.
+- Keep provenance: each migrated test cites its v1 source scenario.
+- The harness must remain provider-free. Subagent models use pi-ai's `faux`
+  provider via `installSubagentModel`, which assumes v2 resolves and streams
+  subagent models through the parent session's model runtime.
+- Contract tests whose subsystem isn't implemented use `pendingTest` and
+  cite what they assert. Promote them to `test` when the behavior lands —
+  or sooner if the assertions already hold.
+- Engine test boundaries explicitly select full mode via the startup fixture;
+  compact/default tests request compact. Inline tests pass `async:false`
+  explicitly—never hide the production default in the call helper.
+- In tests, the session's `agentDir` is its temporary cwd, so
+  `<cwd>/delegate.json` stands in for the user-global config.
+- Update `TEST-MIGRATION.md`'s coverage map when migrating or promoting
+  tests.
 
-## Security
+## Constraints
 
-Dependency vulnerabilities are tracked via GitHub Dependabot, which auto-files alerts when affected versions are detected. Alerts are closed when dependencies are bumped past the patched version. Example: CVE-2026-54328 (GHSA-jfgx-wxx8-mp94) closed by bumping `pi-coding-agent` from `^0.75.3` to `^0.80.3` (commit 4740591).
-
-External issues (e.g., test-harness bugs, upstream library problems) are filed in their respective repos and optionally linked from our issues for tracking. See https://github.com/marcfargas/pi-test-harness/issues/8 for an example.
-
-## Constraints & Red Lines
-
-- **Never edit `.build/delegate.bundle.ts`.** Generated by `bun run build`.
-- **Never reimplement a Pi grammar to avoid touching a Pi private.** Source specs, Git URLs, npm version specs, and local-path detection go through `pi-package-source.ts`, which calls Pi's own parser. A parallel copy that must track a private on every upgrade is worse than one narrow cast that fails loudly: the copies we had drifted (a lowercased local check disagreed with Pi about `NPM:pkg`, and a hand-rolled Git parser knew nothing of `hosted-git-info`). If a needed fact is genuinely unobtainable, fail closed and say why — do not guess. Prefer widening the seam over adding a second grammar; if a private disappears, update the seam in one place.
-- **Subagents must never run the parent's extension inventory.** `noExtensions: true` is non-negotiable for the default path; the only sanctioned exception is a narrow provider-scoped allowlist via `additionalExtensionPaths`, resolved and verified in `provider-extensions.ts` (defaults currently: only `openai-codex` + `npm:@bermudi/pi-codex`, best-effort). The allowlist can be replaced (per-provider, not appended) in `delegate.json` via `providerExtensions`; empty arrays are ignored. Allowlisted sources are resolved from the user scope only. User-configured sources (including re-listed defaults) fail closed when missing or unverifiable; shipped defaults silently degrade to extension-free subagents on Pi's native compaction — best-effort and mute by design.
-- **Session pooling is serialized per `sessionId`.** Concurrent delegate calls with the same `sessionId` queue behind a lock — they do not interleave.
-- **Duplicate `sessionId` values in a single delegate call are rejected.** Each pooled session handles one task at a time.
-- **`resumeFrom` + `model` resumes on a different model.** `createAgentSession` honors an explicit `model` over the session's stored model, so a failed subagent's conversation can be continued on another model — the mechanism for "continue a failed agent with a different model". Delegate tags model-attributable failures (usage limit, quota, auth) `failureKind: "model_error"`, excludes them from same-model whole-task retry (account-level limits aren't transient for that model), and emits a "retry with a different model" hint pointing at the `model` field.
+- No module-level mutable application state. Runtime state must have an
+  explicit owner and lifetime (e.g. `TicketStore`, `AdmissionController`,
+  the extension closure). Immutable constants and stateless helpers are
+  fine.
+- Subagents inherit the parent's model — inline/default tasks always, with
+  no config escape hatch. Only named agents may be overridden via the
+  `delegate.json` `"models"` map (scoped per-parent by `"modelsByParent"`,
+  entries may carry `:effort`), and callers never pick models or effort: the
+  task `model`, `thinking`, and `reasoning_effort` fields are rejected
+  (#32, #44). Registry
+  resolvability is not authorization; see SPEC.md and COMPATIBILITY.md.
+- Markdown profiles (#7): `<project>/.pi/agents` then `<agentDir>/agents`,
+  first definition wins, built-ins win name collisions, `.claude/agents`
+  never imported. Frontmatter `model:`/`thinking`/`tools` are profile
+  defaults below delegate.json pins. `models`/`modelsByParent` keys may name
+  built-ins and globally defined profiles only — project profiles pin via
+  frontmatter `model:`. Names resolve exactly (#61): authored `general.md`
+  and `scout.md` are ordinary profiles, not aliases. Profile tools/body supply
+  reusable defaults; full-mode task overrides remain available.
+- Subagents never nest dispatch (#45): `delegate`/`delegate_ticket`/
+  `delegate_session` are stripped — silently — from every child toolset
+  (explicit `tools`, profile frontmatter, mirrored parent inventory).
+- Until a subsystem is implemented it fails loudly. Scaffold errors and
+  scaffold output are not the contract — `SPEC.md` is.
+- Do not extend the scaffold to force a migrated test green; let it fail
+  meaningfully or keep it pending.
+- `INVARIANTS.md` properties are red lines: cancellation/quiescence, session
+  reuse, ticket state, shared-write admission, and isolated application must
+  not be weakened to make implementation easier.
+- Async tickets now save owner-only full outcomes under the agent directory;
+  cold polling recovers results, but running snapshots become `interrupted`
+  (never resumed or delivered). `operationId` stays host-lifetime; do not
+  mistake ticket recovery for exactly-once dispatch.
+- Pi's child `AgentSession` auto-retries retryable provider errors by default
+  before Delegate sees them. Child session settings disable that in memory;
+  Delegate's own side-effect-aware retry decides whether a short retry is
+  safe. Recheck this seam on Pi upgrades.

@@ -1,7 +1,7 @@
 {
   "name": "@bermudi/pi-delegate",
-  "version": "0.1.23",
-  "description": "Delegate tool for the Pi coding agent.",
+  "version": "0.3.0",
+  "description": "Pi extension: subagent dispatch with compact/full controls, admission, durable tickets, workspaces, and steering",
   "keywords": [
     "pi-package"
   ],
@@ -10,45 +10,43 @@
     "url": "git+https://github.com/bermudi/pi-delegate.git"
   },
   "type": "module",
+  "private": false,
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=.build/delegate.bundle.ts"
+  },
+  "dependencies": {
+    "typebox": "1.3.27"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.87.0",
+    "@earendil-works/pi-ai": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@earendil-works/pi-tui": "0.87.0",
+    "@marcfargas/pi-test-harness": "0.6.1",
+    "@types/bun": "1.4.0",
+    "esbuild": "^0.28.2",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.87.0"
+  },
+  "patchedDependencies": {
+    "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9"
+  },
   "files": [
-    "*.ts",
-    "!*.test.ts",
-    "!*.bundle.ts",
+    "delegate.ts",
+    "src",
     "README.md",
-    "patches"
+    "COMPATIBILITY.md"
   ],
   "pi": {
     "extensions": [
       "./delegate.ts"
     ]
-  },
-  "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.87.0",
-    "@earendil-works/pi-ai": "^0.87.0",
-    "@earendil-works/pi-coding-agent": "^0.87.0",
-    "@earendil-works/pi-tui": "^0.87.0",
-    "@marcfargas/pi-test-harness": "^0.6.1",
-    "@sinclair/typebox": "npm:typebox@^1.3.27",
-    "@types/bun": "^1.4.0",
-    "esbuild": "^0.28.2",
-    "prettier": "^3.9.6",
-    "typescript": "^5.9.3"
-  },
-  "patchedDependencies": {
-    "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
-  },
-  "private": false,
-  "scripts": {
-    "test": "bun test",
-    "typecheck": "tsc --noEmit",
-    "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=.build/delegate.bundle.ts",
-    "format": "prettier --write \"**/*.ts\"",
-    "format:check": "prettier --check \"**/*.ts\""
-  },
-  "peerDependencies": {
-    "@sinclair/typebox": "*"
-  },
-  "overrides": {
-    "brace-expansion": "5.0.9"
   }
 }

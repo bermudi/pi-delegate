@@ -1,5 +1,5 @@
 diff --git a/dist/session.js b/dist/session.js
-index f7dc5de9be959c541ee4bab0ad1424656993bbe9..e515073926f0fbb0e2bc566a9b17f5f15f80a1a1 100644
+index f7dc5de..04a28ed 100644
 --- a/dist/session.js
 +++ b/dist/session.js
 @@ -12,7 +12,7 @@ import * as fs from "node:fs";
@@ -11,3 +11,77 @@ index f7dc5de9be959c541ee4bab0ad1424656993bbe9..e515073926f0fbb0e2bc566a9b17f5f1
  import { createPlaybookStreamFn } from "./playbook.js";
  import { interceptToolExecution } from "./mock-tools.js";
  import { createMockUIContext } from "./mock-ui.js";
+@@ -48,6 +48,10 @@ export async function createTestSession(options = {}) {
+         settingsManager,
+         resourceLoader: loader,
+     });
++    // Pi 0.84 validates auth through ModelRuntime before entering the agent
++    // stream. Keep the test model entirely local while satisfying that
++    // preflight check.
++    await session._modelRuntime?.setRuntimeApiKey("openai", "test-key");
+     // Override getApiKey to bypass real auth checks (on both agent and session)
+     session.agent.getApiKey = async () => "test-key";
+     // The session also validates via _modelRegistry.getApiKey — patch it
+@@ -109,6 +113,10 @@ export async function createTestSession(options = {}) {
+             // Recent pi versions can block a tool before the wrapped tool.execute()
+             // runs. In that path mock-tools.ts cannot record the result itself, so
+             // mirror the serialized session event if no wrapper record exists yet.
++            // pi >= 0.87 executes extension tools outside the agent's tool array,
++            // so this mirror is the only record for them; pi sets event.isError
++            // only for THROWN errors, so honor the returned result's own isError
++            // field like the wrapper did.
+             if (!events.toolResults.some((r) => r.toolCallId === event.toolCallId)) {
+                 events.toolResults.push({
+                     step: currentStep,
+@@ -116,7 +124,7 @@ export async function createTestSession(options = {}) {
+                     toolCallId: event.toolCallId,
+                     text: resultText,
+                     content: event.result?.content ?? [],
+-                    isError: event.isError,
++                    isError: event.isError || !!event.result?.isError,
+                     details: event.result?.details,
+                     mocked: false,
+                 });
+@@ -155,7 +163,7 @@ export async function createTestSession(options = {}) {
+             const { streamFn, state } = createPlaybookStreamFn(turns);
+             playbookState = state;
+             // Replace the model with the playbook
+-            session.agent.streamFn = streamFn;
++            session.agent.streamFunction = streamFn;
+             session.agent.getApiKey = () => "test-key";
+             // Always wrap tools for event collection; if no mocks configured, pass empty map
+             const effectiveMockTools = options.mockTools ?? {};
+diff --git a/dist/playbook.js b/dist/playbook.js
+index 51531bf..8432965 100644
+--- a/dist/playbook.js
++++ b/dist/playbook.js
+@@ -83,6 +83,10 @@ function createAssistantMessage(action, toolCallCounter) {
+         timestamp: Date.now(),
+     };
+ }
++// Tool-call ids must never repeat across runs: the session-event collector
++// dedupes recorded results by toolCallId, and pi >= 0.87 records extension
++// tool results only through that event path.
++let globalToolCallCounter = 0;
+ export function createPlaybookStreamFn(turns) {
+     // Flatten all turns into a single action queue
+     const queue = [];
+@@ -95,7 +99,6 @@ export function createPlaybookStreamFn(turns) {
+         consumedActions: [],
+         pendingCallbacks: new Map(),
+     };
+-    let toolCallCounter = 0;
+     const streamFn = (_model, _context, _options) => {
+         const stream = createAssistantMessageEventStream();
+         const action = queue.shift();
+@@ -121,8 +124,8 @@ export function createPlaybookStreamFn(turns) {
+         state.remaining = queue.length;
+         state.consumedActions.push(action);
+         if (action.type === "call")
+-            toolCallCounter++;
+-        const message = createAssistantMessage(action, toolCallCounter);
++            globalToolCallCounter++;
++        const message = createAssistantMessage(action, globalToolCallCounter);
+         // Register callback if present (keyed by tool call ID for uniqueness)
+         if (action.type === "call" && action.thenCallback) {
+             const tcContent = message.content.find((c) => c.type === "toolCall");
