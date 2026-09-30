@@ -352,7 +352,7 @@ function summaryLine(output: string | undefined): string {
   const lines = (output ?? "")
     .split("\n")
     .map((raw) => raw.replace(/^[#\-*>\s]+/, "").trim())
-    .filter((line) => line !== "");
+    .filter((line) => line !== "" && !/^(```|~~~)/.test(line));
   const picked =
     lines.slice(0, 5).find((line) => !line.endsWith(":")) ?? lines[0] ?? "";
   return picked.replace(/\*\*|__/g, "").trim();
