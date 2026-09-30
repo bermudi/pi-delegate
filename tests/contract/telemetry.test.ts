@@ -535,6 +535,13 @@ describe("delegate telemetry contract", () => {
       const childEnv = { ...process.env };
       delete childEnv.DELEGATE_AGENT_DIR;
       childEnv.DELEGATE_TELEMETRY_DB = dbPath;
+      // Eight processes first-open the same WAL database: schema creation
+      // serializes them through the writer lock, and on a loaded runner the
+      // tail opener can wait past the default 500ms busy window (#53 —
+      // observed as one child's telemetry open failing "database is
+      // locked"). The contract under test is exactly-once persistence, so
+      // the window is widened rather than the contention weakened.
+      childEnv.DELEGATE_TELEMETRY_BUSY_MS = "30000";
       const children = Array.from({ length: 8 }, () => {
         const process_ = Bun.spawn([process.execPath, childScript], {
           env: childEnv,

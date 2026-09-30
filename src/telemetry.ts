@@ -24,6 +24,21 @@ const BUSY_WINDOW_MS = 500;
 const BUSY_RETRY_BASE_MS = 10;
 const BUSY_RETRY_MAX_MS = 50;
 const TELEMETRY_DB_ENV_VAR = "DELEGATE_TELEMETRY_DB";
+const BUSY_WINDOW_ENV_VAR = "DELEGATE_TELEMETRY_BUSY_MS";
+
+/**
+ * The busy-retry window bounds how long telemetry waits on a contended
+ * database before giving up loudly — telemetry must never stall a
+ * dispatch unboundedly, but a fixed 500ms loses under first-open WAL
+ * contention on slow hosts (#53: 8 simultaneous openers each doing
+ * schema work exhausted it in CI). `DELEGATE_TELEMETRY_BUSY_MS` widens
+ * it where contention is expected.
+ */
+function busyWindowMs(): number {
+  const raw = process.env[BUSY_WINDOW_ENV_VAR];
+  const parsed = raw === undefined ? NaN : Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : BUSY_WINDOW_MS;
+}
 
 const TABLES = [
   {
@@ -166,7 +181,7 @@ function sleepSync(ms: number): void {
 }
 
 function withBusyRetry<T>(fn: () => T): T {
-  const deadline = Date.now() + BUSY_WINDOW_MS;
+  const deadline = Date.now() + busyWindowMs();
   let delay = BUSY_RETRY_BASE_MS;
   for (;;) {
     try {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -480,13 +480,27 @@ describe("delegate session contract", () => {
       expect(first.isError).toBe(false);
       expect(subagents.state.callCount).toBe(1);
 
-      // 1ms expires during the dispatch's own resource loading — before a
-      // TaskExecution exists, so the checkout is never taken and no prompt
-      // is attempted.
-      const expired = await callDelegate(session, {
-        async: false,
-        tasks: [{ prompt: "work", sessionId: "conv", deadlineMs: 1 }],
-      });
+      // A real-time deadline can race the dispatch's own setup (#53): with a
+      // warm resource loader the entry→pre-prompt path finishes inside one
+      // wall-clock millisecond, so deadlineMs:1 sometimes prompts anyway —
+      // seen as a CI-only flake ("No more faux responses queued"). The
+      // contract being pinned is "when the clock is already past the
+      // deadline at task start, no provider call happens", so pin the clock:
+      // each Date.now() call jumps an hour, making expiry deterministic on
+      // any machine. Restored before the reuse probe below.
+      let fakeNow = Date.now();
+      const clock = spyOn(Date, "now").mockImplementation(
+        () => (fakeNow += 3_600_000),
+      );
+      let expired;
+      try {
+        expired = await callDelegate(session, {
+          async: false,
+          tasks: [{ prompt: "work", sessionId: "conv", deadlineMs: 1 }],
+        });
+      } finally {
+        clock.mockRestore();
+      }
       expect(expired.text).toMatch(/deadline exceeded/i);
       expect(subagents.state.callCount).toBe(1);
 
