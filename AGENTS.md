@@ -74,6 +74,15 @@ usage is in the transcript pointed to by public result `sessionFile`.
 #61 passed on stock Pi 0.99.1 with user-approved `zai/glm-5.3-flash`;
 see `docs/verification/surface-61-live.md`.
 
+Render checks need no model: replay a copied session jsonl in tmux —
+`pi -ne -e <goodies>/index.ts -e <repo>/delegate.ts --session <copy>`
+with `DELEGATE_AGENT_DIR` pointed at scratch — then `tmux capture-pane -p`
+(add `-e` for colors). Loading bermudis-pi-goodies puts clean-tui next to
+our rows, which is how bermudi actually sees them. Replay has no live ticket
+store, so it exercises the recorded-details fallbacks only. Open (2026-09-29):
+a live zai stream left a duplicate, header-only pending `delegate N tasks`
+box above the real row; replay doesn't reproduce it; cause unknown.
+
 ## Stack
 
 TypeScript (strict), Bun, TypeBox. Our `typebox` pin must mirror Pi's
