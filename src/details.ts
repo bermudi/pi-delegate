@@ -363,6 +363,13 @@ export const ticketDetailsSchema = Type.Object(
     questions: Type.Optional(
       Type.Union([workerQuestionDetailsSchema, Type.Undefined()]),
     ),
+    /**
+     * The wait tail sentence after the ticket view — a wait-any roster
+     * ("still running: …"), a timeout/detached notice, or a
+     * pending-question pointer. The collapsed view renders it; without
+     * it the compact surface dropped everything past the view.
+     */
+    note: Type.Optional(Type.String()),
     steer: Type.Optional(steerDetailsSchema),
     interrupt: Type.Optional(interruptDetailsSchema),
     tail: Type.Optional(tailDetailsSchema),

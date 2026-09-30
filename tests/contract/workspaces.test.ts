@@ -1996,4 +1996,257 @@ exec '${realGit}' "$@"
       expect(outcomes?.[0]?.integration?.sourceDrift).toBeUndefined();
     },
   );
+
+  test(
+    "spelled source paths — @-prefix, file://, unicode space — are refused",
+    async () => {
+      // The guard must compare the path the tool resolves, not the spelled
+      // input: pi's write/edit fold a leading "@", file:// URLs, and
+      // unicode spaces before touching disk — each spelling otherwise
+      // reaches the source tree unguarded.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      mkdirSync(join(dir, "uni space"));
+      const target = join(dir, "guarded.txt");
+
+      const spellings = [
+        `@${target}`,
+        `file://${target}`,
+        join(dir, "uni space", "x.txt"),
+      ];
+      const refusals: string[] = [];
+      const escape: FauxResponseFactory = async (context) => {
+        const seen = context.messages.filter((m) => m.role === "toolResult");
+        if (seen.length > 0) {
+          refusals.push(JSON.stringify(seen[seen.length - 1]));
+        }
+        if (seen.length >= spellings.length) {
+          return fauxAssistantMessage("ALL-REFUSED");
+        }
+        return fauxAssistantMessage([
+          fauxToolCall("write", {
+            path: spellings[seen.length]!,
+            content: "escaped",
+          }),
+        ]);
+      };
+      subagents.respond([escape, escape, escape, escape]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "write files",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["write"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("ALL-REFUSED");
+      expect(refusals.length).toBe(3);
+      for (const refusal of refusals) {
+        expect(refusal).toContain("Refused:");
+        expect(refusal).toContain("disposable copy");
+      }
+      // None of the spellings touched the source.
+      expect(existsSync(target)).toBe(false);
+      expect(existsSync(join(dir, "uni space", "x.txt"))).toBe(false);
+    },
+  );
+
+  test(
+    "a write through a dangling symlink is refused, not redirected into the source",
+    async () => {
+      // A copied absolute symlink keeps pointing at the source; when its
+      // target is missing, the write tool's own mkdir follows the link and
+      // CREATES the file inside the original tree. Existence-based
+      // canonicalization walks past the dangling link and misses that —
+      // the guard must read and follow the link itself.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      symlinkSync(join(dir, "nonexistent"), join(dir, "link"));
+
+      let refusalSeen = "";
+      const throughLink: FauxResponseFactory = async (context) => {
+        const seen = context.messages.filter((m) => m.role === "toolResult");
+        if (seen.length > 0) {
+          refusalSeen = JSON.stringify(seen[seen.length - 1]);
+          return fauxAssistantMessage("LINK-REFUSED");
+        }
+        // Relative spelling inside the copy: "link/x.txt" resolves under
+        // the copy root, but the copied link redirects to the source.
+        return fauxAssistantMessage([
+          fauxToolCall("write", { path: "link/x.txt", content: "escaped" }),
+        ]);
+      };
+      subagents.respond([throughLink, throughLink]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "write through the link",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["write"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(refusalSeen).toContain("Refused:");
+      expect(result.text).toContain("LINK-REFUSED");
+      // The link's missing target must not have been created in the source.
+      expect(existsSync(join(dir, "nonexistent", "x.txt"))).toBe(false);
+      expect(existsSync(join(dir, "nonexistent"))).toBe(false);
+    },
+  );
+
+  test(
+    "a refused re-write does not erase an earlier write's attribution",
+    async () => {
+      // Guard refusal is filesystem-state-dependent: the same spelled path
+      // can write once, then refuse after a symlink retargets it. The
+      // refusal must subtract only its own claim — the earlier successful
+      // write stays attributed.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+
+      let refusalSeen = "";
+      const writeSwapRewrite: FauxResponseFactory = async (context) => {
+        const seen = context.messages.filter((m) => m.role === "toolResult");
+        if (seen.length === 0) {
+          return fauxAssistantMessage([
+            fauxToolCall("write", { path: "dir/f.txt", content: "first" }),
+          ]);
+        }
+        if (seen.length === 1) {
+          return fauxAssistantMessage([
+            fauxToolCall("bash", {
+              command: `mv dir realdir && ln -s '${dir}/dir' dir`,
+            }),
+          ]);
+        }
+        if (seen.length === 2) {
+          return fauxAssistantMessage([
+            fauxToolCall("write", { path: "dir/f.txt", content: "second" }),
+          ]);
+        }
+        refusalSeen = JSON.stringify(seen[seen.length - 1]);
+        return fauxAssistantMessage("ATTR-DONE");
+      };
+      subagents.respond([writeSwapRewrite, writeSwapRewrite, writeSwapRewrite, writeSwapRewrite]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "write, retarget, rewrite",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["write", "bash"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(refusalSeen).toContain("Refused:");
+      // The first write's evidence survives the later refusal.
+      const outcomes = (
+        result.details as { results?: { attributedFiles?: string[] }[] }
+      ).results;
+      const attributed = outcomes?.[0]?.attributedFiles ?? [];
+      expect(
+        attributed.some(
+          (file) => file.includes("delegate-scratch") && file.endsWith("/dir/f.txt"),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  test(
+    "a cancelled isolated batch still reports source drift",
+    async () => {
+      // The drift check ran on the dispatch's abort signal: cancelling
+      // killed the re-snapshot and the surviving shell edits vanished.
+      // A cancelled batch still owes the drift report.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const escaped = join(dir, "escaped.txt");
+      let releaseTurn!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseTurn = resolve;
+      });
+      const escape: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          // Hold the turn open so the cancel lands mid-run.
+          await gate;
+          return fauxAssistantMessage("POST-ESCAPE");
+        }
+        return fauxAssistantMessage([
+          fauxToolCall("bash", {
+            command: `printf 'escape\\n' > '${escaped}'`,
+          }),
+        ]);
+      };
+      subagents.respond([escape, escape]);
+
+      const dispatched = await callDelegate(session, {
+        async: true,
+        tasks: [
+          {
+            prompt: "run a command",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["bash"],
+          },
+        ],
+      });
+      expect(dispatched.isError).toBe(false);
+      const ticket = ticketIdOf(dispatched.text);
+
+      // Wait until the shell write lands, then cancel the ticket.
+      const deadline = Date.now() + 5000;
+      while (!existsSync(escaped) && Date.now() < deadline) {
+        await Bun.sleep(10);
+      }
+      expect(existsSync(escaped)).toBe(true);
+      const cancelled = await callDelegateTicket(session, {
+        action: "cancel",
+        ticket,
+        force: true,
+      });
+      expect(cancelled.isError).toBe(false);
+      // Release the gated turn so the aborted worker can settle.
+      releaseTurn();
+
+      // Forced cancellation settles the ticket immediately while the
+      // worker winds down and post-run reconciliation annotates the shared
+      // outcome record — poll until the drift annotation lands.
+      const live = session;
+      const sourceDrift = async (): Promise<readonly string[] | undefined> =>
+        (
+          (
+            (await callDelegateTicket(live, { action: "poll", ticket }))
+              .details as {
+              results?: ({
+                integration?: { sourceDrift?: readonly string[] };
+              } | null)[];
+            }
+          ).results?.[0]?.integration?.sourceDrift
+        );
+      const pollDeadline = Date.now() + 5000;
+      let drift: readonly string[] | undefined;
+      while ((drift = await sourceDrift()) === undefined && Date.now() < pollDeadline) {
+        await Bun.sleep(10);
+      }
+      expect(drift).toContain("escaped.txt");
+    },
+  );
 });

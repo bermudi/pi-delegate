@@ -553,26 +553,28 @@ const SOURCE_DRIFT_LIMIT = 20;
 
 async function detectSourceDrift(
   group: IsolatedGroup,
-  signal?: AbortSignal,
 ): Promise<readonly string[] | undefined> {
   try {
+    // Deliberately NOT on the dispatch abort signal: a cancelled batch
+    // still owes the drift report — the surviving shell edits are exactly
+    // what the caller needs to see. The check is read-only and bounded
+    // by the git exec timeout.
     const currentTree = await snapshotTree(
       group.sourceRoot,
       group.baselineCommit,
       path.join(group.artifactRoot, "drift.index"),
-      signal,
+      undefined,
       group.snapshotExcludes,
     );
-    const { stdout } = await git(
-      ["diff", "--name-only", group.baselineCommit, currentTree],
-      { cwd: group.sourceRoot, signal },
+    // -z + --no-renames (same as proposal diffs): raw NUL-separated
+    // names — no C-quoting corruption — and a rename reports both its
+    // deleted and created paths.
+    const drift = await changedFiles(
+      group.sourceRoot,
+      group.baselineCommit,
+      currentTree,
     );
-    return stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line !== "")
-      .sort()
-      .slice(0, SOURCE_DRIFT_LIMIT);
+    return drift.sort().slice(0, SOURCE_DRIFT_LIMIT);
   } catch (error) {
     log(`isolated source-drift check failed for '${group.sourceRoot}'`, error);
     return undefined;
@@ -1598,7 +1600,7 @@ export async function prepareIsolated(
         // proposal collection (worker trees and refs only, never the
         // source working tree) so annotation latency is unchanged; the
         // promise self-catches and can never reject.
-        const driftPromise = detectSourceDrift(group, options.signal);
+        const driftPromise = detectSourceDrift(group);
         let drift: readonly string[] | undefined;
         try {
           const accepted = await collectProposals(

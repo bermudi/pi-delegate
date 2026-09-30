@@ -644,7 +644,7 @@ function rejectObsoleteContext(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "context")) {
     throw new Error(
       'The context field has been removed. Omit context and provide a self-contained prompt; use the top-level "brief" for shared batch context. ' +
-        "parent conversation history is never shared. Child-owned sessionId and resumeFrom history remain supported.",
+        'parent conversation history is never shared. Child-owned session history remains supported on the full "surface".',
     );
   }
 }
@@ -1098,7 +1098,11 @@ const HELP_FULL_CONTROLS = `## delegate — full-mode controls
   the original execution/result, changed request conflicts. Unkeyed calls
   always execute independently; it is not exactly-once crash recovery.`;
 
-const HELP_SHARED_RULES = `## Models, profiles, and context
+// #64: the compact edition must not teach fields its schema rejects —
+// pooled/resumed session history and the isolated/scratch session-field
+// exclusions are full-surface facts, dropped from the compact text.
+function helpSharedRules(full: boolean): string {
+  return `## Models, profiles, and context
 - Models and effort: you never pick either — task \`model\`, \`thinking\`,
   and \`reasoning_effort\` fields are rejected. Tasks run on the parent's
   model at the parent's effort; a named agent may instead run on the model
@@ -1116,25 +1120,28 @@ const HELP_SHARED_RULES = `## Models, profiles, and context
   \`tools\`, profile frontmatter \`tools\`, and the mirrored parent
   set alike.
 - Children never inherit parent conversation history. Supply a self-contained
-  brief; project instructions and child-owned pooled/resumed history still apply.`;
+  brief; project instructions still apply${full ? ", as does the child's own pooled/resumed session history" : ""}.`;
+}
 
-const HELP_WORKSPACES = `## Workspaces
+function helpWorkspaces(full: boolean): string {
+  const sessionFields = full ? " Cannot use \`sessionId\` or \`resumeFrom\`." : "";
+  return `## Workspaces
 - \`shared\` (default): the task edits the caller's tree directly. Writers
   whose scope overlaps in one call run one at a time, in task order — each
   sees its predecessor's changes. Use it for dependent edits.
 - \`isolated\`: each task works in a detached Git worktree; successful
   changes merge into the source in task order. Independent edits to the
   same repository run in parallel — much faster than shared for
-  independent work. Cannot use \`sessionId\` or \`resumeFrom\`.
+  independent work.${sessionFields}
 - \`scratch\`: one task, one disposable copy of the tree (reflinked when
   the filesystem supports it); every change is discarded. Use it for
   tasks that may write or run commands but whose output is the answer,
-  not the edits. A read-only task cannot use it — it needs no copy.
-  Cannot use \`sessionId\` or \`resumeFrom\`.
+  not the edits. A read-only task cannot use it — it needs no copy.${sessionFields}
 - In \`isolated\` and \`scratch\`, write/edit calls into the original tree
   are refused — edit the same path inside the worker's copy — but shell
   commands are not confined; drift a worker's shell caused in the original
   is reported on its outcome.`;
+}
 
 const HELP_TICKET_SHARED = `- Canonical task addresses: anywhere \`taskId\` is taken it accepts the
   compound \`"<ticket>#<task>"\` — e.g. \`"t-1a2b#task-1"\` — and the
@@ -1219,11 +1226,11 @@ Compact exposes poll/wait/cancel/answer/steer/interrupt.
   \`duplicate\`, or \`not-applied\` (settled/unknown target).
 - \`{ action: "interrupt", ticket, taskId? }\` — abort one task's
   in-flight turn, cooperatively. The task settles \`interrupted\` —
-  partial output kept, the worker resumable (a pooled session returns
-  reusable; a fresh task keeps its transcript + resume hint). Distinct
-  from \`cancel\`, which tears the whole ticket down. \`taskId\`
-  defaults to the only still-running task; interrupting a settled,
-  already-interrupted, or not-yet-running task receipts \`not-applied\`.
+  partial output kept and the worker's transcript retained (resuming is
+  a full-surface feature). Distinct from \`cancel\`, which tears the
+  whole ticket down. \`taskId\` defaults to the only still-running task;
+  interrupting a settled, already-interrupted, or not-yet-running task
+  receipts \`not-applied\`.
 ${HELP_TICKET_SHARED}`;
 
 const HELP_SESSIONS = `## delegate_session — sessions
@@ -1265,9 +1272,9 @@ ${HELP_DISPATCH}
 
 ${HELP_FULL_CONTROLS}
 
-${HELP_SHARED_RULES}
+${helpSharedRules(true)}
 
-${HELP_WORKSPACES}
+${helpWorkspaces(true)}
 
 ${HELP_TICKETS_FULL}
 
@@ -1282,9 +1289,9 @@ ${HELP_INTERFACES}
 
 ${HELP_DISPATCH}
 
-${HELP_SHARED_RULES}
+${helpSharedRules(false)}
 
-${HELP_WORKSPACES}
+${helpWorkspaces(false)}
 
 ${HELP_TICKETS_COMPACT}
 
@@ -2791,6 +2798,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
               ...(call.action === "poll" || call.action === "wait"
                 ? { questions: result.ticket?.questions }
                 : {}),
+              // A wait's tail sentence (timeout/detached/roster note)
+              // rides details so the collapsed view shows it too (#63).
+              ...(result.note !== undefined ? { note: result.note } : {}),
               // SPEC v3 "Steering": the receipt's machine half rides
               // details.steer (status, taskId, replayed original status);
               // an interrupt's rides details.interrupt the same way. A tail
@@ -2810,8 +2820,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
       defineTool<typeof sessionSchema, DelegateDetails>({
         name: "delegate_session",
         label: "Delegate Sessions",
+        // #64: the compact surface cannot create pooled sessions — its
+        // description must not name the full-only `sessionId` field.
         description:
-          "List or close pooled delegate sessions created by task sessionId fields. Dispatch tasks with delegate; operate on async tickets with delegate_ticket.",
+          surface === "full"
+            ? "List or close pooled delegate sessions created by task sessionId fields. Dispatch tasks with delegate; operate on async tickets with delegate_ticket."
+            : "List or close pooled delegate sessions. Dispatch tasks with delegate; operate on async tickets with delegate_ticket.",
         parameters: sessionSchema,
         promptSnippet: "List or close pooled delegate subagent sessions",
         prepareArguments: (args) => validatePreparedArguments("delegate_session",

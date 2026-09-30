@@ -162,7 +162,8 @@ function completedCount(ticket: Ticket): number {
   return ticket.outcomes.filter((outcome) => outcome !== undefined).length;
 }
 
-function recoveryWarning(ticket: Ticket): string | undefined {
+/** Exported for the collapsed renderer, which must not hide it (#63). */
+export function recoveryWarning(ticket: Ticket): string | undefined {
   // A live ticket can also settle interrupted (every task interrupted on
   // request) — that record is final and its tasks carry resume hints, so
   // the cold-recovery warning applies only to a recovered one.
@@ -1882,6 +1883,12 @@ export interface TicketRpcResult {
    * attach its complete (unbounded) outcomes to result details.
    */
   readonly ticket?: Ticket;
+  /**
+   * The tail a wait result appends after the ticket view — the wait-any
+   * roster sentence, a timeout/detached notice, or a pending-question
+   * pointer. Carried on details.note so the collapsed view shows it too.
+   */
+  readonly note?: string;
   /** The steer receipt's machine-readable half (action "steer" only). */
   readonly steer?: SteerDetails;
   /** The interrupt receipt's machine half (action "interrupt" only). */
@@ -2053,13 +2060,13 @@ export async function handleTicketRpc(
             .join(", ")}`;
     if (result.ticket !== undefined) {
       const view = store.view(result.ticket);
-      const text =
+      const note =
         result.cause === "question"
-          ? `${view}\n\nWait detached: ticket "${result.ticket.id}" is waiting on an answer — ${roster}.`
+          ? `Wait detached: ticket "${result.ticket.id}" is waiting on an answer — ${roster}.`
           : result.cause === "interrupted"
-            ? `${view}\n\nWait detached: ${result.interrupted!.length === 1 ? "task" : "tasks"} ${result.interrupted!.map((id) => `"${result.ticket!.id}#${id}"`).join(", ")} ${result.interrupted!.length === 1 ? "was" : "were"} interrupted — ${roster}.`
-            : `${view}\n\nResolved on the first watched ticket to settle — ${roster}.`;
-      return { text, isError: false, ticket: result.ticket };
+            ? `Wait detached: ${result.interrupted!.length === 1 ? "task" : "tasks"} ${result.interrupted!.map((id) => `"${result.ticket!.id}#${id}"`).join(", ")} ${result.interrupted!.length === 1 ? "was" : "were"} interrupted — ${roster}.`
+            : `Resolved on the first watched ticket to settle — ${roster}.`;
+      return { text: `${view}\n\n${note}`, isError: false, ticket: result.ticket, note };
     }
     const all = call.tickets
       .map((id) => store.get(id)!)
@@ -2107,16 +2114,21 @@ export async function handleTicketRpc(
         signal,
       );
       const view = store.view(ticket);
-      const text = questionPending
-        ? `${view}\n\nWait detached: answer the pending question before waiting for this ticket.`
+      const note = questionPending
+        ? `Wait detached: answer the pending question before waiting for this ticket.`
         : interrupted.length > 0
-          ? `${view}\n\nWait detached: ${interrupted.length === 1 ? "task" : "tasks"} ${interrupted.map((id) => `"${ticket.id}#${id}"`).join(", ")} ${interrupted.length === 1 ? "was" : "were"} interrupted — the ticket is still ${statusWord(ticket)}.`
+          ? `Wait detached: ${interrupted.length === 1 ? "task" : "tasks"} ${interrupted.map((id) => `"${ticket.id}#${id}"`).join(", ")} ${interrupted.length === 1 ? "was" : "were"} interrupted — the ticket is still ${statusWord(ticket)}.`
           : timedOut
-            ? `${view}\n\nWait timed out; the ticket is still ${statusWord(ticket)}.`
+            ? `Wait timed out; the ticket is still ${statusWord(ticket)}.`
             : aborted
-              ? `${view}\n\nWait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
-              : view;
-      return { text, isError: false, ticket };
+              ? `Wait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
+              : undefined;
+      return {
+        text: note !== undefined ? `${view}\n\n${note}` : view,
+        isError: false,
+        ticket,
+        ...(note !== undefined ? { note } : {}),
+      };
     }
     case "cancel":
       return { text: store.cancel(ticket, call.force), isError: false, ticket };

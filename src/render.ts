@@ -35,13 +35,15 @@ import {
   truncateLine,
 } from "./format.ts";
 import { UNBOUNDED_OUTPUT } from "./spill.ts";
-import type { TicketStore } from "./tickets.ts";
+import { recoveryWarning, type TicketStore } from "./tickets.ts";
 import type {
   TaskIntegration,
   TaskOutcome,
   TaskStatus,
   Ticket,
+  TicketStatus,
   TokenBudgetReport,
+  WorkerQuestion,
 } from "./types.ts";
 import type { SessionArguments, TicketArguments } from "./validation.ts";
 
@@ -80,6 +82,28 @@ function isOutcome(value: unknown): value is TaskOutcome {
       value.status === "interrupted" ||
       value.status === "budget-exhausted")
   );
+}
+
+function isWorkerQuestion(value: unknown): value is WorkerQuestion {
+  return (
+    isRecord(value) &&
+    typeof value.taskId === "string" &&
+    typeof value.question === "string"
+  );
+}
+
+/**
+ * Worker- and caller-authored text reaching the TUI is untrusted: pi-tui
+ * writes component text to the terminal verbatim, so a clear-screen or
+ * clipboard-control sequence inside a task output or a call argument
+ * would execute against the user's terminal. Stripping C0 (except \n and
+ * \t) and C1 controls removes every sequence introducer — ESC, 8-bit CSI,
+ * DCS/OSC — without mangling printable text.
+ */
+const TERMINAL_CONTROLS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+function displaySafe(text: string): string {
+  return text.replace(TERMINAL_CONTROLS, "");
 }
 
 /**
@@ -166,7 +190,7 @@ function expandedText(
 }
 
 function styled(text: string, theme: Theme): string {
-  return text
+  return displaySafe(text)
     .split("\n")
     .map((line) => theme.fg("toolOutput", line))
     .join("\n");
@@ -174,7 +198,7 @@ function styled(text: string, theme: Theme): string {
 
 /** Collapse a prompt to a single ~60-char line for the call row. */
 function promptPreview(prompt: string): string {
-  return truncateLine(prompt.replace(/\s+/g, " ").trim(), 60);
+  return truncateLine(displaySafe(prompt).replace(/\s+/g, " ").trim(), 60);
 }
 
 function textOf(component: Component | undefined): Text {
@@ -227,7 +251,9 @@ export function renderDelegateCall(
   const shown = tasks.slice(0, CALL_PREVIEW_TASKS).map((task) => ({
     task,
     label: truncateLine(
-      descriptionLabel(task.description) ?? task.id ?? task.agent ?? "inline",
+      displaySafe(
+        descriptionLabel(task.description) ?? task.id ?? task.agent ?? "inline",
+      ),
       CALL_LABEL_WIDTH,
     ),
   }));
@@ -275,13 +301,13 @@ export function renderTicketCall(
     args.taskId !== undefined
       ? ` #${shortTicketAddress(
           args.taskId.includes("#") || args.ticket === undefined
-            ? args.taskId
+            ? displaySafe(args.taskId)
             : `${args.ticket}#${args.taskId}`,
         )}`
       : args.ticket !== undefined
-        ? ` #${shortTicket(args.ticket)}`
+        ? ` #${shortTicket(displaySafe(args.ticket))}`
         : Array.isArray(args.tickets) && args.tickets.length > 0
-          ? ` ${args.tickets.map((id) => `#${shortTicket(id)}`).join(",")}`
+          ? ` ${args.tickets.map((id) => `#${shortTicket(displaySafe(id))}`).join(",")}`
           : "";
   component.setText(
     theme.fg("toolTitle", theme.bold(`delegate_ticket ${args.action}`)) +
@@ -300,7 +326,8 @@ export function renderSessionCall(
   context: { lastComponent: Component | undefined },
 ): Component {
   const component = textOf(context.lastComponent);
-  const target = args.sessionId !== undefined ? ` #${args.sessionId}` : "";
+  const target =
+    args.sessionId !== undefined ? ` #${displaySafe(args.sessionId)}` : "";
   component.setText(
     theme.fg("toolTitle", theme.bold(`delegate_session ${args.action}`)) +
       theme.fg("muted", target),
@@ -333,11 +360,13 @@ function collapsedTaskLabel(
   // An unsettled slot carries no store/meta label — a positional task-N
   // beats the anonymous "task" the first cut rendered (#63).
   return truncateLine(
-    descriptionLabel(meta?.description) ??
-      meta?.agent ??
-      outcome?.id ??
-      meta?.id ??
-      `task-${index + 1}`,
+    displaySafe(
+      descriptionLabel(meta?.description) ??
+        meta?.agent ??
+        outcome?.id ??
+        meta?.id ??
+        `task-${index + 1}`,
+    ),
     RESULT_LABEL_LIMIT,
   );
 }
@@ -355,7 +384,7 @@ function summaryLine(output: string | undefined): string {
     .filter((line) => line !== "" && !/^(```|~~~)/.test(line));
   const picked =
     lines.slice(0, 5).find((line) => !line.endsWith(":")) ?? lines[0] ?? "";
-  return picked.replace(/\*\*|__/g, "").trim();
+  return displaySafe(picked).replace(/\*\*|__/g, "").trim();
 }
 
 /**
@@ -370,7 +399,12 @@ function collapsedOutcomeMeta(
   spans: { text: string; color: "success" | "error" | "warning" }[];
 } {
   const files = outcome.attributedFiles?.length ?? 0;
-  const muted = files > 0 ? ` · ${files} file${files === 1 ? "" : "s"}` : "";
+  // Bash effects are unobservable — a file count alone would read as the
+  // whole evidence; the `uncertain (bash)` mark carries the caveat the
+  // expanded `files:` line renders (#49 honesty applies collapsed too).
+  const muted =
+    (files > 0 ? ` · ${files} file${files === 1 ? "" : "s"}` : "") +
+    (outcome.uncertainFiles === true ? " · uncertain (bash)" : "");
   const spans: { text: string; color: "success" | "error" | "warning" }[] = [];
   const integration: TaskIntegration | undefined = outcome.integration;
   if (
@@ -383,13 +417,26 @@ function collapsedOutcomeMeta(
   if (integration?.sourceDrift !== undefined && integration.sourceDrift.length > 0) {
     spans.push({ text: " · source drift", color: "warning" });
   }
-  // The verifier profile's parsed verdict rides the same trailer (#63).
+  // The verifier profile's parsed verdict rides the same trailer (#63),
+  // keeping the expanded line's honesty note: PASS without an observed
+  // file change is unverifiable, FAIL without one is an uncorroborated
+  // claim — never a bare green/red stamp.
   if (outcome.verdict !== undefined) {
+    const qualification =
+      files > 0
+        ? ""
+        : outcome.verdict === "PASS"
+          ? " — unverifiable"
+          : outcome.verdict === "FAIL"
+            ? " — not corroborated"
+            : "";
     spans.push({
-      text: ` · VERDICT ${outcome.verdict}`,
+      text: ` · VERDICT ${outcome.verdict}${qualification}`,
       color:
         outcome.verdict === "PASS"
-          ? "success"
+          ? qualification === ""
+            ? "success"
+            : "warning"
           : outcome.verdict === "FAIL"
             ? "error"
             : "warning",
@@ -418,18 +465,42 @@ function collapsedGlyph(status: CollapsedStatus): { glyph: string; color: "succe
 }
 
 /**
+ * What a missing outcome slot reads on a settled record: a cancelled or
+ * interrupted ticket explains the miss with its own word; any other
+ * terminal status means the record was lost. "Running" on a settled
+ * ticket lies — it only applies while the ticket is live.
+ */
+function settledSlotWord(
+  ticketStatus: TicketStatus | undefined,
+): { status: CollapsedStatus; word: string } {
+  if (ticketStatus === "cancelled" || ticketStatus === "interrupted") {
+    return { status: ticketStatus, word: ticketStatus };
+  }
+  return { status: "failed", word: "no outcome recorded" };
+}
+
+/**
  * One collapsed task line: `{icon} {label}  {summary}{meta}` bounded to
  * ~110 chars — the summary shrinks to keep the meta trailer visible.
- * A null/undefined slot is an unsettled task: `○` and `running`.
+ * A null/undefined slot is an unsettled task: `○` and `running` — unless
+ * the ticket already settled, where the slot's word comes from the
+ * ticket's terminal status instead.
  */
 function collapsedTaskLine(
   slot: TaskOutcome | undefined | null,
   meta: CollapsedTaskMeta | undefined,
   index: number,
   theme: Theme,
+  ticketStatus?: TicketStatus | "settled",
 ): string {
   const outcome = slot === null ? undefined : slot;
-  const { glyph, color } = collapsedGlyph(outcome?.status ?? "running");
+  const missing =
+    ticketStatus !== undefined && ticketStatus !== "running"
+      ? settledSlotWord(
+          ticketStatus === "settled" ? undefined : ticketStatus,
+        )
+      : { status: "running" as const, word: "running" };
+  const { glyph, color } = collapsedGlyph(outcome?.status ?? missing.status);
   const label = collapsedTaskLabel(outcome, meta, index);
   const extras =
     outcome !== undefined
@@ -438,10 +509,10 @@ function collapsedTaskLine(
   const metaText = extras.muted + extras.spans.map((span) => span.text).join("");
   const summary =
     outcome === undefined
-      ? "running"
+      ? missing.word
       : outcome.status === "ok"
         ? summaryLine(outcome.output)
-        : (outcome.error ?? outcome.status);
+        : displaySafe(outcome.error ?? outcome.status);
   const budget = Math.max(
     20,
     COLLAPSED_LINE_LIMIT - glyph.length - 1 - label.length - 2 - metaText.length,
@@ -520,6 +591,10 @@ function collapsedBody(
       : undefined;
     const lines: string[] = [];
     if (ticket !== undefined) lines.push(collapsedTicketHeader(ticket, theme));
+    const missing =
+      ticket !== undefined && ticket.status !== "running"
+        ? ticket.status
+        : undefined;
     details.results.forEach((slot, index) => {
       const outcome = isOutcome(slot) ? slot : undefined;
       lines.push(
@@ -530,9 +605,54 @@ function collapsedBody(
             : syncTasks?.[index],
           index,
           theme,
+          missing,
         ),
       );
     });
+    // The view's header material rides below the task lines so the
+    // collapsed surface drops none of it (#63): recovery/cleanup
+    // warnings, advisory notices, pending questions, and a wait's tail
+    // note (timeout / detached / the wait-any still-running roster).
+    if (ticket !== undefined) {
+      const warning = recoveryWarning(ticket);
+      if (warning !== undefined) {
+        lines.push(theme.fg("warning", displaySafe(warning)));
+      }
+    }
+    const notices = (
+      Array.isArray(details.notices)
+        ? details.notices.filter(
+            (notice): notice is string => typeof notice === "string",
+          )
+        : undefined
+    ) ?? ticket?.notices ?? [];
+    for (const notice of notices) {
+      lines.push(theme.fg("muted", displaySafe(notice)));
+    }
+    const questions =
+      (Array.isArray(details.questions)
+        ? details.questions.filter(isWorkerQuestion)
+        : undefined) ??
+      ticket?.questions ??
+      [];
+    const ticketId =
+      ticket?.id ??
+      (typeof details.ticket === "string" ? details.ticket : undefined);
+    for (const question of questions) {
+      const address =
+        ticketId !== undefined
+          ? `${shortTicketAddress(`${ticketId}#${question.taskId}`)} `
+          : "";
+      lines.push(
+        theme.fg(
+          "warning",
+          `? waiting on answer — ${address}${truncateLine(displaySafe(question.question), 80)}`,
+        ),
+      );
+    }
+    if (typeof details.note === "string") {
+      lines.push(theme.fg("toolOutput", displaySafe(shortenTicketIds(details.note))));
+    }
     return lines.join("\n") + "\n" + expandHint(theme).trimStart();
   }
   return undefined;
@@ -545,18 +665,33 @@ function collapsedBody(
  */
 function collapsedRoster(text: string, theme: Theme): string {
   const lines = text.split("\n");
-  const entries = lines.filter((line) => line.startsWith("- "));
   const hidden = lines.find((line) =>
     line.includes("from other sessions not shown"),
   );
+  // Entries plus their indented sub-lines — a roster entry can carry a
+  // recovery warning or a pending-question line; dropping indented lines
+  // would hide exactly the signals that matter.
+  const blocks: string[][] = [];
+  for (const line of lines) {
+    if (line.startsWith("- ")) blocks.push([line]);
+    else if (blocks.length > 0 && /^\s+\S/.test(line)) {
+      blocks[blocks.length - 1]!.push(line);
+    }
+  }
   const body = [
-    ...entries
+    ...blocks
       .slice(0, 5)
-      .map((line) => theme.fg("toolOutput", shortenTicketIds(line))),
-    ...(entries.length > 5
-      ? [theme.fg("muted", `  … and ${entries.length - 5} more`)]
+      .flatMap((block) =>
+        block.map((line) =>
+          theme.fg("toolOutput", displaySafe(shortenTicketIds(line))),
+        ),
+      ),
+    ...(blocks.length > 5
+      ? [theme.fg("muted", `  … and ${blocks.length - 5} more`)]
       : []),
-    ...(hidden !== undefined ? [theme.fg("muted", hidden)] : []),
+    ...(hidden !== undefined
+      ? [theme.fg("muted", displaySafe(hidden))]
+      : []),
   ];
   return body.join("\n") + expandHint(theme);
 }
@@ -578,7 +713,10 @@ export function createResultRenderer(tickets: TicketStore) {
       context.lastComponent instanceof Text
         ? context.lastComponent
         : new Text("", 0, 0);
-    if (!options.expanded && context.isError !== true) {
+    // Collapsed applies to error results too: a failed multi-task
+    // dispatch still carries details.results, and truncating its text
+    // would hide the later tasks' failures entirely.
+    if (!options.expanded) {
       const collapsed = collapsedBody(result, tickets, theme);
       if (collapsed !== undefined) {
         component.setText(collapsed);
@@ -646,28 +784,53 @@ export function createMessageRenderer(tickets: TicketStore): MessageRenderer {
           : typeof details.ticket === "string"
             ? [details.ticket]
             : [];
+      // Per-ticket headers only when EVERY named ticket resolves —
+      // skipping a store-missed ticket would drop its tasks' lines
+      // entirely (a failed task on it would silently vanish). On any
+      // miss, fall back to the recorded merged outcomes once.
+      const resolved = ids.map((id) => tickets.get(id));
       const lines: string[] = [];
-      for (const id of ids) {
-        const ticket = tickets.get(id);
-        if (ticket === undefined) continue;
-        lines.push(collapsedTicketHeader(ticket, theme));
-        ticket.outcomes.forEach((outcome, index) => {
-          lines.push(
-            collapsedTaskLine(outcome, ticket.tasks[index], index, theme),
-          );
-        });
-      }
-      // A replayed transcript misses the store: render the recorded
-      // merged outcomes once, without per-ticket headers.
-      if (
-        lines.length === 0 &&
-        isRecord(details) &&
-        Array.isArray(details.results)
-      ) {
+      if (ids.length > 0 && resolved.every((t) => t !== undefined)) {
+        for (const ticket of resolved as Ticket[]) {
+          lines.push(collapsedTicketHeader(ticket, theme));
+          ticket.outcomes.forEach((outcome, index) => {
+            lines.push(
+              collapsedTaskLine(
+                outcome,
+                ticket.tasks[index],
+                index,
+                theme,
+                ticket.status,
+              ),
+            );
+          });
+          const warning = recoveryWarning(ticket);
+          if (warning !== undefined) {
+            lines.push(theme.fg("warning", displaySafe(warning)));
+          }
+          for (const notice of ticket.notices) {
+            lines.push(theme.fg("muted", displaySafe(notice)));
+          }
+        }
+      } else if (isRecord(details) && Array.isArray(details.results)) {
+        // A replayed transcript misses the store: render the recorded
+        // merged outcomes once, without per-ticket headers. Delivered
+        // messages are post-settlement, so a missing slot is a lost
+        // record — never "running".
         (details.results as unknown[]).forEach((slot, index) => {
           const outcome = isOutcome(slot) ? slot : undefined;
-          lines.push(collapsedTaskLine(outcome, undefined, index, theme));
+          lines.push(
+            collapsedTaskLine(outcome, undefined, index, theme, "settled"),
+          );
         });
+        // The merged notices ride the details half the same way.
+        if (Array.isArray(details.notices)) {
+          for (const notice of details.notices) {
+            if (typeof notice === "string") {
+              lines.push(theme.fg("muted", displaySafe(notice)));
+            }
+          }
+        }
       }
       if (lines.length === 0) return undefined;
       const label = theme.fg(

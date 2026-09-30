@@ -86,7 +86,11 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   manual keeps the shared sections yet never names a full-only control as
   callable (no full-mode-controls section, no pause/resume/tail/timed-wait/
   steerId docs) and closes with the "Full surface adds" signpost; the full
-  manual keeps every section.
+  manual keeps every section. Outside the sessions section's `close`
+  argument and the closing delta, the compact text never names
+  `sessionId`/`resumeFrom` at all — shared rules, workspace exclusions,
+  the interrupt doc, and the `delegate_session` description all drop
+  them.
 - **Provenance:** user-approved simplification supersedes #35/#41/#43/#44
   alias acceptance and cardinality defaults.
 
@@ -376,7 +380,19 @@ gaps.
   and first-line-plus-hint for receipts/rosters — expanded views unchanged.
   Covered: per-status icons and labels, ticket header + running slots,
   async one-liner, receipt/roster truncation, delivered-message collapsed
-  lines.
+  lines. The same honesty the expanded view carries applies collapsed:
+  `uncertain (bash)` survives a file count, unevidenced PASS/FAIL verdicts
+  keep their `unverifiable`/`not corroborated` qualification, recovery
+  warnings/notices/pending questions and a wait's tail note (timeout,
+  detached, wait-any roster via `details.note`) render below the task
+  lines, roster entries keep their warning/question sub-lines, a settled
+  ticket's missing slot words itself (`cancelled`/`no outcome recorded`,
+  never `running`), an error-flagged result still draws the task rows,
+  and a delivered message renders per-ticket headers only when every
+  named ticket resolves — otherwise the recorded merged outcomes, so a
+  store-missed ticket's failures cannot silently vanish. Untrusted text
+  (task output, errors, questions, call arguments, notices) is stripped
+  of C0/C1 terminal controls before display.
 - **Gap:** none identified.
 
 ### Cancellation
@@ -601,7 +617,14 @@ gaps.
   (authored `systemPrompt`s included); a worker's shell write into the
   source is reported as `sourceDrift` on its integration and renders as
   `source drift:` — while a worker that never ran a shell is not blamed
-  for drift it could not have caused.
+  for drift it could not have caused. Path spellings normalize like pi's
+  own write/edit layer before the guard compares (`@`-prefix, `file://`
+  URLs, unicode spaces), a dangling symlink's write-through is refused
+  rather than redirected into the source, a refused re-write preserves an
+  earlier write's attribution on the same path, delegate-owned agent-dir
+  churn under the repo is excluded from drift, and a cancelled batch's
+  drift report still lands (the check runs off the dispatch abort signal,
+  `-z --no-renames`).
 - **Gap:** binary-content proposals end-to-end — patches always carry
   `--binary` and the failed-apply tests fault that invocation, but no test
   pushes actual non-text content through a live proposal; index/branch

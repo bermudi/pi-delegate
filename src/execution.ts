@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -23,7 +22,7 @@ import {
 } from "./retry.ts";
 import { persistSessionHeader, transcriptSize, type PooledSession, type SessionPool } from "./sessions.ts";
 import { parseVerdict } from "./format.ts";
-import { isWorkspaceGuardRefusal } from "./workspace-guard.ts";
+import { isWorkspaceGuardRefusal, toolPathTarget } from "./workspace-guard.ts";
 import {
   Deferred,
   type ExecutionHandle,
@@ -301,6 +300,14 @@ export class TaskExecution implements ExecutionHandle {
    */
   private readonly attributed = new Set<string>();
   /**
+   * Claims per attributed path: a refusal subtracts only its own call's
+   * claim. Guard refusal is filesystem-state-dependent (a symlink can
+   * retarget a path between calls), so the same spelled path can write
+   * once and refuse later — dropping the path outright would erase the
+   * earlier write's evidence.
+   */
+  private readonly attributedClaims = new Map<string, number>();
+  /**
    * toolCallId → the resolved path its write/edit call claimed at
    * `tool_execution_start`. Pi emits the start event before extension
    * `tool_call` handlers can block, so a refused call is already
@@ -492,17 +499,23 @@ export class TaskExecution implements ExecutionHandle {
     if (!FILE_PATH_TOOLS.has(toolName)) return;
     const raw = toolCallPath(args);
     if (raw !== undefined) {
-      const resolved = resolve(this.task.cwd, raw);
+      // The same spelling normalization the tool applies — `@`/`file://`/
+      // unicode-space spellings attribute the file they actually hit.
+      const resolved = toolPathTarget(raw, this.task.cwd);
       this.attributed.add(resolved);
+      this.attributedClaims.set(
+        resolved,
+        (this.attributedClaims.get(resolved) ?? 0) + 1,
+      );
       this.pendingCallPaths.set(toolCallId, resolved);
     }
   }
 
   /**
    * A workspace-guard refusal (#62) means the call never ran: its claimed
-   * path is not evidence of a write. The refusal is path-deterministic —
-   * the same resolved path would refuse again — so subtracting it can
-   * never erase a path a different call legitimately wrote.
+   * path is not evidence of a write. Subtract only this call's claim —
+   * refusal depends on live filesystem state, so an earlier call to the
+   * same path may have legitimately written it.
    */
   private noteToolCallEnd(
     toolCallId: string,
@@ -525,7 +538,15 @@ export class TaskExecution implements ExecutionHandle {
         typeof (part as { text?: unknown }).text === "string" &&
         isWorkspaceGuardRefusal((part as { text: string }).text),
     );
-    if (refused) this.attributed.delete(pending);
+    if (refused) {
+      const remaining = (this.attributedClaims.get(pending) ?? 1) - 1;
+      if (remaining <= 0) {
+        this.attributedClaims.delete(pending);
+        this.attributed.delete(pending);
+      } else {
+        this.attributedClaims.set(pending, remaining);
+      }
+    }
   }
 
   /**

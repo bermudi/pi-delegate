@@ -42,7 +42,7 @@ interface ResultRenderingTool {
     },
     options: { expanded: boolean; isPartial: boolean },
     theme: unknown,
-    context: { lastComponent?: unknown },
+    context: { lastComponent?: unknown; isError?: boolean },
   ): RenderedComponent;
 }
 
@@ -644,7 +644,10 @@ test(
     expect(collapsed).toContain("✓ b  done · VERDICT FAIL");
     expect(collapsed).toContain("✓ c  done · VERDICT AMBIGUOUS");
 
-    // The color mapping is contract: tag the theme to observe it.
+    // The color mapping is contract: tag the theme to observe it. An
+    // unevidenced PASS is not a clean green — the expanded `verdict:`
+    // line calls it unverifiable, and the collapsed tag must not drop
+    // that qualification (#49/#63 honesty).
     const tagTheme = {
       fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
       bold: (text: string) => text,
@@ -658,9 +661,10 @@ test(
             mode: "dispatch",
             async: false,
             results: [
-              { index: 0, id: "a", status: "ok", retries: 0, output: "x", verdict: "PASS" },
+              { index: 0, id: "a", status: "ok", retries: 0, output: "x", verdict: "PASS", attributedFiles: ["x.ts"] },
               { index: 1, id: "b", status: "ok", retries: 0, output: "x", verdict: "FAIL" },
               { index: 2, id: "c", status: "ok", retries: 0, output: "x", verdict: "AMBIGUOUS" },
+              { index: 3, id: "d", status: "ok", retries: 0, output: "x", verdict: "PASS" },
             ],
           },
         },
@@ -671,8 +675,9 @@ test(
       .render(8192)
       .join("\n");
     expect(tagged).toContain("<success> · VERDICT PASS</success>");
-    expect(tagged).toContain("<error> · VERDICT FAIL</error>");
+    expect(tagged).toContain("<error> · VERDICT FAIL — not corroborated</error>");
     expect(tagged).toContain("<warning> · VERDICT AMBIGUOUS</warning>");
+    expect(tagged).toContain("<warning> · VERDICT PASS — unverifiable</warning>");
   },
 );
 
@@ -737,5 +742,237 @@ test(
     const collapsed = renderSyntheticResult(session, { mode: "help" }, "text");
     expect(collapsed.trim()).toMatch(/^\(.*to read\)$/);
     expect(collapsed).not.toContain("manual");
+  },
+);
+
+test(
+  "terminal-control sequences in worker text never reach the display",
+  async () => {
+    // pi-tui writes rendered text to the terminal verbatim — a clear-screen
+    // (ESC[2J) or clipboard write (OSC 52) inside a task output, error,
+    // question, or call argument would execute against the user's
+    // terminal. Every surface strips C0/C1 controls before display.
+    session = await openDelegateBoundary();
+    const hostile =
+      "report\x1b[2J\x1b[H done\x1b]52;c;aGVsbG8=\x07 and \x9b31m red";
+    const collapsed = renderSyntheticResult(session, {
+      mode: "dispatch",
+      async: false,
+      results: [
+        { index: 0, id: "a", status: "ok", retries: 0, output: hostile },
+        { index: 1, id: "b", status: "failed", retries: 0, error: `${hostile} broke` },
+      ],
+      notices: [`notice ${hostile}`],
+      questions: [{ taskId: "b", id: "q-1", question: hostile }],
+      note: `note ${hostile}`,
+    });
+    expect(collapsed).toContain("report");
+    expect(collapsed).not.toContain("\x1b");
+    expect(collapsed).not.toContain("\x9b");
+
+    const tool = delegateTool(session) as unknown as ResultRenderingTool;
+    const expanded = tool
+      .renderResult(
+        {
+          content: [{ type: "text", text: "" }],
+          details: {
+            mode: "dispatch",
+            async: false,
+            results: [
+              { index: 0, id: "a", status: "ok", retries: 0, output: hostile },
+            ],
+          },
+        },
+        { expanded: true, isPartial: false },
+        plainTheme,
+        { lastComponent: undefined },
+      )
+      .render(8192)
+      .join("\n");
+    expect(expanded).toContain("report");
+    expect(expanded).not.toContain("\x1b");
+
+    // Call rows sanitize too — the model's own arguments are untrusted.
+    const call = renderToolCall(session, "delegate", {
+      tasks: [{ prompt: `p ${hostile}`, id: `id\x1b[2J` }],
+    });
+    expect(call).not.toContain("\x1b");
+  },
+);
+
+test(
+  "an error result still renders the collapsed per-task view",
+  async () => {
+    // A failed multi-task dispatch carries details.results — gating the
+    // collapsed view on isError fell back to a 10-line truncation that hid
+    // every task past the first few. Replay renders through the same path.
+    session = await openDelegateBoundary();
+    const tool = delegateTool(session) as unknown as ResultRenderingTool;
+    const collapsed = tool
+      .renderResult(
+        {
+          content: [{ type: "text", text: "Ticket spilled a long view" }],
+          details: {
+            mode: "dispatch",
+            async: false,
+            results: [
+              { index: 0, id: "a", status: "ok", retries: 0, output: "first done" },
+              { index: 1, id: "b", status: "failed", retries: 0, error: "second blew up" },
+              { index: 2, id: "c", status: "failed", retries: 0, error: "third blew up too" },
+            ],
+          },
+        },
+        { expanded: false, isPartial: false },
+        plainTheme,
+        { lastComponent: undefined, isError: true },
+      )
+      .render(8192)
+      .join("\n");
+    expect(collapsed).toContain("✓ a  first done");
+    expect(collapsed).toContain("✗ b  second blew up");
+    expect(collapsed).toContain("✗ c  third blew up too");
+  },
+);
+
+test(
+  "a collapsed wait carries its tail note, pending questions, and notices",
+  async () => {
+    // The wait view's suffix — timeout, detached roster, pending question —
+    // lived only in the model-facing text. The collapsed ticket view must
+    // show it too, from the details half.
+    session = await openDelegateBoundary();
+    const collapsed = renderSyntheticResult(session, {
+      mode: "ticket",
+      action: "wait",
+      ticket: "t-81a83dbe-1234-5678-9abc-def012345678",
+      results: [
+        { index: 0, id: "a", status: "ok", retries: 0, output: "done" },
+      ],
+      notices: ["two writers serialized"],
+      questions: [
+        { taskId: "task-2", id: "q-1", question: "which environment?" },
+      ],
+      note: 'Resolved on the first watched ticket to settle — still running: "t-22222222-0000-1111-2222-333344445555" (running, 0/1 tasks finished).',
+    });
+    expect(collapsed).toContain("✓ a  done");
+    expect(collapsed).toContain("two writers serialized");
+    expect(collapsed).toContain("waiting on answer");
+    expect(collapsed).toContain("t-81a83dbe#task-2");
+    expect(collapsed).toContain("which environment?");
+    expect(collapsed).toContain("still running:");
+    expect(collapsed).toContain("t-22222222");
+    expect(collapsed).not.toContain("t-22222222-0000");
+  },
+);
+
+test(
+  "a cancelled ticket's missing outcome reads cancelled, not running",
+  async () => {
+    // A terminal ticket's unrecorded slot is not "running" — the ticket's
+    // own status words it.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const blocked = gate("NEVER-DELIVERED");
+    subagents.respond([blocked.step]);
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "hold", agent: "coder" }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    await callDelegateTicket(session, { action: "cancel", ticket, force: true });
+    blocked.release();
+
+    const settled = await callDelegateTicket(session, { action: "poll", ticket });
+    const collapsed = renderToolResult(session, settled, false);
+    expect(collapsed).toContain("· cancelled");
+    expect(collapsed).toContain("⊘");
+    expect(collapsed).not.toContain("running");
+  },
+);
+
+test(
+  "a coalesced delivery with a store-missed ticket falls back to merged outcomes",
+  async () => {
+    // details.tickets renders per-ticket only when EVERY id resolves —
+    // a partial miss used to render the resolved tickets and silently drop
+    // the missing one's tasks (including failures). The recorded merged
+    // results are the fallback, like the expanded view's rule.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const blocked = gate("DONE");
+    subagents.respond([blocked.step]);
+    const host = session.session as AgentSession;
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "one" }],
+      async: true,
+    });
+    const live = ticketIdOf(dispatched.text);
+    blocked.release();
+    await callDelegateTicket(session, { action: "wait", ticket: live, timeoutMs: 5000 });
+
+    const renderer = host.extensionRunner.getMessageRenderer("delegate-result")!;
+    const message = {
+      customType: "delegate-result",
+      content: "coalesced",
+      details: {
+        tickets: [live, "t-00000000-0000-0000-0000-000000000000"],
+        originLeafIds: [null, null],
+        results: [
+          { index: 0, id: "one", status: "ok", retries: 0, output: "DONE" },
+          { index: 0, id: "lost-task", status: "failed", retries: 0, error: "lost failure" },
+        ],
+      },
+    };
+    const collapsed = renderer(message as never, { expanded: false, outputPad: 0 }, plainTheme as never)!;
+    const text = collapsed.render(8192).map((line) => line.replace(/\s+$/, "")).join("\n");
+    expect(text).toContain("lost-task");
+    expect(text).toContain("lost failure");
+    // All-or-nothing: no per-ticket header when one id missed the store.
+    expect(text).not.toContain("· completed 1/1");
+  },
+);
+
+test(
+  "a collapsed file count keeps the bash-uncertainty mark",
+  async () => {
+    // `· N files` beside a task that also ran a shell understates the
+    // evidence surface — the expanded `files:` line says
+    // `uncertain (bash)`; the collapsed meta must not drop it.
+    session = await openDelegateBoundary();
+    const collapsed = renderSyntheticResult(session, {
+      mode: "dispatch",
+      async: false,
+      results: [
+        { index: 0, id: "a", status: "ok", retries: 0, output: "done", attributedFiles: ["x.ts"], uncertainFiles: true },
+        { index: 1, id: "b", status: "ok", retries: 0, output: "done", uncertainFiles: true },
+      ],
+    });
+    expect(collapsed).toContain("✓ a  done · 1 file · uncertain (bash)");
+    expect(collapsed).toContain("✓ b  done · uncertain (bash)");
+  },
+);
+
+test(
+  "a collapsed roster keeps each entry's warning and question sub-lines",
+  async () => {
+    // Roster entries can carry indented warning/question lines — dropping
+    // them hides exactly the signals a poll exists to surface.
+    session = await openDelegateBoundary();
+    const collapsed = renderSyntheticResult(
+      session,
+      { mode: "ticket" },
+      [
+        "Tickets:",
+        '- "t-81a83dbe-36ca-422d-a98f-1ee3906ee83e" running — 1/2 tasks finished',
+        "  waiting for answer: t-81a83dbe-36ca-422d-a98f-1ee3906ee83e#task-2 (q-1): pick an env",
+        '- "t-22222222-36ca-422d-a98f-1ee3906ee83e" interrupted — 0/1 tasks finished',
+        "  This run stopped without a final record.",
+      ].join("\n"),
+    );
+    expect(collapsed).toContain('- "t-81a83dbe" running');
+    expect(collapsed).toContain("waiting for answer: t-81a83dbe#task-2");
+    expect(collapsed).toContain("stopped without a final record");
   },
 );

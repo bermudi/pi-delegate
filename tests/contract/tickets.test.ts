@@ -182,6 +182,11 @@ describe("delegate ticket contract", () => {
       });
       expect(timedOut.isError).toBe(false);
       expect(timedOut.text).toMatch(/running|timeout|pending/i);
+      // The tail sentence is machine-readable so the collapsed view can
+      // show why the wait ended instead of hiding it (#63).
+      expect(
+        (timedOut.details as { note?: string }).note,
+      ).toContain("Wait timed out");
 
       // The ticket is still alive and finishes once the work unblocks.
       release();

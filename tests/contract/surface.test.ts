@@ -81,6 +81,19 @@ describe("compact/full delegate surface", () => {
       manual.text.indexOf("## Telemetry"),
     );
     expect(sessionsSection).not.toContain("keeps its session");
+    // The remaining spots that taught session reuse are gone too: the
+    // shared context rule, the workspace exclusions, and the interrupt
+    // doc's resume hint. Only the sessions section's `close` argument and
+    // the closing full-surface delta may still name the fields.
+    const teaching = manual.text.slice(
+      0,
+      manual.text.indexOf("Full surface adds:"),
+    );
+    const outsideSessions = teaching.replace(sessionsSection, "");
+    expect(outsideSessions).not.toContain("sessionId");
+    expect(outsideSessions).not.toContain("resumeFrom");
+    // The tool description teaches the same delta boundary.
+    expect(registeredTool(session, "delegate_session").description).not.toContain("sessionId");
     // The closing line names what full adds and how to enable it.
     expect(manual.text).toContain("Full surface adds:");
     expect(manual.text).toContain('"surface": "full"');
