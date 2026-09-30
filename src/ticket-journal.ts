@@ -31,6 +31,9 @@ const integration = Type.Object({
   proposalRef: Type.Optional(Type.String()),
   patchPath: Type.Optional(Type.String()),
   worktreePath: Type.Optional(Type.String()),
+  // #62: source-relative paths that drifted in the original tree while a
+  // shell-capable isolated worker ran — optional so pre-#62 records parse.
+  sourceDrift: Type.Optional(Type.Array(Type.String())),
 });
 const outcome = Type.Object({
   index: Type.Integer({ minimum: 0 }), id: Type.String(),

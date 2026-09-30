@@ -23,6 +23,7 @@ import {
 } from "./retry.ts";
 import { persistSessionHeader, transcriptSize, type PooledSession, type SessionPool } from "./sessions.ts";
 import { parseVerdict } from "./format.ts";
+import { isWorkspaceGuardRefusal } from "./workspace-guard.ts";
 import {
   Deferred,
   type ExecutionHandle,
@@ -299,6 +300,14 @@ export class TaskExecution implements ExecutionHandle {
    * call for the same reason).
    */
   private readonly attributed = new Set<string>();
+  /**
+   * toolCallId → the resolved path its write/edit call claimed at
+   * `tool_execution_start`. Pi emits the start event before extension
+   * `tool_call` handlers can block, so a refused call is already
+   * attributed; `tool_execution_end` carries the refusal and the entry
+   * here lets the subtraction find exactly the path that call added.
+   */
+  private readonly pendingCallPaths = new Map<string, string>();
   /** True once a bash/exec call ran — shell file effects are unobservable. */
   private uncertainFiles = false;
   /**
@@ -475,7 +484,7 @@ export class TaskExecution implements ExecutionHandle {
    * claim a path in their arguments; bash/exec record no path but mark
    * the evidence uncertain — a shell can mutate anything it can reach.
    */
-  private noteToolCall(toolName: string, args: unknown): void {
+  private noteToolCall(toolCallId: string, toolName: string, args: unknown): void {
     if (SHELL_TOOLS.has(toolName)) {
       this.uncertainFiles = true;
       return;
@@ -483,8 +492,40 @@ export class TaskExecution implements ExecutionHandle {
     if (!FILE_PATH_TOOLS.has(toolName)) return;
     const raw = toolCallPath(args);
     if (raw !== undefined) {
-      this.attributed.add(resolve(this.task.cwd, raw));
+      const resolved = resolve(this.task.cwd, raw);
+      this.attributed.add(resolved);
+      this.pendingCallPaths.set(toolCallId, resolved);
     }
+  }
+
+  /**
+   * A workspace-guard refusal (#62) means the call never ran: its claimed
+   * path is not evidence of a write. The refusal is path-deterministic —
+   * the same resolved path would refuse again — so subtracting it can
+   * never erase a path a different call legitimately wrote.
+   */
+  private noteToolCallEnd(
+    toolCallId: string,
+    toolName: string,
+    isError: boolean,
+    result: unknown,
+  ): void {
+    const pending = this.pendingCallPaths.get(toolCallId);
+    this.pendingCallPaths.delete(toolCallId);
+    if (pending === undefined || !isError || !FILE_PATH_TOOLS.has(toolName)) {
+      return;
+    }
+    const content = (result as { content?: unknown } | null)?.content;
+    if (!Array.isArray(content)) return;
+    const refused = content.some(
+      (part) =>
+        typeof part === "object" &&
+        part !== null &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string" &&
+        isWorkspaceGuardRefusal((part as { text: string }).text),
+    );
+    if (refused) this.attributed.delete(pending);
   }
 
   /**
@@ -774,16 +815,21 @@ export class TaskExecution implements ExecutionHandle {
           }
           return;
         }
-        if (
-          event.type === "tool_execution_end" &&
-          SIDE_EFFECT_TOOLS.has(event.toolName)
-        ) {
-          this.hadSideEffects = true;
+        if (event.type === "tool_execution_end") {
+          if (SIDE_EFFECT_TOOLS.has(event.toolName)) {
+            this.hadSideEffects = true;
+          }
+          this.noteToolCallEnd(
+            event.toolCallId,
+            event.toolName,
+            event.isError,
+            event.result,
+          );
         }
         // File-attribution evidence: the call's claimed path, observed
         // whether or not the tool reports success (it may have mutated).
         if (event.type === "tool_execution_start") {
-          this.noteToolCall(event.toolName, event.args);
+          this.noteToolCall(event.toolCallId, event.toolName, event.args);
         }
       });
       // Armed until the run ends — including waitForIdle, where a wedged
@@ -1008,13 +1054,16 @@ export async function runTask(
       break;
     }
     let loaderPromise: Promise<DefaultResourceLoader>;
-    if (task.providerExtensions !== undefined) {
+    if (task.providerExtensions !== undefined || task.workspaceGuard !== undefined) {
       // Extension-bearing children never share a loader: the extension
       // runtime binds mutable per-session state, so every attempt builds
       // and loads its own (v1 host.ts `loadChildResources`). Required
       // roots already proved loadable at resolve time (before admission);
       // this reload stays fail-closed for a root that changed since and
       // for errors the probe skipped. Best-effort roots drop silently.
+      // The workspace guard (#62) takes the same path: it is an inline
+      // factory whose load failure is fatal — a cached loader would skip
+      // the error check and could run the task unguarded.
       loaderPromise = loadSubagentResources(task, controls.env);
     } else {
       const key = JSON.stringify([task.cwd, task.systemPrompt ?? null, task.appendSystemPrompt]);

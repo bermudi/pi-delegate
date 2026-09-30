@@ -38,6 +38,7 @@ import { resumeTagOf } from "./format.ts";
 import { resolveDependencyGraph } from "./graph.ts";
 import type { TaskInput } from "./validation.ts";
 import type { ResolvedTask, Workspace } from "./types.ts";
+import { workspaceGuardFactory } from "./workspace-guard.ts";
 
 /**
  * The parent session's ModelRuntime. `ExtensionContext` exposes only the
@@ -466,6 +467,8 @@ export async function resolveTasks(
       resumeTag,
       deadlineMs: task.deadlineMs,
       workspace,
+      // Set later by workspace preparation when the cwd is remapped.
+      workspaceGuard: undefined,
       writeRoots: reserves ? await writeRootsOf(cwd) : undefined,
       dependsOn: graph.deps[index]!,
       phase: graph.phases[index]!,
@@ -594,6 +597,21 @@ export function createSubagentResourceLoader(
       additionalExtensionPaths.length > 0
       ? { additionalExtensionPaths: [...additionalExtensionPaths] }
       : {}),
+    // #62: the workspace write/edit guard is an inline factory — Pi loads
+    // `extensionFactories` even under `noExtensions` (verified in
+    // pi-coding-agent 0.87's resource-loader: the flag excludes the
+    // user/project inventory only), so the child stays extension-free
+    // apart from the allowlisted provider roots and this refusal hook.
+    ...(task.workspaceGuard !== undefined
+      ? {
+          extensionFactories: [
+            {
+              name: "delegate-workspace-guard",
+              factory: workspaceGuardFactory(task.workspaceGuard, task.cwd),
+            },
+          ],
+        }
+      : {}),
     agentsFilesOverride: ({ agentsFiles }) => ({
       agentsFiles: agentsFiles.filter(
         ({ path }) => !isGlobalContextFile(path, env.agentDir),
@@ -645,6 +663,21 @@ export async function loadSubagentResources(
     await resourceLoader.reload();
 
     const extensionsResult = resourceLoader.getExtensions();
+    // Inline factories (today: delegate-workspace-guard, #62) are not a
+    // provider root — partitionExtensionLoadFailures already counts their
+    // `<inline:...>` errors fatal, but the message below would wrongly
+    // name a provider. Fail closed with the real culprit: a guarded task
+    // must never run unguarded.
+    const inlineErrors = extensionsResult.errors.filter((error) =>
+      error.path.startsWith("<inline:"),
+    );
+    if (inlineErrors.length > 0) {
+      throw new Error(
+        `Failed to load the delegate workspace guard; the task was not run unguarded: ${inlineErrors
+          .map((error) => error.error)
+          .join("; ")}`,
+      );
+    }
     const { fatalCount, droppableRoots } = partitionExtensionLoadFailures({
       extensionPaths,
       loadedExtensionPaths: extensionsResult.extensions.map(

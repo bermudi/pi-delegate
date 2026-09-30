@@ -69,6 +69,20 @@ export interface ResolvedTask {
   readonly deadlineMs: number | undefined;
   readonly workspace: Workspace;
   /**
+   * Set by isolated/scratch workspace preparation when the task's cwd was
+   * remapped into a copy: the original source root and the worker's copy
+   * root. Drives the inline write/edit refusal — a call targeting the
+   * source tree outside the copy is blocked — and anchors the workspace
+   * note appended to the child prompt (#62). Undefined on shared tasks.
+   */
+  readonly workspaceGuard:
+    | {
+        readonly kind: "isolated" | "scratch";
+        readonly sourceRoot: string;
+        readonly copyRoot: string;
+      }
+    | undefined;
+  /**
    * Canonical write-scope roots when this task can mutate, else undefined.
    * Usually a single root; an external `core.worktree` keeps the physical
    * cwd reachable beside the Git top-level, so both are listed.
@@ -128,6 +142,14 @@ export interface TaskIntegration {
   readonly proposalRef?: string;
   readonly patchPath?: string;
   readonly worktreePath?: string;
+  /**
+   * Source-relative paths that changed in the original tree while this
+   * isolated worker ran a shell (#62). Shell commands are not confined to
+   * the worker copy, so drift beside the proposal is reported as evidence —
+   * never applied and never silently absorbed into the outcome. Sorted,
+   * bounded.
+   */
+  readonly sourceDrift?: readonly string[];
 }
 
 /**

@@ -96,6 +96,9 @@ const taskIntegrationSchema = Type.Object(
     proposalRef: Type.Optional(Type.String()),
     patchPath: Type.Optional(Type.String()),
     worktreePath: Type.Optional(Type.String()),
+    // #62: source-relative paths that changed in the original tree while a
+    // shell-capable isolated worker ran — shell effects are unconfined.
+    sourceDrift: Type.Optional(readonlyArray(Type.String())),
   },
   { additionalProperties: false },
 );

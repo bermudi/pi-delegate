@@ -289,6 +289,13 @@ interface IsolatedGroup {
   readonly artifactRoot: string;
   readonly baselineCommit: string;
   readonly baselineRef: string;
+  /**
+   * The same repository-relative exclude pathspecs the baseline snapshot
+   * used (artifact roots, excludedPaths). The reconcile-time drift check
+   * re-snapshots with them so artifact directories can never masquerade
+   * as source drift (#62).
+   */
+  readonly snapshotExcludes: readonly string[];
   readonly taskIndexes: number[];
   /**
    * Resolves when this group's reconciliation (including artifact cleanup)
@@ -530,6 +537,45 @@ async function restorePreApplyState(
   }
   if (firstError !== undefined) log("isolated rollback could not restore every path", firstError);
   return skipped;
+}
+
+/**
+ * Source drift evidence (#62): shell commands are not confined to the
+ * worker copy, so an isolated worker's bash can write the original tree
+ * without leaving a proposal. Re-snapshot the source with the same
+ * excludes the baseline used and diff it against the baseline commit —
+ * the paths that moved while the group ran, source-relative and sorted,
+ * bounded so a repo-scale spill stays one bounded field. A failure here
+ * is logged and skipped: drift reporting must never fail reconciliation.
+ */
+const SOURCE_DRIFT_LIMIT = 20;
+
+async function detectSourceDrift(
+  group: IsolatedGroup,
+  signal?: AbortSignal,
+): Promise<readonly string[] | undefined> {
+  try {
+    const currentTree = await snapshotTree(
+      group.sourceRoot,
+      group.baselineCommit,
+      path.join(group.artifactRoot, "drift.index"),
+      signal,
+      group.snapshotExcludes,
+    );
+    const { stdout } = await git(
+      ["diff", "--name-only", group.baselineCommit, currentTree],
+      { cwd: group.sourceRoot, signal },
+    );
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "")
+      .sort()
+      .slice(0, SOURCE_DRIFT_LIMIT);
+  } catch (error) {
+    log(`isolated source-drift check failed for '${group.sourceRoot}'`, error);
+    return undefined;
+  }
 }
 
 /**
@@ -1482,6 +1528,7 @@ export async function prepareIsolated(
           artifactRoot,
           baselineCommit,
           baselineRef,
+          snapshotExcludes: excluded,
           taskIndexes: [],
           reconcileDone,
           finishReconcile,
@@ -1509,7 +1556,22 @@ export async function prepareIsolated(
       // from the baseline tree; the worker still needs a directory.
       await fs.promises.mkdir(workerCwd, { recursive: true });
       group.taskIndexes.push(taskIndex);
-      translated[taskIndex] = { ...task, cwd: workerCwd };
+      translated[taskIndex] = {
+        ...task,
+        cwd: workerCwd,
+        // #62: prompts routinely name absolute source paths; the note
+        // teaches the copy mapping, the inline workspace guard refuses
+        // what the note does not catch.
+        appendSystemPrompt: [
+          ...task.appendSystemPrompt,
+          `Workspace: you are working in an isolated Git worktree copy of ${group.sourceRoot} at ${workerRoot}. Your working directory is ${workerCwd}. Paths under ${group.sourceRoot} in your instructions mean the same files in your copy: use ${workerRoot}/<same relative path>. Do not modify anything under ${group.sourceRoot} directly — write and edit calls there are refused. Your changes merge back into the original automatically when you finish.`,
+        ],
+        workspaceGuard: {
+          kind: "isolated",
+          sourceRoot: group.sourceRoot,
+          copyRoot: workerRoot,
+        },
+      };
     }
   } catch (error) {
     await undoPreparation();
@@ -1524,6 +1586,14 @@ export async function prepareIsolated(
     ): Promise<readonly TaskOutcome[]> {
       const results = outcomes;
       for (const group of groupsByRoot.values()) {
+        // Shell escapes (#62): the drift snapshot must observe the source
+        // before applyToSource mutates it — afterwards worker bash writes
+        // are indistinguishable from legitimate applies. It overlaps
+        // proposal collection (worker trees and refs only, never the
+        // source working tree) so annotation latency is unchanged; the
+        // promise self-catches and can never reject.
+        const driftPromise = detectSourceDrift(group, options.signal);
+        let drift: readonly string[] | undefined;
         try {
           const accepted = await collectProposals(
             group,
@@ -1531,10 +1601,34 @@ export async function prepareIsolated(
             results,
             options,
           );
+          drift = await driftPromise;
           await applyToSource(group, workers, results, accepted, options);
         } catch (error) {
+          // A group failure still owes the drift report: a worker's shell
+          // may have written the source whether or not its proposal
+          // applied. The promise self-catches, so this never throws.
+          drift = await driftPromise;
           log("isolated group reconciliation failed", error);
           await markGroupFailure(group, workers, results, error);
+        }
+        // Drift is only attributable to a worker that ran a shell: a task
+        // without bash cannot have written the source. Source changes
+        // with no shell-capable worker are the caller's own edits —
+        // already reported by the per-proposal conflict machinery — and
+        // must not be pinned on an innocent outcome.
+        if (drift !== undefined && drift.length > 0) {
+          for (const taskIndex of group.taskIndexes) {
+            const outcome = results[taskIndex];
+            if (
+              outcome?.uncertainFiles === true &&
+              outcome.integration !== undefined
+            ) {
+              results[taskIndex] = withIntegration(outcome, {
+                ...outcome.integration,
+                sourceDrift: drift,
+              });
+            }
+          }
         }
         try {
           await cleanupGroup(group, workers, results);

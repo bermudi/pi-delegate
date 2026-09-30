@@ -1132,6 +1132,10 @@ Three sibling tools share Delegate's machinery:
   tasks that may write or run commands but whose output is the answer,
   not the edits. A read-only task cannot use it — it needs no copy.
   Cannot use \`sessionId\` or \`resumeFrom\`.
+- In \`isolated\` and \`scratch\`, write/edit calls into the original tree
+  are refused — edit the same path inside the worker's copy — but shell
+  commands are not confined; drift a worker's shell caused in the original
+  is reported on its outcome.
 
 ## delegate_ticket — tickets
 Compact exposes poll/wait/cancel/answer/steer/interrupt. Full mode adds

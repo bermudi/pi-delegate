@@ -222,7 +222,22 @@ export async function prepareScratch(
       const workerCwd = path.join(copyRoot, path.relative(root, cwd));
       await fs.promises.mkdir(workerCwd, { recursive: true });
       workers.set(taskIndex, { taskIndex, copyRoot, retained: false });
-      translated[taskIndex] = { ...task, cwd: workerCwd };
+      translated[taskIndex] = {
+        ...task,
+        cwd: workerCwd,
+        // #62: prompts routinely name absolute source paths; the note
+        // teaches the copy mapping, the inline workspace guard refuses
+        // what the note does not catch.
+        appendSystemPrompt: [
+          ...task.appendSystemPrompt,
+          `Workspace: you are working in a disposable copy of ${root} at ${copyRoot}. Your working directory is ${workerCwd}. Paths under ${root} in your instructions mean the same files in your copy: use ${copyRoot}/<same relative path>. Do not modify anything under ${root} — write and edit calls there are refused. Every change you make is discarded when you finish; your final message is the result.`,
+        ],
+        workspaceGuard: {
+          kind: "scratch",
+          sourceRoot: root,
+          copyRoot,
+        },
+      };
     }
   } catch (error) {
     await fs.promises

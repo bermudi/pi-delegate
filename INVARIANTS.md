@@ -191,6 +191,10 @@ use any design that makes these properties true and testable.
   without changing the user's branch or index.
 - Each worker MUST be isolated from other workers' ordinary relative writes.
   Worker activity MUST terminate before its output is accepted for application.
+- Worker write/edit tool calls targeting the source tree outside the worker's
+  copy MUST be refused (isolated and scratch). Shell effects are not confined;
+  source drift observed during an isolated run in which a worker used a shell
+  MUST be reported on that worker's outcome.
 - Every successful proposal MUST have a durable recovery representation before
   reconciliation.
 - Proposals MUST reconcile in task order. Each proposal is all-or-nothing;

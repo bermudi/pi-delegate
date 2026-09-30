@@ -318,6 +318,23 @@ contract:
   (shared/scratch/isolated) and their admission semantics, session
   pools, `operationId` idempotency, spill, delivery once-ness,
   evidence-bearing telemetry rows.
+- **Workspace path guard (#62).** Isolated and scratch copies protect
+  relative writes; absolute paths into the original tree previously
+  sailed past the copy (observed live: workers edited the source tree
+  while reconcile reported `no_changes`). Every isolated/scratch child
+  now runs an inline `tool_call` guard — the only extension in its
+  loader besides allowlisted provider sources — that refuses
+  `write`/`edit` calls targeting the original source root outside the
+  worker's copy, naming the copy-mapped path to edit instead. Paths
+  outside the source root are untouched: the guard fixes the
+  copy-confusion, it is not a sandbox, and reads are never blocked. A
+  guard that fails to load fails the task — workers never run
+  unguarded. The child prompt carries a workspace note mapping source
+  paths to copy paths (appended under authored `systemPrompt`s too).
+  Shell commands remain unconfined: when source drift is observed
+  during an isolated run in which a worker used a shell, that worker's
+  `integration.sourceDrift` reports the source-relative paths —
+  evidence beside the proposal machinery, never silently applied.
 
 ## Compatibility posture
 

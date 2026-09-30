@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1656,6 +1657,297 @@ exec '${realGit}' "$@"
       }
       expect(next.isError).toBe(false);
       expect(next.text).toContain("SECOND-WRITER-DONE");
+    },
+  );
+
+  test(
+    "an isolated write to the absolute source path is refused and its mapped write applies",
+    async () => {
+      // Issue #62: real dogfood failure — a brief naming the source tree's
+      // absolute path made workers edit the source directly, and reconcile
+      // reported `no_changes · applied 0`. The guard must refuse the call
+      // with the copy-mapped path; a write there reconciles normally.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+      const sourceFile = join(dir, "guarded.txt");
+
+      let refusalSeen = "";
+      let mappedWrite = "";
+      const escapeThenObey: FauxResponseFactory = async (context) => {
+        const toolResults = context.messages.filter(
+          (m) => m.role === "toolResult",
+        );
+        if (toolResults.length === 0) {
+          return fauxAssistantMessage([
+            fauxToolCall("write", { path: sourceFile, content: "escaped" }),
+          ]);
+        }
+        if (toolResults.length === 1) {
+          refusalSeen = JSON.stringify(toolResults[0]);
+          const mapped = /Edit (\S+) instead/.exec(refusalSeen)?.[1];
+          if (mapped === undefined) return fauxAssistantMessage("NOT-REFUSED");
+          mappedWrite = mapped;
+          return fauxAssistantMessage([
+            fauxToolCall("write", { path: mapped, content: "in-copy" }),
+          ]);
+        }
+        return fauxAssistantMessage("RECOVERED");
+      };
+      subagents.respond([escapeThenObey, escapeThenObey, escapeThenObey]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "edit guarded.txt",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["write"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(refusalSeen).toContain("Refused:");
+      expect(refusalSeen).toContain("isolated copy");
+      // The refusal names the same file inside the worker's copy — which
+      // lives under the agent dir's delegate-isolated tree.
+      expect(mappedWrite).toContain("delegate-isolated");
+      expect(mappedWrite.endsWith("guarded.txt")).toBe(true);
+      // The mapped write landed in the worktree and reconciled into source.
+      expect(readFileSync(sourceFile, "utf8")).toBe("in-copy");
+      expect(result.text).toContain("RECOVERED");
+      expect(result.text).toMatch(/applied_unverified/);
+      // The refused call never touched a file: attribution carries the
+      // copy path, not the refused source path (#62).
+      const outcomes = (result.details as { results?: { attributedFiles?: string[] }[] }).results;
+      const attributed = outcomes?.[0]?.attributedFiles ?? [];
+      expect(attributed.some((file) => file === sourceFile)).toBe(false);
+      expect(attributed.some((file) => file === mappedWrite)).toBe(true);
+    },
+  );
+
+  test(
+    "a scratch write to the absolute source path is refused",
+    async () => {
+      // Same escape, disposable copy: the refusal names the scratch copy,
+      // and nothing reaches the source.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+      const sourceFile = join(dir, "guarded.txt");
+
+      let refusalSeen = "";
+      const escapeThenDone: FauxResponseFactory = async (context) => {
+        const toolResults = context.messages.filter(
+          (m) => m.role === "toolResult",
+        );
+        if (toolResults.length === 0) {
+          return fauxAssistantMessage([
+            fauxToolCall("edit", {
+              path: sourceFile,
+              oldText: "x",
+              newText: "escaped",
+            }),
+          ]);
+        }
+        refusalSeen = JSON.stringify(toolResults[0]);
+        return fauxAssistantMessage("SCRATCH-DONE");
+      };
+      subagents.respond([escapeThenDone, escapeThenDone]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "edit guarded.txt",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["edit"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(refusalSeen).toContain("Refused:");
+      expect(refusalSeen).toContain("disposable copy");
+      expect(existsSync(sourceFile)).toBe(false);
+      expect(result.text).toContain("SCRATCH-DONE");
+    },
+  );
+
+  test(
+    "isolated and scratch children get the workspace note with real roots",
+    async () => {
+      // The note teaches the copy mapping; it must reach the child even on
+      // an authored systemPrompt (appendSystemPrompt composes over both).
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+      const sourceRoot = realpathSync(dir);
+
+      const prompts = new Map<string, string>();
+      const capture: FauxResponseFactory = async (context) => {
+        const sys = context.messages.find((m) => m.role === "system");
+        const serialized = JSON.stringify(context.messages);
+        const key = serialized.includes("authored isolated task")
+          ? "authored"
+          : serialized.includes("scratch task")
+            ? "scratch"
+            : "isolated";
+        prompts.set(key, JSON.stringify(sys));
+        return fauxAssistantMessage("DONE");
+      };
+      subagents.respond([capture, capture, capture]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "isolated task",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["write"],
+          },
+          {
+            prompt: "scratch task",
+            cwd: dir,
+            workspace: "scratch",
+            tools: ["write"],
+          },
+          {
+            prompt: "authored isolated task",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["write"],
+            systemPrompt: "AUTHORED-BASE: verbatim.",
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(prompts.size).toBe(3);
+      const isolated = prompts.get("isolated") ?? "";
+      const scratch = prompts.get("scratch") ?? "";
+      const authored = prompts.get("authored") ?? "";
+      expect(isolated).toContain(
+        `isolated Git worktree copy of ${sourceRoot}`,
+      );
+      expect(isolated).toContain("delegate-isolated");
+      expect(isolated).toContain("write and edit calls there are refused");
+      expect(isolated).toContain("merge back into the original");
+      expect(scratch).toContain(`disposable copy of ${sourceRoot}`);
+      expect(scratch).toContain("delegate-scratch");
+      expect(scratch).toContain("discarded when you finish");
+      expect(authored).toContain("AUTHORED-BASE: verbatim.");
+      expect(authored).toContain(
+        `isolated Git worktree copy of ${sourceRoot}`,
+      );
+    },
+  );
+
+  test(
+    "an isolated worker's shell escape is reported as source drift",
+    async () => {
+      // The guard covers write/edit only; bash cannot be confined. A worker
+      // shell-writing the source tree leaves no proposal, so reconcile must
+      // diff the source against the baseline and report the drift on the
+      // outcome that ran a shell.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const escape: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("ESCAPED-DONE")
+          : fauxAssistantMessage([
+              fauxToolCall("bash", {
+                command: `printf 'escape\\n' > '${dir}/escaped.txt'`,
+              }),
+            ]);
+      subagents.respond([escape, escape]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "run a command",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["bash"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // The escape really happened — the point is reporting, not undo.
+      expect(readFileSync(join(dir, "escaped.txt"), "utf8")).toBe("escape\n");
+      expect(result.text).toContain("source drift:");
+      expect(result.text).toContain("escaped.txt");
+      expect(result.text).toContain("Shell commands are not confined");
+      const outcomes = (
+        result.details as {
+          results?: { integration?: { sourceDrift?: string[] } }[];
+        }
+      ).results;
+      expect(outcomes?.[0]?.integration?.sourceDrift).toContain("escaped.txt");
+    },
+  );
+
+  test(
+    "source drift is not pinned on a worker that never ran a shell",
+    async () => {
+      // Same drift signal, different attribution: the caller edits a source
+      // file mid-run while the isolated worker only writes inside its copy.
+      // The change may still conflict with the proposal, but the outcome
+      // must not carry sourceDrift — the worker had no shell.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      let workerStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        workerStarted = resolve;
+      });
+      let releaseWorker!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseWorker = resolve;
+      });
+      const gated: FauxResponseFactory = async () => {
+        workerStarted();
+        await gate;
+        return fauxAssistantMessage("CLEAN-DONE");
+      };
+      subagents.respond([gated]);
+
+      const dispatched = callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "observe only",
+            cwd: dir,
+            workspace: "isolated",
+            tools: ["write"],
+          },
+        ],
+      });
+      await started;
+      // Caller-side edit while the isolated worker is gated — the drift
+      // signal exists, but must not be attributed to a shell-less worker.
+      writeFileSync(join(dir, "caller-drift.txt"), "caller\n");
+      releaseWorker();
+      const result = await dispatched;
+
+      expect(result.isError).toBe(false);
+      expect(result.text).not.toContain("source drift:");
+      const outcomes = (
+        result.details as {
+          results?: { integration?: { sourceDrift?: string[] } }[];
+        }
+      ).results;
+      expect(outcomes?.[0]?.integration?.sourceDrift).toBeUndefined();
     },
   );
 });

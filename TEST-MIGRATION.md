@@ -548,7 +548,9 @@ gaps.
   read-only tasks reject before any provider call; a linked worktree
   rejects with the shared/isolated remedy; a scratch task does not
   conflict with an overlapping shared writer; copies from dead processes
-  are swept; copies land under the agent dir, never beside the source.
+  are swept; copies land under the agent dir, never beside the source;
+  an `edit` to the absolute source path is refused naming the copy-mapped
+  path and leaves the source untouched (#62).
 - **Gap:** nested repositories whose `.git` files use absolute gitdirs
   (accepted risk: an ordinary copy preserves them, and scratch is not a
   security boundary).
@@ -571,6 +573,14 @@ gaps.
   working-tree edits as a per-path conflict (verify-before-write); an
   identical second proposal reports `applied_unverified` with empty
   `appliedFiles` and already-present wording, never a fresh apply.
+  Workspace guard (#62): a `write` to the absolute source path is refused
+  naming the copy-mapped path, the mapped write reconciles normally, and
+  the refused path is not attributed; scratch gets the same refusal; both
+  surfaces' child prompts carry the workspace note with real roots
+  (authored `systemPrompt`s included); a worker's shell write into the
+  source is reported as `sourceDrift` on its integration and renders as
+  `source drift:` — while a worker that never ran a shell is not blamed
+  for drift it could not have caused.
 - **Gap:** binary-content proposals end-to-end — patches always carry
   `--binary` and the failed-apply tests fault that invocation, but no test
   pushes actual non-text content through a live proposal; index/branch
