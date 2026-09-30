@@ -61,7 +61,11 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     expect(polled.text).toContain("SAVED-OUTPUT");
     expect((await callDelegateTicket(next, { action: "wait", ticket, timeoutMs: 10 })).text)
       .toContain("SAVED-OUTPUT");
-    expect((await callDelegateTicket(next, { action: "poll" })).text).toContain(ticket);
+    // #64: the record belongs to the dispatching session — the bare roster
+    // hides it behind the count line; explicit-id poll above still reads it.
+    const roster = await callDelegateTicket(next, { action: "poll" });
+    expect(roster.text).not.toContain(ticket);
+    expect(roster.text).toContain("(1 ticket(s) from other sessions not shown");
     expect((await callDelegateTicket(next, { action: "resume", ticket })).isError).toBe(true);
     expect((await callDelegateTicket(next, { action: "answer", ticket, taskId: "task-1", questionId: "q-1", answer: "x" })).isError).toBe(true);
     const disk = statSync(join(first.cwd, "delegate-tickets", `${ticket}.json`));
@@ -222,8 +226,11 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       expect(polled.text).toMatch(/effects are unknown|may have changed/i);
       expect((await callDelegateTicket(next, { action: "wait", ticket })).text)
         .toMatch(/effects are unknown|may have changed/i);
+      // #64: the bare roster scopes to this session — the record hides
+      // behind the count line while its warning stays on the explicit
+      // poll and wait above.
       expect((await callDelegateTicket(next, { action: "poll" })).text)
-        .toMatch(/effects are unknown|may have changed/i);
+        .toContain("(1 ticket(s) from other sessions not shown");
     } finally {
       release?.();
     }
@@ -285,7 +292,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     expect(headerPoll.text).not.toContain("→ To retry:");
   });
 
-  test("a fully recorded quarantined cancellation warns on the recovered roster", async () => {
+  test("a fully recorded quarantined cancellation warns on the recovered view", async () => {
     const first = await openAt();
     const model = await installSubagentModel(first);
     let release!: () => void;
@@ -315,12 +322,13 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       }
       expect(saved?.outcomes[0]?.quarantined).toBe(true);
       const next = await openAt(first.cwd);
-      const roster = await callDelegateTicket(next, { action: "poll" });
-      expect(roster.text).toContain(ticket);
-      expect(roster.text).toMatch(/termination was unconfirmed|may still have changed/i);
-      expect(roster.text).toMatch(/inspect the workspace before new writes/i);
-      expect((await callDelegateTicket(next, { action: "poll", ticket })).text)
-        .toMatch(/termination was unconfirmed/i);
+      // #64: the warning lives on the explicit view — the bare roster
+      // scopes to this session and hides the record behind the count line.
+      const polled = await callDelegateTicket(next, { action: "poll", ticket });
+      expect(polled.text).toMatch(/termination was unconfirmed|may still have changed/i);
+      expect(polled.text).toMatch(/inspect the workspace before new writes/i);
+      expect((await callDelegateTicket(next, { action: "poll" })).text)
+        .toContain("(1 ticket(s) from other sessions not shown");
     } finally {
       release?.();
     }

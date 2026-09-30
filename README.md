@@ -45,6 +45,9 @@ is an operator setting, not a model-family switch.
 Choose before launching work: `/reload` cancels active workers and waits for
 safe cleanup, as it does for any extension reload.
 
+The manual (`tasks: []`) documents only the selected surface's controls and,
+on compact, ends with the list of what full adds.
+
 Full mode adds task ids/display labels, explicit tools/base-prompt overrides,
 session reuse, transcript resume, deadlines and dependencies; batch token
 budgets/retry keys; ticket pause/resume/tail, wait-any, timed waits and explicit
@@ -206,7 +209,8 @@ wait, wait-any, pause/resume and tail controls below require full mode.
 
 `delegate_ticket({ ticket, action, ... })` operates on a ticket:
 
-- `poll` — the ticket roster, or one ticket's task list and settled results.
+- `poll` — this session's ticket roster, or one ticket's task list and
+  settled results.
 - `wait` — block until the ticket settles; `timeoutMs` bounds the wait (unset
   means wait for settlement) and a `tickets` array watches several, returning
   when the first watched ticket settles — a one-id list folds into the
@@ -236,7 +240,10 @@ Tickets are durable journals under `<agentDir>/delegate-tickets/` with
 owner-only permissions. Settled outcomes are recoverable after a restart via
 `poll`/`wait`; a snapshot that was running recovers as `interrupted` — running
 work is never resumed automatically. `operationId` deduplication and delivered
-wakes do not survive restart; only the recorded outcomes do.
+wakes do not survive restart; only the recorded outcomes do. The bare roster
+and unknown-ticket hints list only the current session's tickets — records
+owned by sibling sessions stay readable by explicit id and are counted in a
+trailing note.
 
 ## Worker questions
 

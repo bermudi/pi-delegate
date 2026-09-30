@@ -1047,15 +1047,12 @@ function prepareSessionArguments(value: unknown): SessionToolArguments {
   return args as SessionToolArguments;
 }
 
-const help = `# Delegate Manual
+// The manual is assembled per surface (#64): shared sections stay
+// single-sourced, while the compact edition documents only the controls
+// the compact schemas accept — naming a rejected field teaches a call
+// that fails. The full edition carries every section.
 
-Three sibling tools share Delegate's machinery:
-- \`delegate\` dispatches subagent tasks, synchronously or on an async ticket.
-- \`delegate_ticket\` operates on async tickets: poll, wait, cancel, pause,
-  resume, answer, steer, interrupt, tail.
-- \`delegate_session\` lists and closes pooled subagent sessions.
-
-## Compact and full interfaces
+const HELP_INTERFACES = `## Compact and full interfaces
 - Compact is the default. Set \`"surface": "full"\` in user-global
   delegate.json and run /reload to enable advanced controls. Surface selection
   never depends on model family, and changing the file does not change the
@@ -1067,9 +1064,9 @@ Three sibling tools share Delegate's machinery:
   Use the profile instead of repeating those settings in ordinary calls;
   full mode still accepts explicit one-off overrides.
 - Removed cross-harness aliases are not accepted. Use canonical fields and
-  exact built-in or authored profile names.
+  exact built-in or authored profile names.`;
 
-## delegate — ordinary dispatch
+const HELP_DISPATCH = `## delegate — ordinary dispatch
 - \`tasks\` is required: [] shows this manual; a nonempty array runs work.
   Every task count defaults to background execution, returning a ticket and
   automatically delivering results. Do not poll in a loop. Pass
@@ -1082,9 +1079,9 @@ Three sibling tools share Delegate's machinery:
   checks and small edits yourself. Only each task's final message returns,
   so ask for the answer shape you need. Run reads in parallel; keep
   dependent edits in one shared-workspace call (they run in task order) and
-  use \`isolated\` only for independent edits.
+  use \`isolated\` only for independent edits.`;
 
-## delegate — full-mode controls
+const HELP_FULL_CONTROLS = `## delegate — full-mode controls
 - Task \`id\` correlates results; \`description\` is a display label only.
   \`tools\` and \`systemPrompt\` override profile defaults. Tool groups:
   \`*\` selects read/bash/edit/write; \`ro\` selects read/grep/find/ls.
@@ -1099,7 +1096,9 @@ Three sibling tools share Delegate's machinery:
   the positive-integer ceiling; running tasks finish normally.
 - \`operationId\` is a bounded host-lifetime retry key: same id/request reuses
   the original execution/result, changed request conflicts. Unkeyed calls
-  always execute independently; it is not exactly-once crash recovery.
+  always execute independently; it is not exactly-once crash recovery.`;
+
+const HELP_SHARED_RULES = `## Models, profiles, and context
 - Models and effort: you never pick either — task \`model\`, \`thinking\`,
   and \`reasoning_effort\` fields are rejected. Tasks run on the parent's
   model at the parent's effort; a named agent may instead run on the model
@@ -1117,9 +1116,9 @@ Three sibling tools share Delegate's machinery:
   \`tools\`, profile frontmatter \`tools\`, and the mirrored parent
   set alike.
 - Children never inherit parent conversation history. Supply a self-contained
-  brief; project instructions and child-owned pooled/resumed history still apply.
+  brief; project instructions and child-owned pooled/resumed history still apply.`;
 
-## Workspaces
+const HELP_WORKSPACES = `## Workspaces
 - \`shared\` (default): the task edits the caller's tree directly. Writers
   whose scope overlaps in one call run one at a time, in task order — each
   sees its predecessor's changes. Use it for dependent edits.
@@ -1135,14 +1134,27 @@ Three sibling tools share Delegate's machinery:
 - In \`isolated\` and \`scratch\`, write/edit calls into the original tree
   are refused — edit the same path inside the worker's copy — but shell
   commands are not confined; drift a worker's shell caused in the original
-  is reported on its outcome.
+  is reported on its outcome.`;
 
-## delegate_ticket — tickets
+const HELP_TICKET_SHARED = `- Canonical task addresses: anywhere \`taskId\` is taken it accepts the
+  compound \`"<ticket>#<task>"\` — e.g. \`"t-1a2b#task-1"\` — and the
+  separate \`ticket\` field is then optional (the address carries it).
+  Wakes, receipts, and task sections render tasks this way so the parent
+  can copy the address verbatim.
+- Restart recovery: saved tickets stay pollable across host restarts, and
+  a \`running\` record is interrupted at startup only when its owning
+  process is provably gone (different boot, or a dead pid) — \`owning
+  session ended before settlement\`. A sibling session's live ticket is
+  left alone, and recovery never restarts work.
+- The bare poll roster and unknown-ticket hints list only this session's
+  tickets; a settled ticket from another session stays readable by id.`;
+
+const HELP_TICKETS_FULL = `## delegate_ticket — tickets
 Compact exposes poll/wait/cancel/answer/steer/interrupt. Full mode adds
 pause/resume/tail, wait-any tickets, timeoutMs, steerId, offset and waitMs.
 
-- \`{ action: "poll" }\` — the ticket roster, or one ticket's status with
-  \`ticket\`. Never blocks.
+- \`{ action: "poll" }\` — this session's ticket roster, or one ticket's
+  status with \`ticket\`. Never blocks.
 - \`{ action: "wait", ticket }\` — block until the ticket settles;
   \`timeoutMs\` (full mode, milliseconds) detaches only the
   waiter, the work continues. \`tickets: [ids]\` watches several and
@@ -1184,30 +1196,95 @@ pause/resume/tail, wait-any tickets, timeoutMs, steerId, offset and waitMs.
   only still-running task (or the ticket's only task). Sources: the
   task's durable transcript for file-backed runs, the captured activity
   text for scratch/isolated ones — raw transcripts are never exposed.
-- Canonical task addresses: anywhere \`taskId\` is taken it accepts the
-  compound \`"<ticket>#<task>"\` — e.g. \`"t-1a2b#task-1"\` — and the
-  separate \`ticket\` field is then optional (the address carries it).
-  Wakes, receipts, and task sections render tasks this way so the parent
-  can copy the address verbatim.
-- Restart recovery: saved tickets stay pollable across host restarts, and
-  a \`running\` record is interrupted at startup only when its owning
-  process is provably gone (different boot, or a dead pid) — \`owning
-  session ended before settlement\`. A sibling session's live ticket is
-  left alone, and recovery never restarts work.
+${HELP_TICKET_SHARED}`;
 
-## delegate_session — sessions
+const HELP_TICKETS_COMPACT = `## delegate_ticket — tickets
+Compact exposes poll/wait/cancel/answer/steer/interrupt.
+
+- \`{ action: "poll" }\` — this session's ticket roster, or one ticket's
+  status with \`ticket\`. Never blocks.
+- \`{ action: "wait", ticket }\` — block until the ticket settles; a new
+  worker question or a task interruption also ends the wait.
+- \`{ action: "cancel", ticket }\` — previews without \`force\`; with
+  \`force: true\` the ticket is cancelled now and in-flight tasks are asked
+  to stop (cooperative; no rollback).
+- \`{ action: "answer", ticket, taskId, questionId, answer }\` — answer a
+  worker's pending \`ask_parent\` question (all four fields required).
+  Poll to see outstanding questions. Only async workers can ask.
+- \`{ action: "steer", ticket, taskId, message }\` — send a message into a
+  running task: \`taskId\` defaults to the only still-running task; a
+  retry-safe key is derived from this call and the receipt names it. The
+  receipt says what happened: \`steered\` (merged at the child's next
+  turn boundary), \`activated\` (queued, opens the next turn),
+  \`duplicate\`, or \`not-applied\` (settled/unknown target).
+- \`{ action: "interrupt", ticket, taskId? }\` — abort one task's
+  in-flight turn, cooperatively. The task settles \`interrupted\` —
+  partial output kept, the worker resumable (a pooled session returns
+  reusable; a fresh task keeps its transcript + resume hint). Distinct
+  from \`cancel\`, which tears the whole ticket down. \`taskId\`
+  defaults to the only still-running task; interrupting a settled,
+  already-interrupted, or not-yet-running task receipts \`not-applied\`.
+${HELP_TICKET_SHARED}`;
+
+const HELP_SESSIONS = `## delegate_session — sessions
 - A task with \`sessionId\` keeps its session live after it finishes; a later
   task with the same id continues that conversation. The session's cwd,
   tools, thinking, model, and base prompt are frozen at first use —
   incompatible reuse is rejected.
 - \`{ action: "list" }\` lists live sessions; \`{ action: "close", sessionId }\`
-  closes one.
+  closes one.`;
 
-## Telemetry
+const HELP_TELEMETRY = `## Telemetry
 - Disabled by default; enable only via "telemetry" in delegate.json.
 - Local content-free metadata only: batch and task outcome records in a
   SQLite database at telemetry.dbPath, DELEGATE_TELEMETRY_DB, or
-  <agentDir>/delegate-usage.db. Failures never block work.
+  <agentDir>/delegate-usage.db. Failures never block work.`;
+
+function helpIntro(ticketActions: string): string {
+  return `# Delegate Manual
+
+Three sibling tools share Delegate's machinery:
+- \`delegate\` dispatches subagent tasks, synchronously or on an async ticket.
+- \`delegate_ticket\` operates on async tickets: ${ticketActions}.
+- \`delegate_session\` lists and closes pooled subagent sessions.`;
+}
+
+const help = `${helpIntro("poll, wait, cancel, pause,\n  resume, answer, steer, interrupt, tail")}
+
+${HELP_INTERFACES}
+
+${HELP_DISPATCH}
+
+${HELP_FULL_CONTROLS}
+
+${HELP_SHARED_RULES}
+
+${HELP_WORKSPACES}
+
+${HELP_TICKETS_FULL}
+
+${HELP_SESSIONS}
+
+${HELP_TELEMETRY}
+`;
+
+const compactHelp = `${helpIntro("poll, wait, cancel, answer, steer, interrupt")}
+
+${HELP_INTERFACES}
+
+${HELP_DISPATCH}
+
+${HELP_SHARED_RULES}
+
+${HELP_WORKSPACES}
+
+${HELP_TICKETS_COMPACT}
+
+${HELP_SESSIONS}
+
+${HELP_TELEMETRY}
+
+Full surface adds: task id/description, tools/systemPrompt overrides, sessionId/resumeFrom, dependsOn, deadlineMs, tokenBudget, operationId, pause/resume/tail (with offset/waitMs), wait on several tickets, timeoutMs, steerId — set "surface": "full" in user-global delegate.json and /reload.
 `;
 
 /**
@@ -2344,7 +2421,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
               content: [
                 {
                   type: "text" as const,
-                  text: `Current surface: ${surface}.\n\n` + help + customProfileSection(ctx),
+                  text:
+                    `Current surface: ${surface}.\n\n` +
+                    // #64: the manual documents only the controls the
+                    // selected surface's schemas accept.
+                    (surface === "full" ? help : compactHelp) +
+                    customProfileSection(ctx),
                 },
               ],
               details: ({ mode: "help" as const } satisfies HelpDetails),
@@ -2651,7 +2733,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
           // `toolCallId` seeds the derived steerId (#44) — an omitted key
           // becomes `steer:<toolCallId>`, so a transport-level retry of the
           // same tool call replays rather than re-injecting.
-          const result = await handleTicketRpc(call, tickets, signal, toolCallId);
+          const result = await handleTicketRpc(
+            call,
+            tickets,
+            signal,
+            toolCallId,
+            // #64: the roster and known-ticket lists show only this
+            // session's tickets; explicit ids still reach others.
+            ctx.sessionManager.getSessionId(),
+          );
           return {
             content: [{ type: "text" as const, text: result.text }],
             details: ({

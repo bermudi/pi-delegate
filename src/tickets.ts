@@ -416,6 +416,31 @@ function rosterView(tickets: readonly Ticket[]): string {
 }
 
 /**
+ * The roster is this Pi session's work (#64): the store also holds
+ * journaled records owned by sibling sessions (live tickets still running
+ * elsewhere, settled records kept pollable), and listing those would read
+ * as work this session owns. A record with a different — or missing —
+ * owner sessionId is another session's; explicit-id poll/wait/tail still
+ * reach it (settled results stay pollable).
+ */
+function ownTickets(
+  store: TicketStore,
+  sessionId: string | undefined,
+): { mine: Ticket[]; hidden: number } {
+  const all = store.list();
+  const mine = all.filter(
+    (ticket) => ticket.owner?.sessionId === sessionId,
+  );
+  return { mine, hidden: all.length - mine.length };
+}
+
+function hiddenTicketNote(hidden: number): string {
+  return hidden > 0
+    ? `(${hidden} ticket(s) from other sessions not shown; poll one by id to read it.)`
+    : "";
+}
+
+/**
  * The canonical `<ticket>#<task>` address (#53) — rendered wherever a
  * task is named as an addressee so the parent can copy it verbatim into
  * any taskId field.
@@ -424,12 +449,19 @@ function taskAddress(ticketId: string, taskId: string): string {
   return `${ticketId}#${taskId}`;
 }
 
-/** Unknown-ticket errors name the live tickets — the available names. */
-function knownTickets(store: TicketStore): string {
-  const live = store.list().map((ticket) => `"${ticket.id}"`);
-  return live.length === 0
-    ? "There are no tickets right now — dispatch creates them."
-    : `Known tickets: ${live.join(", ")}.`;
+/**
+ * Unknown-ticket errors name this session's tickets (#64, same scoping
+ * as the roster): other sessions' records stay readable by explicit id
+ * but are not suggested as names this session can act on.
+ */
+function knownTickets(store: TicketStore, sessionId: string | undefined): string {
+  const { mine, hidden } = ownTickets(store, sessionId);
+  const suffix = hiddenTicketNote(hidden);
+  const base =
+    mine.length === 0
+      ? "There are no tickets right now — dispatch creates them."
+      : `Known tickets: ${mine.map((ticket) => `"${ticket.id}"`).join(", ")}.`;
+  return suffix === "" ? base : `${base} ${suffix}`;
 }
 
 /**
@@ -1900,9 +1932,17 @@ export async function handleTicketRpc(
   signal: AbortSignal | undefined,
   /** The calling tool call's id — seeds the derived steerId (#44). */
   toolCallId = "",
+  /** The calling Pi session's id — scopes roster/known-ticket listings (#64). */
+  sessionId?: string,
 ): Promise<TicketRpcResult> {
   if (call.action === "poll" && call.ticket === undefined) {
-    return { text: rosterView(store.list()), isError: false };
+    const { mine, hidden } = ownTickets(store, sessionId);
+    const roster = rosterView(mine);
+    const note = hiddenTicketNote(hidden);
+    return {
+      text: note === "" ? roster : `${roster}\n${note}`,
+      isError: false,
+    };
   }
   // Canonical task addresses (#53): a taskId of the form
   // "<ticket>#<task>" carries its own ticket — the ticket field is
@@ -1948,7 +1988,7 @@ export async function handleTicketRpc(
       return {
         text:
           `Steer "${steerId ?? ""}": not-applied — ticket '${ticketName ?? ""}' ` +
-          `is unknown; nothing was sent. ${knownTickets(store)}` +
+          `is unknown; nothing was sent. ${knownTickets(store, sessionId)}` +
           (derivedSteer ? " (steerId derived from this call's tool-call id)" : ""),
         isError: false,
         steer: {
@@ -1969,7 +2009,7 @@ export async function handleTicketRpc(
       return {
         text:
           `Interrupt on ticket '${ticketName ?? ""}': not-applied — the ticket ` +
-          `is unknown; nothing was aborted. ${knownTickets(store)}`,
+          `is unknown; nothing was aborted. ${knownTickets(store, sessionId)}`,
         isError: false,
         interrupt: {
           ticket: ticketName ?? "",
@@ -1990,7 +2030,7 @@ export async function handleTicketRpc(
       return {
         text:
           `Ticket ${missing.map((id) => `'${id}'`).join(", ")} not found. ` +
-          knownTickets(store),
+          knownTickets(store, sessionId),
         isError: true,
       };
     }
@@ -2037,7 +2077,7 @@ export async function handleTicketRpc(
   }
   if (!ticket) {
     return {
-      text: `Ticket '${ticketName ?? ""}' not found. ${knownTickets(store)}`,
+      text: `Ticket '${ticketName ?? ""}' not found. ${knownTickets(store, sessionId)}`,
       isError: true,
     };
   }

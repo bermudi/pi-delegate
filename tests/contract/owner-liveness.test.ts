@@ -310,4 +310,69 @@ describe("owner-liveness startup recovery (issue #54)", () => {
       release();
     }
   });
+
+  test("the bare roster lists only this session's tickets; explicit ids still reach others", async () => {
+    // #64: a recovered record belongs to the Pi session that dispatched it —
+    // the roster and unknown-ticket hints scope to the calling session's id,
+    // while any ticket stays readable by explicit id.
+    const first = await openAt();
+    const provider = await installSubagentModel(first);
+    // Distinct cwds: two gated shared writers would otherwise trip the
+    // same-repo admission conflict on the second dispatch.
+    mkdirSync(join(first.cwd, "w-a"));
+    mkdirSync(join(first.cwd, "w-b"));
+    const sibling = await dispatchRunning(first, provider, join(first.cwd, "w-a"));
+    const ownerless = await dispatchRunning(first, provider, join(first.cwd, "w-b"));
+    try {
+      // A row whose owner carries no session id cannot be attributed to the
+      // calling session either — it hides the same way.
+      rewriteJournal(first.cwd, ownerless.ticket, (row) => {
+        delete row.owner!.sessionId;
+      });
+      const next = await openAt(first.cwd);
+      const nextProvider = await installSubagentModel(next);
+      nextProvider.respond([fauxAssistantMessage("OWN-OUTPUT")]);
+      const dispatched = await callDelegate(next, {
+        tasks: [{ prompt: "own ticket" }],
+        async: true,
+      });
+      const own = ticketIdOf(dispatched.text);
+      const settled = await callDelegateTicket(next, {
+        action: "wait",
+        ticket: own,
+        timeoutMs: 5000,
+      });
+      expect(settled.isError).toBe(false);
+
+      const roster = await callDelegateTicket(next, { action: "poll" });
+      expect(roster.isError).toBe(false);
+      expect(roster.text).toContain(own);
+      expect(roster.text).not.toContain(sibling.ticket);
+      expect(roster.text).not.toContain(ownerless.ticket);
+      expect(roster.text).toContain(
+        "(2 ticket(s) from other sessions not shown; poll one by id to read it.)",
+      );
+
+      // Explicit id still reaches a ticket this session does not own.
+      const explicit = await callDelegateTicket(next, {
+        action: "poll",
+        ticket: sibling.ticket,
+      });
+      expect(explicit.isError).toBe(false);
+      expect(explicit.text).toContain("running");
+
+      // Unknown-ticket hints never suggest another session's ids.
+      const unknown = await callDelegateTicket(next, {
+        action: "poll",
+        ticket: "nope-64",
+      });
+      expect(unknown.isError).toBe(true);
+      expect(unknown.text).toContain(own);
+      expect(unknown.text).not.toContain(sibling.ticket);
+      expect(unknown.text).not.toContain(ownerless.ticket);
+    } finally {
+      sibling.release();
+      ownerless.release();
+    }
+  });
 });

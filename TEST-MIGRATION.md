@@ -82,6 +82,11 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   `surface.test.ts` also rejects malformed supplied task lists instead
   of discarding them during flat recovery, and verifies omitted/true async
   operation equivalence versus explicit-false conflict.
+- **Surface-scoped manual (#64):** `surface.test.ts` proves the compact
+  manual keeps the shared sections yet never names a full-only control as
+  callable (no full-mode-controls section, no pause/resume/tail/timed-wait/
+  steerId docs) and closes with the "Full surface adds" signpost; the full
+  manual keeps every section.
 - **Provenance:** user-approved simplification supersedes #35/#41/#43/#44
   alias acceptance and cardinality defaults.
 
@@ -1208,6 +1213,12 @@ the never-resume invariant is unchanged.
   left alone. `tests/contract/recovery.test.ts` models cold starts by
   orphaning the journaled owner pid — a same-process second boundary is
   a live sibling under #54, not a restart.
+- **Session-scoped roster (#64):** `owner-liveness.test.ts` proves the bare
+  poll roster and unknown-ticket hints list only records whose owner
+  sessionId is the calling session's — a sibling-owned and an ownerless
+  record hide behind the trailing "from other sessions" count, this
+  session's own ticket lists, and explicit-id poll still reads a hidden
+  ticket (settled records stay pollable per SPEC axiom 2).
 
 ### Wait-any (v3, #58)
 

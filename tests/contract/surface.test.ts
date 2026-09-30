@@ -45,6 +45,49 @@ describe("compact/full delegate surface", () => {
     expect(manual.text).toContain("/reload");
   });
 
+  test("the compact manual documents only compact-accepted controls and signposts the full delta", async () => {
+    // #64: a compact caller reading about a full-only control would issue a
+    // call the schema rejects — the manual it sees must not name them as
+    // usable. The delta is still signposted so the opt-in is discoverable.
+    const session = await open();
+    const manual = await callDelegate(session, { tasks: [] });
+    expect(manual.text).toContain("Current surface: compact");
+    for (const section of [
+      "## delegate — ordinary dispatch",
+      "## Models, profiles, and context",
+      "## Workspaces",
+      "## delegate_ticket — tickets",
+      "## delegate_session — sessions",
+      "## Telemetry",
+    ]) {
+      expect(manual.text).toContain(section);
+    }
+    // No full-only control is documented as callable.
+    expect(manual.text).not.toContain("## delegate — full-mode controls");
+    expect(manual.text).not.toContain('action: "pause"');
+    expect(manual.text).not.toContain('"pause" | "resume"');
+    expect(manual.text).not.toContain('action: "tail"');
+    expect(manual.text).not.toContain("steerId?");
+    expect(manual.text).not.toContain("watches several");
+    expect(manual.text).not.toContain("`timeoutMs`");
+    expect(manual.text).not.toContain("char offset into");
+    // The closing line names what full adds and how to enable it.
+    expect(manual.text).toContain("Full surface adds:");
+    expect(manual.text).toContain('"surface": "full"');
+  });
+
+  test("the full manual keeps the full-mode controls and every ticket action", async () => {
+    const session = await open("full");
+    const manual = await callDelegate(session, { tasks: [] });
+    expect(manual.text).toContain("Current surface: full");
+    expect(manual.text).toContain("## delegate — full-mode controls");
+    expect(manual.text).toContain('"pause" | "resume"');
+    expect(manual.text).toContain('action: "tail"');
+    expect(manual.text).toContain("steerId");
+    expect(manual.text).toContain("watches several");
+    expect(manual.text).not.toContain("Full surface adds:");
+  });
+
   test("full selection changes declarations without introducing extra tool names", async () => {
     const compact = await open();
     const full = await open("full");

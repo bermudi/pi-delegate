@@ -190,8 +190,11 @@ mid-flight the parent can steer. The grammar:
   cancel, answer, steer, and interrupt, with their required addressing and
   payload fields; full mode also exposes pause/resume/tail, wait-any
   `tickets`, `timeoutMs`, `steerId`, `offset`, and `waitMs`.
-  Session list/close remain available in both modes. The manual explains how
-  to enable full mode and all retained advanced features.
+  Session list/close remain available in both modes. The manual itself
+  is scoped to the selected surface (#64): the compact edition documents
+  only controls the compact schema accepts — it must not teach a call
+  that rejects — and closes with a line naming what full adds and how
+  to enable it; the full edition carries the complete controls.
 - **Description is a feature, not an alias.** The optional task display label
   remains available in full mode; it is not a task correlation id.
 - **Conversation and model boundaries remain closed.** Parent history is
@@ -335,6 +338,14 @@ contract:
   during an isolated run in which a worker used a shell, that worker's
   `integration.sourceDrift` reports the source-relative paths —
   evidence beside the proposal machinery, never silently applied.
+- **Session-scoped roster (#64).** The ticket store also holds
+  journaled records owned by other Pi sessions — live sibling tickets
+  still running elsewhere and settled records kept pollable (axiom 2).
+  The bare `poll` roster and unknown-ticket hints list only records
+  whose owner `sessionId` is the calling session's — a record with a
+  different or missing owner session is another session's — and count
+  the hidden remainder in a trailing note teaching explicit-id poll.
+  Naming a ticket by id reaches it unchanged regardless of owner.
 
 ## Compatibility posture
 
