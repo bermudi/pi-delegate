@@ -308,7 +308,7 @@ test(
     // Work-order §3d.8 + #63: `delegate N tasks`, one line per task
     // showing its label — description, then caller id, then agent, then
     // `inline` (compact callers cannot set ids, so a positional task-N is
-    // noise) — and the first ~80 chars of its prompt (cut at a word
+    // noise) — and the first ~86 chars of its prompt (cut at a word
     // boundary), `… and K more` past four, `delegate manual` for an empty
     // list — and deliberately static: no spinner, timers, or live state.
     session = await openDelegateBoundary();
@@ -316,26 +316,26 @@ test(
 
     expect(render({ tasks: [] })).toBe("delegate manual");
     expect(render({ tasks: [{ prompt: "hello world" }] })).toBe(
-      "delegate 1 task\n  inline  hello world",
+      "delegate 1 task\n  ▸ inline  hello world",
     );
     // A caller-provided id replaces the fallback label; agent labels
     // compact tasks; description wins over both.
     expect(render({ tasks: [{ id: "alpha", prompt: "x" }] })).toBe(
-      "delegate 1 task\n  alpha  x",
+      "delegate 1 task\n  ▸ alpha  x",
     );
     expect(render({ tasks: [{ agent: "scout", prompt: "x" }] })).toBe(
-      "delegate 1 task\n  scout  x",
+      "delegate 1 task\n  ▸ scout  x",
     );
     expect(
       render({
         tasks: [{ id: "alpha", agent: "scout", description: "scan the tree", prompt: "x" }],
       }),
-    ).toBe("delegate 1 task\n  scan the tree  x");
+    ).toBe("delegate 1 task\n  ▸ scan the tree  x");
     const four = render({
       tasks: [1, 2, 3, 4].map((n) => ({ prompt: `prompt ${n}` })),
     });
     expect(four).toContain("delegate 4 tasks");
-    expect(four).toContain("  inline  prompt 4");
+    expect(four).toContain("  ▸ inline  prompt 4");
     expect(four).not.toContain("… and");
     // Labels pad to a common width so prompt previews align.
     const padded = render({
@@ -345,17 +345,17 @@ test(
       ],
     });
     const paddedLines = padded.split("\n");
-    expect(paddedLines[1]).toMatch(/^  a\s+  first$/);
-    expect(paddedLines[2]).toMatch(/^  longer-label  second$/);
+    expect(paddedLines[1]).toMatch(/^  ▸ a\s+  first$/);
+    expect(paddedLines[2]).toMatch(/^  ▸ longer-label  second$/);
     const six = render({
       tasks: [1, 2, 3, 4, 5, 6].map((n) => ({ prompt: `prompt ${n}` })),
     });
     expect(six).toContain("  … and 2 more");
     expect(six).not.toContain("prompt 5");
-    // A ~80-char preview with an ellipsis; long prompts stay one line.
+    // A ~86-char preview with an ellipsis; long prompts stay one line.
     const long = render({ tasks: [{ prompt: "p".repeat(200) }] });
     const previewLine = long.split("\n")[1]!;
-    expect(previewLine.length).toBeLessThanOrEqual(2 + 16 + 2 + 80);
+    expect(previewLine.length).toBeLessThanOrEqual(2 + 16 + 2 + 86);
     expect(previewLine).toContain("…");
     // The cut lands between words when the prompt has them.
     const words = render({ tasks: [{ prompt: "alpha ".repeat(30) }] });

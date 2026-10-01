@@ -57,9 +57,11 @@ const COLLAPSED_LINE_LIMIT = 110;
 /**
  * Call-row prompt preview budget: with label and indent it keeps each
  * task to one line on a ~100-column terminal, and `Text` soft-wraps at
- * word boundaries on narrower ones.
+ * word boundaries on narrower ones. Sized so the boundary cut around a
+ * ~30-char path token keeps its leading directory instead of dropping
+ * it whole.
  */
-const CALL_PREVIEW_LIMIT = 80;
+const CALL_PREVIEW_LIMIT = 86;
 /** Call-row labels align to the longest shown, never wider than this. */
 const CALL_LABEL_WIDTH = 16;
 /** Result-line labels truncate so the summary keeps its budget. */
@@ -272,10 +274,11 @@ export function renderDelegateCall(
     Math.max(...shown.map((entry) => entry.label.length)),
   );
   const lines = [
-    theme.fg(
-      "toolTitle",
-      theme.bold(`delegate ${tasks.length} task${tasks.length === 1 ? "" : "s"}`),
-    ),
+    theme.fg("toolTitle", theme.bold("delegate ")) +
+      theme.fg(
+        "accent",
+        `${tasks.length} task${tasks.length === 1 ? "" : "s"}`,
+      ),
   ];
   for (const { task, label } of shown) {
     const preview =
@@ -284,10 +287,13 @@ export function renderDelegateCall(
         : task.resumeFrom !== undefined
           ? `↻${resumeTagOf(task.resumeFrom)}`
           : "(no prompt)";
-    // Labels bright, previews muted — the same anchor the collapsed
-    // result rows use, so a call and its outcomes read as one shape.
+    // An accent dispatch arrow per task (the result rows answer with
+    // their ✓/✗ glyphs), bright labels, dim previews: three depths so
+    // the eye can scan agents apart from work on the tinted card.
     lines.push(
-      theme.fg("toolTitle", `  ${label.padEnd(width)}  `) +
+      theme.fg("muted", "  ") +
+        theme.fg("accent", "▸ ") +
+        theme.fg("toolTitle", `${label.padEnd(width)}  `) +
         theme.fg("muted", preview),
     );
   }
@@ -556,9 +562,14 @@ function collapsedTicketHeader(ticket: Ticket, theme: Theme): string {
   const status =
     ticket.status === "running" && ticket.paused ? "paused" : ticket.status;
   const done = ticket.outcomes.filter((outcome) => outcome !== undefined).length;
-  return theme.fg(
-    "muted",
-    `ticket ${shortTicket(ticket.id)} · ${status} ${done}/${ticket.totalTasks}`,
+  // Same anatomy as the dispatch receipt: accent id, quiet prose.
+  return (
+    theme.fg("muted", "ticket ") +
+    theme.fg("accent", shortTicket(ticket.id)) +
+    theme.fg(
+      "muted",
+      ` · ${status} ${done}/${ticket.totalTasks}`,
+    )
   );
 }
 
@@ -592,11 +603,14 @@ function collapsedBody(
     // count, and auto-delivery is the documented contract — expanding
     // reveals the rest. "Dispatched" (not "running") stays true when a
     // replayed transcript renders this receipt long after settlement.
+    // The id is the handle a follow-up delegate_ticket call needs, so it
+    // gets the accent; the prose around it stays quiet.
     return (
-      theme.fg(
-        "toolOutput",
-        `↳ ticket ${shortTicket(details.ticket)} · dispatched to background`,
-      ) + expandHint(theme)
+      theme.fg("accent", "↳ ") +
+      theme.fg("muted", "ticket ") +
+      theme.fg("accent", shortTicket(details.ticket)) +
+      theme.fg("muted", " · dispatched to background") +
+      expandHint(theme)
     );
   }
   if (Array.isArray(details.results) && details.results.length > 0) {
