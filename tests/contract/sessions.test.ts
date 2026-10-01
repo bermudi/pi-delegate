@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -463,45 +463,26 @@ describe("delegate session contract", () => {
   );
 
   test(
-    "a deadline that hits before the model is called leaves the pooled session intact and records no usage",
+    "a removed deadline field rejects before acquiring the pooled session or recording usage",
     async () => {
-      // INVARIANTS "Session reuse": a deadline before prompting MAY leave
-      // the session intact and MUST record no usage. Usage without a
-      // provider call is impossible, so the unchanged callCount is the
-      // boundary witness for "no usage".
+      // #118: rejected calls must leave an existing pooled conversation untouched.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
 
-      subagents.respond([fauxAssistantMessage("DEADLINE-POOL-MARKER")]);
+      subagents.respond([fauxAssistantMessage("POOL-MARKER")]);
       const first = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "remember DEADLINE-POOL-MARKER", sessionId: "conv" }],
+        tasks: [{ prompt: "remember POOL-MARKER", sessionId: "conv" }],
       });
       expect(first.isError).toBe(false);
       expect(subagents.state.callCount).toBe(1);
 
-      // A real-time deadline can race the dispatch's own setup (#53): with a
-      // warm resource loader the entry→pre-prompt path finishes inside one
-      // wall-clock millisecond, so deadlineMs:1 sometimes prompts anyway —
-      // seen as a CI-only flake ("No more faux responses queued"). The
-      // contract being pinned is "when the clock is already past the
-      // deadline at task start, no provider call happens", so pin the clock:
-      // each Date.now() call jumps an hour, making expiry deterministic on
-      // any machine. Restored before the reuse probe below.
-      let fakeNow = Date.now();
-      const clock = spyOn(Date, "now").mockImplementation(
-        () => (fakeNow += 3_600_000),
-      );
-      let expired;
-      try {
-        expired = await callDelegate(session, {
-          async: false,
-          tasks: [{ prompt: "work", sessionId: "conv", deadlineMs: 1 }],
-        });
-      } finally {
-        clock.mockRestore();
-      }
-      expect(expired.text).toMatch(/deadline exceeded/i);
+      const expired = await callDelegate(session, {
+        async: false,
+        tasks: [{ prompt: "work", sessionId: "conv", deadlineMs: 1 }],
+      });
+      expect(expired.isError).toBe(true);
+      expect(expired.text).toMatch(/deadlineMs.*removed/i);
       expect(subagents.state.callCount).toBe(1);
 
       const listed = await callDelegateSession(session, { action: "list" });
@@ -509,7 +490,7 @@ describe("delegate session contract", () => {
 
       const inspect: FauxResponseFactory = (context) =>
         fauxAssistantMessage(
-          JSON.stringify(context).includes("DEADLINE-POOL-MARKER")
+          JSON.stringify(context).includes("POOL-MARKER")
             ? "CONTINUED"
             : "FRESH",
         );

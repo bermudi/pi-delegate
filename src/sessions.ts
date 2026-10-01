@@ -234,8 +234,8 @@ export interface SessionSettle {
     readonly status: TaskStatus;
     /** Whether session.prompt() was attempted this run. */
     readonly prompted: boolean;
-    /** Set when a watchdog (deadline or stall) ended the run. */
-    readonly watchdog: "deadline" | "stall" | undefined;
+    /** Set when the inactivity watchdog ended the run. */
+    readonly watchdog: "stall" | undefined;
     /** Worker quiescence could not be confirmed; never dispose. */
     readonly quarantined: boolean;
   };
@@ -250,7 +250,7 @@ export interface SessionSettle {
  *
  * Disposition rules (INVARIANTS "Session reuse"):
  * - insert only after a successful, prompted run with a durable session file;
- * - a checked-out session cancelled or watchdog-ended (deadline/stall) after
+ * - a checked-out session cancelled or stalled after
  *   prompting is evicted; either before prompting leaves it intact;
  * - an ordinary failure keeps it reusable, and so does an interrupt —
  *   the aborted run wound down quiescent, and keeping the worker alive is

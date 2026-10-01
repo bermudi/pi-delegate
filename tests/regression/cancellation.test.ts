@@ -263,10 +263,11 @@ test(
   "a sync call returns a structured outcome instead of hanging when the worker cannot be confirmed stopped",
   async () => {
     // v1 evidence: unwind-budget regressions — a synchronous dispatch must
-    // not wait forever on unconfirmed worker termination. The task's own
-    // deadline is the deterministic trigger (the harness cannot interrupt an
-    // in-flight tool call); the gated factory keeps session.abort() pending.
+    // not wait forever on unconfirmed worker termination. The inactivity
+    // watchdog is the deterministic trigger (#118); the gated factory keeps
+    // session.abort() pending.
     session = await openDelegateBoundary();
+    configureDelegate(session, { stallTimeoutMs: 500 });
     const subagents = await installSubagentModel(session);
 
     let release!: () => void;
@@ -290,14 +291,13 @@ test(
         {
           prompt: "hang",
           tools: ["write"],
-          deadlineMs: 500,
         },
       ],
     });
     // The call returned at all: settlement did not wait for cleanup. The
     // provider call is still gated (callCount proves it was in flight), so
     // the worker's termination is genuinely unconfirmed.
-    expect(result.text).toMatch(/deadline|cancel/i);
+    expect(result.text).toMatch(/stall|cancel/i);
     expect(subagents.state.callCount).toBe(1);
 
     // The abandoned worker may still mutate: conflicting work rejects.
@@ -332,6 +332,7 @@ test(
     // that may never arrive would park the whole batch on a worker that
     // may still be mutating.
     session = await openDelegateBoundary();
+    configureDelegate(session, { stallTimeoutMs: 500 });
     const subagents = await installSubagentModel(session);
 
     let release!: () => void;
@@ -342,13 +343,13 @@ test(
     };
     subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
 
-    // The prerequisite's deadline fires while its provider call is gated:
+    // The prerequisite's inactivity watchdog fires while its provider call is gated:
     // it records a quarantined failure while the worker may still run.
     // The dependent must block off that record — not wait on quiescence.
     const result = await callDelegate(session, {
       async: false,
       tasks: [
-        { id: "stuck", prompt: "hang", tools: ["write"], deadlineMs: 500 },
+        { id: "stuck", prompt: "hang", tools: ["write"] },
         {
           id: "dependent",
           prompt: "never runs",
@@ -390,6 +391,7 @@ test(
     // writer could start while a quarantined phase-0 writer still
     // mutates the shared root.
     session = await openDelegateBoundary();
+    configureDelegate(session, { stallTimeoutMs: 500 });
     const subagents = await installSubagentModel(session);
 
     let release!: () => void;
@@ -415,7 +417,6 @@ test(
           id: "stuck",
           prompt: "stuck writer",
           tools: ["write"],
-          deadlineMs: 500,
         },
         { id: "prereq", prompt: "quick read", tools: ["read"] },
         {
@@ -429,7 +430,7 @@ test(
     });
     const ticket = ticketIdOf(dispatched.text);
 
-    // Phase 0's provider calls are both in flight; let the deadline fire
+    // Phase 0's provider calls are both in flight; let the stall watchdog fire
     // and phase 1 begin. The second writer must stay parked on the stuck
     // writer's confirmed quiescence — no provider call while it is gated.
     const deadline = Date.now() + 5000;
@@ -455,11 +456,11 @@ test(
 );
 
 test(
-  "a parent abort during an in-flight sync dispatch settles as a cancellation, not a deadline or a hang",
+  "a parent abort during an in-flight sync dispatch settles as a cancellation, not a stall or a hang",
   async () => {
     // v1 evidence: caller-abort regressions — the parent's abort reaches the
     // tool through its execute signal and must settle with the parent-abort
-    // cause, which outranks deadline and stall.
+    // cause, which outranks stall.
     //
     // The harness's awaited run() cannot express an interruption, but it
     // exposes the raw AgentSession: fire the call detached and abort() the
@@ -486,7 +487,6 @@ test(
         {
           prompt: "hang",
           tools: ["write"],
-          deadlineMs: 60_000,
         },
       ],
     });
@@ -500,8 +500,7 @@ test(
     await (session.session as AgentSession).abort();
 
     const result = await pending;
-    // The abort outranks the (unfired) deadline: a structured cancellation,
-    // never the deadline path, and settlement did not wait on the still-
+    // A structured cancellation; settlement did not wait on the still-
     // gated worker.
     expect(result.text).toMatch(/cancel/i);
     expect(result.text).not.toMatch(/deadline/i);
@@ -616,8 +615,8 @@ test(
   async () => {
     // v1 evidence: runner.ts inactivity watchdog — silence past the
     // configured stall timeout requests cooperative cancellation under the
-    // stall cause; SPEC: "Stall timeouts measure inactivity; deadlines
-    // measure wall-clock time." The budget comes from delegate.json.
+    // stall cause; SPEC: stall timeouts measure inactivity. The budget
+    // comes from delegate.json.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
     configureDelegate(session, { stallTimeoutMs: 150 });
@@ -669,8 +668,8 @@ test(
 test(
   "parked time behind a paused ticket is not inactivity — the stall watchdog suspends",
   async () => {
-    // v1 evidence: pause.ts — "inactivity checks stop while parked; explicit
-    // wall-clock deadlines still count". A worker parked between turns for
+    // v1 evidence: pause.ts — inactivity checks stop while parked.
+    // #118 removes task wall-clock deadlines. A worker parked between turns
     // longer than the stall budget must survive to resume.
     //
     // Determinism: the pause lands while turn one's provider call is still
@@ -1223,10 +1222,10 @@ test(
 );
 
 test(
-  "omitting deadlineMs means no wall-clock budget at all",
+  "tasks have no wall-clock budget at all",
   async () => {
     // INVARIANTS "Cancellation and quiescence": a task carries no
-    // wall-clock budget unless its caller supplies deadlineMs; no
+    // wall-clock budget (#118); no
     // configuration default, host default, or implicit mechanism may add
     // one. With the inactivity watchdog disabled too, a worker whose
     // provider call never settles must still be running — nothing else
@@ -1255,8 +1254,7 @@ test(
     }
     expect(subagents.state.callCount).toBe(1);
 
-    // Far past any plausible internal budget; no deadline was supplied, so
-    // no implicit one may fire.
+    // Advancing wall time must not introduce a task deadline.
     await new Promise((r) => setTimeout(r, 400));
     const midFlight = await callDelegateTicket(session, {
       action: "poll",
@@ -1273,104 +1271,5 @@ test(
     });
     expect(settled.text).toContain("EVENTUALLY-DONE");
     expect(settled.text).toMatch(/completed/i);
-  },
-);
-
-test(
-  "an explicit deadline keeps counting while the ticket is paused",
-  async () => {
-    // SPEC "Tickets": pause is cooperative and holds queued tasks and
-    // future model turns — INVARIANTS: a paused ticket retains its
-    // deadlines. The worker's in-flight call is past the pause boundary,
-    // and the deadline must still fire while the ticket sits paused.
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const hanging: FauxResponseFactory = async () => {
-      await gate;
-      return fauxAssistantMessage("TOO-LATE");
-    };
-    subagents.respond([hanging]);
-
-    const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "paused deadline", deadlineMs: 250 }],
-      async: true,
-    });
-    const ticket = ticketIdOf(dispatched.text);
-    const running = Date.now() + 5000;
-    while (subagents.state.callCount < 1 && Date.now() < running) {
-      await new Promise((r) => setImmediate(r));
-    }
-    expect(subagents.state.callCount).toBe(1);
-
-    const paused = await callDelegateTicket(session, {
-      action: "pause",
-      ticket,
-    });
-    expect(paused.isError).toBe(false);
-
-    await new Promise((r) => setTimeout(r, 450));
-    const whilePaused = await callDelegateTicket(session, {
-      action: "poll",
-      ticket,
-    });
-    expect(whilePaused.text).toMatch(/deadline exceeded/i);
-
-    release();
-    const settled = await callDelegateTicket(session, {
-      action: "wait",
-      ticket,
-      timeoutMs: 5000,
-    });
-    expect(settled.text).toMatch(/deadline exceeded/i);
-    expect(settled.text).not.toMatch(/paused/);
-  },
-);
-
-test(
-  "when deadline and stall both fire, the deadline is the reported cause",
-  async () => {
-    // INVARIANTS: cancellation cause precedence is parent abort, then
-    // deadline, then stall. The worker is silent the whole time, so the
-    // stall watchdog fires too — both causes genuinely hit, and the
-    // caller must hear the deadline, not the stall.
-    session = await openDelegateBoundary();
-    configureDelegate(session, { stallTimeoutMs: 300 });
-    const subagents = await installSubagentModel(session);
-
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const hanging: FauxResponseFactory = async () => {
-      await gate;
-      return fauxAssistantMessage("TOO-LATE");
-    };
-    subagents.respond([hanging]);
-
-    const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "silent until both timers fire", deadlineMs: 150 }],
-      async: true,
-    });
-    const ticket = ticketIdOf(dispatched.text);
-
-    // Deadline arms at ~0ms, stall at ~300ms; both fire while the worker
-    // is still winding down behind the gated provider call.
-    await new Promise((r) => setTimeout(r, 600));
-    const provisional = await callDelegateTicket(session, {
-      action: "poll",
-      ticket,
-    });
-    expect(provisional.text).toMatch(/deadline exceeded/i);
-    expect(provisional.text).not.toMatch(/stall/i);
-
-    release();
-    const settled = await callDelegateTicket(session, {
-      action: "wait",
-      ticket,
-      timeoutMs: 5000,
-    });
-    expect(settled.text).toMatch(/deadline exceeded/i);
-    expect(settled.text).not.toMatch(/stall/i);
   },
 );

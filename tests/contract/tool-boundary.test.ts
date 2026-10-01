@@ -74,7 +74,6 @@ describe("delegate public tool contract", () => {
       [
         "agent",
         "cwd",
-        "deadlineMs",
         "dependsOn",
         "description",
         "id",

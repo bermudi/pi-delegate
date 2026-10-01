@@ -27,6 +27,7 @@ import {
 } from "../../src/details.ts";
 import {
   callDelegate,
+  configureDelegate,
   callDelegateSession,
   callDelegateTicket,
   installSubagentModel,
@@ -359,16 +360,17 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
     async () => {
       // Issue #51: details.usageLowerBound is literally `true` (not a
       // count, not a string) — set when a task's accounting is
-      // incomplete. A deadline that fires while the provider call is
+      // incomplete. A stall that fires while the provider call is
       // gated records a quarantined failure.
       session = await openDelegateBoundary();
+      configureDelegate(session, { stallTimeoutMs: 500 });
       const subagents = await installSubagentModel(session);
       const held = gate("TOO-LATE");
       subagents.respond([held.step]);
 
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "hang", deadlineMs: 500 }],
+        tasks: [{ prompt: "hang" }],
       });
       const details = objectOf(result.details, "details");
       expect(details.usageLowerBound).toBe(true);

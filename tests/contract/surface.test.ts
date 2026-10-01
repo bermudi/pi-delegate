@@ -117,7 +117,7 @@ describe("compact/full delegate surface", () => {
     expect(properties(compact).tokenBudget).toBeUndefined();
     expect(properties(full).tokenBudget).toBeDefined();
     const fullTask = objectOf(objectOf(objectOf(properties(full).tasks).items).properties);
-    for (const key of ["id", "tools", "systemPrompt", "deadlineMs", "dependsOn", "sessionId", "resumeFrom", "description"]) {
+    for (const key of ["id", "tools", "systemPrompt", "dependsOn", "sessionId", "resumeFrom", "description"]) {
       expect(fullTask[key]).toBeDefined();
     }
     for (const key of ["agent_type", "subagent_type", "task_name", "message", "run_in_background"]) {
@@ -140,7 +140,7 @@ describe("compact/full delegate surface", () => {
     const subagents = await installSubagentModel(session);
     for (const [field, value] of [
       ["id", "a"], ["description", "label"], ["tools", []], ["systemPrompt", "custom"],
-      ["deadlineMs", 100], ["sessionId", "pooled"], ["resumeFrom", "/missing.jsonl"], ["dependsOn", []],
+      ["sessionId", "pooled"], ["resumeFrom", "/missing.jsonl"], ["dependsOn", []],
     ] as const) {
       for (const input of [value, null]) {
         const result = await callDelegate(session, {

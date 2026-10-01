@@ -826,9 +826,10 @@ describe("delegate dispatch contract", () => {
       // v1 evidence: format.ts — incomplete-quiescence results rendered
       // "≥N tokens (incomplete)" and warned that output, token usage, and
       // cost were lower bounds. v2 keeps TaskOutcome.quarantined and must
-      // mark the semantics: a gated provider + task deadline makes the
+      // mark the semantics: a gated provider + inactivity watchdog makes the
       // worker's termination unconfirmable, so its accounting is partial.
       session = await openDelegateBoundary();
+      configureDelegate(session, { stallTimeoutMs: 500 });
       const subagents = await installSubagentModel(session);
       let release!: () => void;
       const gate = new Promise<void>((resolve) => (release = resolve));
@@ -840,9 +841,9 @@ describe("delegate dispatch contract", () => {
 
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "hang", tools: ["write"], deadlineMs: 300 }],
+        tasks: [{ prompt: "hang", tools: ["write"] }],
       });
-      expect(result.text).toMatch(/deadline/i);
+      expect(result.text).toMatch(/stall/i);
       // Per-task and aggregate wording: the caller cannot mistake a
       // partial accounting for the full total.
       expect(result.text).toMatch(/lower bound/i);

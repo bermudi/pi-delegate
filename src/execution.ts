@@ -40,9 +40,9 @@ export interface RunControls {
   readonly waitWhilePaused: (signal?: AbortSignal) => Promise<void>;
   /** Only async-ticket workers can ask; callback parks the execution slot. */
   readonly askQuestion?: (question: string, signal: AbortSignal) => Promise<string>;
-  /** Whether this run's work has been cancelled or its deadline fired. */
+  /** Whether this run's work has been aborted. */
   readonly isAborted: () => boolean;
-  /** Combined cancellation signal (ticket cancel, parent abort, deadline). */
+  /** Combined cancellation signal (ticket cancel, parent abort, stall). */
   readonly signal: AbortSignal;
   /** Inactivity watchdog budget in ms; 0 disables it. */
   readonly stallTimeoutMs: number;
@@ -215,17 +215,15 @@ function lastAssistantText(session: AgentSession): {
 }
 
 /**
- * Cancellation-cause precedence: a parent/ticket abort outranks a deadline,
- * which outranks a stall. Lower rank wins when causes race.
+ * Cancellation-cause precedence: a parent/ticket abort outranks a stall. Lower rank wins when causes race.
  */
 const ABORT_PRECEDENCE: Record<string, number> = {
   cancelled: 0,
   // Interrupt is an operator abort that keeps the worker resumable — it
-  // outranks watchdog causes (an interrupt landing mid-deadline still
+  // outranks watchdog causes (an interrupt landing mid-stall still
   // reports interrupted) but loses to ticket/parent cancellation.
   interrupted: 1,
-  deadline: 2,
-  stall: 3,
+  stall: 2,
 };
 
 function preferredReason(
@@ -273,7 +271,7 @@ function reportableTranscript(
  *
  * - result() is the caller-visible settlement. It resolves with the true
  *   outcome when the run winds down, or with a provisional cancelled /
- *   deadline outcome as soon as cancellation is requested — a provider or
+ *   stall outcome as soon as cancellation is requested — a provider or
  *   tool that ignores the abort signal must not hold the caller. A
  *   provisional outcome is quarantined: termination is unconfirmed, so the
  *   worker's reservations stay held.
@@ -550,13 +548,9 @@ export class TaskExecution implements ExecutionHandle {
   }
 
   /**
-   * Watchdog causes (deadline, stall) settle as failures with their own
-   * wording; operator and parent aborts settle as plain cancellations.
+   * Stalls settle as failures with their own wording; operator and parent aborts settle as plain cancellations.
    */
   private watchdogError(): string | undefined {
-    if (this.abortReason === "deadline") {
-      return `deadline exceeded after ${this.task.deadlineMs}ms`;
-    }
     if (this.abortReason === "stall") {
       return `stalled: no session activity for ${this.controls.stallTimeoutMs}ms; task aborted`;
     }
@@ -691,7 +685,7 @@ export class TaskExecution implements ExecutionHandle {
         status: outcome.status,
         prompted: this.prompted,
         watchdog:
-          this.abortReason === "deadline" || this.abortReason === "stall"
+          this.abortReason === "stall"
             ? this.abortReason
             : undefined,
         quarantined: this.quarantined,
@@ -1008,9 +1002,7 @@ function canRetryWholeTask(
 /**
  * Run a task with the whole-task retry policy: a clearly transient failure
  * gets a bounded number of fresh attempts; model-attributable, cancelled,
- * side-effecting, and quarantined failures return immediately. The deadline
- * budget is one wall-clock window measured from when the task leaves the
- * queue — all attempts and the backoff between them share it.
+ * side-effecting, and quarantined failures return immediately.
  */
 export async function runTask(
   task: ResolvedTask,
@@ -1044,34 +1036,10 @@ export async function runTask(
     hadSideEffects: false,
     quarantined: false,
   };
-  // The wall-clock budget starts when the task leaves the queue (SPEC
-  // "deadlineMs ... beginning after queueing"): runTask is entered only
-  // after pause gates, dependency gates, predecessor waits, and both
-  // concurrency semaphores, so the first Date.now() here is the queue-exit
-  // instant. It must be captured synchronously on entry — an await before
-  // it (e.g. resource-loader reload) would let slow setup eat the budget
-  // and report success past the deadline.
-  const enteredAt = Date.now();
-  const deadlineAt =
-    task.deadlineMs !== undefined ? enteredAt + task.deadlineMs : undefined;
-  const deadlineExpired = (): AttemptResult => ({
-    status: "failed",
-    output: last.output,
-    error: `deadline exceeded after ${task.deadlineMs}ms`,
-    usage: last.usage,
-    hadSideEffects: last.hadSideEffects,
-    quarantined: last.quarantined,
-    sessionFile: last.sessionFile,
-    transcriptStart: last.transcriptStart,
-  });
 
   for (;;) {
     if (controls.isAborted()) {
       last = { status: "cancelled", hadSideEffects: false, quarantined: last.quarantined };
-      break;
-    }
-    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
-      last = deadlineExpired();
       break;
     }
     let loaderPromise: Promise<DefaultResourceLoader>;
@@ -1095,37 +1063,11 @@ export async function runTask(
         return promise;
       })();
     }
-    // A stalled resource loader must not hold a task past its explicit
-    // deadline. Race the remaining wall budget as well as parent abort;
-    // no child session exists yet, so nothing needs quiescence confirmation.
-    let loaderDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
-    const loaderDeadline = deadlineAt === undefined
-      ? undefined
-      : new Promise<"deadline">((resolve) => {
-          loaderDeadlineTimer = setTimeout(
-            () => resolve("deadline"),
-            Math.max(0, deadlineAt - Date.now()),
-          );
-        });
-    let loaded: DefaultResourceLoader | "deadline" | undefined;
-    try {
-      loaded = await Promise.race([
-        loaderPromise,
-        abortedSignal(controls.signal).then(() => undefined),
-        ...(loaderDeadline ? [loaderDeadline] : []),
-      ]);
-    } finally {
-      if (loaderDeadlineTimer !== undefined) clearTimeout(loaderDeadlineTimer);
-    }
-    if (loaded === "deadline") {
-      // The losing reload may fail later; it no longer has a caller.
-      void loaderPromise.catch(() => undefined);
-      last = controls.isAborted()
-        ? { status: "cancelled", hadSideEffects: false, quarantined: last.quarantined }
-        : deadlineExpired();
-      break;
-    }
-    const loader = loaded;
+    // Loading remains abortable even before a child session exists.
+    const loader = await Promise.race([
+      loaderPromise,
+      abortedSignal(controls.signal).then(() => undefined),
+    ]);
     if (loader === undefined) {
       void loaderPromise.catch(() => undefined);
       last = {
@@ -1135,15 +1077,8 @@ export async function runTask(
       };
       break;
     }
-    // Resource loading is part of the post-queue wall-clock budget. The
-    // timer below only protects a live TaskExecution; if loading consumed
-    // the whole budget, do not create (much less prompt) a late worker.
     if (controls.isAborted()) {
       last = { status: "cancelled", hadSideEffects: false, quarantined: last.quarantined };
-      break;
-    }
-    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
-      last = deadlineExpired();
       break;
     }
 
@@ -1161,20 +1096,8 @@ export async function runTask(
       loader,
     );
     onExecution?.(execution);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    if (deadlineAt !== undefined) {
-      timer = setTimeout(
-        () => void execution.abort("deadline"),
-        Math.max(0, deadlineAt - Date.now()),
-      );
-    }
     const usageBeforeAttempt = usage;
-    let recorded: AttemptResult;
-    try {
-      recorded = await execution.result();
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
+    const recorded = await execution.result();
     last = recorded;
     usage = addUsage(usage, last.usage);
     mergeAttribution(recorded);
@@ -1234,10 +1157,7 @@ export async function runTask(
       `[delegate] retrying task ${task.id} after transient failure (attempt ${retries + 1} of ${MAX_TASK_ATTEMPTS}): ${last.error ?? "unknown error"}`,
     );
     try {
-      // The backoff shares the deadline window: never sleep past it.
-      const remaining =
-        deadlineAt !== undefined ? deadlineAt - Date.now() : RETRY_DELAY_MS;
-      await sleep(Math.min(RETRY_DELAY_MS, Math.max(0, remaining)), controls.signal);
+      await sleep(RETRY_DELAY_MS, controls.signal);
     } catch {
       last = {
         status: "cancelled",

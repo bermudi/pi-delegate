@@ -465,7 +465,6 @@ export async function resolveTasks(
       sessionId: task.sessionId,
       resumeFrom: task.resumeFrom,
       resumeTag,
-      deadlineMs: task.deadlineMs,
       workspace,
       // Set later by workspace preparation when the cwd is remapped.
       workspaceGuard: undefined,

@@ -73,6 +73,40 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     expect(statSync(join(first.cwd, "delegate-tickets")).mode & 0o077).toBe(0);
   });
 
+  test("historical saved deadline failures remain readable without restarting work (#118)", async () => {
+    const first = await openAt();
+    const provider = await installSubagentModel(first);
+    provider.respond([fauxAssistantMessage("HISTORICAL-PARTIAL-OUTPUT")]);
+    const ticket = ticketIdOf((await callDelegate(first, {
+      tasks: [{ prompt: "report" }], async: true,
+    })).text);
+    await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
+    const path = join(first.cwd, "delegate-tickets", `${ticket}.json`);
+    const isRecord = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
+    const saved: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (!isRecord(saved) || !Array.isArray(saved.outcomes)) {
+      throw new Error("saved ticket must be a record with an outcomes array");
+    }
+    const outcome: unknown = saved.outcomes[0];
+    if (!isRecord(outcome)) {
+      throw new Error("saved ticket must contain a first outcome record");
+    }
+    saved.status = "failed";
+    outcome.status = "failed";
+    outcome.error = "deadline exceeded after 250ms";
+    writeFileSync(path, JSON.stringify(saved));
+
+    const next = await openAt(first.cwd);
+    const nextProvider = await installSubagentModel(next);
+    for (const action of ["poll", "wait"] as const) {
+      const view = await callDelegateTicket(next, { action, ticket });
+      expect(view.text).toContain("deadline exceeded after 250ms");
+      expect(view.text).toContain("HISTORICAL-PARTIAL-OUTPUT");
+    }
+    expect(nextProvider.state.callCount).toBe(0);
+  });
+
   test("unfinished work reappears interrupted, never restarted by poll", async () => {
     const first = await openAt();
     const provider = await installSubagentModel(first);

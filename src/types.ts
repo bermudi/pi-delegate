@@ -66,7 +66,6 @@ export interface ResolvedTask {
    * as `↻<tag>` in task views; undefined on non-resume tasks.
    */
   readonly resumeTag: string | undefined;
-  readonly deadlineMs: number | undefined;
   readonly workspace: Workspace;
   /**
    * Set by isolated/scratch workspace preparation when the task's cwd was

@@ -4,6 +4,7 @@ import { DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import {
   callDelegate,
+  callDelegateDetached,
   delegateTool,
   installSubagentModel,
   openDelegateBoundary,
@@ -19,9 +20,8 @@ interface DirectTool {
   ): Promise<{ content: readonly { text?: string }[] }>;
 }
 
-test("deadline expires during resource loading without prompting a child", async () => {
-  // Regression: a 25ms budget previously reported success after a 150ms
-  // loader reload because the timeout was armed only after that reload.
+test("slow resource loading has no task wall-clock budget", async () => {
+  // #118 overrides the old resource-loading deadline regression.
   const session = await openDelegateBoundary();
   const original = DefaultResourceLoader.prototype.reload;
   const reload = spyOn(DefaultResourceLoader.prototype, "reload").mockImplementation(
@@ -35,45 +35,65 @@ test("deadline expires during resource loading without prompting a child", async
     model.respond([fauxAssistantMessage("late worker")]);
     const result = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "do nothing", tools: [], deadlineMs: 25 }],
+      tasks: [{ prompt: "do nothing", tools: [] }],
     });
-    expect(result.isError).toBe(true);
-    expect(result.text).toContain("deadline exceeded");
-    expect(model.state.callCount).toBe(0);
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("late worker");
+    expect(model.state.callCount).toBe(1);
   } finally {
     reload.mockRestore();
     session.dispose();
   }
 });
 
-test("deadline returns even when the resource loader stays blocked", async () => {
+test("parent cancellation returns even when the resource loader stays blocked", async () => {
   const session = await openDelegateBoundary();
   const original = DefaultResourceLoader.prototype.reload;
+  let entered!: () => void;
+  const loading = new Promise<void>((resolve) => { entered = resolve; });
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
+  let reloadCompletion: Promise<void> | undefined;
   const reload = spyOn(DefaultResourceLoader.prototype, "reload").mockImplementation(
-    async function (this: DefaultResourceLoader) {
-      await gate;
-      return original.call(this);
+    function (this: DefaultResourceLoader) {
+      reloadCompletion = (async () => {
+        entered();
+        await gate;
+        await original.call(this);
+      })();
+      return reloadCompletion;
     },
   );
+  const finishLoading = async (): Promise<void> => {
+    release();
+    await reloadCompletion;
+    // Drain loader consumers' promise continuations before checking or teardown.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
   try {
     const model = await installSubagentModel(session);
     model.respond([fauxAssistantMessage("late worker")]);
-    const dispatch = callDelegate(session, {
+    const dispatch = callDelegateDetached(session, {
       async: false,
-      tasks: [{ prompt: "do nothing", tools: [], deadlineMs: 25 }],
+      tasks: [{ prompt: "do nothing", tools: [] }],
     });
+    await loading;
+    await (session.session as AgentSession).abort();
     const result = await Promise.race([
       dispatch,
-      Bun.sleep(300).then(() => { throw new Error("deadline remained stuck in loader"); }),
+      Bun.sleep(2000).then(() => { throw new Error("cancellation remained stuck in loader"); }),
     ]);
-    expect(result.text).toContain("deadline exceeded");
+    expect(result.text).toMatch(/cancelled/i);
+    expect(model.state.callCount).toBe(0);
+    await finishLoading();
     expect(model.state.callCount).toBe(0);
   } finally {
-    release();
-    reload.mockRestore();
-    session.dispose();
+    try {
+      await finishLoading();
+    } finally {
+      reload.mockRestore();
+      session.dispose();
+    }
   }
 });
 

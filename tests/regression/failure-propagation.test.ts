@@ -108,11 +108,9 @@ describe("regression: failure propagation and retries", () => {
   );
 
   test(
-    "the deadline budget is shared across attempts and the retry backoff",
+    "safe retries are not curtailed by a wall-clock budget",
     async () => {
-      // SPEC: deadlineMs is one wall-clock budget covering attempts and
-      // backoff, not a fresh budget per attempt. deadlineMs (100) is shorter
-      // than the retry backoff, so the second attempt must never start.
+      // #118: attempts and backoff have no task wall-clock limit.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       subagents.respond([
@@ -120,18 +118,17 @@ describe("regression: failure propagation and retries", () => {
           stopReason: "error",
           errorMessage: "connection reset by peer",
         }),
-        fauxAssistantMessage("SHOULD-NOT-REACH"),
+        fauxAssistantMessage("RETRIED"),
       ]);
 
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { prompt: "flaky",  deadlineMs: 100 },
+          { prompt: "flaky" },
         ],
       });
-      expect(result.text).toMatch(/deadline/i);
-      expect(result.text).not.toContain("SHOULD-NOT-REACH");
-      expect(subagents.state.callCount).toBe(1);
+      expect(result.text).toContain("RETRIED");
+      expect(subagents.state.callCount).toBe(2);
     },
   );
 

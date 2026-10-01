@@ -878,6 +878,7 @@ describe("delegate telemetry contract", () => {
     "an unconfirmed worker outcome is marked provisional",
     async () => {
       session = await openDelegateBoundary();
+      configureDelegate(session, { stallTimeoutMs: 500 });
       const subagents = await installSubagentModel(session);
       const dbPath = join(trackedTempDir(), "usage.db");
       configureDelegate(session, {
@@ -893,9 +894,9 @@ describe("delegate telemetry contract", () => {
 
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "hang", tools: ["write"], deadlineMs: 500 }],
+        tasks: [{ prompt: "hang", tools: ["write"] }],
       });
-      expect(result.text).toMatch(/deadline|cancel/i);
+      expect(result.text).toMatch(/stall|cancel/i);
       expect(subagents.state.callCount).toBe(1);
 
       const db = new DatabaseSync(dbPath);
@@ -1289,7 +1290,7 @@ describe("delegate telemetry contract", () => {
       });
 
       expect(result.isError).toBe(true);
-      expect(result.text).toMatch(/deadlineMs must be positive/);
+      expect(result.text).toMatch(/deadlineMs field has been removed/);
       expect(subagents.state.callCount).toBe(0);
 
       const db = new DatabaseSync(dbPath);
@@ -1298,7 +1299,7 @@ describe("delegate telemetry contract", () => {
         expect(misfires).toHaveLength(1);
         const row = misfires[0];
         expect(row?.phase).toBe("validation");
-        expect(row?.message).toContain("deadlineMs must be positive");
+        expect(row?.message).toContain("deadlineMs field has been removed");
         expect(row?.task_count).toBe(1);
       } finally {
         db.close();

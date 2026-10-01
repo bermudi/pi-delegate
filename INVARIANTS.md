@@ -23,11 +23,12 @@ use any design that makes these properties true and testable.
   authorize cleanup.
 - Cancellation is cooperative. It MUST NOT claim to stop subprocesses or roll
   back completed side effects.
-- Cancellation cause precedence is parent abort, then deadline, then stall.
-- A task carries no wall-clock time budget unless its caller supplies
-  `deadlineMs`; omission MUST mean no deadline. No configuration default,
-  host default, or other implicit mechanism may add one, and the inactivity
-  watchdog MUST NOT be repurposed as a wall-clock limit.
+- Cancellation cause precedence is parent abort, then stall.
+- Tasks MUST carry no wall-clock deadline (#118, user-approved). Supplied
+  `deadlineMs` MUST reject before execution in both surfaces, even null or
+  recovered flat/stringified shapes. No configuration or host default may add
+  a task deadline, and the inactivity watchdog MUST NOT become a wall-clock
+  limit. Historical saved deadline failures MUST remain readable.
 
 ## Dispatch identity
 
@@ -86,9 +87,8 @@ use any design that makes these properties true and testable.
   MUST reject, holding the exclusivity until the worker is confirmed
   quiescent — never released by caller settlement alone. Two tasks in one
   call MUST NOT share a transcript.
-- A pooled session cancelled, stalled, or deadline-exceeded after prompting
-  MUST be evicted. A deadline before prompting may leave it intact and MUST
-  record no usage.
+- A pooled session cancelled or stalled after prompting MUST be evicted.
+  Cancellation before prompting may leave it intact and MUST record no usage.
 - Ordinary provider/task failure on an existing pooled session remains
   reusable and its attempt usage is recorded.
 - A late materialization after cancellation MUST NOT be prompted or pooled.
@@ -115,10 +115,10 @@ use any design that makes these properties true and testable.
   Yielding execution capacity MUST NOT yield the session, workspace, admission
   reservation, or confirmed-quiescence obligation. Capacity MUST be reacquired
   before an answer lets worker execution continue.
-- A question MUST NOT wake the wrong parent branch. Cancellation, deadline,
+- A question MUST NOT wake the wrong parent branch. Cancellation
   and shutdown MUST invalidate pending questions; late answers MUST NOT
-  resurrect terminal work. Question waits MUST NOT count as stall inactivity,
-  but explicit deadlines MUST keep counting.
+  resurrect terminal work. Question waits MUST NOT count as stall inactivity.
+  Tasks have no wall-clock deadline, including while awaiting an answer.
 
 - Ticket terminal state MUST be internally consistent and idempotent regardless
   of racing completion, cancellation, and shutdown.
@@ -145,7 +145,7 @@ use any design that makes these properties true and testable.
 - Delivery failure MUST NOT undo settlement or make results unpollable.
 - Wait timeout or caller abort MUST detach only that waiter.
 - Pause is orthogonal to lifecycle: a paused ticket remains running and retains
-  its sessions, deadlines, workspace reservations, and protection against
+  its sessions, workspace reservations, and protection against
   conflicting work.
 
 ## Dependencies and handoffs

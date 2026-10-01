@@ -49,9 +49,9 @@ The manual (`tasks: []`) documents only the selected surface's controls and,
 on compact, ends with the list of what full adds.
 
 Full mode adds task ids/display labels, explicit tools/base-prompt overrides,
-session reuse, transcript resume, deadlines and dependencies; batch token
+session reuse, transcript resume and dependencies; batch token
 budgets/retry keys; ticket pause/resume/tail, wait-any, timed waits and explicit
-steering retry keys. No execution or safety features are removed.
+steering retry keys. Safety guarantees are the same in both modes.
 
 ## Dispatch
 
@@ -59,9 +59,15 @@ A call resolves profiles, tools, workspaces and write claims before running
 work. Compact mode covers ordinary calls. Full-mode task fields are `prompt`
 (required unless `resumeFrom`), `id` (auto `task-1`…), `description` (display
 label, ≤200 chars), `agent`, `cwd`, `systemPrompt`, `tools`, `sessionId`,
-`resumeFrom`, `deadlineMs`, `workspace`, `dependsOn`. Batch `workspace`
+`resumeFrom`, `workspace`, `dependsOn`. Batch `workspace`
 is the default for tasks without their own; full-mode `operationId` is a
 host-lifetime dispatch retry key.
+
+Tasks have no wall-clock deadline (#118): `deadlineMs` has been removed and
+rejects before execution in both modes, even when null. Stall detection remains
+an inactivity watchdog. Cancel/interrupt stop work cooperatively; ticket wait
+and tail timeouts detach only the waiter. Saved historical deadline failures
+remain readable.
 
 Only canonical field names are accepted. Removed cross-harness spellings
 reject before any worker starts, even when null or accompanied by the

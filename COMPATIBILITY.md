@@ -1,5 +1,16 @@
 # Delegate v2 compatibility contract
 
+## Task deadlines removed (#118, user-approved)
+
+BREAKING: `deadlineMs` is removed in both compact and full mode. Its presence
+rejects before execution, including null and flat/stringified recovery shapes.
+Remove it from calls: tasks have no wall-clock deadline. Use cooperative ticket
+cancel/interrupt to stop work; wait/tail timeouts only detach the waiter.
+Historical saved deadline failures remain readable. This explicitly overrides
+SPEC-V2's deadline field and its loading, retry, pause, question, and session
+rules. Stall detection, abort/quiescence, reservations, worker-question/paused
+safety, ticket wait/tail bounds, shutdown bounds, and token budgets are unchanged.
+
 ## Simplified v3 surface (#61, user-approved 2026-09-29)
 
 This section supersedes the older alias and cardinality entries below.
@@ -23,7 +34,7 @@ This section supersedes the older alias and cardinality entries below.
   addresses but use placeholders for task/message/answer bodies.
 - Reusable tools/base-instruction choices belong in Markdown profiles;
   explicit per-task overrides remain available in full mode. Dependencies,
-  deadlines, budgets, resume, pooled sessions, output tailing and pause/resume
+  budgets, resume, pooled sessions, output tailing and pause/resume
   are not deleted. Compact ticket waits have no caller timeout; explicit
   polling is immediate and full mode retains detach-only `timeoutMs`.
 - No changes to cancellation, workspace admission/application, session
@@ -186,7 +197,7 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   extension API. Requiring a patched, forked, or unreleased Pi host is a
   breaking change, not an implementation detail.
 - Pause as a cooperative boundary between tasks/model turns—not OS process
-  suspension—and continued counting of explicit deadlines.
+  suspension; tasks now have no wall-clock deadlines (#118).
 
 ### Workspaces and safety
 

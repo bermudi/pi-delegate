@@ -67,22 +67,6 @@ describe("async worker questions (#17)", () => {
     })).isError).toBe(true);
   });
 
-  test("deadline keeps running while a question waits, and late answers fail", async () => {
-    session = await openDelegateBoundary();
-    const model = await installSubagentModel(session);
-    model.respond([fauxAssistantMessage([fauxToolCall("ask_parent", { question: "Still there?" })])]);
-    const ticket = ticketIdOf((await callDelegate(session, {
-      tasks: [{ id: "deadline", prompt: "ASK", deadlineMs: 250 }], async: true,
-    })).text);
-    const questionId = await untilQuestion(session, ticket);
-    await new Promise((resolve) => setTimeout(resolve, 330));
-    const settled = await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2500 });
-    expect(settled.text).toMatch(/deadline exceeded/i);
-    expect((await callDelegateTicket(session, {
-      action: "answer", ticket, taskId: "deadline", questionId, answer: "too late",
-    })).isError).toBe(true);
-  });
-
   test("forced cancellation invalidates the pending question and does not unblock a worker", async () => {
     session = await openDelegateBoundary();
     const model = await installSubagentModel(session);
@@ -293,7 +277,7 @@ describe("async worker questions (#17)", () => {
   });
 
   test("session shutdown cancels a worker's pending question; late answers fail", async () => {
-    // SPEC "Worker questions": deadline, cancellation, AND shutdown
+    // SPEC "Worker questions": cancellation AND shutdown
     // interrupt unanswered questions without resurrecting terminal work.
     // Shutdown force-cancels every ticket, which must invalidate the
     // question, release the worker, and leave a late answer impossible.

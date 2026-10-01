@@ -156,12 +156,6 @@ const taskSchema = Type.Object(
         description: "Absolute path to a .jsonl session transcript.",
       }),
     ),
-    deadlineMs: Type.Optional(
-      Type.Number({
-        description:
-          "Positive wall-clock budget in milliseconds, counted from after queueing; omission means no deadline.",
-      }),
-    ),
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
         description:
@@ -708,10 +702,21 @@ function rejectForeignContextFields(record: Record<string, unknown>): void {
   }
 }
 
+/** Removed task deadlines reject by presence, before null stripping or flat recovery. */
+function rejectTaskDeadline(record: Record<string, unknown>): void {
+  if (Object.hasOwn(record, "deadlineMs")) {
+    throw new Error(
+      "The deadlineMs field has been removed — tasks have no wall-clock deadline. " +
+        "Remove it; use delegate_ticket cancel or interrupt to stop work. Wait timeouts detach only the waiter.",
+    );
+  }
+}
+
 function normalizeTask(value: unknown, index: number): unknown {
   if (!isRecord(value)) return value;
   const task = { ...value };
-  // Presence of `context` rejects even when null — before null stripping.
+  // Removed fields reject even when null — before null stripping.
+  rejectTaskDeadline(task);
   rejectObsoleteContext(task);
   rejectFieldAliases(task, true);
   // Same for the foreign context-sharing spellings (#56).
@@ -784,11 +789,6 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
         `${where}: 'tools' must be an array of tool names — a JSON array string or one bare name also works — not an ambiguous string.`,
       );
     }
-    if (typeof task.deadlineMs === "string") {
-      throw new Error(
-        `${where}: 'deadlineMs' must be a positive number, not a string.`,
-      );
-    }
   });
 }
 
@@ -804,6 +804,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   if (!isRecord(value)) return value as DelegateArguments;
 
   const args = { ...value };
+  rejectTaskDeadline(args);
   rejectObsoleteContext(args);
   rejectFieldAliases(args, false);
   if (Object.hasOwn(args, "message")) {
@@ -887,6 +888,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   }
   if (args.tasks !== undefined && !Array.isArray(args.tasks)) {
     if (isRecord(args.tasks)) {
+      rejectTaskDeadline(args.tasks);
       rejectObsoleteContext(args.tasks);
       rejectFieldAliases(args.tasks, true);
       rejectForeignContextFields(args.tasks);
@@ -942,6 +944,7 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
   if (!isRecord(value)) return value as TicketToolArguments;
 
   const args = { ...value };
+  rejectTaskDeadline(args);
   rejectObsoleteContext(args);
   rejectFieldAliases(args, false);
   stripNulls(args);
@@ -1014,6 +1017,7 @@ function prepareSessionArguments(value: unknown): SessionToolArguments {
   if (!isRecord(value)) return value as SessionToolArguments;
 
   const args = { ...value };
+  rejectTaskDeadline(args);
   rejectObsoleteContext(args);
   rejectFieldAliases(args, false);
   stripNulls(args);
@@ -1104,8 +1108,7 @@ const HELP_FULL_CONTROLS = `## delegate — full-mode controls
   \`tools\` and \`systemPrompt\` override profile defaults. Tool groups:
   \`*\` selects read/bash/edit/write; \`ro\` selects read/grep/find/ls.
 - \`sessionId\` reuses a child session; \`resumeFrom\` resumes an absolute .jsonl
-  transcript. Only resumed tasks may omit prompt. \`deadlineMs\` limits worker
-  wall time after queueing; omission means no deadline.
+  transcript. Only resumed tasks may omit prompt.
 - \`dependsOn\` names same-batch task ids. All prerequisites must succeed
   and stop safely before a dependent starts. Their bounded outputs are handed
   off and their applied changes are visible. Failure blocks dependents,
@@ -1317,7 +1320,7 @@ ${HELP_SESSIONS_COMPACT}
 
 ${HELP_TELEMETRY}
 
-Full surface adds: task id/description, tools/systemPrompt overrides, sessionId/resumeFrom, dependsOn, deadlineMs, tokenBudget, operationId, pause/resume/tail (with offset/waitMs), wait on several tickets, timeoutMs, steerId — set "surface": "full" in user-global delegate.json and /reload.
+Full surface adds: task id/description, tools/systemPrompt overrides, sessionId/resumeFrom, dependsOn, tokenBudget, operationId, pause/resume/tail (with offset/waitMs), wait on several tickets, timeoutMs, steerId — set "surface": "full" in user-global delegate.json and /reload.
 `;
 
 /**

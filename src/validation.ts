@@ -12,7 +12,6 @@ export interface TaskInput {
   readonly tools?: string[];
   readonly sessionId?: string;
   readonly resumeFrom?: string;
-  readonly deadlineMs?: number;
   readonly workspace?: "shared" | "scratch" | "isolated";
   readonly dependsOn?: string[];
   readonly description?: string;
@@ -436,9 +435,6 @@ function validateTasks(tasks: readonly TaskInput[]): void {
     }
     if (task.prompt === undefined && task.resumeFrom === undefined) {
       fail(`${where}: a task needs a prompt (prompt is optional only with resumeFrom).`);
-    }
-    if (task.deadlineMs !== undefined && task.deadlineMs <= 0) {
-      fail(`${where}: deadlineMs must be positive; got ${task.deadlineMs}.`);
     }
     if (
       (task.workspace === "scratch" || task.workspace === "isolated") &&

@@ -3,6 +3,29 @@
 The v1 suite is evidence, not source material. Tests are rewritten against the
 registered `delegate` tool; they do not import implementation helpers.
 
+## Task deadline removal (#118, user-approved)
+
+The user said “cut deadline.” SPEC.md overrides inherited SPEC-V2 deadlines;
+no deadline behavior remains required. `tests/contract/deadline-removal.test.ts`
+checks both registered surfaces' schemas/manual/descriptions and rejection
+before any child executes: positive, zero, negative, null, string, and boolean
+values across task, flat, stringified, empty-task recovery, stranded top-level,
+and malformed-object shapes. `validation.test.ts` and `telemetry.test.ts` now
+assert removal rather than positivity; `sessions.test.ts` proves rejection
+leaves a pooled conversation untouched with no provider call.
+
+Safety scenarios formerly triggered by deadlines now use the stall watchdog:
+sync provisional settlement, retained write claims, dependent blocking,
+cross-phase serialization, lower-bound accounting, and provisional telemetry.
+`preflight-races.test.ts` covers slow loading without a budget and cancellation
+of blocked loading. `failure-propagation.test.ts` covers safe retry/backoff
+without a wall-clock budget. Cancellation, question shutdown/late answers,
+stall suspension during pause/questions, wait/tail detachment, and shutdown
+bounds remain covered. Only deadline-specific paused/cause-precedence and
+question expiry assertions are retired. `recovery.test.ts` verifies historical
+saved deadline failures remain pollable/waitable without replay. Historical
+v1 deadline scenarios are superseded, not a coverage gap.
+
 ## Classification
 
 - **Contract** — proves behavior promised by `SPEC.md`.
@@ -97,16 +120,14 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
 
 ### Dispatch preflight races
 
-- **Contract:** An explicit deadline covers resource loading after a task
-  leaves the queue; shutdown cannot start a worker from a dispatch still
-  resolving its tasks.
-- **Covered now:** `tests/regression/preflight-races.test.ts` delays the
-  child resource loader beyond the deadline (including one that remains
-  blocked) and races shutdown against both sync and async writer-scope
-  resolution through the registered tool.
-- **Provenance:** v2 bug review: slow setup previously launched a child
-  after its deadline, and shutdown during resolution missed a ticket created
-  after the shutdown snapshot.
+- **Contract:** resource loading has no task wall-clock budget (#118), remains
+  abortable, and never starts a worker after cancellation. Shutdown racing
+  whole-call resolution must reject before admission or ticket creation.
+- **Covered now:** `tests/regression/preflight-races.test.ts` delays the child
+  resource loader, cancels a still-blocked reload before any prompt, and races
+  shutdown against sync and async writer-scope resolution through registered tools.
+- **Provenance:** v2 slow-loading/deadline and shutdown-resolution review;
+  #118 supersedes the deadline behavior while preserving abort/shutdown safety.
 
 ### Restart visibility and provider limits (#26)
 
@@ -139,12 +160,12 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
 
 - **Contract:** async-only child `ask_parent` and correlated ticket `answer`;
   visible unanswered questions; parked execution capacity with session/write
-  reservation retained; deadline, cancellation, pause, duplicate/late answers;
+  reservation retained; cancellation, pause, duplicate/late answers;
   a parent ticket wait returns on a question rather than deadlocking.
 - **Covered now:** provider-free public-tool tests in `tests/contract/questions.test.ts`
   exercise ask/answer/resume, another ticket using yielded capacity, shared
   write rejection while parked, wrong/duplicate/late answers, pause,
-  cancellation, deadline, invalid RPCs, and a parent already waiting.
+  cancellation, invalid RPCs, and a parent already waiting.
   Also covers rejection of parallel tool calls, questions from reused
   pooled sessions, and cancellation while reacquiring capacity.
   `tool-boundary.test.ts` checks the published schema.
@@ -195,7 +216,7 @@ gaps.
   merged into an explicit task array, with the stray field named; a
   top-level `model` beside `tasks` getting the model rejection; duplicate
   task/session ids;
-  non-positive `deadlineMs`; scratch/isolated + `sessionId`/`resumeFrom`;
+  removed `deadlineMs` (all values, #118); scratch/isolated + `sessionId`/`resumeFrom`;
   prompt-less task without resume; unknown agent guidance; required-field
   messages for ticket/session RPC; a task `model` field is rejected before
   any task starts with guidance toward the config; a named agent's `models`
@@ -224,7 +245,7 @@ gaps.
   aggregate usage on the tool result; parent-abort of an in-flight sync call
   settles as a structured cancellation (asserted in the cancellation
   regression suite via `callDelegateDetached` + raw-session `abort()`);
-  deadline/stall outcomes visible in result text (cancellation suite);
+  stall outcomes visible in result text (cancellation suite);
   a sabotaged model-runtime grab (truthy impostor injected through the raw
   harness session) fails the whole call with the actionable error before any
   task starts (`tests/regression/host-runtime.test.ts`, issue #11);
@@ -398,7 +419,7 @@ gaps.
 ### Cancellation
 
 - **Contract:** preview unless `force`; cooperative; never claims rollback or
-  subprocess termination; cause precedence parent-abort > deadline > stall;
+  subprocess termination; cause precedence parent-abort > stall;
   cancelled work must still produce a caller-visible outcome; unsafe-to-clean
   resources stay quarantined.
 - **Regression:** cancellation during prompt/turn produces structured
@@ -412,11 +433,11 @@ gaps.
   error, and no extra turn starts. Caller settlement is decoupled from
   worker wind-down: a forced cancel settles while a gated provider keeps
   cleanup blocked, a sync call returns a structured outcome when its
-  deadline fires against a non-cooperative worker, conflicting work
+  inactivity watchdog fires against a non-cooperative worker, conflicting work
   rejects while the quarantined worker may still mutate, and the
   reservation releases only after quiescence is actually confirmed.
   Parent-abort of an in-flight sync call settles with the `cancelled` cause
-  (which outranks the task's unfired deadline) while the gated worker is
+  (which outranks stall) while the gated worker is
   still held — proven by driving `session.session.abort()` on the raw
   AgentSession mid-call. The stall cause: a worker silent past the
   `delegate.json` `stallTimeoutMs` budget settles as a structured stall
@@ -442,10 +463,10 @@ gaps.
 ### Pause / resume
 
 - **Contract:** cooperative boundary between tasks and model turns; paused
-  ticket stays running and keeps sessions, deadlines, and reservations.
+  ticket stays running and keeps sessions and reservations.
 - **Regression:** resume-then-repause cannot leak a waiting operation; a
   naturally final turn completes instead of parking; parked time is not
-  inactivity while wall-clock deadlines still apply.
+  inactivity; tasks have no wall-clock deadlines (#118).
 - **Internal:** checkpoint machinery, `Agent.subscribe` gating, parked
   listener bookkeeping.
 - **Covered now:** pause holds queued work; paused ticket remains running;
@@ -455,8 +476,7 @@ gaps.
   queued tasks before slot acquisition and parks between-turn continuations
   via the core `prepareNextTurnWithContext` hook.
 - **Gap:** mid-turn pause semantics (current turn finishes); pause
-  unavailability on terminal tickets. Deadline-during-pause is covered —
-  "Timer rules" under "Invariant hardening" below.
+  unavailability on terminal tickets.
 
 ### Session reuse and lifecycle
 
@@ -467,8 +487,8 @@ gaps.
 - **Regression:** frozen-config mismatch is an actionable rejection; missing
   `resumeFrom` transcript errors; busy sessions (including cancelling
   tickets) reject conflicting reuse; cancelled/stalled pooled sessions are
-  evicted; pre-prompt deadline leaves the pooled session intact with no
-  usage; late materialization after cancellation is never prompted or pooled.
+  evicted; rejected deadline fields leave the pooled session intact with no
+  provider call (#118); late materialization after cancellation is never prompted or pooled.
 - **Internal:** pool map/locks, config cloning, quarantine registry, session
   file bookkeeping.
 - **Covered now:** pool + list + continuation on reuse; `close` removes and
@@ -482,14 +502,10 @@ gaps.
   `resumeFrom` without a prompt rehydrates the transcript and sends the
   default continuation instruction (live test with a real `.jsonl`
   fixture); empty `sessionId` rejected.
-- **Gap:** eviction after a deadline-exceeded *prompted* run — stalled and
-  cancelled eviction are covered (stall under "Invariant hardening" below;
-  the pool settles both watchdog causes through one branch, but only the
-  stall variant is named by a test); shutdown cleanup and the pre-prompt
-  deadline leaving the session intact are covered (same section and the
-  live tests above). Usage recorded for ordinary failures on pooled
-  sessions remains open: the "records its attempt" test witnesses the
-  single provider call, not usage.
+- **Gap:** usage recorded for ordinary failures on pooled sessions remains
+  open: the "records its attempt" test witnesses the single provider call,
+  not usage. Stall/cancel eviction, shutdown cleanup, and rejection before
+  pooled-session acquisition are covered. Deadline eviction is retired (#118).
 
 ### Transcript exclusivity (2026-09-27)
 
@@ -658,9 +674,8 @@ gaps.
   timing.
 - **Covered now:** transient retry to success; usage-limit no-retry +
   account-limit hint; serialized successor after predecessor failure; batch
-  validation starts nothing; the `deadlineMs` budget is shared across
-  attempts and the retry backoff (a deadline shorter than the backoff
-  prevents the second attempt entirely).
+  validation starts nothing; safe retry and backoff have no task wall-clock
+  budget (#118).
 - **Gap:** retry-count visibility in results; stall structured outcomes;
   no-retry-after-side-effects (needs a mutating tool before a transient
   failure).
@@ -844,18 +859,19 @@ and the file that carries it.
   releases its write reservation for the next dispatch.
   `tests/contract/workspaces.test.ts`.
 - **Session-reuse dispositions** (INVARIANTS "Session reuse"): stall
-  eviction; a pre-prompt deadline leaving the session intact with no
+  eviction; deadline-field rejection leaving the session intact with no
   provider call (no usage possible); ordinary failure keeping the session
   reusable; the busy-while-running/reusable-after-settle cycle; shutdown
   disposing every pooled session — running ones after quiescence — and
   refusing later sessionId dispatches. Cleanup-failure REPORTING is
   log-only: `AgentSession.dispose` is built not to throw, so it has no
   boundary-observable failure mode. `tests/contract/sessions.test.ts`.
-- **Timer rules** (INVARIANTS "Cancellation and quiescence"): omitted
-  `deadlineMs` means no wall-clock budget (watchdog disabled, worker still
-  running well past any implicit limit); explicit deadlines keep counting
-  while a ticket is paused; when deadline and stall both fire, the deadline
-  is the reported cause. `tests/regression/cancellation.test.ts`.
+- **Timer rules** (INVARIANTS "Cancellation and quiescence", #118): tasks
+  have no wall-clock budget (watchdog disabled, worker stays running despite
+  advancing wall time); the removed field rejects before execution in both
+  surfaces. `tests/regression/cancellation.test.ts` and
+  `tests/contract/deadline-removal.test.ts`. Paused/question inactivity
+  suspension and silent in-flight stall behavior remain covered.
 - **Waiting tasks hold no concurrency slot** (INVARIANTS "Shared writes"
   and "Dependencies"): serialized same-call writers and dependency waiters
   hold no slot while waiting — at `maxConcurrent: 1` a slot-holding wait
@@ -1305,7 +1321,7 @@ resolves on the first ticket to settle, the watcher's `Promise.any`.
 | V1 evidence | Class | V2 treatment |
 | --- | --- | --- |
 | `schema.test.ts`/`delegate.test.ts`: enum, control-field, and id rejection | Contract | Live tests in `tests/contract/validation.test.ts` |
-| `schema.test.ts`/`task-resolution.test.ts`: semantic validation (duplicates, deadlines, workspace conflicts, mode mixing, unknown agent, required fields) | Contract | Pending tests in `tests/contract/validation.test.ts` |
+| `schema.test.ts`/`task-resolution.test.ts`: semantic validation (duplicates, removed deadline fields, workspace conflicts, mode mixing, unknown agent, required fields) | Contract | Pending tests in `tests/contract/validation.test.ts` |
 | `lifecycle.test.ts`/`dispatch.test.ts`: ordered sync results, sibling failure isolation, task-id echo, usage, async ticket return, concurrency bound | Contract | Pending tests in `tests/contract/dispatch.test.ts` |
 | `delegate.test.ts`/`pause.test.ts` ticket integration: roster, not-found, wait, timeout detach, cancel preview/force, retained results, pause/resume | Contract + Regression | Pending tests in `tests/contract/tickets.test.ts` |
 | `lifecycle.test.ts` pool/session tests: pooling, list, close, frozen config, `resumeFrom` errors, busy conflicts | Contract + Regression | Live tests in `tests/contract/sessions.test.ts` |
@@ -1339,9 +1355,9 @@ Semantic decisions recorded during implementation:
 - `wait` timeout or caller abort detaches only that waiter.
 - Stall is an inactivity watchdog fed by session events (`delegate.json`
   `stallTimeoutMs`, default 15min, 0 disables). It settles a task as failed
-  with stall wording — distinct from deadline and operator cancellation —
+  with stall wording — distinct from operator cancellation —
   freezes while a worker is parked between turns, and evicts a pooled
-  session after a prompted run the same way a deadline does.
+  session after a prompted run.
 - Subagent sessions are extension-free, in-memory-transcript, and stream
   through the parent `ModelRuntime` (reached via `modelRegistry.runtime`,
   a private-field seam that fails loudly if upstream changes it).
@@ -1372,8 +1388,8 @@ Public-boundary regression tests added for defects found in review:
 - `tests/contract/workspaces.test.ts` — `GIT_DIR` redirect +
   bash-capable multi-writer batch fails closed; the Git scope probe
   scrubs inherited `GIT_*`.
-- `tests/regression/failure-propagation.test.ts` — `deadlineMs` is one
-  wall-clock budget across attempts and backoff.
+- `tests/regression/failure-propagation.test.ts` — safe retries and backoff
+  carry no task wall-clock budget (#118).
 - `tests/contract/sessions.test.ts` — `resumeFrom` without a prompt sends
   the default continuation instruction over the rehydrated transcript.
 
@@ -1384,12 +1400,12 @@ The investigation confirmed a real indefinite-settlement defect: Pi's
 provider-stream and tool awaits do not race the abort signal — so a
 non-cooperative provider/tool left `prompt()` pending forever and a
 synchronous dispatch never returned (proven by a test that timed out at 5s
-on the pre-fix implementation; it now returns at the task's deadline).
+on the pre-fix implementation; now exercised with the stall watchdog after #118).
 
 The lifecycle now separates three concepts in `TaskExecution`:
 
 - **caller settlement** (`result()`): resolves with the true outcome when
-  the run winds down, or a provisional cancelled/deadline outcome the
+  the run winds down, or a provisional cancelled/stall outcome the
   moment cancellation is requested — never blocked on cleanup;
 - **worker truth** (`settled()`): resolves only when `prompt()` +
   `waitForIdle()` actually settle — confirmed quiescence;
@@ -1403,7 +1419,7 @@ New regression tests in `tests/regression/cancellation.test.ts`:
 - forced cancel settles while a gated provider blocks cleanup, conflicting
   work rejects during quarantine, the reservation releases only after the
   worker demonstrably winds down, and the ticket stays cancelled;
-- a sync call returns a structured deadline outcome while the worker is
+- a sync call returns a structured stall outcome while the worker is
   still gated, holds the reservation during quarantine, and admits the
   same scope once quiescence is confirmed.
 
@@ -1519,8 +1535,8 @@ execution, and state update, so no second locking layer exists.
   before admission so a mismatch fails the whole call; `checkout`
   re-verifies so a close-and-recreate race degrades to a task failure.
   `resumeFrom` on an already-live sessionId rejects.
-- **Settle policy:** ok+prompted keeps/inserts; prompted cancel or deadline
-  evicts; pre-prompt cancel/deadline leaves the session intact; ordinary
+- **Settle policy:** ok+prompted keeps/inserts; prompted cancel or stall
+  evicts; pre-prompt cancel leaves the session intact; ordinary
   failure keeps a pooled session reusable; quarantined sessions are evicted
   but never disposed.
 - **RPC:** `list` shows live entries (running marked); `close` rejects

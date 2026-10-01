@@ -141,10 +141,10 @@ describe("delegate validation contract", () => {
     expect(result.text).not.toMatch(/sessionId must be a non-empty/);
   });
 
-  test("rejects non-positive deadlines with an actionable error", async () => {
-    // v1 evidence: schema.test.ts "rejects non-positive deadlineMs".
+  test("rejects removed deadlines with an actionable error", async () => {
+    // #118 supersedes v1 schema.test.ts non-positive deadline validation.
     session = await openDelegateBoundary();
-    for (const deadlineMs of [0, -50]) {
+    for (const deadlineMs of [0, -50, 100, null]) {
       const result = await callDelegate(session, {
         async: false,
         tasks: [{ prompt: "x", deadlineMs }],

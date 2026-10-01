@@ -13,6 +13,21 @@ below is traced to that evidence.
 
 ---
 
+## Task deadlines removed (#118, user-approved)
+
+The user's explicit decision, “cut deadline,” overrides SPEC-V2's
+`deadlineMs` dispatch field, execution/retry wall-clock budgets, and deadline
+rules during resource loading, pause, questions, and pooled-session settlement.
+Tasks have no wall-clock deadline. Supplied `deadlineMs` rejects the entire call
+before execution in compact and full mode, including null, flat, and
+stringified-task recovery shapes; it is not silently discarded. Historical
+saved deadline failures remain readable, but cannot authorize new calls.
+
+Inactivity/stall detection, cooperative abort and confirmed quiescence,
+reservations and quarantine, paused/question-waiting worker safety, detachable
+bounded ticket waits/tails, and shutdown bounds remain unchanged. This removes
+only task deadlines, not unrelated internal timer bounds or batch token budgets.
+
 ## Axioms
 
 1. **The weights are the platform.** Models arrive RL-trained on the
@@ -185,7 +200,7 @@ mid-flight the parent can steer. The grammar:
   Compact dispatch advertises `tasks`, `async`, `workspace`, and
   `brief`; each task has `prompt`, `agent`, `cwd`, and `workspace`.
   Full mode adds task `id`, `description`, `tools`, `systemPrompt`,
-  `sessionId`, `resumeFrom`, `deadlineMs`, `dependsOn` and batch
+  `sessionId`, `resumeFrom`, `dependsOn` and batch
   `tokenBudget`, `operationId`. Compact ticket actions are poll, wait,
   cancel, answer, steer, and interrupt, with their required addressing and
   payload fields; full mode also exposes pause/resume/tail, wait-any

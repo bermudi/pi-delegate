@@ -139,6 +139,6 @@ describe("regression: malformed provider calls recover at the public boundary", 
       tasks: [{ prompt: "inspect", deadlineMs: "1000" }],
     });
     expect(deadline.isError).toBe(true);
-    expect(deadline.text).toContain("'deadlineMs'");
+    expect(deadline.text).toContain("deadlineMs");
   });
 });
