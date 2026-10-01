@@ -308,9 +308,9 @@ test(
     // Work-order §3d.8 + #63: `delegate N tasks`, one line per task
     // showing its label — description, then caller id, then agent, then
     // `inline` (compact callers cannot set ids, so a positional task-N is
-    // noise) — and the first ~60 chars of its prompt, `… and K more`
-    // past four, `delegate manual` for an empty list — and deliberately
-    // static: no spinner, timers, or live state.
+    // noise) — and the first ~80 chars of its prompt (cut at a word
+    // boundary), `… and K more` past four, `delegate manual` for an empty
+    // list — and deliberately static: no spinner, timers, or live state.
     session = await openDelegateBoundary();
     const render = (args: unknown) => renderToolCall(session!, "delegate", args);
 
@@ -352,11 +352,14 @@ test(
     });
     expect(six).toContain("  … and 2 more");
     expect(six).not.toContain("prompt 5");
-    // A ~60-char preview with an ellipsis; long prompts stay one line.
+    // A ~80-char preview with an ellipsis; long prompts stay one line.
     const long = render({ tasks: [{ prompt: "p".repeat(200) }] });
     const previewLine = long.split("\n")[1]!;
-    expect(previewLine.length).toBeLessThanOrEqual(2 + 16 + 2 + 60);
+    expect(previewLine.length).toBeLessThanOrEqual(2 + 16 + 2 + 80);
     expect(previewLine).toContain("…");
+    // The cut lands between words when the prompt has them.
+    const words = render({ tasks: [{ prompt: "alpha ".repeat(30) }] });
+    expect(words.split("\n")[1]).toMatch(/alpha…$/);
     // A resume-only task shows its revival tag instead of a prompt.
     const resumed = render({
       tasks: [{ resumeFrom: "/tmp/x/sess_ab12cd34ef.jsonl" }],
@@ -517,8 +520,9 @@ test(
 test(
   "an async dispatch receipt collapses to one line",
   async () => {
-    // #63: the ticket-creation result is a single receipt line —
-    // background ticket id (short), task count, auto-delivery — with the
+    // #63: the ticket-creation result is a single pointer line — short
+    // ticket id, dispatched to background (the call row already carries
+    // the task count; expansion reveals delivery detail) — with the
     // expand hint keeping notices reachable.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
@@ -533,7 +537,7 @@ test(
     const lines = collapsed.split("\n").filter((line) => line !== "");
     expect(lines.length).toBeLessThanOrEqual(2);
     expect(lines[0]).toMatch(
-      /^↳ background ticket t-[0-9a-f]{8} · 2 tasks · results arrive automatically/,
+      /^↳ ticket t-[0-9a-f]{8} · dispatched to background/,
     );
     expect(lines[0]).toContain("… more");
 

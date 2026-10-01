@@ -33,6 +33,7 @@ import {
   formatDispatchResult,
   resumeTagOf,
   truncateLine,
+  truncateWords,
 } from "./format.ts";
 import { UNBOUNDED_OUTPUT } from "./spill.ts";
 import { recoveryWarning, type TicketStore } from "./tickets.ts";
@@ -53,6 +54,12 @@ const COLLAPSED_PREVIEW_LINES = 10;
 const CALL_PREVIEW_TASKS = 4;
 /** Display budget for a collapsed one-line task summary. */
 const COLLAPSED_LINE_LIMIT = 110;
+/**
+ * Call-row prompt preview budget: with label and indent it keeps each
+ * task to one line on a ~100-column terminal, and `Text` soft-wraps at
+ * word boundaries on narrower ones.
+ */
+const CALL_PREVIEW_LIMIT = 80;
 /** Call-row labels align to the longest shown, never wider than this. */
 const CALL_LABEL_WIDTH = 16;
 /** Result-line labels truncate so the summary keeps its budget. */
@@ -196,9 +203,12 @@ function styled(text: string, theme: Theme): string {
     .join("\n");
 }
 
-/** Collapse a prompt to a single ~60-char line for the call row. */
+/** Collapse a prompt to a single line for the call row. */
 function promptPreview(prompt: string): string {
-  return truncateLine(displaySafe(prompt).replace(/\s+/g, " ").trim(), 60);
+  return truncateWords(
+    displaySafe(prompt).replace(/\s+/g, " ").trim(),
+    CALL_PREVIEW_LIMIT,
+  );
 }
 
 function textOf(component: Component | undefined): Text {
@@ -274,7 +284,12 @@ export function renderDelegateCall(
         : task.resumeFrom !== undefined
           ? `↻${resumeTagOf(task.resumeFrom)}`
           : "(no prompt)";
-    lines.push(theme.fg("muted", `  ${label.padEnd(width)}  ${preview}`));
+    // Labels bright, previews muted — the same anchor the collapsed
+    // result rows use, so a call and its outcomes read as one shape.
+    lines.push(
+      theme.fg("toolTitle", `  ${label.padEnd(width)}  `) +
+        theme.fg("muted", preview),
+    );
   }
   const rest = tasks.length - CALL_PREVIEW_TASKS;
   if (rest > 0) {
@@ -573,11 +588,14 @@ function collapsedBody(
     details.async === true &&
     typeof details.ticket === "string"
   ) {
-    const count = Array.isArray(details.tasks) ? details.tasks.length : 0;
+    // One pointer line: the call row above already carries the task
+    // count, and auto-delivery is the documented contract — expanding
+    // reveals the rest. "Dispatched" (not "running") stays true when a
+    // replayed transcript renders this receipt long after settlement.
     return (
       theme.fg(
         "toolOutput",
-        `↳ background ticket ${shortTicket(details.ticket)} · ${count} task${count === 1 ? "" : "s"} · results arrive automatically`,
+        `↳ ticket ${shortTicket(details.ticket)} · dispatched to background`,
       ) + expandHint(theme)
     );
   }

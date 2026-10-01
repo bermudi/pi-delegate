@@ -56,6 +56,20 @@ export function truncateLine(text: string, limit: number): string {
 }
 
 /**
+ * Truncate to at most `limit` chars, cutting at the last word boundary at
+ * or before the limit so the ellipsis lands between words; text with no
+ * reasonable boundary (a long path or token run) still hard-cuts.
+ */
+export function truncateWords(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const slice = text.slice(0, Math.max(0, limit - 1));
+  const boundary = slice.lastIndexOf(" ");
+  const body =
+    boundary > Math.floor(limit / 2) ? slice.slice(0, boundary) : slice;
+  return `${body.trimEnd()}…`;
+}
+
+/**
  * A transcript is *resumable* iff `resumeFrom` opens a conversation with
  * restorable history: the file exists and holds at least one
  * message-bearing entry. A header-only `.jsonl` — produced when a
