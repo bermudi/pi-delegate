@@ -200,8 +200,9 @@ use any design that makes these properties true and testable.
   source drift observed during an isolated or scratch run (scratch evidence
   requires a usable Git repository) in which a worker used a shell MUST be
   reported on that worker's outcome — excluding writes attributable to
-  same-batch shared siblings; a root overlapped by a shell-capable shared
-  sibling is unattributable and MUST NOT carry a pin (logged instead).
+  same-batch shared siblings; a root overlapped by a shared sibling whose
+  shell writes are unobservable (a shell that ran outside Git evidence
+  coverage) is unattributable and MUST NOT carry a pin (logged instead).
 - Every successful proposal MUST have a durable recovery representation before
   reconciliation.
 - Proposals MUST reconcile in task order. Each proposal is all-or-nothing;

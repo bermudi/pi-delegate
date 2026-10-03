@@ -8,6 +8,11 @@ import {
 } from "./config.ts";
 import { runTask, type RunControls } from "./execution.ts";
 import {
+  withGitEvidence,
+  type AttributionWindows,
+  type WindowEvidence,
+} from "./git-attribution.ts";
+import {
   blockingReason,
   handoffAppendix,
   prerequisiteSatisfied,
@@ -166,6 +171,14 @@ export class DispatchCoordinator {
         outcomes: TaskOutcome[],
       ) => Promise<readonly TaskOutcome[]>;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
+      /**
+       * The session's Git evidence-window registry (SPEC v3
+       * "Observability — Completion evidence"; user decision 2026-10-02):
+       * each task's window opens right before its first attempt and
+       * settles after the final one, so one window spans every retry.
+       * Undefined leaves attribution purely tool-observed.
+       */
+      attribution?: AttributionWindows;
       /**
        * One task's caller-visible settlement (#60): invoked for every
        * recorded outcome — provisional or final — as it lands, with the
@@ -444,6 +457,7 @@ export class DispatchCoordinator {
       onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
       brief?: string;
       tokenBudget?: number;
+      attribution?: AttributionWindows;
     },
     grant: AdmissionGrant,
     loaders: Map<string, Promise<DefaultResourceLoader>>,
@@ -496,6 +510,9 @@ export class DispatchCoordinator {
     // Once the worker's true outcome has landed it must not be overwritten
     // by a provisional one — worker truth is strictly better information.
     let workerTruthRecorded = false;
+    // The task's Git evidence window, once settled: a late worker-truth
+    // outcome folds the same evidence over its own observed set.
+    let windowEvidence: WindowEvidence | undefined;
     const record = (outcome: TaskOutcome) => {
       if (workerTruthRecorded) return;
       outcomes[task.index] = outcome;
@@ -578,9 +595,12 @@ export class DispatchCoordinator {
       if (late === undefined) return;
       workerTruthRecorded = true;
       // Reconciliation may already have annotated the provisional entry;
-      // worker truth replaces the run outcome but keeps its integration.
+      // worker truth replaces the run outcome but keeps its integration —
+      // and the Git window's evidence folds over its own observed set.
       const merged: TaskOutcome = {
-        ...late,
+        ...(windowEvidence === undefined
+          ? late
+          : withGitEvidence(late, windowEvidence)),
         integration: outcomes[task.index]?.integration ?? late.integration,
       };
       outcomes[task.index] = merged;
@@ -846,19 +866,57 @@ export class DispatchCoordinator {
                 // Diagnostics must never fail the dispatch it displays.
               }
             }
-            const outcome = await runTask(
-              effectiveTask,
-              controls,
-              loaders,
-              (handle) => {
-                workerCreated = true;
-                liveExecutions += 1;
-                if (ticket) {
-                  this.tickets.registerExecution(ticket, task.index, handle);
+            // The Git evidence window (SPEC v3 "Observability —
+            // Completion evidence") opens here — after admission, pause,
+            // predecessor, and slot gates, immediately before the first
+            // attempt — so a queued task never absorbs pre-window
+            // changes, and one window spans all of runTask's retries.
+            const window =
+              options.attribution === undefined
+                ? undefined
+                : await options.attribution.open(task, ticket?.id);
+            let outcome: TaskOutcome;
+            try {
+              outcome = await runTask(
+                effectiveTask,
+                controls,
+                loaders,
+                (handle) => {
+                  workerCreated = true;
+                  liveExecutions += 1;
+                  if (ticket) {
+                    this.tickets.registerExecution(ticket, task.index, handle);
+                  }
+                },
+                onWorkerSettled,
+              );
+              // The window settles after the final attempt but before
+              // workspace reconciliation — its diff must not count the
+              // integrator's own writes.
+              if (window !== undefined && options.attribution !== undefined) {
+                if (outcome.quarantined === true) {
+                  // A provisional record cannot wait on the second
+                  // snapshot: the cancelled view must land when the
+                  // ticket does, and worker truth — which replaces it —
+                  // folds this window's evidence when it arrives.
+                  void options.attribution
+                    .settle(window)
+                    .then((evidence) => {
+                      windowEvidence = evidence;
+                    });
+                } else {
+                  const evidence = await options.attribution.settle(window);
+                  windowEvidence = evidence;
+                  outcome = withGitEvidence(outcome, evidence);
                 }
-              },
-              onWorkerSettled,
-            );
+              }
+            } finally {
+              // On a thrown run the window still closes so it can never
+              // look open-ended to siblings.
+              if (window !== undefined && windowEvidence === undefined) {
+                options.attribution?.abandon(window);
+              }
+            }
             record(outcome);
             return;
           } finally {

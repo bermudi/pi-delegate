@@ -455,11 +455,12 @@ export async function prepareScratch(
         // Review carve-out: a same-phase shared sibling writes the source
         // legitimately — admission seats it beside scratch on purpose —
         // so its attributed files are not escapes. Subtract those; but a
-        // shell-capable sibling makes attribution for this root
-        // impossible (its bash writes are unobservable), so pinning is
-        // de-scoped for the whole root and says so once, like the non-Git
-        // case. Only same-phase siblings matter: earlier phases finished
-        // before this window opened, later ones write after it closed.
+        // shell sibling with no Git coverage makes attribution for this
+        // root impossible (its bash writes are unobservable), so pinning
+        // is de-scoped for the whole root and says so once, like the
+        // non-Git case. Only same-phase siblings matter: earlier phases
+        // finished before this window opened, later ones write after it
+        // closed.
         const rootCanon = canonicalPath(drift.sourceRoot);
         const underRoot = (candidate: string): boolean =>
           isWithin(rootCanon, canonicalPath(candidate));
@@ -474,10 +475,20 @@ export async function prepareScratch(
           }
           const siblingOutcome = outcomes[index];
           if (!siblingOutcome) continue;
-          const attributed = siblingOutcome.attributedFiles ?? [];
+          // Same trust basis as overlap reporting: a sibling whose
+          // window named concurrent writers can carry their changes in
+          // its Git diff — subtracting those would hide real escapes,
+          // so only its directly-observed paths count then.
+          const attributed =
+            (siblingOutcome.concurrentWriters?.length ?? 0) > 0
+              ? (siblingOutcome.observedFiles ?? [])
+              : (siblingOutcome.attributedFiles ?? []);
           const overlapsRoot =
             underRoot(sibling.cwd) || attributed.some(underRoot);
           if (!overlapsRoot) continue;
+          // An uncovered-shell sibling is the only de-scoping case: a
+          // Git-covered one's changes are already in its attributed set
+          // and get subtracted by the loop below.
           if (siblingOutcome.uncertainFiles === true) {
             unattributable = true;
             break;
@@ -509,7 +520,9 @@ export async function prepareScratch(
         for (const worker of workers.values()) {
           if (worker.sourceRoot !== drift.sourceRoot) continue;
           const outcome = outcomes[worker.taskIndex];
-          if (!outcome || outcome.uncertainFiles !== true) continue;
+          // Pin on "ran a shell", not on `uncertainFiles`: a Git-covered
+          // copy's window cannot see writes that escaped to the source.
+          if (!outcome || outcome.shellObserved !== true) continue;
           outcomes[worker.taskIndex] = {
             ...outcome,
             integration: {

@@ -122,7 +122,16 @@ export const taskOutcomeDetailsSchema = Type.Object(
     // tail).
     transcriptStart: Type.Optional(Type.Integer()),
     attributedFiles: Type.Optional(readonlyArray(Type.String())),
+    // Overlap-reporting basis while concurrentWriters is non-empty —
+    // the write/edit-observed subset of attributedFiles.
+    observedFiles: Type.Optional(readonlyArray(Type.String())),
     uncertainFiles: Type.Optional(Type.Boolean()),
+    // The task ran a shell regardless of Git coverage — internal
+    // source-drift evidence, carried on the record for fidelity.
+    shellObserved: Type.Optional(Type.Boolean()),
+    // Writers whose work may appear inside the task's Git evidence
+    // window ("parent", or "<ticket>#<task>" for a mutating sibling).
+    concurrentWriters: Type.Optional(readonlyArray(Type.String())),
     verdict: Type.Optional(taskVerdictSchema),
   },
   { additionalProperties: false },
@@ -144,6 +153,9 @@ export const attributedFilesDetailsSchema = readonlyArray(
       taskId: Type.String(),
       files: readonlyArray(Type.String()),
       uncertain: Type.Boolean(),
+      // Optional: only a task whose Git window overlapped other writers
+      // names them ("parent", or "<ticket>#<task>").
+      concurrentWriters: Type.Optional(readonlyArray(Type.String())),
     },
     { additionalProperties: false },
   ),

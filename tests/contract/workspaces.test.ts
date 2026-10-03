@@ -249,7 +249,15 @@ describe("delegate workspace and shared-write contract", () => {
         async: true,
       });
       ticketIdOf(dispatched.text); // ticket exists
+      // The worker's first stream is in flight before the rejection is
+      // measured — otherwise its arrival races the second call and the
+      // count moves for a reason unrelated to the call under test.
+      const started = Date.now() + 5000;
+      while (subagents.state.callCount < 1 && Date.now() < started) {
+        await new Promise((r) => setImmediate(r));
+      }
       const callsBefore = subagents.state.callCount;
+      expect(callsBefore).toBe(1);
 
       const rejected = await callDelegate(session, {
         async: false,

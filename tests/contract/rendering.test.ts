@@ -939,11 +939,12 @@ test(
 );
 
 test(
-  "a collapsed file count keeps the bash-uncertainty mark",
+  "a collapsed file count keeps the unknown-shell mark",
   async () => {
-    // `· N files` beside a task that also ran a shell understates the
-    // evidence surface — the expanded `files:` line says
-    // `uncertain (bash)`; the collapsed meta must not drop it.
+    // `· N files` beside a task that ran an uncovered shell understates
+    // the evidence surface — the expanded `files:` line says
+    // `unknown (shell used outside git)`; the collapsed meta must not
+    // drop it.
     session = await openDelegateBoundary();
     const collapsed = renderSyntheticResult(session, {
       mode: "dispatch",
@@ -953,8 +954,8 @@ test(
         { index: 1, id: "b", status: "ok", retries: 0, output: "done", uncertainFiles: true },
       ],
     });
-    expect(collapsed).toContain("✓ a  done · 1 file · uncertain (bash)");
-    expect(collapsed).toContain("✓ b  done · uncertain (bash)");
+    expect(collapsed).toContain("✓ a  done · 1 file · unknown shell");
+    expect(collapsed).toContain("✓ b  done · unknown shell");
   },
 );
 

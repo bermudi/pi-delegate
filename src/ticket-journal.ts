@@ -57,6 +57,11 @@ const outcome = Type.Object({
   // written before attribution existed still parse unchanged.
   attributedFiles: Type.Optional(Type.Array(Type.String())),
   uncertainFiles: Type.Optional(Type.Boolean()),
+  // Optional — records written before Git evidence windows (user
+  // decision 2026-10-02) carry none.
+  observedFiles: Type.Optional(Type.Array(Type.String())),
+  shellObserved: Type.Optional(Type.Boolean()),
+  concurrentWriters: Type.Optional(Type.Array(Type.String())),
   // Verifier verdict (#49) — optional; only verifier-profile outcomes
   // with a parseable VERDICT: line carry it.
   verdict: Type.Optional(Type.Union([

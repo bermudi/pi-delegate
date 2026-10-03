@@ -170,12 +170,15 @@ Workspaces:
 
 Both non-shared modes are one-shot: they reject `sessionId` and `resumeFrom`.
 
-Completion evidence — results name the files each task touched: ordered,
-deduplicated paths observed on `write`/`edit` calls, resolved against the task
-cwd, plus a `files: uncertain (bash)` marker when shell commands ran and an
-`overlap:` note when batch tasks claimed the same file. Evidence records
-observed calls only; it is not confinement and does not prove other paths were
-untouched.
+Completion evidence — results name the files each task touched: the union of
+`write`/`edit`-observed paths and the changes a Git snapshot taken before and
+after the run saw in the worker's repository (committed paths included via a
+moved `HEAD`; ignored files are never covered). A shell run outside Git
+coverage shows `files: unknown (shell used outside git)`, a covered window
+that saw nothing shows no files line, a window that overlapped other writers
+names them, and an `overlap:` note flags batch tasks that claimed the same
+file. Evidence records observed changes only; it is not confinement and does
+not prove other paths were untouched.
 
 ## Configuration
 

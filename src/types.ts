@@ -196,17 +196,44 @@ export interface TaskOutcome {
    */
   readonly transcriptStart?: number;
   /**
-   * SPEC v3 "Observability — Completion evidence": absolute paths named by
-   * the task's write/edit tool calls, resolved against the task cwd,
-   * in first-observed order, deduplicated. Evidence, not confinement —
-   * only what tool calls claimed; a file never named is never reported.
+   * SPEC v3 "Observability — Completion evidence": absolute paths the
+   * task changed, resolved against the task cwd, ordered, deduplicated —
+   * the union of paths observed in its write/edit tool calls and the
+   * paths its Git evidence window saw change (user decision 2026-10-02).
+   * Evidence, not confinement: it reports what tools touched and claims
+   * nothing about paths outside observation.
    */
   readonly attributedFiles?: readonly string[];
   /**
-   * True when the task ran a bash/exec tool call: shell effects are
-   * unobservable per-path, so `attributedFiles` is then a lower bound.
+   * The subset of `attributedFiles` named directly by write/edit tool
+   * calls — recorded when `concurrentWriters` is non-empty so overlap
+   * reporting can fall back to unambiguous observations instead of the
+   * Git window's potentially-shared diff.
+   */
+  readonly observedFiles?: readonly string[];
+  /**
+   * True when the task ran a bash/exec tool call AND no Git evidence
+   * window covered its run (outside a repository, or Git failed): shell
+   * effects are then unobservable, so `attributedFiles` is a lower
+   * bound. A covered window sees the shell's footprint itself and the
+   * flag lifts.
    */
   readonly uncertainFiles?: boolean;
+  /**
+   * True when the task ran a bash/exec tool call — regardless of Git
+   * coverage. Internal evidence: isolated/scratch source-drift pinning
+   * keys on "this worker could have escaped its copy", which a covered
+   * window says nothing about.
+   */
+  readonly shellObserved?: boolean;
+  /**
+   * Writers whose work may appear inside this task's Git evidence
+   * window: `parent` when the parent session ran a write/edit/bash/exec
+   * call during it, `<ticket>#<task>` for another mutating delegate task
+   * whose window overlapped on the same repository root. Advisory only —
+   * the window is shared, not exclusive.
+   */
+  readonly concurrentWriters?: readonly string[];
   /**
    * SPEC v3 "Observability — Completion evidence — verifier verdict":
    * when the task ran under the built-in `verifier` profile, the verdict

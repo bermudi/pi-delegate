@@ -420,12 +420,13 @@ function collapsedOutcomeMeta(
   spans: { text: string; color: "success" | "error" | "warning" }[];
 } {
   const files = outcome.attributedFiles?.length ?? 0;
-  // Bash effects are unobservable — a file count alone would read as the
-  // whole evidence; the `uncertain (bash)` mark carries the caveat the
-  // expanded `files:` line renders (#49 honesty applies collapsed too).
+  // Uncovered shell effects are unknowable — a file count alone would
+  // read as the whole evidence; the `unknown shell` mark carries the
+  // caveat the expanded `files:` line renders (#49 honesty applies
+  // collapsed too).
   const muted =
     (files > 0 ? ` · ${files} file${files === 1 ? "" : "s"}` : "") +
-    (outcome.uncertainFiles === true ? " · uncertain (bash)" : "");
+    (outcome.uncertainFiles === true ? " · unknown shell" : "");
   const spans: { text: string; color: "success" | "error" | "warning" }[] = [];
   const integration: TaskIntegration | undefined = outcome.integration;
   if (

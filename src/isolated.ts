@@ -1635,15 +1635,17 @@ export async function prepareIsolated(
           await markGroupFailure(group, workers, results, error);
         }
         // Drift is only attributable to a worker that ran a shell: a task
-        // without bash cannot have written the source. Source changes
-        // with no shell-capable worker are the caller's own edits —
-        // already reported by the per-proposal conflict machinery — and
-        // must not be pinned on an innocent outcome.
+        // without bash cannot have written the source. `shellObserved`,
+        // not `uncertainFiles` — a Git-covered shell still escapes its
+        // worktree unseen by that window (the drift IS the proof).
+        // Source changes with no shell-capable worker are the caller's
+        // own edits — already reported by the per-proposal conflict
+        // machinery — and must not be pinned on an innocent outcome.
         if (drift !== undefined && drift.length > 0) {
           for (const taskIndex of group.taskIndexes) {
             const outcome = results[taskIndex];
             if (
-              outcome?.uncertainFiles === true &&
+              outcome?.shellObserved === true &&
               outcome.integration !== undefined
             ) {
               results[taskIndex] = withIntegration(outcome, {

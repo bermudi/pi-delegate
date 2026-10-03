@@ -414,7 +414,7 @@ gaps.
   Covered: per-status icons and labels, ticket header + running slots,
   async one-liner, receipt/roster truncation, delivered-message collapsed
   lines. The same honesty the expanded view carries applies collapsed:
-  `uncertain (bash)` survives a file count, unevidenced PASS/FAIL verdicts
+  `unknown shell` survives a file count, unevidenced PASS/FAIL verdicts
   keep their `unverifiable`/`not corroborated` qualification, recovery
   warnings/notices/pending questions and a wait's tail note (timeout,
   detached, wait-any roster via `details.note`) render below the task
@@ -962,29 +962,48 @@ live run — never a mid-turn merge.
   and a task that never ran keeps the plain text. Cold-recovered
   tickets refuse with `not-applied` in `tests/contract/recovery.test.ts`.
 
-### Completion evidence — file attribution (v3, #38, 2026-09-27)
+### Completion evidence — file attribution (v3, #38, 2026-09-27; git windows 2026-10-02)
 
 SPEC v3 "Observability — Completion evidence" restores a lighter form of
-v1's touched-file reporting: observed write/edit call paths (resolved
-against the task cwd, ordered, deduplicated) plus a bash/exec uncertainty
-marker — never v1's physical tracking (inode signatures, symlink
-canonicalization, git-diff fallback). Evidence, not confinement: nothing
-reads it for admission, scheduling, or execution.
+v1's touched-file reporting: the union of observed write/edit call paths
+(resolved against the task cwd, ordered, deduplicated) and the changes a
+Git evidence window saw — a `HEAD`/`status`/`lstat` snapshot before the
+task's first attempt and another after the last, plus
+`git diff --name-only` across a moved `HEAD`. Never v1's physical
+tracking (inode signatures, symlink canonicalization). Evidence, not
+confinement: nothing reads it for admission, scheduling, or execution.
+The git-diff carve-out in the original restoration was reversed by user
+decision 2026-10-02 after live session `01a0fdba`, where every
+bash-using worker had reported only `files: uncertain (bash)`.
 
-- **Contract:** `files: a.ts, src/b.md` / `files: uncertain (bash)` lines
-  beside each task's claim in sync results, live/settled ticket views,
-  and delivered wakes; `overlap: <path>` once per path two tasks
-  attributed, naming both task ids; `details.attributedFiles` on sync
+- **Contract:** `files: a.ts, src/b.md` / `files: unknown (shell used
+  outside git)` lines beside each task's claim in sync results,
+  live/settled ticket views, and delivered wakes; a covered window that
+  saw nothing shows no files line; `· may include concurrent edits by:
+  <writers>` on windows that overlapped the parent's mutating calls
+  (fact only) or same-root mutating siblings; `overlap: <path>` once per
+  path two tasks attributed, naming both task ids — computed on
+  write/edit observation plus Git windows with no named writers;
+  `details.attributedFiles` (with optional `concurrentWriters`) on sync
   results and poll/wait; journal persistence via optional fields, so
   pre-attribution records parse unchanged; cancel previews carry no
   attribution.
 - **Covered now:** `tests/contract/attribution.test.ts` — write and edit
   attribution, relative-path resolution against a task `cwd`, dedupe,
-  out-of-root paths rendering absolute, bash uncertainty without output
-  parsing, combined write+bash evidence, the single named overlap line,
-  ticket/wake/live-poll rendering, `details.attributedFiles`, cancel
-  previews staying evidence-free, cold recovery of recorded attribution,
-  and pre-attribution journal records parsing cleanly.
+  out-of-root paths rendering absolute, the uncovered-shell mark without
+  output parsing, combined write+shell evidence, the single named
+  overlap line, ticket/wake/live-poll rendering,
+  `details.attributedFiles`, cancel previews staying evidence-free,
+  cold recovery of recorded attribution, and pre-attribution journal
+  records parsing cleanly. Git windows (provenance: live session
+  `01a0fdba`, 2026-10-02): bash-created files reported by path, a
+  pre-dirty file reported only when the run rewrote it (its untouched
+  pre-dirty sibling excluded), a no-change window showing no files
+  line, committed paths via a moved `HEAD`, non-Git shells falling
+  back to the unknown mark, a snapshot failure logging to stderr and
+  degrading without failing the task, overlapping mutating tasks on
+  one repository naming each other with no false overlap line, and the
+  parent named for a mutating call inside a window.
 
 ### Ticket interrupt — abort the turn, keep the worker (v3, #42)
 
@@ -1193,7 +1212,7 @@ against them.
 - **Covered now:** `tests/contract/details.test.ts` — `Check` against
   the exported schemas on a real help call, sync dispatch (brief,
   tokenBudget, write attribution, verifier verdict,
-  bash uncertainty), async dispatch + poll/wait + delivered wake, steer
+  uncovered-shell uncertainty), async dispatch + poll/wait + delivered wake, steer
   and interrupt receipts, a worker-question notification, a session
   list, and a quarantined-outcome `usageLowerBound`. The capacity
   sentence lives in `tests/contract/workspaces.test.ts` (held claim

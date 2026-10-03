@@ -41,6 +41,7 @@ import {
   DispatchCoordinator,
   type DispatchOutcome,
 } from "./src/coordinator.ts";
+import { AttributionWindows } from "./src/git-attribution.ts";
 import {
   briefNote,
   budgetNote,
@@ -542,6 +543,13 @@ function normalizeTools(value: string): unknown {
 
 const TICKET_ACTIONS = ["poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt", "tail"];
 const SESSION_ACTIONS = ["list", "close"];
+
+/**
+ * The parent-side tools that can mutate the tree a task's Git evidence
+ * window watches. Content-free concurrency input — only the tool event
+ * is recorded, never the call's arguments (user decision 2026-10-02).
+ */
+const PARENT_MUTATING_TOOLS = new Set(["write", "edit", "bash", "exec"]);
 
 /** A `delegate_ticket` example call built from the fields the caller sent. */
 function delegateTicketExample(args: Record<string, unknown>): string {
@@ -1553,6 +1561,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
     { readonly by: "wait" | "poll"; readonly view: string }
   >();
   let deliveryFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The session's Git evidence-window registry (SPEC v3 "Observability —
+   * Completion evidence"; user decision 2026-10-02): every dispatch hands
+   * it to the coordinator, which opens one window per task before its
+   * first attempt. Shared across calls so concurrent windows on one
+   * repository root still see each other; parent mutations flag every
+   * open window via the tool-event hooks below.
+   */
+  const attributionWindows = new AttributionWindows();
 
   /**
    * "Same leaf" means same branch: the parent's own turn appends entries
@@ -1857,6 +1874,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
     async: boolean;
   }>();
   api.on("tool_execution_start", (event) => {
+    // Parent mutating-tool events flag every open evidence window —
+    // content-free: the fact alone is recorded, never the arguments.
+    if (PARENT_MUTATING_TOOLS.has(event.toolName)) {
+      attributionWindows.noteParentMutation();
+    }
     if (event.toolName !== "delegate") return;
     const raw: unknown = event.args;
     if (!isRecord(raw)) {
@@ -1882,6 +1904,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
     });
   });
   api.on("tool_execution_end", (event, ctx) => {
+    // A parent mutation that started before a window opened still lands
+    // inside it — flag at completion too.
+    if (PARENT_MUTATING_TOOLS.has(event.toolName)) {
+      attributionWindows.noteParentMutation();
+    }
     if (event.toolName !== "delegate") return;
     const metadata = preflightDispatches.get(event.toolCallId);
     preflightDispatches.delete(event.toolCallId);
@@ -2118,6 +2145,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           signal: dispatchSignal,
           ticket,
           quiescence: barrier,
+          attribution: attributionWindows,
           preparePhase: (phase) => plan!.preparePhase(phase),
           reconcilePhase: (phase, outcomes) =>
             // The dispatch facts the batch actually holds: plans consume
@@ -2242,6 +2270,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               signal: batch.dispatchSignal,
               ticket: cancelledTicket,
               quiescence: barrier,
+              attribution: attributionWindows,
               onTaskSettled: (task, outcome) => {
                 if (outcome.usage === undefined) return;
                 emitUsage(
@@ -2723,11 +2752,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 results: result.outcomes,
                 // SPEC v3 "Observability — Completion evidence": the
                 // machine-readable half of the per-task `files:` lines —
-                // absolute write/edit paths plus the bash-uncertainty flag.
+                // absolute paths, the unknown-shell flag, and the names
+                // of writers that overlapped a task's evidence window.
                 attributedFiles: result.outcomes.map((outcome) => ({
                   taskId: outcome.id,
                   files: [...(outcome.attributedFiles ?? [])],
                   uncertain: outcome.uncertainFiles === true,
+                  ...(outcome.concurrentWriters !== undefined
+                    ? { concurrentWriters: [...outcome.concurrentWriters] }
+                    : {}),
                 })),
                 // SPEC v3 "Observability — Completion evidence — verifier
                 // verdict" (#49): the machine half of the `verdict:` lines —

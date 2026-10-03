@@ -235,6 +235,7 @@ function taskSection(
       outcome.attributedFiles,
       outcome.uncertainFiles,
       ticket.tasks[outcome.index]?.cwd,
+      outcome.concurrentWriters,
     ),
     verdictLine(outcome),
   ]
@@ -815,9 +816,19 @@ export class TicketStore {
    */
   attributionDetails(
     ticket: Ticket,
-  ): readonly { taskId: string; files: readonly string[]; uncertain: boolean }[] {
+  ): readonly {
+    taskId: string;
+    files: readonly string[];
+    uncertain: boolean;
+    concurrentWriters?: readonly string[];
+  }[] {
     const { record, rt } = this.entry(ticket);
-    const rows: { taskId: string; files: readonly string[]; uncertain: boolean }[] = [];
+    const rows: {
+      taskId: string;
+      files: readonly string[];
+      uncertain: boolean;
+      concurrentWriters?: readonly string[];
+    }[] = [];
     for (let index = 0; index < record.tasks.length; index++) {
       const outcome = record.outcomes[index];
       if (outcome !== undefined) {
@@ -825,6 +836,9 @@ export class TicketStore {
           taskId: outcome.id,
           files: [...(outcome.attributedFiles ?? [])],
           uncertain: outcome.uncertainFiles === true,
+          ...(outcome.concurrentWriters !== undefined
+            ? { concurrentWriters: [...outcome.concurrentWriters] }
+            : {}),
         });
         continue;
       }

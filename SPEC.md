@@ -272,14 +272,36 @@ mid-flight the parent can steer. The grammar:
 ## Observability
 
 - **Completion evidence.** A settled task's record carries the file
-  changes attributed to it: paths observed in its write/edit tool
-  calls, with changes sourced from bash marked uncertain. The inline
-  result, delivered wake, and ticket views show each task's attributed
-  files beside its claim, and `details.attributedFiles` carries them
-  machine-readably; when two tasks in one batch are attributed the
-  same file, the result says so. Attribution is evidence, not
-  confinement — it reports what tools touched and claims nothing
-  about paths it could not observe.
+  changes attributed to it: the union of paths observed in its
+  write/edit tool calls and the changes a Git evidence window saw in
+  the worker's repository (user decision 2026-10-02, live session
+  01a0fdba — a bash-only worker had reported only `uncertain (bash)`
+  and nothing usable). The window opens before the task's first
+  attempt and closes after the last: it snapshots `HEAD` plus
+  `git status --porcelain -z` with an lstat per listed path, and the
+  reported set is the paths whose status or stat differs between the
+  two snapshots plus `git diff --name-only` across a moved `HEAD` —
+  so committed work reports, a file already dirty before the run
+  reports only when the run rewrote it, and paths excluded by
+  `.gitignore` are never covered. When a bash/exec call ran and no
+  snapshot covered the window — the cwd is not a repository, or Git
+  failed (logged, never fatal) — the unknown-shell mark stands
+  instead; a covered window that saw nothing reports no files line
+  at all.
+
+  Every window is shared evidence, not exclusive: a window that
+  overlapped other writers — the parent's own write/edit/bash/exec
+  calls (fact only, never arguments) or mutating sibling tasks on the
+  same repository root — names them. Overlap reporting claims a
+  shared file only on write/edit observation or a Git window with no
+  named writers, so two overlapping tasks cannot each falsely claim
+  the other's changes. The inline result, delivered wake, and ticket
+  views show each task's attributed files beside its claim, and
+  `details.attributedFiles` carries them machine-readably with the
+  optional `concurrentWriters` names; when two tasks in one batch are
+  attributed the same file, the result says so. Attribution is
+  evidence, not confinement — it reports what changed inside a window
+  and claims nothing it could not observe.
 
   A task run under the built-in `verifier` profile (#49 — the
   reviewer's read + bash toolset under a prompt that demands a

@@ -1133,7 +1133,9 @@ export async function runTask(
                 ...(allFiles.size > 0
                   ? { attributedFiles: [...allFiles] }
                   : {}),
-                ...(anyUncertain ? { uncertainFiles: true } : {}),
+                ...(anyUncertain
+                  ? { uncertainFiles: true, shellObserved: true }
+                  : {}),
                 // The late outcome is the verifier's real verdict — the
                 // provisional snapshot's may have pre-dated its last line.
                 ...(() => {
@@ -1183,7 +1185,7 @@ export async function runTask(
     sessionFile: last.sessionFile,
     transcriptStart: last.transcriptStart,
     ...(allFiles.size > 0 ? { attributedFiles: [...allFiles] } : {}),
-    ...(anyUncertain ? { uncertainFiles: true } : {}),
+    ...(anyUncertain ? { uncertainFiles: true, shellObserved: true } : {}),
     // A verifier task's outcome carries its parsed verdict — reporting
     // evidence beside attribution; it never gates anything (#49).
     ...(() => {

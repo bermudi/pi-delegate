@@ -275,14 +275,24 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   the 2026-09-27 gap audit (V1-V2-MAP §3d item 1).
 
   **Restored in lighter form by SPEC v3 "Observability — Completion
-  evidence" (#38).** V2 now records the paths observed in each task's
+  evidence" (#38).** V2 records the paths observed in each task's
   write/edit tool calls — resolved against the task cwd, ordered,
-  deduplicated — plus an uncertainty marker when the task ran bash/exec.
-  This is evidence, not v1's physical tracking: no inode signatures,
-  no symlink canonicalization, no git-diff inference, and no claim about
-  paths a tool call never named. Display, overlap reporting, and
-  `details.attributedFiles` are the restored surfaces; v1's
-  `details.overlapWarning` shape and physical-identity semantics are not.
+  deduplicated — plus an uncertainty marker when the task ran
+  bash/exec outside Git coverage. This is evidence, not v1's physical
+  tracking: no inode signatures, no symlink canonicalization, and no
+  claim about paths a tool call never named. Display, overlap
+  reporting, and `details.attributedFiles` are the restored surfaces;
+  v1's `details.overlapWarning` shape and physical-identity semantics
+  are not. **Extended by user decision 2026-10-02 (live session
+  01a0fdba):** the earlier "no git-diff inference" carve-out is
+  reversed — a Git evidence window (a `HEAD`/`status`/`lstat`
+  snapshot before the task's first attempt and another after the
+  last, plus `git diff --name-only` across a moved `HEAD`) supplies
+  the shell's file footprint wherever the worker's cwd is a usable
+  repository, and the uncertainty mark survives only where no window
+  covered the shell. Concurrency is reported, not hidden: a window
+  names the overlapping mutating writers (the parent's tool calls,
+  same-root siblings) whose changes may be folded into it.
 
 - **Child base prompt is composed, not precedence-chosen (#33, user decision
   2026-09-26).** V1 picked one prompt by precedence — task, then agent, then a

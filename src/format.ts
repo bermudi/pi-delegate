@@ -303,23 +303,34 @@ export function displayPath(file: string, cwd: string | undefined): string {
 
 /**
  * The compact `files:` evidence line beside a task's output/claim:
- * `files: a.ts, src/b.md` for observed write/edit targets; `files:
- * uncertain (bash)` when only shell calls ran (their file effects are
- * unobservable and bash output is never parsed); both marks when both
- * kinds of evidence exist. Undefined when the task carries no evidence.
+ * `files: a.ts, src/b.md` for the merged attribution set — write/edit
+ * call targets union the Git window's changed paths (user decision
+ * 2026-10-02; bash output is still never parsed). When a task ran a
+ * shell with no Git coverage, shell changes are unknowable: `files:
+ * unknown (shell used outside git)`, or `· plus unknown shell changes
+ * (outside git)` beside observed paths. Named concurrent writers append
+ * `· may include concurrent edits by: …` — the window is shared, so its
+ * diff may carry a sibling's or the parent's work. Undefined when the
+ * task carries no evidence.
  */
 export function filesLine(
   files: readonly string[] | undefined,
   uncertain: boolean | undefined,
   cwd: string | undefined,
+  concurrentWriters?: readonly string[],
 ): string | undefined {
   const paths = files ?? [];
-  const mark = "uncertain (bash)";
+  const writers =
+    concurrentWriters !== undefined && concurrentWriters.length > 0
+      ? ` · may include concurrent edits by: ${concurrentWriters.join(", ")}`
+      : "";
   if (paths.length === 0) {
-    return uncertain === true ? `files: ${mark}` : undefined;
+    return uncertain === true
+      ? `files: unknown (shell used outside git)${writers}`
+      : undefined;
   }
   const list = paths.map((file) => displayPath(file, cwd)).join(", ");
-  return `files: ${list}${uncertain === true ? ` · ${mark}` : ""}`;
+  return `files: ${list}${uncertain === true ? " · plus unknown shell changes (outside git)" : ""}${writers}`;
 }
 
 /**
@@ -370,17 +381,23 @@ export function verdictLine(outcome: TaskOutcome): string | undefined {
 /**
  * One line per absolute path that two or more outcomes in the batch
  * claimed: `overlap: /path — attributed by tasks a, b`. Computed on
- * attributed (write/edit-observed) paths only — never on bash-uncertain
- * tasks, whose effects name no path. Evidence, not a lock claim: it
- * says so once, naming the file and the tasks (SPEC v3 "Observability —
- * Completion evidence").
+ * write/edit-observed paths plus Git-derived paths only from tasks with
+ * no concurrent writers — a task whose window named other writers may
+ * carry their changes in its diff, so its Git-derived set would pin a
+ * sibling's file on both tasks at once (user decision 2026-10-02).
+ * Evidence, not a lock claim: it says so once, naming the file and the
+ * tasks (SPEC v3 "Observability — Completion evidence").
  */
 export function overlapLines(
   outcomes: readonly TaskOutcome[],
 ): string[] {
   const claims = new Map<string, string[]>();
   for (const outcome of outcomes) {
-    for (const file of new Set(outcome.attributedFiles ?? [])) {
+    const basis =
+      (outcome.concurrentWriters?.length ?? 0) > 0
+        ? (outcome.observedFiles ?? [])
+        : outcome.attributedFiles;
+    for (const file of new Set(basis ?? [])) {
       const ids = claims.get(file) ?? [];
       if (!ids.includes(outcome.id)) ids.push(outcome.id);
       claims.set(file, ids);
@@ -433,6 +450,7 @@ export function formatDispatchResult(
         outcome.attributedFiles,
         outcome.uncertainFiles,
         task?.cwd,
+        outcome.concurrentWriters,
       ),
       verdictLine(outcome),
     ]
