@@ -67,7 +67,11 @@ typecheck/test/build then `npm publish`es via OIDC (no local npm auth);
 the tag must equal `package.json`'s version. `pi-delegate-v0.3.0` was the
 v3 cutover tag (see PUBLISH.md). The installed host is Pi 1.0.0; 0.3.3
 widened the host peer range to `>=0.87.0 <2.0.0` (`^0.87.0` excluded it),
-and steer delivery was verified in it. Run the tree per-session with
+and steer delivery was verified in it. The installed entry in
+`~/.pi/agent/settings.json` is the unversioned `npm:@bermudi/pi-delegate`
+so `pi update --extensions` tracks releases — an exact `@version` pin
+makes `pi update` a silent no-op; pin only to roll back (see PUBLISH.md).
+Run the tree per-session with
 `pi -ne -e <repo>/delegate.ts`; do NOT add a `.pi/extensions/` shim
 here — pi hard-errors on duplicate tool names between project and user
 extensions, which bricks every normal session in the repo.

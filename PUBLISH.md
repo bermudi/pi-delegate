@@ -28,13 +28,20 @@ Watch the workflow run; npm lists 0.3.1 when it finishes.
 ## Post-publish verification
 
 1. `npm view @bermudi/pi-delegate version` → 0.3.1.
-2. In a scratch directory (NOT this repo): `pi install
+2. On the operator machine, `pi update --extensions` picks the release
+   up — the `~/.pi/agent/settings.json` entry is the **unversioned**
+   `npm:@bermudi/pi-delegate`. An exact `@x.y.z` pin makes `pi update`
+   report "Updated" while doing nothing (seen 2026-10-03); only
+   `pi install npm:...@x.y.z` moves a pinned entry, and rollback to a
+   specific version still uses exactly that form. Keep the normal entry
+   unpinned.
+3. In a scratch directory (NOT this repo): `pi install
    npm:@bermudi/pi-delegate`, start `pi`, dispatch one single-task and
    one two-task call — verify both return tickets and wake with results.
    Verify `async:false` returns inline, removed aliases reject, compact
    hides and rejects advanced controls, and `"surface":"full"` plus
    reload enables the retained advanced controls.
-3. Confirm the OLD v1 behavior is gone in that install (sync-default
+4. Confirm the OLD v1 behavior is gone in that install (sync-default
    batches and kitchen-sink tool schema) — the displacement worked.
 
 ## Rollback
