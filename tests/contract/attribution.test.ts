@@ -247,6 +247,16 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
+    // The delivered wake renders the settled view: the files line rides
+    // it. Asserted before any wait — a wait that returns the terminal
+    // view consumes the wake (SPEC "Wake delivery").
+    const end = Date.now() + 2000;
+    while (sends.mock.calls.length === 0 && Date.now() < end) {
+      await Bun.sleep(5);
+    }
+    expect(sends).toHaveBeenCalled();
+    expect(String(sends.mock.calls[0]![0].content)).toContain("files: deliverable.md");
+    // A wait after the wake still returns the full view and details.
     const waited = await callDelegateTicket(session, {
       action: "wait",
       ticket,
@@ -257,13 +267,6 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
     expect(attributed.find((e) => e.taskId === "task-1")!.files).toEqual([
       join(session.cwd, "deliverable.md"),
     ]);
-    // The delivered wake renders the same view: the files line rides it.
-    const end = Date.now() + 2000;
-    while (sends.mock.calls.length === 0 && Date.now() < end) {
-      await Bun.sleep(5);
-    }
-    expect(sends).toHaveBeenCalled();
-    expect(String(sends.mock.calls[0]![0].content)).toContain("files: deliverable.md");
   });
 
   test("a running task's poll row shows attribution observed so far", async () => {

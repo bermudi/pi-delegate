@@ -311,9 +311,15 @@ gaps.
   tool count, and an `active now`/`active Ns ago` age, queued tasks read
   `waiting…`, and the header totals active/queued tasks and tool calls.
 - **Covered now (`tests/contract/delivery.test.ts`, `SPEC.md` "Background
-  delivery" and "Wake delivery"):** same-leaf follow-up wake of an idle
-  parent (`deliverAs: "followUp"` + `triggerTurn: true`), including after
-  a prior navigation; durable no-wake append plus "appended" notice
+  delivery" and "Wake delivery"):** same-leaf steering wake
+  (`deliverAs: "steer"` + `triggerTurn: true`) — on an idle parent it
+  triggers a new turn, including after a prior navigation; on a busy
+  parent the delivered `delegate-result` custom message enters context
+  before the run's final assistant message (proven through a held
+  tool-call turn — the harness cannot place the message between two
+  model calls of one run, so the turn-boundary ordering is asserted as
+  "before final assistant message / before `agent_end`", live session
+  01a0fdba, 2026-10-02); durable no-wake append plus "appended" notice
   after `/tree` navigation (`triggerTurn: false` — the custom message
   lands in the session at the current leaf); delivery held until
   isolated reconciliation applies and final annotations land; delivery
@@ -328,15 +334,21 @@ gaps.
   old batch is still reconciling; the visible waiting status names the
   awaited ticket id; new dispatches reject once shutdown begins while
   ticket RPCs still answer. Wake coalescing (#36): settlements inside
-  the ~100ms flush window emit ONE followUp message whose content names
+  the ~100ms flush window emit ONE steering message whose content names
   every settled ticket and whose details carry the merged ids and
   outcomes; settlements past the window wake separately; a window
   mixing same-leaf and moved-leaf tickets emits one wake plus one
   append + one notify naming the moved tickets; a ticket enqueues at
   most once ever; a settlement queued at shutdown is suppressed, logged,
-  and stays pollable.
-- **Gap:** delivered-result suppression when a waiter already consumed it;
-  progress/onUpdate frames; roster wording details; replacement-session
+  and stays pollable. Delivered-result suppression (closes the gap
+  named below, live session 01a0fdba, 2026-10-02): a `wait` or `poll`
+  that returned the ticket's terminal view consumes the pending wake —
+  no `delegate-result` message is appended and the skip is logged; a
+  wait consuming one of two settled tickets still delivers the
+  unconsumed sibling alone; a timed-out wait that returned while the
+  ticket kept running does not consume — the result delivers on
+  settlement.
+- **Gap:** progress/onUpdate frames; roster wording details; replacement-session
   non-inheritance (no real session replacement is expressible through the
   harness — the emitted `session_shutdown` path is covered instead).
 
@@ -1771,7 +1783,7 @@ collision precedence, and frontmatter model/thinking/tools (issue #7;
 defaults (now always background), exact agent names, and misfire telemetry (issue #35;
 `SPEC.md` "Interaction grammar"/"Canonical surface"/"Observability",
 `tests/contract/grammar.test.ts`, `tests/contract/telemetry.test.ts`);
-wake coalescing — simultaneous settlements batch into one followUp wake
+wake coalescing — simultaneous settlements batch into one steering wake
 grouped by leaf routing (issue #36; `SPEC.md` "Wake delivery",
 `tests/contract/delivery.test.ts`); task steering with delivery
 receipts — turn-boundary `steered`, parked `activated`, idempotent

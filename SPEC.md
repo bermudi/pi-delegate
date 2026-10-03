@@ -169,8 +169,13 @@ mid-flight the parent can steer. The grammar:
   `details.tokenBudget` carries `{limit, consumed, exhaustedAt?}`
   on dispatch results, polls, and waits; it persists on the
   ticket record so a recovered view still reports it.
-- **Wake delivery.** Settled results inject as follow-up turns,
-  leaf-aware; simultaneous settlements batch into one wake.
+- **Wake delivery.** Settled results inject as steering wakes,
+  leaf-aware: a busy parent merges one at its next turn boundary
+  (after the current turn's tool calls, before the next model call),
+  an idle parent starts a new turn; simultaneous settlements batch
+  into one wake. A `wait` or `poll` that already returned the same
+  terminal view consumes the wake — the result is not delivered
+  again (live session 01a0fdba, 2026-10-02).
 
 ## Canonical surface (#61, user-approved 2026-09-29)
 

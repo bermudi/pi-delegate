@@ -283,6 +283,23 @@ describe("delegate dependency graph and handoffs", () => {
       });
       const ticket = ticketIdOf(dispatched.text);
 
+      // The delivered delegate-result message carries the blocked
+      // outcome: its content names the block, its details keep the
+      // structured record. Asserted before any wait/poll — returning
+      // the terminal view to the model consumes the wake (SPEC "Wake
+      // delivery").
+      const end = Date.now() + 2000;
+      while (sends.mock.calls.length === 0) {
+        if (Date.now() > end) throw new Error("delivery never fired");
+        await Bun.sleep(5);
+      }
+      // Delivery wakes once — duplicate delivery is its own regression
+      // class elsewhere in this suite.
+      expect(sends).toHaveBeenCalledTimes(1);
+      const [message] = sends.mock.calls[0]!;
+      expect(message.customType).toBe("delegate-result");
+      expect(message.content).toContain("blocked");
+
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
@@ -322,21 +339,6 @@ describe("delegate dependency graph and handoffs", () => {
       expect(pollDependent?.status).toBe("blocked");
       expect(pollDependent?.blockedBy).toEqual(["failer"]);
       expect(pollDependent?.error).toMatch(/'failer'/);
-
-      // The delivered delegate-result message carries the blocked
-      // outcome: its content names the block, its details keep the
-      // structured record.
-      const end = Date.now() + 2000;
-      while (sends.mock.calls.length === 0) {
-        if (Date.now() > end) throw new Error("delivery never fired");
-        await Bun.sleep(5);
-      }
-      // Delivery wakes once — duplicate delivery is its own regression
-      // class elsewhere in this suite.
-      expect(sends).toHaveBeenCalledTimes(1);
-      const [message] = sends.mock.calls[0]!;
-      expect(message.customType).toBe("delegate-result");
-      expect(message.content).toContain("blocked");
       expect(message.content).toMatch(/'failer'/);
       const delivered = objectOf(message.details).results as
         | ResultItem[]

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai";
@@ -180,6 +180,40 @@ describe("async worker questions (#17)", () => {
       action: "answer", ticket, taskId: "block", questionId: match![1], answer: "yes",
     });
     expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("done");
+  });
+
+  test("a worker-question notice rides steering delivery like a result wake", async () => {
+    // Contract (user decision 2026-10-02, live session 01a0fdba):
+    // same-leaf question notices steer — they merge at a busy parent's
+    // next turn boundary and wake an idle one, rather than parking on
+    // the follow-up queue until the whole run ends.
+    session = await openDelegateBoundary();
+    const host = session.session as AgentSession;
+    const sends = spyOn(host, "sendCustomMessage");
+    const model = await installSubagentModel(session);
+    model.respond([
+      fauxAssistantMessage([fauxToolCall("ask_parent", { question: "Steer me?" })]),
+      fauxAssistantMessage("ANSWERED"),
+    ]);
+    const ticket = ticketIdOf((await callDelegate(session, {
+      tasks: [{ prompt: "ask" }], async: true,
+    })).text);
+    const questionId = await untilQuestion(session, ticket);
+    const notice = sends.mock.calls.find(
+      (call) =>
+        (call[0] as { customType?: string }).customType ===
+        "delegate-question",
+    );
+    expect(notice).toBeDefined();
+    expect(notice![1]).toEqual({ deliverAs: "steer", triggerTurn: true });
+    await callDelegateTicket(session, {
+      action: "answer", ticket, taskId: "task-1", questionId, answer: "yes",
+    });
+    expect(
+      (await callDelegateTicket(session, {
+        action: "wait", ticket, timeoutMs: 2000,
+      })).text,
+    ).toContain("ANSWERED");
   });
 
   test("a question beside another tool call is rejected rather than parking a still-active worker", async () => {

@@ -141,6 +141,15 @@ Preflight metadata stays owned until actual execute entry: later tool_call
 handlers can still block after earlier handlers approved a call.
 Recheck both seams on upgrades (`surface.test.ts`, `telemetry.test.ts`).
 
+Same-leaf result wakes and worker-question notices send custom messages
+with `deliverAs: "steer"` (changed 2026-10-02, live session 01a0fdba —
+follow-up drained only after the whole run, leaving results undelivered
+for ~20min on a busy parent). Pi drains the steering queue at each turn
+boundary — after the in-flight turn's tool calls finish, before the next
+model call — and treats it as a turn trigger on an idle agent; verified
+in pi-coding-agent 0.87.0 (`sendCustomMessage` → `agent.steer`,
+agent-loop.js steering poll) and 1.0.0. Recheck that drain on Pi bumps.
+
 ## Workflow
 
 ```bash

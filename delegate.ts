@@ -189,7 +189,7 @@ const delegateSchema = Type.Object(
     async: Type.Optional(
       Type.Boolean({
         description:
-          "Every nonempty call returns a background ticket and delivers results automatically. Pass async: false to wait for inline results, regardless of task count. Inspect or control tickets with delegate_ticket.",
+          "Every nonempty call returns a background ticket; results arrive at your next step on their own. Pass async: false to wait for inline results, regardless of task count. Inspect or control tickets with delegate_ticket.",
       }),
     ),
     workspace: Type.Optional(
@@ -1090,9 +1090,9 @@ const HELP_INTERFACES = `## Compact and full interfaces
 
 const HELP_DISPATCH = `## delegate — ordinary dispatch
 - \`tasks\` is required: [] shows this manual; a nonempty array runs work.
-  Every task count defaults to background execution, returning a ticket and
-  automatically delivering results. Do not poll in a loop. Pass
-  \`async: false\` to return results inline in input order.
+  Every task count defaults to background execution, returning a ticket;
+  results arrive on their own at your next step — wait only when blocked
+  on one. Pass \`async: false\` to return results inline in input order.
 - Ordinary task fields: \`prompt\`, \`agent\` (default/explore/coder/reviewer/verifier
   or an exact custom profile name; omit for inline), \`cwd\`, \`workspace\`.
 - Top-level \`workspace\` is the batch default. \`brief\` prepends shared context
@@ -1437,7 +1437,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
         navigationEpoch === ticket.originEpoch &&
         (ticket.originLeafId === null ||
           ctx.sessionManager.getBranch().some((entry) => entry.id === ticket.originLeafId));
-      if (sameLeaf) api.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
+      // Same leaf: steer — on a busy parent the notice merges at the
+      // next turn boundary (after the in-flight tool calls, before the
+      // next model call); on an idle one it starts a turn.
+      if (sameLeaf) api.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
       else {
         api.sendMessage(message, { triggerTurn: false });
         ctx.ui.notify(`Worker "${ticket.id}#${question.taskId}" asks a question; poll and answer it with delegate_ticket on this branch.`, "info");
@@ -1515,7 +1518,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
   /**
    * SPEC v3 "Interaction grammar — Wake delivery": settled results
-   * inject as follow-up turns, leaf-aware, and simultaneous settlements
+   * inject as steering wakes, leaf-aware, and simultaneous settlements
    * batch into one wake. `deliver` used to send one message per ticket
    * the moment it settled — a fan-out produced one parent turn per
    * ticket. Now settlement enqueues here; the first enqueue arms one
@@ -1528,6 +1531,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
    * truth, and a settled ticket stays pollable regardless of what
    * delivery did with it. Entries are never removed: a ticket must
    * never enqueue twice, even across a flush boundary.
+   *
+   * Consumption: `consumedDeliveries` records the exact terminal view a
+   * wait/poll already returned to the model. The flush suppresses the
+   * wake per ticket only when the view it would send now is identical —
+   * a render taken while the ticket was still finalizing (the settled
+   * wait races the batch's own `finishBatch` by a few microtasks) still
+   * suppresses, while a record that gained content since the render
+   * (late outcomes, budget account, notices) still delivers. An
+   * unconsumed sibling in the same window delivers normally.
    */
   interface QueuedDelivery {
     readonly ticket: Ticket;
@@ -1536,6 +1548,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
   }
   const deliveryQueue: QueuedDelivery[] = [];
   const enqueuedDeliveries = new Set<string>();
+  const consumedDeliveries = new Map<
+    string,
+    { readonly by: "wait" | "poll"; readonly view: string }
+  >();
   let deliveryFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
   /**
@@ -1622,9 +1638,23 @@ export default function delegateExtension(api: ExtensionAPI): void {
       }
       return;
     }
+    // A wait/poll that already showed this exact view makes the wake
+    // redundant — drop it per ticket and say so. A ticket whose record
+    // changed since that render still delivers: the wake carries
+    // content the caller never saw.
+    const pending = batch.filter(({ ticket }) => {
+      const consumed = consumedDeliveries.get(ticket.id);
+      if (consumed === undefined || tickets.view(ticket) !== consumed.view) {
+        return true;
+      }
+      console.error(
+        `[delegate] delivery for ticket ${ticket.id} skipped: result already returned by ${consumed.by}`,
+      );
+      return false;
+    });
     const wake: QueuedDelivery[] = [];
     const moved: QueuedDelivery[] = [];
-    for (const queued of batch) {
+    for (const queued of pending) {
       try {
         (sameLeaf(queued) ? wake : moved).push(queued);
       } catch {
@@ -1666,11 +1696,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
     };
     if (wake.length > 0) {
       try {
-        // Same leaf, no transition observed: a follow-up wakes an idle
-        // parent and queues behind a busy one's tool calls. One wake per
-        // settlement group, not per ticket (SPEC "Wake delivery").
+        // Same leaf, no transition observed: a steering message merges
+        // at the busy parent's next turn boundary — after the in-flight
+        // assistant turn's tool calls, before the next model call — and
+        // starts a turn on an idle one. One wake per settlement group,
+        // not per ticket (SPEC "Wake delivery").
         api.sendMessage(deliveredMessage(wake), {
-          deliverAs: "followUp",
+          deliverAs: "steer",
           triggerTurn: true,
         });
       } catch (error) {
@@ -2405,7 +2437,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         name: "delegate",
         label: "Delegate to Subagents",
         description:
-          "Run self-contained subagent tasks. Every nonempty call returns a background ticket and delivers results automatically; async: false returns inline results for any task count. Batch related work in one call: shared-tree writers serialize within a batch and overlapping writers in separate calls reject. The explore role is read-only and admits concurrently; reviewer uses bash and counts as a writer. Use isolated for parallel edits or scratch to discard changes. Named Markdown profiles supply tools and base instructions. tasks: [] shows the manual." +
+          "Run self-contained subagent tasks. Every nonempty call returns a background ticket; results arrive at your next step on their own — async: false returns inline results for any task count. Batch related work in one call: shared-tree writers serialize within a batch and overlapping writers in separate calls reject. The explore role is read-only and admits concurrently; reviewer uses bash and counts as a writer. Use isolated for parallel edits or scratch to discard changes. Named Markdown profiles supply tools and base instructions. tasks: [] shows the manual." +
           (surface === "compact" ? " Compact surface; enable advanced controls with \"surface\": \"full\" in user-global delegate.json and /reload." : " Full surface; advanced task and batch controls are enabled."),
         parameters: Type.Unsafe<DelegateArguments>(surface === "full" ? delegateSchema : compactDelegateSchema),
         promptSnippet:
@@ -2414,7 +2446,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           "Delegate side work that would flood your context — broad searches, long logs, independent parallel jobs. Do one-file checks and small edits yourself; writing the brief costs more than the work.",
           "Subagents never see this conversation — give each delegate task a self-contained brief (use brief for context the whole batch shares).",
           "Only a subagent's final message comes back: name the answer shape you need (file list, yes/no, short verdict) so reports stay short.",
-          "Async delegate results arrive automatically — do not poll in a loop; only wait on a ticket when the next step needs its result.",
+          "Async results arrive on their own at your next step — do not poll in a loop; wait only when blocked on a ticket's result.",
           'Parallelize reads freely; keep edits to one writer where possible. Put dependent edits in one call on the shared workspace (they run in task order); use workspace "isolated" only for independent edits — overlapping changes still conflict at merge.',
           "Split very large task batches across delegate calls; overlong tool calls get truncated.",
         ],
@@ -2627,7 +2659,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                       (call.tokenBudget !== undefined
                         ? `${budgetNote({ limit: call.tokenBudget, consumed: 0 })}\n`
                         : "") +
-                      `Results will be delivered automatically when the batch settles; keep working. ` +
+                      `Results arrive on their own at your next step; wait only when blocked on them. ` +
                       `delegate_ticket can wait on or cancel it if needed (action "wait" / "cancel").` +
                       (ticket.notices.length > 0
                         ? `\n${ticket.notices.join("\n")}`
@@ -2768,7 +2800,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         name: "delegate_ticket",
         label: "Delegate Tickets",
         description:
-          "Inspect or control background delegate work. poll returns status immediately; wait returns on settlement or a new worker question/interruption. cancel previews unless force:true. answer replies to a worker question; steer sends instructions at turn boundaries; interrupt stops a turn while retaining its transcript. Results arrive automatically; do not poll in a loop." +
+          "Inspect or control background delegate work. poll returns status immediately; wait returns on settlement or a new worker question/interruption. cancel previews unless force:true. answer replies to a worker question; steer sends instructions at turn boundaries; interrupt stops a turn while retaining its transcript. Results arrive at your next step on their own — wait only when blocked on one." +
           (surface === "full" ? " Full mode also offers pause/resume, wait-any, timed waits, steering retry keys and incremental output tailing." : " Advanced controls require \"surface\": \"full\" in user-global delegate.json and /reload."),
         parameters: Type.Unsafe<TicketToolArguments>(surface === "full" ? ticketSchema : compactTicketSchema),
         promptSnippet:
@@ -2801,6 +2833,20 @@ export default function delegateExtension(api: ExtensionAPI): void {
             // session's tickets; explicit ids still reach others.
             ctx.sessionManager.getSessionId(),
           );
+          // SPEC v3 "Wake delivery": a wait/poll that returned the
+          // ticket's terminal view has already shown the model its
+          // content — record the fingerprint so the flush drops a wake
+          // that would only repeat it.
+          if (
+            (call.action === "poll" || call.action === "wait") &&
+            result.consumedView !== undefined &&
+            result.ticket !== undefined
+          ) {
+            consumedDeliveries.set(result.ticket.id, {
+              by: call.action === "poll" ? "poll" : "wait",
+              view: result.consumedView,
+            });
+          }
           return {
             content: [{ type: "text" as const, text: result.text }],
             details: ({

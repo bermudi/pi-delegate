@@ -85,11 +85,13 @@ report `token budget: consumed/limit`, `details.tokenBudget` carries
 records the account.
 
 Delivery happens once, when the batch fully settles: tickets settling within the
-same flush window coalesce into a single follow-up wake when the parent is still
-on the dispatching branch — it wakes an idle parent and queues behind a busy
-one — or a single durable append when the branch moved or a navigation is in
-flight. Delivery failure never undoes settlement — the ticket stays pollable —
-and delivery suppressed at shutdown leaves it the same way.
+same flush window coalesce into a single steering wake when the parent is still
+on the dispatching branch — it starts a turn on an idle parent and merges at the
+next turn boundary on a busy one — or a single durable append when the branch
+moved or a navigation is in flight. A `wait` or `poll` that already returned the
+same terminal view consumes the wake, so a result you already saw is not
+delivered again. Delivery failure never undoes settlement — the ticket stays
+pollable — and delivery suppressed at shutdown leaves it the same way.
 
 Concurrency: `maxConcurrent` caps simultaneous tasks globally (default 8).
 Per-model bounds work per model key — an exact `concurrency.models`

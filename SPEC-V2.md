@@ -457,10 +457,19 @@ outcome is safe to expose (isolated reconciliation applied or retained, final
 annotations recorded). Cancellation settles the ticket at once; its delivery
 still waits for the safe outcome.
 
+A `wait` or `poll` that already returned the ticket's terminal view consumes
+its pending delivery: the flush compares the exact view text the caller saw
+with the view the wake would send and skips the ticket only on an identical
+match, logging the skip to stderr (a record that gained content since the
+render — late outcomes, budget account, notices — still delivers). A group
+mixing consumed and unconsumed tickets delivers only the unconsumed ones.
+
 - **Same leaf, no transition:** if the parent is still on the session-tree
   leaf where the ticket was dispatched and no shutdown or tree transition has
-  been observed, the result is sent as a follow-up that wakes an idle parent
-  and queues behind a busy one's remaining tool calls.
+  been observed, the result is sent as a steering wake: on an idle parent it
+  starts a new turn; on a busy parent it merges at the next turn boundary —
+  after the current assistant turn's tool calls finish, before the next model
+  call.
 - **Otherwise** (leaf moved, tree transition in progress, shutdown observed):
   the result is appended to the session as a custom message at the current
   leaf without triggering a turn, and a notice announces it. It enters model
@@ -472,7 +481,7 @@ still waits for the safe outcome.
   stays settled and pollable.
 
 Session shutdown — quit, `/reload`, `/new`, `/resume`, `/fork` — rejects new
-dispatches, force-cancels every running ticket with no follow-up delivery,
+dispatches, force-cancels every running ticket with no delivered wake,
 and then holds the shutdown until every worker's quiescence is confirmed,
 showing a visible waiting status. Replacement sessions never inherit live
 workers or workspace reservations. They may poll saved ticket results from

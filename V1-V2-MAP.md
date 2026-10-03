@@ -52,7 +52,7 @@ These are decided, recorded, and carry migration guidance. No action needed.
 - **`concurrency.models` / `concurrency.default`**: per-model and
   provider-scoped bounds below the global `maxConcurrent`.
 - **Delivery via stock Pi extension API** (#3): no host patch required;
-  navigation-epoch tracking, leaf-aware follow-up vs no-turn append,
+  navigation-epoch tracking, leaf-aware steering wake vs no-turn append,
   delivery-failure handling that keeps tickets pollable.
 - **Scratch hardening**: read-only tasks rejected (copy buys nothing);
   linked-worktree/submodule preflight is a cheap stat, not a paid copy;
@@ -111,12 +111,14 @@ closed by `da14612`. `TEST-MIGRATION.md`'s per-subsystem **Gap** entries and
 its "Next contract slices → Remaining" list are now the live record of
 untested-but-implemented behavior (usage properties; per-provider limit
 variants; abort-of-queued-while-parked; aborted-worker-completes-ok;
-delivered-result suppression after waiter consumption; mid-turn pause
+mid-turn pause
 semantics; eviction after stalled/deadline runs; read-only+writer
 parallelism; nested-repo gitdirs; cancel-before-apply retention;
 retry-count visibility; stall structured outcomes; async-no-usage;
 scratch-suggestion rejection prose; prompt-preview sanitization;
-cancel-on-settled wording).
+cancel-on-settled wording). Delivered-result suppression after waiter
+consumption left this list 2026-10-02 — implemented and covered in
+`tests/contract/delivery.test.ts` (live session 01a0fdba).
 
 With the visibility layer: footer lifecycle, pause/resume footer,
 multi-ticket merge, and the once-per-activation settle warning are

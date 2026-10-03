@@ -161,24 +161,10 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
       expect(details.brief).toBe("ASYNC-BRIEF");
       const ticket = details.ticket as string;
 
-      const polled = await callDelegateTicket(session, {
-        action: "poll",
-        ticket,
-      });
-      expect(Check(ticketDetailsSchema, polled.details)).toBe(true);
-      const waited = await callDelegateTicket(session, {
-        action: "wait",
-        ticket,
-        timeoutMs: 5000,
-      });
-      expect(waited.text).toContain("ASYNC-DONE");
-      expect(Check(ticketDetailsSchema, waited.details)).toBe(true);
-      const waitedDetails = objectOf(waited.details, "details");
-      const outcomes = waitedDetails.results as { output?: string }[];
-      expect(outcomes[0]!.output).toBe("ASYNC-DONE");
-
       // The delivered wake's details are the same record — pinned by
-      // deliveredDetailsSchema (single-ticket shape).
+      // deliveredDetailsSchema (single-ticket shape). Asserted before
+      // poll/wait: returning the terminal view to the model consumes
+      // the wake (SPEC "Wake delivery").
       await waitFor(
         () =>
           sends.mock.calls.some(
@@ -194,6 +180,22 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
           "delegate-result",
       )!;
       expect(Check(deliveredDetailsSchema, delivered[0].details)).toBe(true);
+
+      const polled = await callDelegateTicket(session, {
+        action: "poll",
+        ticket,
+      });
+      expect(Check(ticketDetailsSchema, polled.details)).toBe(true);
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      expect(waited.text).toContain("ASYNC-DONE");
+      expect(Check(ticketDetailsSchema, waited.details)).toBe(true);
+      const waitedDetails = objectOf(waited.details, "details");
+      const outcomes = waitedDetails.results as { output?: string }[];
+      expect(outcomes[0]!.output).toBe("ASYNC-DONE");
     },
   );
 

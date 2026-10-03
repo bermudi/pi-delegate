@@ -1889,6 +1889,16 @@ export interface TicketRpcResult {
    * pointer. Carried on details.note so the collapsed view shows it too.
    */
   readonly note?: string;
+  /**
+   * The terminal view this call returned to the model — the content
+   * fingerprint for delivery consumption (SPEC v3 "Wake delivery").
+   * Present only when the rendered view was already terminal; the
+   * delivery flush compares it against the view the wake would send
+   * and suppresses the wake only on an exact match — identical content
+   * is already-shown, while a record that changed since the render
+   * (late outcomes, budget account, notices) still delivers.
+   */
+  readonly consumedView?: string;
   /** The steer receipt's machine-readable half (action "steer" only). */
   readonly steer?: SteerDetails;
   /** The interrupt receipt's machine half (action "interrupt" only). */
@@ -2060,13 +2070,19 @@ export async function handleTicketRpc(
             .join(", ")}`;
     if (result.ticket !== undefined) {
       const view = store.view(result.ticket);
+      // Fingerprint for delivery consumption: the exact terminal view
+      // the model just received — the flush suppresses only an
+      // identical repeat (see TicketRpcResult.consumedView).
+      const consumedView = isTerminal(result.ticket.status)
+        ? view
+        : undefined;
       const note =
         result.cause === "question"
           ? `Wait detached: ticket "${result.ticket.id}" is waiting on an answer — ${roster}.`
           : result.cause === "interrupted"
             ? `Wait detached: ${result.interrupted!.length === 1 ? "task" : "tasks"} ${result.interrupted!.map((id) => `"${result.ticket!.id}#${id}"`).join(", ")} ${result.interrupted!.length === 1 ? "was" : "were"} interrupted — ${roster}.`
             : `Resolved on the first watched ticket to settle — ${roster}.`;
-      return { text: `${view}\n\n${note}`, isError: false, ticket: result.ticket, note };
+      return { text: `${view}\n\n${note}`, isError: false, ticket: result.ticket, note, consumedView };
     }
     const all = call.tickets
       .map((id) => store.get(id)!)
@@ -2105,8 +2121,15 @@ export async function handleTicketRpc(
     };
   }
   switch (call.action) {
-    case "poll":
-      return { text: store.view(ticket), isError: false, ticket };
+    case "poll": {
+      const view = store.view(ticket);
+      return {
+        text: view,
+        isError: false,
+        ticket,
+        consumedView: isTerminal(ticket.status) ? view : undefined,
+      };
+    }
     case "wait": {
       const { timedOut, aborted, questionPending, interrupted } = await store.wait(
         ticket,
@@ -2114,6 +2137,9 @@ export async function handleTicketRpc(
         signal,
       );
       const view = store.view(ticket);
+      // Same fingerprint as poll: only a terminal view can consume the
+      // pending wake — a running/timed-out/detached one never does.
+      const consumedView = isTerminal(ticket.status) ? view : undefined;
       const note = questionPending
         ? `Wait detached: answer the pending question before waiting for this ticket.`
         : interrupted.length > 0
@@ -2127,6 +2153,7 @@ export async function handleTicketRpc(
         text: note !== undefined ? `${view}\n\n${note}` : view,
         isError: false,
         ticket,
+        consumedView,
         ...(note !== undefined ? { note } : {}),
       };
     }

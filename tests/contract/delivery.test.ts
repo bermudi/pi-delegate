@@ -12,14 +12,58 @@ import type {
   MockUIConfig,
   TestSession,
 } from "@marcfargas/pi-test-harness";
+import { calls, says, when } from "@marcfargas/pi-test-harness";
 import {
   callDelegate,
   installSubagentModel,
   objectOf,
   openDelegateBoundary,
+  registeredTool,
   ticketIdOf,
   callDelegateTicket,
 } from "../support/pi-boundary.ts";
+import { armHold, releaseHold } from "../support/parent-hold.ts";
+
+interface DirectResult {
+  readonly content: readonly {
+    readonly type: string;
+    readonly text?: string;
+  }[];
+  readonly isError?: boolean;
+  readonly details?: unknown;
+}
+
+interface DirectTool {
+  execute(
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+    onUpdate: (update: unknown) => void,
+    ctx: unknown,
+  ): Promise<DirectResult>;
+}
+
+/**
+ * Fire the registered delegate_ticket tool without a scripted parent
+ * turn — a direct execute lands inside the ~100ms delivery flush window
+ * where a whole `session.run` might not (same seam as tickets.test.ts).
+ */
+function directTicket(session: TestSession) {
+  const tool = registeredTool(session, "delegate_ticket") as unknown as DirectTool;
+  const ctx = (session.session as AgentSession).extensionRunner.createContext();
+  const fallback = new AbortController();
+  let sequence = 0;
+  return (params: Record<string, unknown>): Promise<DirectResult> => {
+    sequence += 1;
+    return tool.execute(
+      `direct-ticket-${sequence}`,
+      params,
+      fallback.signal,
+      () => {},
+      ctx,
+    );
+  };
+}
 
 function gate(message = "DELIVERED-OUTPUT") {
   let release!: () => void;
@@ -87,7 +131,7 @@ describe("async result delivery", () => {
   test.each([false, true])(
     "same-origin completion wakes once, including after prior navigation (%s)",
     async (navigateFirst) => {
-      // Contract: SPEC "Background delivery" same-leaf follow-up wake.
+      // Contract: SPEC "Background delivery" same-leaf steering wake.
       // V1 evidence: dispatch.test.ts 'stamps the current leaf and delivers
       // normally when it has not changed'.
       const { host, blocked, sends, ticket, originLeafId } =
@@ -110,7 +154,7 @@ describe("async result delivery", () => {
       expect(results?.[0]?.output).toBe("DELIVERED-OUTPUT");
       expect(sends.mock.calls[0]![0].content).toContain("DELIVERED-OUTPUT");
       expect(sends.mock.calls[0]![1]).toEqual({
-        deliverAs: "followUp",
+        deliverAs: "steer",
         triggerTurn: true,
       });
       expect(
@@ -185,7 +229,7 @@ describe("async result delivery", () => {
 
   test("shutdown cancels immediately, never delivers, and holds until the worker actually stops", async () => {
     // INVARIANTS "Ticket state": shutdown cancellation settles immediately,
-    // resolves waiters, performs no follow-up delivery, and the session
+    // resolves waiters, performs no delivered wake, and the session
     // boundary MUST NOT complete while any worker's quiescence is
     // unconfirmed. The faux gate ignores abort signals, so the worker stays
     // unquiesced until release — that is what makes the hold observable.
@@ -541,7 +585,7 @@ describe("async result delivery", () => {
 
     expect(sends).toHaveBeenCalledTimes(1);
     const [message, options] = sends.mock.calls[0]!;
-    expect(options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+    expect(options).toEqual({ deliverAs: "steer", triggerTurn: true });
     expect(String(message.content)).toContain(ticketA);
     expect(String(message.content)).toContain(ticketB);
     expect(String(message.content)).toContain("COALESCED-A");
@@ -647,7 +691,7 @@ describe("async result delivery", () => {
     expect(sends).toHaveBeenCalledTimes(2);
     const [wake, append] = sends.mock.calls;
     expect(wake![1]).toEqual({
-      deliverAs: "followUp",
+      deliverAs: "steer",
       triggerTurn: true,
     });
     expect(String(wake![0].content)).toContain(ticketB);
@@ -747,5 +791,257 @@ describe("async result delivery", () => {
     } finally {
       errors.mockRestore();
     }
+  });
+
+  test("a busy parent receives the result at the next turn boundary, mid-run", async () => {
+    // Contract (user decision 2026-10-02, live session 01a0fdba): a
+    // same-leaf wake steers — on a busy parent the result enters context
+    // at the next turn boundary (after the in-flight tool calls, before
+    // the next model call), not after the whole run ends as a follow-up.
+    // Observable proxy: the delegate-result message_end lands before the
+    // run's final assistant message and before agent_end.
+    session = await openDelegateBoundary({
+      leadingExtensions: [
+        join(import.meta.dirname, "../support/parent-hold.ts"),
+      ],
+    });
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const blocked = gate();
+    model.respond([blocked.step]);
+    const sends = spyOn(host, "sendCustomMessage");
+    armHold();
+    const run = session.run(
+      when("busy parent", [
+        calls("delegate", {
+          tasks: [{ prompt: "bg", tools: [] }],
+          async: true,
+        }),
+        calls("delegate_hold", {}),
+        says("PARENT-FINAL"),
+      ]),
+    );
+    // Park the parent inside the hold tool, then let the ticket settle
+    // while the run is still in flight.
+    await until(() =>
+      session.events.all.some(
+        (event) =>
+          event.type === "tool_execution_start" &&
+          event.toolName === "delegate_hold",
+      ),
+    );
+    blocked.release();
+    await until(() => sends.mock.calls.length === 1);
+    expect(sends.mock.calls[0]![1]).toEqual({
+      deliverAs: "steer",
+      triggerTurn: true,
+    });
+    releaseHold();
+    await run;
+
+    // The steered message entered context mid-run: before the run's
+    // final assistant message and before agent_end.
+    const messages = session.events.messages;
+    const deliveredAt = messages.findIndex((m) => m.role === "custom");
+    const finalAt = messages.findLastIndex((m) => m.role === "assistant");
+    expect(deliveredAt).toBeGreaterThan(-1);
+    expect(finalAt).toBeGreaterThan(deliveredAt);
+    const deliveredEnd = session.events.all.findIndex(
+      (event) =>
+        event.type === "message_end" &&
+        (event.message as { role?: string }).role === "custom",
+    );
+    const agentEndAt = session.events.all.findIndex(
+      (event) => event.type === "agent_end",
+    );
+    expect(deliveredEnd).toBeGreaterThan(-1);
+    expect(agentEndAt).toBeGreaterThan(deliveredEnd);
+  });
+
+  test("a wait that returns the settled result consumes the pending delivery", async () => {
+    // Contract (user decision 2026-10-02, live session 01a0fdba; closes
+    // the TEST-MIGRATION "delivered-result suppression" gap): a wait
+    // that returned the ticket's terminal view already gave the model
+    // everything the wake would send — the flush drops an identical
+    // repeat.
+    session = await openDelegateBoundary();
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const blocked = gate();
+    model.respond([blocked.step]);
+    const sends = spyOn(host, "sendCustomMessage");
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "bg", tools: [] }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    try {
+      // The common race: the ticket settles while a wait on it is in
+      // flight — the wait's result marks consumed before the flush fires.
+      const waiting = callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 5000,
+      });
+      await until(() =>
+        session.events.all.some(
+          (event) =>
+            event.type === "tool_execution_start" &&
+            event.toolName === "delegate_ticket",
+        ),
+      );
+      blocked.release();
+      const waited = await waiting;
+      expect(waited.text).toContain("DELIVERED-OUTPUT");
+      // Past the flush window and any turn a delivery would have run.
+      await Bun.sleep(300);
+      await host.agent.waitForIdle();
+      expect(sends).not.toHaveBeenCalled();
+      expect(
+        errors.mock.calls.some((args) =>
+          args
+            .join(" ")
+            .includes(
+              `delivery for ticket ${ticket} skipped: result already returned by wait`,
+            ),
+        ),
+      ).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  test("a terminal poll inside the flush window consumes the pending delivery", async () => {
+    // Same consumption contract through poll: the returned terminal
+    // view's content — not merely the terminal status — is what
+    // consumes the wake.
+    session = await openDelegateBoundary();
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const blocked = gate();
+    model.respond([blocked.step]);
+    const sends = spyOn(host, "sendCustomMessage");
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "bg", tools: [] }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    const ticketRpc = directTicket(session);
+    try {
+      blocked.release();
+      // Direct executes keep the poll inside the flush window; running
+      // polls on the way must not consume.
+      const deadline = Date.now() + 5000;
+      let view = "";
+      while (Date.now() < deadline) {
+        const polled = await ticketRpc({ action: "poll", ticket });
+        view = polled.content.map((c) => c.text ?? "").join("\n");
+        if (/completed|failed|cancelled|partial/.test(view)) break;
+        await Bun.sleep(2);
+      }
+      expect(view).toContain("DELIVERED-OUTPUT");
+      // One more poll past the settle→finishBatch hop: the batch's
+      // finalization lands within microtasks of settlement, so this
+      // read's fingerprint is the final view either way.
+      await Bun.sleep(5);
+      await ticketRpc({ action: "poll", ticket });
+      await Bun.sleep(300);
+      await host.agent.waitForIdle();
+      expect(sends).not.toHaveBeenCalled();
+      expect(
+        errors.mock.calls.some((args) =>
+          args
+            .join(" ")
+            .includes(
+              `delivery for ticket ${ticket} skipped: result already returned by poll`,
+            ),
+        ),
+      ).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  test("a wait that detaches while still running does not consume the delivery", async () => {
+    // A timed-out wait returns a running view — never a terminal one —
+    // so the settled result still wakes on its own.
+    session = await openDelegateBoundary();
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const blocked = gate();
+    model.respond([blocked.step]);
+    const sends = spyOn(host, "sendCustomMessage");
+
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "bg", tools: [] }],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    const waited = await callDelegateTicket(session, {
+      action: "wait",
+      ticket,
+      timeoutMs: 150,
+    });
+    expect(waited.text).toContain("timed out");
+    blocked.release();
+    await until(() => sends.mock.calls.length === 1);
+    await host.agent.waitForIdle();
+    expect(String(sends.mock.calls[0]![0].content)).toContain(
+      "DELIVERED-OUTPUT",
+    );
+  });
+
+  test("a wait consuming one ticket still delivers an unconsumed sibling", async () => {
+    // Consumption is per ticket: a group holding one consumed and one
+    // unconsumed ticket delivers only the unconsumed one.
+    session = await openDelegateBoundary();
+    const host = session.session as AgentSession;
+    const model = await installSubagentModel(session);
+    const first = gate("CONSUMED-RESULT");
+    const second = gate("DELIVERED-RESULT");
+    model.respond([first.step, second.step]);
+    const sends = spyOn(host, "sendCustomMessage");
+
+    const dispatchA = await callDelegate(session, {
+      tasks: [{ prompt: "consumed", tools: [] }],
+      async: true,
+    });
+    const ticketA = ticketIdOf(dispatchA.text);
+    const dispatchB = await callDelegate(session, {
+      tasks: [{ prompt: "delivered", tools: [] }],
+      async: true,
+    });
+    const ticketB = ticketIdOf(dispatchB.text);
+
+    const waiting = callDelegateTicket(session, {
+      action: "wait",
+      ticket: ticketA,
+      timeoutMs: 5000,
+    });
+    await until(() =>
+      session.events.all.some(
+        (event) =>
+          event.type === "tool_execution_start" &&
+          event.toolName === "delegate_ticket",
+      ),
+    );
+    first.release();
+    second.release();
+    const waited = await waiting;
+    expect(waited.text).toContain("CONSUMED-RESULT");
+    await until(() => sends.mock.calls.length === 1);
+    // Past every window both tickets could have flushed in.
+    await Bun.sleep(300);
+    await host.agent.waitForIdle();
+    expect(sends).toHaveBeenCalledTimes(1);
+    const content = String(sends.mock.calls[0]![0].content);
+    expect(content).toContain(ticketB);
+    expect(content).toContain("DELIVERED-RESULT");
+    expect(content).not.toContain(ticketA);
+    expect(content).not.toContain("CONSUMED-RESULT");
   });
 });
