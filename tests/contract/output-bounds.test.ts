@@ -58,6 +58,9 @@ async function pollUntil(session: TestSession, ticket: string, needle: RegExp) {
     if (Date.now() > end) {
       throw new Error(`timed out waiting for poll to match ${needle}`);
     }
+    // Macrotask yield: a tight microtask poll starves Bun's child-exit
+    // delivery for the Git evidence probes.
+    await Bun.sleep(5);
   }
 }
 

@@ -116,17 +116,26 @@ describe("delegate visibility signals", () => {
     const subagents = await installSubagentModel(session);
     const g1 = gate();
     const g2 = gate();
-    subagents.respond([g1.step, g2.step]);
+    // Route each stream call by its own task prompt rather than queue
+    // position: which worker reaches its first stream first is scheduling
+    // (a writer opens its Git evidence window first), so FIFO order must
+    // not decide which ticket a gate belongs to.
+    const routed: FauxResponseFactory = (context, options, state, model) => {
+      const text = JSON.stringify(context.messages);
+      const g = text.includes("FIRST-TASK") ? g1 : g2;
+      return g.step(context, options, state, model);
+    };
+    subagents.respond([routed, routed]);
 
     const first = await callDelegate(session, {
-      tasks: [{ prompt: "one" }],
+      tasks: [{ prompt: "FIRST-TASK" }],
       async: true,
     });
     const t1 = ticketIdOf(first.text);
     const second = await callDelegate(session, {
       // Read-only: an inline writer in the same cwd would correctly be
       // rejected by shared-write admission against ticket one.
-      tasks: [{ prompt: "two", tools: "ro" }],
+      tasks: [{ prompt: "SECOND-TASK", tools: "ro" }],
       async: true,
     });
     const t2 = ticketIdOf(second.text);

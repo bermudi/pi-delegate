@@ -2146,6 +2146,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           ticket,
           quiescence: barrier,
           attribution: attributionWindows,
+          attributionQuiescenceBoundMs: shutdownQuiescenceBudgetMs(),
           preparePhase: (phase) => plan!.preparePhase(phase),
           reconcilePhase: (phase, outcomes) =>
             // The dispatch facts the batch actually holds: plans consume
@@ -2271,6 +2272,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               ticket: cancelledTicket,
               quiescence: barrier,
               attribution: attributionWindows,
+              attributionQuiescenceBoundMs: shutdownQuiescenceBudgetMs(),
               onTaskSettled: (task, outcome) => {
                 if (outcome.usage === undefined) return;
                 emitUsage(

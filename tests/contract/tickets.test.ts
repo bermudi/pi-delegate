@@ -254,6 +254,15 @@ describe("delegate ticket contract", () => {
       });
       const ticket = ticketIdOf(dispatched.text);
 
+      // The tasks serialize on their shared write scope, so the second
+      // worker's stream call proves the first task's outcome is already
+      // recorded — cancelling earlier could beat task start and lose the
+      // completed output this test exists to retain.
+      await waitFor(
+        () => subagents.state.callCount >= 2,
+        "second worker stream to start",
+      );
+
       const cancelled = await callDelegateTicket(session, {
         action: "cancel",
         ticket,

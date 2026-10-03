@@ -98,6 +98,13 @@ test(
     });
     const ticket = ticketIdOf(dispatched.text);
 
+    // The leader must be streaming when the cancel lands — otherwise the
+    // cancel can win the race to the first provider call and the count
+    // below moves for a reason unrelated to the queue gate under test.
+    const started = Date.now() + 5000;
+    while (subagents.state.callCount < 1 && Date.now() < started) {
+      await new Promise((r) => setImmediate(r));
+    }
     const cancelled = await callDelegateTicket(session, {
       action: "cancel",
       ticket,
@@ -592,6 +599,13 @@ test(
     });
     const ticket = ticketIdOf(dispatched.text);
 
+    // The abort must land mid-stream: wait until the worker's provider
+    // call is in flight before cancelling, or the cancel can win the
+    // race to the first stream and "mid-stream" never happened.
+    const started = Date.now() + 5000;
+    while (subagents.state.callCount < 1 && Date.now() < started) {
+      await new Promise((r) => setImmediate(r));
+    }
     const cancelled = await callDelegateTicket(session, {
       action: "cancel",
       ticket,

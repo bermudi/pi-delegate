@@ -276,8 +276,11 @@ mid-flight the parent can steer. The grammar:
   write/edit tool calls and the changes a Git evidence window saw in
   the worker's repository (user decision 2026-10-02, live session
   01a0fdba — a bash-only worker had reported only `uncertain (bash)`
-  and nothing usable). The window opens before the task's first
-  attempt and closes after the last: it snapshots `HEAD` plus
+  and nothing usable). Only a mutating toolset opens a window at
+  all (bash counts): a read-only run pays no snapshot cost and can
+  never wear a sibling's or the parent's concurrent edits. The
+  window opens before the task's first attempt and closes after
+  the last: it snapshots `HEAD` plus
   `git status --porcelain -z` with an lstat per listed path, and the
   reported set is the paths whose status or stat differs between the
   two snapshots plus `git diff --name-only` across a moved `HEAD` —

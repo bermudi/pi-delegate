@@ -358,6 +358,9 @@ describe("async result delivery", () => {
       ) {
         break;
       }
+      // Macrotask yield: a tight microtask poll starves Bun's
+      // child-exit delivery for the Git evidence probes.
+      await Bun.sleep(5);
     }
     if (!lastPoll.includes("DELIVERED-OUTPUT")) {
       throw new Error(
@@ -767,6 +770,9 @@ describe("async result delivery", () => {
           await callDelegateTicket(session, { action: "poll", ticket })
         ).text;
         if (/completed|failed|cancelled|partial/.test(view)) break;
+        // Macrotask yield: a tight microtask poll starves Bun's
+        // child-exit delivery for the Git evidence probes.
+        await Bun.sleep(5);
       }
       expect(view).toContain("completed");
       await Bun.sleep(25);

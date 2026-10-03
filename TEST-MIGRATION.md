@@ -1002,8 +1002,11 @@ bash-using worker had reported only `files: uncertain (bash)`.
   line, committed paths via a moved `HEAD`, non-Git shells falling
   back to the unknown mark, a snapshot failure logging to stderr and
   degrading without failing the task, overlapping mutating tasks on
-  one repository naming each other with no false overlap line, and the
-  parent named for a mutating call inside a window.
+  one repository naming each other with no false overlap line, the
+  parent named for a mutating call inside a window, a read-only task
+  beside a writing sibling opening no window and reporting nothing,
+  and sequential tasks on one repository not naming each other (the
+  registry prunes closed windows that no open window could overlap).
 
 ### Ticket interrupt — abort the turn, keep the worker (v3, #42)
 

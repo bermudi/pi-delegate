@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -777,5 +777,113 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
     } finally {
       release();
     }
+  });
+
+  test("a read-only task beside a writing sibling opens no window and reports no files", async () => {
+    // Contract: SPEC "Completion evidence" — only a mutating toolset
+    // opens a Git evidence window (bash counts as mutating). A read-only
+    // task pays no snapshot cost and can never wear the edits a sibling
+    // or the parent landed beside it in the shared root.
+    const session = await openAt();
+    const repo = join(session.cwd, "repo");
+    initRepo(repo);
+    writeFileSync(join(repo, "keep.txt"), "KEEP\n");
+    execSync("git add -A && git commit -qm base", { cwd: repo });
+    const model = await installSubagentModel(session);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const routed: FauxResponseFactory = (context) => {
+      const messages = JSON.stringify(context.messages);
+      if (messages.includes("inspect the tree")) {
+        return gate.then(() => fauxAssistantMessage("LOOKED"));
+      }
+      if (messages.includes("tool_result")) {
+        return fauxAssistantMessage("WROTE-IT");
+      }
+      return fauxAssistantMessage([
+        fauxToolCall("bash", { command: "echo w > sibling.txt" }),
+      ]);
+    };
+    model.respond([routed, routed, routed]);
+    const dispatched = await callDelegate(session, {
+      tasks: [
+        { prompt: "inspect the tree", cwd: repo, tools: ["read"] },
+        { prompt: "write a file", cwd: repo, tools: ["bash"] },
+      ],
+      async: true,
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    try {
+      // The sibling's write must land while the read-only task is still
+      // running — inside the span where a window, if it had opened one,
+      // would have seen it.
+      const end = Date.now() + 5000;
+      while (!existsSync(join(repo, "sibling.txt"))) {
+        if (Date.now() > end) {
+          throw new Error("sibling writer never landed its write");
+        }
+        await Bun.sleep(10);
+      }
+      release();
+      const waited = await callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+        timeoutMs: 10_000,
+      });
+      expect(waited.isError).toBe(false);
+      const attributed = attributedOf(waited.details);
+      const reader = attributed.find((entry) => entry.taskId === "task-1")!;
+      expect(reader.files).toEqual([]);
+      expect(reader.uncertain).toBe(false);
+      expect(reader.concurrentWriters ?? []).toEqual([]);
+      const section = waited.text.slice(
+        waited.text.indexOf("### Task task-1"),
+        waited.text.indexOf("### Task task-2"),
+      );
+      expect(section).not.toContain("files:");
+      expect(section).not.toContain("concurrent edits");
+    } finally {
+      release();
+    }
+  });
+
+  test("sequential tasks on one repository do not name each other as concurrent writers", async () => {
+    // Contract: SPEC "Completion evidence — concurrency honesty" — only
+    // windows that overlapped in time are named; a task that ran after
+    // its predecessor settled keeps no stale writer names (the
+    // registry's closed records are prunable, never re-claimed).
+    const session = await openAt();
+    const repo = join(session.cwd, "repo");
+    initRepo(repo);
+    const model = await installSubagentModel(session);
+    model.respond([
+      fauxAssistantMessage([
+        fauxToolCall("bash", { command: "echo a > first.txt" }),
+      ]),
+      fauxAssistantMessage("FIRST-DONE"),
+      fauxAssistantMessage([
+        fauxToolCall("bash", { command: "echo b > second.txt" }),
+      ]),
+      fauxAssistantMessage("SECOND-DONE"),
+    ]);
+    const first = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "write the first file", cwd: repo }],
+    });
+    expect(first.isError).toBe(false);
+    const second = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "write the second file", cwd: repo }],
+    });
+    expect(second.isError).toBe(false);
+    expect(second.text).toContain("files: second.txt");
+    expect(second.text).not.toContain("concurrent edits");
+    const attributed = attributedOf(second.details);
+    expect(attributed[0]!.files).toEqual([inRepo(repo, "second.txt")]);
+    expect(attributed[0]!.concurrentWriters ?? []).toEqual([]);
+    // The predecessor's file is pre-existing dirt now — not reported.
+    expect(second.text).not.toContain("first.txt");
   });
 });

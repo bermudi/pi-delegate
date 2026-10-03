@@ -14,32 +14,23 @@
  * writers are named beside the files line rather than pretending the
  * window was exclusive.
  */
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import { join } from "node:path";
-import { canonicalPath, gitProbeEnv } from "./fsx.ts";
+import { canonicalPath, exec, gitProbeEnv } from "./fsx.ts";
 import { isWriter } from "./profiles.ts";
 import type { ResolvedTask, TaskOutcome } from "./types.ts";
 
-/**
- * The snapshot is a fast read-only probe (rev-parse, porcelain status,
- * lstats, a name-only diff) run SYNCHRONOUSLY like provider-extensions'
- * gitOutput: an asynchronous execFile's exit callback can be starved
- * indefinitely while the session's event loop is saturated by awaiting
- * callers, which reads as a frozen task from every view. A synchronous
- * spawn always returns — a hung Git only ever costs its own timeout.
- */
 const SNAPSHOT_TIMEOUT_MS = 10_000;
 const SNAPSHOT_MAX_BUFFER = 16 * 1024 * 1024;
 
-function gitSync(args: readonly string[]): string {
-  return execFileSync("git", args as string[], {
+/** A read-only Git probe through the repo's argv-array execFile wrapper. */
+async function gitProbe(args: readonly string[]): Promise<string> {
+  const result = await exec("git", args, {
     env: gitProbeEnv(),
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: SNAPSHOT_TIMEOUT_MS,
+    timeoutMs: SNAPSHOT_TIMEOUT_MS,
     maxBuffer: SNAPSHOT_MAX_BUFFER,
   });
+  return result.stdout;
 }
 
 /** The failure text the fail-closed probes inspect: stderr first. */
@@ -124,10 +115,10 @@ function parsePorcelain(stdout: string): Map<string, StatusEntry> {
  * ordinary "no coverage" answer, not a failure. Git's own errors (broken
  * `.git`, missing binary, timeouts) throw; the caller logs and degrades.
  */
-export function snapshotRepo(cwd: string): RepoSnapshot | undefined {
+export async function snapshotRepo(cwd: string): Promise<RepoSnapshot | undefined> {
   let topOut: string;
   try {
-    topOut = gitSync(["-C", cwd, "rev-parse", "--show-toplevel"]);
+    topOut = await gitProbe(["-C", cwd, "rev-parse", "--show-toplevel"]);
   } catch (error) {
     // Mirrors writeRootsOf's fail-closed rule: only Git's explicit
     // "not a repository" permits the no-coverage answer.
@@ -138,13 +129,13 @@ export function snapshotRepo(cwd: string): RepoSnapshot | undefined {
   if (root === "") return undefined;
   let head: string | undefined;
   try {
-    head = gitSync(["-C", root, "rev-parse", "--verify", "HEAD"]).trim();
+    head = (await gitProbe(["-C", root, "rev-parse", "--verify", "HEAD"])).trim();
   } catch {
     // An unborn branch has no HEAD; the status listing still covers
     // the tree and committed-diff coverage is simply absent.
     head = undefined;
   }
-  const status = gitSync([
+  const status = await gitProbe([
     "-C",
     root,
     "status",
@@ -172,10 +163,10 @@ function sameStat(a: FileStat | undefined, b: FileStat | undefined): boolean {
  * HEAD moved inside the window — `git diff --name-only` between the two
  * commits so work the task committed is still reported.
  */
-export function changedRelPaths(
+export async function changedRelPaths(
   before: RepoSnapshot,
   after: RepoSnapshot,
-): string[] {
+): Promise<string[]> {
   const changed = new Set<string>();
   for (const [rel, entry] of after.files) {
     const prior = before.files.get(rel);
@@ -190,7 +181,7 @@ export function changedRelPaths(
     const base = before.head ?? EMPTY_TREE;
     const tip = after.head ?? EMPTY_TREE;
     if (base !== tip) {
-      const committed = gitSync([
+      const committed = await gitProbe([
         "-C",
         after.root,
         "diff",
@@ -223,12 +214,15 @@ interface WindowRecord {
   /** `<ticket>#<task>` for ticket work, the bare task id for inline runs. */
   readonly name: string;
   readonly root: string;
-  /** Mutating toolset (`isWriter` — the layer's writer knowledge). */
-  readonly mutating: boolean;
   readonly startedAt: number;
   endedAt: number | undefined;
   parentMutated: boolean;
-  readonly before: RepoSnapshot;
+  /**
+   * The pre-window snapshot — kept only while the window is open or its
+   * settle is in flight; dropped the moment the window closes so the
+   * registry's memory doesn't grow with every task it has ever seen.
+   */
+  before: RepoSnapshot | undefined;
 }
 
 function windowsOverlap(record: WindowRecord, other: WindowRecord): boolean {
@@ -240,23 +234,28 @@ function windowsOverlap(record: WindowRecord, other: WindowRecord): boolean {
 /**
  * The session's evidence-window registry — owned by the extension
  * closure, one instance across dispatches so overlapping tickets still
- * see each other's windows. Every record is kept once closed: a window
- * that ended before a sibling settled still legitimately overlapped it.
+ * see each other's windows. A closed record is kept only while a
+ * still-open window could have overlapped it; once every open window
+ * started after it ended, no future window can overlap it either, so it
+ * is pruned.
  */
 export class AttributionWindows {
-  private readonly records: WindowRecord[] = [];
+  private records: WindowRecord[] = [];
 
   /**
    * Open a task's evidence window: snapshot the worker's actual cwd
    * right before its first attempt. `undefined` when the cwd is outside
-   * Git (shell changes there stay unknowable) — and also after a Git
-   * failure, which is logged and degrades to the unknown-shell mark
-   * without failing the task.
+   * Git (shell changes there stay unknowable), after a Git failure —
+   * logged, degrading to the unknown-shell mark without failing the
+   * task — and for a task whose toolset cannot mutate at all: a
+   * read-only run opens no window, so it pays no snapshot cost and can
+   * never wear a sibling's or the parent's concurrent edits.
    */
   async open(task: ResolvedTask, ticketId?: string): Promise<WindowRecord | undefined> {
+    if (!isWriter(task.tools)) return undefined;
     let before: RepoSnapshot | undefined;
     try {
-      before = snapshotRepo(task.cwd);
+      before = await snapshotRepo(task.cwd);
     } catch (error) {
       console.error(
         `[delegate] git snapshot failed for ${task.id} in ${task.cwd}: ${error instanceof Error ? error.message : String(error)}`,
@@ -267,7 +266,6 @@ export class AttributionWindows {
     const record: WindowRecord = {
       name: ticketId !== undefined ? `${ticketId}#${task.id}` : task.id,
       root: before.root,
-      mutating: isWriter(task.tools),
       startedAt: Date.now(),
       endedAt: undefined,
       parentMutated: false,
@@ -296,21 +294,28 @@ export class AttributionWindows {
    * same repository root.
    */
   async settle(record: WindowRecord): Promise<WindowEvidence> {
+    const before = record.before;
+    if (before === undefined) {
+      // Already closed (settle raced an abandon) — nothing to diff.
+      return { files: [], covered: false, concurrentWriters: [] };
+    }
     try {
-      const after = snapshotRepo(record.root);
+      const after = await snapshotRepo(record.root);
       record.endedAt = Date.now();
       if (after === undefined) {
-        // The tree stopped being a repository mid-task — no coverage.
+        // The tree stopped being a repository mid-task — no coverage;
+        // the window still closes fully.
+        record.before = undefined;
+        this.prune();
         return { files: [], covered: false, concurrentWriters: [] };
       }
-      const files = changedRelPaths(record.before, after).map((rel) =>
+      const files = (await changedRelPaths(before, after)).map((rel) =>
         join(record.root, rel),
       );
       const writers = this.records
         .filter(
           (other) =>
             other !== record &&
-            other.mutating &&
             other.root === record.root &&
             windowsOverlap(record, other),
         )
@@ -319,9 +324,13 @@ export class AttributionWindows {
         ...(record.parentMutated ? ["parent"] : []),
         ...writers,
       ];
+      record.before = undefined;
+      this.prune();
       return { files, covered: true, concurrentWriters };
     } catch (error) {
       record.endedAt = Date.now();
+      record.before = undefined;
+      this.prune();
       console.error(
         `[delegate] git snapshot failed for ${record.name} in ${record.root}: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -332,6 +341,27 @@ export class AttributionWindows {
   /** End a window whose task died between open and settle. */
   abandon(record: WindowRecord): void {
     record.endedAt ??= Date.now();
+    record.before = undefined;
+    this.prune();
+  }
+
+  /**
+   * Drop closed records that can no longer overlap any still-open
+   * window — a window that ended before the earliest open window
+   * started can overlap nothing now running and nothing that opens
+   * later. With no open windows, every closed record goes.
+   */
+  private prune(): void {
+    let earliestOpen = Number.POSITIVE_INFINITY;
+    for (const record of this.records) {
+      if (record.endedAt === undefined && record.startedAt < earliestOpen) {
+        earliestOpen = record.startedAt;
+      }
+    }
+    this.records = this.records.filter(
+      (record) =>
+        record.endedAt === undefined || record.endedAt >= earliestOpen,
+    );
   }
 }
 

@@ -207,6 +207,10 @@ test(
       if (Date.now() > deadline) {
         throw new Error("poll never reached 1/2 tasks finished");
       }
+      // A macrotask yield, not just an await: a tight microtask poll
+      // starves Bun's child-exit delivery, which the Git evidence
+      // windows' async probes depend on.
+      await Bun.sleep(5);
     }
     expect(running.text).toContain("truncated in this poll");
     expect(running.text).not.toContain("R".repeat(50));
@@ -495,6 +499,7 @@ test(
       if (Date.now() > deadline) {
         throw new Error("poll never reached 1/2 tasks finished");
       }
+      await Bun.sleep(5);
     }
     const collapsed = renderToolResult(session, running, false);
     expect(collapsed).toContain(

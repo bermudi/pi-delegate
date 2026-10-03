@@ -180,6 +180,15 @@ export class DispatchCoordinator {
        */
       attribution?: AttributionWindows;
       /**
+       * Bound on a quarantined task's deferred window settle: a
+       * provisional outcome leaves the worker possibly still mutating,
+       * so its evidence window closes only when quiescence is confirmed
+       * — or is abandoned after this many ms (the caller passes the
+       * session's shutdown-quiescence bound; a worker that outlives even
+       * that can no longer produce honest evidence anyway).
+       */
+      attributionQuiescenceBoundMs?: number;
+      /**
        * One task's caller-visible settlement (#60): invoked for every
        * recorded outcome — provisional or final — as it lands, with the
        * settled outcome's recorded usage. The sink publishes usage
@@ -458,6 +467,7 @@ export class DispatchCoordinator {
       brief?: string;
       tokenBudget?: number;
       attribution?: AttributionWindows;
+      attributionQuiescenceBoundMs?: number;
     },
     grant: AdmissionGrant,
     loaders: Map<string, Promise<DefaultResourceLoader>>,
@@ -876,6 +886,7 @@ export class DispatchCoordinator {
                 ? undefined
                 : await options.attribution.open(task, ticket?.id);
             let outcome: TaskOutcome;
+            let windowClosed = window === undefined;
             try {
               outcome = await runTask(
                 effectiveTask,
@@ -896,24 +907,60 @@ export class DispatchCoordinator {
               if (window !== undefined && options.attribution !== undefined) {
                 if (outcome.quarantined === true) {
                   // A provisional record cannot wait on the second
-                  // snapshot: the cancelled view must land when the
-                  // ticket does, and worker truth — which replaces it —
-                  // folds this window's evidence when it arrives.
-                  void options.attribution
-                    .settle(window)
-                    .then((evidence) => {
+                  // snapshot — and the snapshot itself cannot run yet
+                  // either: a cancelled worker may still be writing. The
+                  // window closes when quiescence is confirmed, folding
+                  // its evidence over the worker-truth record, or is
+                  // abandoned at the quiescence bound when the worker
+                  // never stops.
+                  windowClosed = true;
+                  const attribution = options.attribution;
+                  const openWindow = window;
+                  const boundMs =
+                    options.attributionQuiescenceBoundMs ?? 30_000;
+                  void (async () => {
+                    try {
+                      const quiesced = await Promise.race([
+                        confirmed.promise.then(() => true),
+                        new Promise<false>((resolve) =>
+                          setTimeout(() => resolve(false), boundMs),
+                        ),
+                      ]);
+                      if (!quiesced) {
+                        attribution.abandon(openWindow);
+                        return;
+                      }
+                      const evidence = await attribution.settle(openWindow);
                       windowEvidence = evidence;
-                    });
+                      // Worker truth's record is already on file — fold
+                      // the window's evidence over it so its files line
+                      // reflects what the worker actually did.
+                      const current = outcomes[task.index];
+                      if (current !== undefined) {
+                        const enriched = withGitEvidence(current, evidence);
+                        outcomes[task.index] = enriched;
+                        if (ticket) {
+                          this.tickets.recordOutcome(ticket, enriched);
+                        }
+                      }
+                    } catch (error) {
+                      attribution.abandon(openWindow);
+                      console.error(
+                        `[delegate] deferred git evidence settle for task ${task.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+                      );
+                    }
+                  })();
                 } else {
                   const evidence = await options.attribution.settle(window);
                   windowEvidence = evidence;
                   outcome = withGitEvidence(outcome, evidence);
+                  windowClosed = true;
                 }
               }
             } finally {
               // On a thrown run the window still closes so it can never
               // look open-ended to siblings.
-              if (window !== undefined && windowEvidence === undefined) {
+              if (window !== undefined && !windowClosed) {
                 options.attribution?.abandon(window);
               }
             }
