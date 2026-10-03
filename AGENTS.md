@@ -65,7 +65,9 @@ the installed artifact. Publishing is CI-driven: push a
 `pi-delegate-v<version>` tag and `publish-npm.yml` gates
 typecheck/test/build then `npm publish`es via OIDC (no local npm auth);
 the tag must equal `package.json`'s version. `pi-delegate-v0.3.0` was the
-v3 cutover tag (see PUBLISH.md). Run the tree per-session with
+v3 cutover tag (see PUBLISH.md). The installed host is Pi 1.0.0; 0.3.3
+widened the host peer range to `>=0.87.0 <2.0.0` (`^0.87.0` excluded it),
+and steer delivery was verified in it. Run the tree per-session with
 `pi -ne -e <repo>/delegate.ts`; do NOT add a `.pi/extensions/` shim
 here — pi hard-errors on duplicate tool names between project and user
 extensions, which bricks every normal session in the repo.
