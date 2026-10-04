@@ -69,3 +69,8 @@ runs both.
 - 2026-10-04 — put this repo's practice notes in the personal wiki
   (`~/Documents/AgenticWiki`) instead of the repo itself; operational state
   belongs where the operators read (bermudi).
+- 2026-10-04 — #46 close comment claimed the pausing/paused distinction
+  "carried through the v3 merge"; it had collapsed to a boolean (fresh
+  review M1). Verify survived-behavior, not intent, before asserting
+  carry-through — and close comments state gates honestly (found by the
+  same review: the dogfood gate was never run).

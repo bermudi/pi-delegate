@@ -52,9 +52,10 @@ function fmtDuration(ms: number): string {
 
 /** Live pause state wins over the store's possibly-lagging status. */
 function statusWord(row: ActivityRow, paused: boolean): string {
-  if (paused && (row.status === "queued" || row.status === "running")) {
-    return "paused";
-  }
+  // "pausing": pause requested, the in-flight turn is still streaming to
+  // its checkpoint; "paused": parked between turns (or held while queued).
+  if (paused && row.status === "running") return "pausing";
+  if (paused && row.status === "queued") return "paused";
   return row.status;
 }
 

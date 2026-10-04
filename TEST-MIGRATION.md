@@ -486,9 +486,14 @@ gaps.
   countdown freezes while parked and resumes with its remaining budget),
   and a silent in-flight turn still stalls under a paused ticket. v2 gates
   queued tasks before slot acquisition and parks between-turn continuations
-  via the core `prepareNextTurnWithContext` hook.
-- **Gap:** mid-turn pause semantics (current turn finishes); pause
-  unavailability on terminal tickets.
+  via the core `prepareNextTurnWithContext` hook. `tests/contract/pause.test.ts`
+  adds: domain rejections (pause/resume on settled, resume on non-paused)
+  as returned error results; the mid-turn sequence `pausing — finishing
+  current turn` → `paused between turns` (poll lines) with tail
+  `taskState: "paused"`; resume continuing the same live session
+  (`callCount === 2`, no replay).
+- **Gap:** closed — mid-turn pause semantics and pause unavailability on
+  terminal tickets are covered by `tests/contract/pause.test.ts`.
 
 ### Session reuse and lifecycle
 

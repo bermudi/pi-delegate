@@ -314,6 +314,9 @@ function liveTaskLine(
   if (row.status === "paused" || (ticket.paused && !inFlight && row.status !== "running")) {
     return `Ⅱ ${label} · paused between turns`;
   }
+  if (ticket.paused && row.status === "running") {
+    return `⏳ ${label} · pausing — finishing current turn`;
+  }
   const parts = [activityLabel(row)];
   if (row.toolCalls.length > 0) {
     parts.push(`${row.toolCalls.length} tool${row.toolCalls.length === 1 ? "" : "s"}`);
@@ -2174,9 +2177,17 @@ export async function handleTicketRpc(
     case "cancel":
       return { text: store.cancel(ticket, call.force), isError: false, ticket };
     case "pause":
-      return { text: store.pause(ticket), isError: false, ticket };
+      try {
+        return { text: store.pause(ticket), isError: false, ticket };
+      } catch (error) {
+        return { text: error instanceof Error ? error.message : String(error), isError: true, ticket };
+      }
     case "resume":
-      return { text: store.resume(ticket), isError: false, ticket };
+      try {
+        return { text: store.resume(ticket), isError: false, ticket };
+      } catch (error) {
+        return { text: error instanceof Error ? error.message : String(error), isError: true, ticket };
+      }
     case "answer":
       try {
         return { text: store.answer(ticket, taskId!, call.questionId!, call.answer!), isError: false, ticket };

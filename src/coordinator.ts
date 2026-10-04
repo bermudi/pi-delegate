@@ -834,7 +834,18 @@ export class DispatchCoordinator {
                     }
                   : undefined,
               waitWhilePaused: (runSignal) =>
-                ticket ? this.waitWhilePaused(ticket, runSignal ?? signal) : Promise.resolve(),
+                ticket
+                  ? this.waitWhilePaused(ticket, runSignal ?? signal, {
+                      onPark: () => this.setTaskStatusSafely(ticket, task.id, "paused"),
+                      onWake: () => {
+                        // Only restore "running" when the ticket is genuinely
+                        // back mid-flight; settle/pause raced past the gate.
+                        if (ticket.status === "running" && !ticket.paused) {
+                          this.setTaskStatusSafely(ticket, task.id, "running");
+                        }
+                      },
+                    })
+                  : Promise.resolve(),
               // Steers parked while the task had no live run ride its
               // next prompt's first turn (SPEC v3 "Steering").
               consumeSteers:
@@ -869,13 +880,7 @@ export class DispatchCoordinator {
                 }
               },
             };
-            if (this.activity !== undefined && ticket !== undefined) {
-              try {
-                this.activity.setTicketTaskStatus(ticket.id, task.id, "running");
-              } catch {
-                // Diagnostics must never fail the dispatch it displays.
-              }
-            }
+            this.setTaskStatusSafely(ticket, task.id, "running");
             // The Git evidence window (SPEC v3 "Observability —
             // Completion evidence") opens here — after admission, pause,
             // predecessor, and slot gates, immediately before the first
@@ -995,14 +1000,41 @@ export class DispatchCoordinator {
   private waitWhilePaused(
     ticket: Ticket,
     signal: AbortSignal,
+    hooks?: { onPark: () => void; onWake: () => void },
   ): Promise<void> {
     return (async () => {
+      // Park/wake bracket the actual held state, so display state is
+      // produced by the checkpoint that owns the truth (#46 M1): a task
+      // reports "paused" only while it is genuinely parked between turns,
+      // never while its final pre-pause turn is still streaming.
+      let parked = false;
       while (ticket.paused && ticket.status === "running" && !signal.aborted) {
+        if (!parked) {
+          parked = true;
+          hooks?.onPark();
+        }
         const gate = this.tickets.pauseGatePromise(ticket);
         if (gate === undefined) break;
         await Promise.race([gate, onAbort(signal)]);
       }
+      if (parked) hooks?.onWake();
     })();
+  }
+
+  /** Activity is diagnostics; a status update must never fail the run. */
+  private setTaskStatusSafely(
+    ticket: Ticket | undefined,
+    taskId: string,
+    status: "running" | "paused",
+  ): void {
+    if (this.activity === undefined || ticket === undefined) return;
+    try {
+      this.activity.setTicketTaskStatus(ticket.id, taskId, status);
+    } catch (error) {
+      console.error(
+        `[delegate] task status update failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 }
 

@@ -231,7 +231,11 @@ wait, wait-any, pause/resume and tail controls below require full mode.
   commands are not rolled back; `force: true` terminates the ticket and asks
   workers to abort.
 - `pause` / `resume` — cooperative pause at a turn boundary; the current model
-  response and tool calls finish first.
+  response and tool calls finish first. A requested-but-not-yet-parked task
+  shows `pausing`; `paused` means parked between turns (or held while
+  queued). A paused task keeps its execution slot, session, and workspace
+  reservation by design — paused remains running (INVARIANTS) — so a small
+  `maxConcurrent` can be starved by a long-paused ticket; resume frees it.
 - `answer` — reply to a worker question (see below).
 - `steer` — send text to a running task (see Steering).
 - `interrupt` — abort one task's in-flight turn cooperatively (`taskId`
