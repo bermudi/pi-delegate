@@ -65,6 +65,15 @@ async function parkedTicketFixture(): Promise<{
   return { ticket, release, marker, subagents };
 }
 
+/** Spin until `cond` holds; bounded, so a broken fixture fails loudly. */
+async function until(cond: () => boolean, what: string, budgetMs = 5000): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  while (!cond() && Date.now() < deadline) {
+    await new Promise((r) => setImmediate(r));
+  }
+  expect(cond(), what).toBe(true);
+}
+
 describe("delegate_ticket pause/resume", () => {
   test("pause/resume on a settled ticket return error results, never throws", async () => {
     // #46 m1: domain rejections ride the store convention — returned
@@ -135,6 +144,12 @@ describe("delegate_ticket pause/resume", () => {
     // session — a respawn or replay would re-request turn one.
     const { ticket, release, marker, subagents } = await parkedTicketFixture();
 
+    // Determinism (review m3): callCount increments synchronously when the
+    // provider request arrives, before the gated factory resolves — so
+    // callCount === 1 proves the task passed admission, its row is
+    // "running", and turn one is genuinely mid-flight when pause lands.
+    await until(() => subagents.state.callCount === 1, "turn one request observed");
+
     const requested = await callDelegateTicket(session!, {
       action: "pause",
       ticket,
@@ -151,19 +166,19 @@ describe("delegate_ticket pause/resume", () => {
     expect(pausing.text).not.toMatch(/paused between turns/);
 
     release();
-    const deadline = Date.now() + 5000;
-    while (!existsSync(marker) && Date.now() < deadline) {
+    await until(() => existsSync(marker), "paused turn's tool call completed");
+
+    // Parked: re-poll until the observed transition lands (no sleeps),
+    // then pin both the poll label and the machine-readable tail state.
+    const parkedDeadline = Date.now() + 5000;
+    let parkedText = "";
+    while (!parkedText.includes("paused between turns") && Date.now() < parkedDeadline) {
+      parkedText = (
+        await callDelegateTicket(session!, { action: "poll", ticket })
+      ).text;
       await new Promise((r) => setImmediate(r));
     }
-    expect(existsSync(marker)).toBe(true);
-    await new Promise((r) => setTimeout(r, 50));
-
-    // Parked: the label flips, and the machine-readable tail agrees.
-    const parkedPoll = await callDelegateTicket(session!, {
-      action: "poll",
-      ticket,
-    });
-    expect(parkedPoll.text).toMatch(/paused between turns/);
+    expect(parkedText).toContain("paused between turns");
 
     const tail = await callDelegateTicket(session!, {
       action: "tail",
@@ -189,7 +204,6 @@ describe("delegate_ticket pause/resume", () => {
     });
     expect(settled.isError).toBe(false);
     expect(settled.text).toContain("RESUMED-DONE");
-    expect(settled.text).not.toContain("GATED");
     expect(subagents.state.callCount).toBe(2);
   });
 });

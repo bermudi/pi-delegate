@@ -1334,6 +1334,10 @@ export class TicketStore {
           : (this.activity?.taskRow(record.id, taskId)?.assistantTail ??
             outcome?.output ??
             "");
+      // taskState is the RAW activity-row status, not the browser's
+      // annotated word: "running" here can mean pausing (pause requested,
+      // in-flight turn still streaming) — only "paused" is the parked
+      // truth. Consumers wanting the annotated form read the poll view.
       const taskState =
         outcome?.status ??
         this.activity?.taskRow(record.id, taskId)?.status ??
