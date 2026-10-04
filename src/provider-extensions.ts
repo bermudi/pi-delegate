@@ -31,7 +31,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   DefaultPackageManager,
   SettingsManager,
@@ -485,18 +485,6 @@ async function resolveProviderExtensionPathsUncached(
     }
     paths.add(userPath);
     if (!required) bestEffortPaths.add(userPath);
-  }
-
-  // Positive visibility for the invisible-by-design path (v1
-  // provider-extensions.ts:506-534): a surviving best-effort default
-  // changes subagent behavior without any user action — worth one line
-  // per provider per dispatch. User-configured sources never announce
-  // themselves; the user installed them knowingly.
-  if (bestEffortPaths.size > 0) {
-    const providerName = provider.trim() || "provider";
-    console.error(
-      `[delegate] provider extension integration active for ${providerName} subagents: ${[...bestEffortPaths].map((root) => basename(root) || root).join(", ")}`,
-    );
   }
 
   return { paths, bestEffortPaths, signature };
