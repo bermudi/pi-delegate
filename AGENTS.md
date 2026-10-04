@@ -177,12 +177,13 @@ review. Small fixes need no issue. GitHub issues are the only backlog; if
 authorities; issue proposals and plans do not override them. Behavioral
 changes require explicit reconciliation in the root contracts.
 
-### Kitchen
+### Corrections
 
-`KITCHEN.md` tracks this repo's practice: trust-ladder audit, verification
-status, weeds queue, correction log. Corrected an agent in this repo? Append
-one line to the correction log — recurring classes get pushed down the
-ladder in the weekly pass, not re-explained in chat.
+`docs/corrections.md` is the ledger: one line per correction of an agent
+working in this repo (date, correction, where), plus the enforcement map.
+Fix the instance, log the line. Weekly pass clusters recurring classes and
+pushes them down the ladder — architecture/types/lint/CI before prose —
+instead of re-explaining in chat.
 
 Approved sequencing (not a second backlog): reconcile existing issues →
 background delivery/reliability → worker questions → automatic handoffs →
