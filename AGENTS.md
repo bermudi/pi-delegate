@@ -177,6 +177,13 @@ review. Small fixes need no issue. GitHub issues are the only backlog; if
 authorities; issue proposals and plans do not override them. Behavioral
 changes require explicit reconciliation in the root contracts.
 
+### Kitchen
+
+`KITCHEN.md` tracks this repo's practice: trust-ladder audit, verification
+status, weeds queue, correction log. Corrected an agent in this repo? Append
+one line to the correction log — recurring classes get pushed down the
+ladder in the weekly pass, not re-explained in chat.
+
 Approved sequencing (not a second backlog): reconcile existing issues →
 background delivery/reliability → worker questions → automatic handoffs →
 restart recovery/live browser → later steering/team messages. This is planning
