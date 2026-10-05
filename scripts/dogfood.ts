@@ -131,15 +131,16 @@ function planSurface(surface: "compact" | "full", root: string, modelId: string)
     surface === "compact"
       ? [
           "Use the delegate tool exactly twice in this turn:",
-          `(1) one call with async:false, tasks: [{ prompt: "Write exactly ${marker} into ${markerPath} using the bash tool", tools: ["bash"] }]`,
-          `(2) one call with async omitted (background), tasks: [{ prompt: "Read ${markerPath} and reply with exactly its contents", tools: ["read"] }]`,
-          "Then use delegate_ticket action:\"wait\" with timeoutMs:90000 on the background ticket and report both outcomes verbatim.",
+          `(1) one call with async:false, tasks: [{ prompt: "Write exactly ${marker} into ${markerPath} using the bash tool" }]`,
+          `(2) one call with async omitted (background), tasks: [{ prompt: "Read ${markerPath} and reply with exactly its contents" }]`,
+          "Then use delegate_ticket action:\"wait\" with timeoutMs:90000 on the background ticket. Keep your final reply under five short lines; no explanations.",
+          "Do not set per-task tools or any full-surface-only field: this session runs the default compact schema.",
         ].join("\n")
       : [
           "Use the delegate tool exactly twice in this turn:",
           `(1) one call with async:false, tasks: [{ prompt: "Write exactly ${marker} into ${markerPath} using the bash tool", tools: ["bash"] }]`,
           `(2) one call with async omitted (background), tasks: [{ prompt: "Read ${markerPath} and reply with exactly its contents", tools: ["read"] }]`,
-          'Then use delegate_ticket action:"pause" on that ticket, poll once with action:"poll", then action:"resume", and finally action:"wait" with timeoutMs:90000. Report the poll line and both task outcomes verbatim.',
+          'Then use delegate_ticket action:"pause" on that ticket, poll once with action:"poll", then action:"resume", and finally action:"wait" with timeoutMs:90000. Keep your final reply under six short lines (one per outcome plus the poll line); no explanations.',
           `Do not choose any model yourself; the session model (${modelId}) already applies to subagents.`,
         ].join("\n");
 
@@ -248,7 +249,7 @@ const surfaceFlag = args.includes("--surface")
   : "both";
 const timeoutFlag = args.includes("--timeout-secs")
   ? Number(args[args.indexOf("--timeout-secs") + 1])
-  : 300;
+  : 480;
 const surfaces: ("compact" | "full")[] =
   surfaceFlag === "both" ? ["compact", "full"] : [surfaceFlag];
 
