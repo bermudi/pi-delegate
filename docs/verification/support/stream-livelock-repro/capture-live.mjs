@@ -59,7 +59,7 @@ if (flag("child")) {
 	const piAiRoot =
 		process.env.PIAI_ROOT ??
 		`${os.homedir()}/.pi/agent/install/releases/${readFileSync(`${os.homedir()}/.pi/agent/install/current-version`, "utf8").trim()}/node_modules/@earendil-works/pi-ai`;
-	const mod = await import(pathToFileURL(`${piAiRoot}/dist/api/openai-completions.js`).href);
+	const { streamSimple } = await import(pathToFileURL(`${piAiRoot}/dist/compat.js`).href);
 	const { MODELS } = await import(pathToFileURL(`${piAiRoot}/dist/models.generated.js`).href);
 
 	// Credential: loaded here, used once, never displayed.
@@ -166,12 +166,12 @@ if (flag("child")) {
 	let events = 0;
 	let lastType = "";
 	try {
-		const stream = mod.stream(model, context, {
+		const stream = streamSimple(model, context, {
 			apiKey,
 			fetch: teeFetch,
 			signal: controller.signal,
 			maxRetries: 0,
-			thinkingLevel,
+			reasoning: thinkingLevel,
 			toolChoice: "required",
 		});
 		for await (const ev of stream) {

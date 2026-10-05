@@ -77,3 +77,42 @@ The fix does not depend on the answer: per-chunk abort checks plus a
 no-completion bound on accumulated tool-call args (and, per #9265, ending
 the per-delta full reparse) close the livelock for every trigger in the
 class.
+
+## Wild-trigger capture (`capture-live.mjs`)
+
+Answers the open question empirically: runs the installed pi-ai against
+live zai with a fetch tee that records every response byte to disk
+*before* pi-ai parses it, in the incident shape (glm-5.3, forced
+`delegate` tool call, fine-grained `tool_stream` args deltas — a normal
+attempt streams ~3.7k tool_calls deltas / ~900KB).
+
+```bash
+node capture-live.mjs --attempts=5 --gap=15 --timeout=300   # live loop
+node capture-live.mjs --attempts=50 --gap=30 &              # long capture
+node capture-live.mjs --mock --mock-port=4797 --attempts=1  # free rehearsal
+```
+
+Per attempt under `captures/<ts>/a<N>/`: `body.sse` (raw bytes,
+append-sync so a SIGKILLed wedge still keeps them), `events.jsonl`
+(request shape, per-chunk byte timeline, abort transitions, stream
+result), `cpu.jsonl` (parent's /proc samples), `meta.json` (verdict).
+
+Verdicts: `COMPLETED`, `ERRORED`, `WEDGE: …` (cpu pegged with bytes
+stalled, or bytes past the 20MB bound — endless delivery), kill is
+SIGKILL after a 60s observation window. A WEDGE verdict means the wild
+trigger is captured: `body.sse` + `events.jsonl` of that attempt is the
+artifact for replay against patched/unpatched pi-ai.
+
+Notes:
+- Credentials load at runtime from `~/.pi/agent/auth.json` (`zai`
+  `api_key`); the key is never printed, and the Authorization header is
+  never captured. The model entry comes from the installed catalog, so
+  the capture exercises the exact baseUrl/compat the incident stack used.
+- The request must go through `streamSimple` (or another entry that
+  normalizes context): the raw per-provider `stream()` expects tools
+  folded into the transcript system message and silently sends
+  `tools: []` otherwise — the mock harness hides this because it scripts
+  responses regardless of the request.
+- `toolChoice: "required"` is needed because glm-5.3 otherwise answers
+  the review request in prose; named forcing (`{type:"function",…}`) is
+  rejected by zai with error 1210.
