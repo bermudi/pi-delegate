@@ -17,6 +17,7 @@
 //                         [--observe=SECS] [--bytes-bound=MB] [--out=DIR]
 //                         [--mock] [--mock-scenario=S] [--mock-port=P]
 //                         [--prompt=...] [--model=ID] [--thinking-level=L]
+//                         [--provider=P]
 //   node capture-live.mjs --child ...          (internal: one attempt)
 //
 // Capture layout per attempt (under captures/<ts>-a<N>/):
@@ -225,6 +226,8 @@ for (let attempt = 1; attempt <= attempts; attempt++) {
 		`--timeout=${timeoutSecs}`,
 		...(flag("mock") ? ["--mock", `--mock-port=${arg("mock-port", "4711")}`] : []),
 		...(arg("model", "") ? [`--model=${arg("model", "glm-5.3")}`] : []),
+		...(arg("thinking-level", "") ? [`--thinking-level=${arg("thinking-level", "high")}`] : []),
+		...(arg("provider", "") ? [`--provider=${arg("provider", "zai")}`] : []),
 		...(arg("prompt", "") !== "" ? [`--prompt=${arg("prompt", DEFAULT_PROMPT)}`] : []),
 	], { stdio: ["ignore", "inherit", "inherit"] });
 
