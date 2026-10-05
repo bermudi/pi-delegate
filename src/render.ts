@@ -31,6 +31,7 @@ import { Text, type Component } from "@earendil-works/pi-tui";
 import {
   descriptionLabel,
   formatDispatchResult,
+  formatDuration,
   resumeTagOf,
   truncateLine,
   truncateWords,
@@ -729,6 +730,117 @@ function collapsedRoster(text: string, theme: Theme): string {
   return body.join("\n") + expandHint(theme);
 }
 
+/** Braille frames for a live board's running rows (#119). */
+const LIVE_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/** Per-row tail budget: `tool: preview` stays inside ~one line. */
+const LIVE_PREVIEW_LIMIT = 60;
+/** Row labels truncate so the tail keeps its budget. */
+const LIVE_LABEL_LIMIT = 22;
+
+interface LiveTaskView {
+  readonly id: string;
+  readonly label: string;
+  readonly status: string;
+  readonly startedAt: number;
+  readonly lastEventAt: number;
+  readonly tool?: string;
+  readonly preview?: string;
+}
+
+function isLiveTask(value: unknown): value is LiveTaskView {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.label === "string" &&
+    typeof value.status === "string" &&
+    typeof value.startedAt === "number" &&
+    typeof value.lastEventAt === "number" &&
+    (value.tool === undefined || typeof value.tool === "string") &&
+    (value.preview === undefined || typeof value.preview === "string")
+  );
+}
+
+/**
+ * The pending tool row's live board for a running inline batch (#119):
+ * `delegate — 3 tasks · running 12m27s · 1 done` over one line per task —
+ * glyph, label, duration, and the current/last `tool: preview` tail. The
+ * partial's `live` details are display-only and never settle-model data.
+ */
+function liveBoard(result: AgentToolResult<unknown>, theme: Theme): string | undefined {
+  const details = result.details;
+  if (
+    !isRecord(details) ||
+    details.mode !== "dispatch" ||
+    details.async !== false
+  ) {
+    return undefined;
+  }
+  const live = details.live;
+  if (!isRecord(live) || typeof live.startedAt !== "number") return undefined;
+  const tasks = (Array.isArray(live.tasks) ? live.tasks : []).filter(isLiveTask);
+  if (tasks.length === 0) return undefined;
+  const now = Date.now();
+  const done = tasks.filter(
+    (task) =>
+      task.status !== "queued" &&
+      task.status !== "running" &&
+      task.status !== "paused",
+  ).length;
+  const spinner = LIVE_SPINNER[Math.floor(now / 160) % LIVE_SPINNER.length]!;
+  const lines = [
+    theme.fg("toolTitle", theme.bold("delegate")) +
+      theme.fg("muted", " — ") +
+      theme.fg("accent", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`) +
+      theme.fg("muted", ` · running ${formatDuration(now - live.startedAt)}`) +
+      (done > 0 ? theme.fg("muted", ` · ${done} done`) : ""),
+  ];
+  for (const task of tasks) {
+    const settled =
+      task.status !== "queued" &&
+      task.status !== "running" &&
+      task.status !== "paused";
+    const { glyph, color } = task.status === "running"
+      ? { glyph: spinner, color: "accent" as const }
+      : task.status === "queued" || task.status === "paused"
+        ? { glyph: "○", color: "muted" as const }
+        : collapsedGlyph(task.status as TaskStatus);
+    const elapsed = formatDuration(
+      Math.max(0, (settled ? task.lastEventAt : now) - task.startedAt),
+    );
+    const label = truncateLine(
+      displaySafe(task.label || task.id),
+      LIVE_LABEL_LIMIT,
+    );
+    const tail =
+      task.tool !== undefined
+        ? ` ${task.tool}${task.preview !== undefined ? `: ${displaySafe(task.preview).replace(/\s+/g, " ").trim()}` : ""}`
+        : "";
+    lines.push(
+      theme.fg("muted", "  ") +
+        theme.fg(color, glyph) +
+        " " +
+        theme.fg("toolTitle", label.padEnd(LIVE_LABEL_LIMIT)) +
+        " " +
+        theme.fg(
+          settled ? "muted" : "toolOutput",
+          settled ? `${task.status} ${elapsed}` : elapsed,
+        ) +
+        (tail !== ""
+          ? theme.fg("muted", truncateLine(tail, LIVE_PREVIEW_LIMIT))
+          : ""),
+    );
+  }
+  const notices = Array.isArray(details.notices)
+    ? details.notices.filter(
+        (notice): notice is string => typeof notice === "string",
+      )
+    : [];
+  for (const notice of notices) {
+    lines.push(theme.fg("muted", `  ${displaySafe(notice)}`));
+  }
+  return lines.join("\n");
+}
+
 /**
  * The tool definitions' `renderResult`: collapsed renders the compact
  * per-task/ticket view (#63); expanded renders the complete recorded
@@ -746,6 +858,16 @@ export function createResultRenderer(tickets: TicketStore) {
       context.lastComponent instanceof Text
         ? context.lastComponent
         : new Text("", 0, 0);
+    // #119: a running inline dispatch's partial carries the live board —
+    // never the collapsed/expanded result views, which only apply to the
+    // settled record.
+    if (options.isPartial) {
+      const board = liveBoard(result, theme);
+      if (board !== undefined) {
+        component.setText(board);
+        return component;
+      }
+    }
     // Collapsed applies to error results too: a failed multi-task
     // dispatch still carries details.results, and truncating its text
     // would hide the later tasks' failures entirely.

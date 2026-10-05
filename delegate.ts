@@ -32,6 +32,7 @@ import type {
   AsyncDispatchDetails,
   DeliveredDetails,
   HelpDetails,
+  LiveDispatchDetails,
   QuestionNoticeDetails,
   SessionDetails,
   SyncDispatchDetails,
@@ -79,6 +80,7 @@ import {
   Deferred,
   type OutputBounds,
   type ResolvedTask,
+  type TaskOutcome,
   type Ticket,
 } from "./src/types.ts";
 import {
@@ -1964,6 +1966,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
     readonly tokenBudget?: number;
     readonly onNotices?: (notices: readonly string[]) => void;
     /**
+     * Inline batches (#119): the dispatch key live activity rows track
+     * under, and a settle callback that fires the board refresh as each
+     * task's outcome lands.
+     */
+    readonly syncRunId?: string;
+    readonly onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
+    /**
      * Async mode's edge: creates the ticket once tasks are resolved, so
      * the pipeline spends the rest of the batch under its cancellation
      * signal; the pipeline relabels nothing for it.
@@ -2150,6 +2159,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           signal: dispatchSignal,
           ticket,
           quiescence: barrier,
+          syncRunId: options.syncRunId,
           attribution: attributionWindows,
           attributionQuiescenceBoundMs: shutdownQuiescenceBudgetMs(),
           preparePhase: (phase) => plan!.preparePhase(phase),
@@ -2169,13 +2179,25 @@ export default function delegateExtension(api: ExtensionAPI): void {
           // settled outcome's recorded usage, tagged with its ticket and
           // task. No usage (never ran, cancelled pre-prompt) → no event.
           onTaskSettled: (task, outcome) => {
-            if (outcome.usage === undefined) return;
-            emitUsage(
-              taskUsagePayload(task, outcome.usage, {
-                ticketId: ticket?.id,
-                taskId: task.id,
-              }),
-            );
+            if (outcome.usage !== undefined) {
+              emitUsage(
+                taskUsagePayload(task, outcome.usage, {
+                  ticketId: ticket?.id,
+                  taskId: task.id,
+                }),
+              );
+            }
+            // #119: an inline batch's board refreshes as each outcome
+            // lands — display-only, so a throwing emitter is swallowed.
+            if (options.onTaskSettled !== undefined) {
+              try {
+                options.onTaskSettled(task, outcome);
+              } catch (error) {
+                console.error(
+                  `[delegate] settle observer failed for task ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
+            }
           },
           brief: options.brief,
           tokenBudget: options.tokenBudget,
@@ -2594,12 +2616,78 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 });
             };
 
+            // #119: an inline batch publishes a live board while it runs —
+            // the pending tool row's heartbeat, ~1s plus each task settle.
+            // Rows live in the activity store under this call's run id;
+            // the partials are display-only (never the session file or the
+            // model's context). `boardNotices` fills when the pipeline
+            // returns; settle-driven emits cannot precede that point.
+            const syncRunId =
+              call.async === false ? `inline-${toolCallId}` : undefined;
+            let boardNotices: readonly string[] = [];
+            const emitBoard = (): void => {
+              if (onUpdate === undefined || syncRunId === undefined) return;
+              try {
+                const rows = activity.syncRunRows(syncRunId);
+                if (rows.length === 0) return;
+                onUpdate({
+                  content:
+                    boardNotices.length > 0
+                      ? [
+                          {
+                            type: "text" as const,
+                            text: boardNotices.join("\n"),
+                          },
+                        ]
+                      : [],
+                  details: ({
+                    mode: "dispatch" as const,
+                    async: false as const,
+                    live: {
+                      startedAt: rows[0]!.startedAt,
+                      tasks: rows.map((row) => {
+                        const inFlight = row.toolCalls.find(
+                          (callRow) => callRow.inFlight,
+                        );
+                        const last =
+                          inFlight ?? row.toolCalls[row.toolCalls.length - 1];
+                        return {
+                          id: row.taskId,
+                          label: row.label,
+                          status: row.status,
+                          startedAt: row.startedAt,
+                          lastEventAt: row.lastEventAt,
+                          ...(last !== undefined
+                            ? {
+                                tool: last.tool,
+                                preview:
+                                  inFlight !== undefined
+                                    ? last.argPreview
+                                    : last.preview,
+                              }
+                            : {}),
+                        };
+                      }),
+                    },
+                    ...(boardNotices.length > 0
+                      ? { notices: [...boardNotices] }
+                      : {}),
+                  } satisfies LiveDispatchDetails),
+                });
+              } catch {
+                // The board is display-only; a failed emit never
+                // reaches the batch.
+              }
+            };
             const { completion, ticket, notices, tasks, outputBounds } =
               await runDispatchPipeline({
               requestedTasks: call.tasks,
               ctx,
               brief: call.brief,
               tokenBudget: call.tokenBudget,
+              syncRunId,
+              onTaskSettled:
+                syncRunId === undefined ? undefined : () => emitBoard(),
               // One signal source in the pipeline: the caller's host signal
               // for a sync batch, the ticket's cancellation for an async one.
               signal: call.async ? undefined : signal,
@@ -2712,7 +2800,23 @@ export default function delegateExtension(api: ExtensionAPI): void {
               };
             }
 
-            const result = await completion;
+            boardNotices = notices;
+            // The board's first frame paints every task row as tracked —
+            // by now coordinator.run's synchronous prefix registered them.
+            emitBoard();
+            // The heartbeat runs for the batch's life; `finally` clears it
+            // on settle, throw, or abort so no timer outlives the call.
+            const heartbeat =
+              onUpdate === undefined || syncRunId === undefined
+                ? undefined
+                : setInterval(emitBoard, 1000);
+            heartbeat?.unref?.();
+            let result: DispatchOutcome;
+            try {
+              result = await completion;
+            } finally {
+              if (heartbeat !== undefined) clearInterval(heartbeat);
+            }
             // SPEC: error-valued only when every task failed or was blocked —
             // cancelled and partially failed batches are normal results
             // carrying each task's own status, mirroring a ticket's `partial`

@@ -197,6 +197,13 @@ export class DispatchCoordinator {
        */
       onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
       /**
+       * Ticket-less (inline) dispatch identity (#119): the live-activity
+       * run key this batch's rows track under — `sync-run:<runId>:<taskId>`
+       * keeps concurrent inline dispatches and repeated task ids distinct.
+       * Absent on ticket-backed batches, whose rows key by ticket id.
+       */
+      syncRunId?: string;
+      /**
        * The shared batch brief (SPEC v3 "Batch brief"): prepended to
        * every task's prompt as a delimited preamble — before the task's
        * own prose, leaving the dependent handoff appendix trailing it.
@@ -464,6 +471,7 @@ export class DispatchCoordinator {
       ticket?: Ticket;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
       onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
+      syncRunId?: string;
       brief?: string;
       tokenBudget?: number;
       attribution?: AttributionWindows;
@@ -499,15 +507,25 @@ export class DispatchCoordinator {
       combined.dispose();
     };
     const taskStartedAt = Date.now();
-    // Ticket tasks get live browser rows from the start (diagnostics only).
-    if (this.activity !== undefined && ticket !== undefined) {
+    // Live browser rows from the start (diagnostics only): ticket tasks
+    // key by ticket id, inline tasks by this dispatch's run id (#119).
+    if (this.activity !== undefined) {
       try {
-        this.activity.trackTicketTask({
-          ticketId: ticket.id,
-          taskId: task.id,
-          label: task.agent,
-          prompt: task.prompt,
-        });
+        if (ticket !== undefined) {
+          this.activity.trackTicketTask({
+            ticketId: ticket.id,
+            taskId: task.id,
+            label: task.agent,
+            prompt: task.prompt,
+          });
+        } else if (options.syncRunId !== undefined) {
+          this.activity.trackSyncTask({
+            runId: options.syncRunId,
+            taskId: task.id,
+            label: task.agent,
+            prompt: task.prompt,
+          });
+        }
       } catch {
         // A failed track never blocks the task it wanted to display.
       }
@@ -534,6 +552,17 @@ export class DispatchCoordinator {
         try {
           if (ticket !== undefined) {
             this.activity.setTicketTaskStatus(ticket.id, task.id, outcome.status);
+          } else if (options.syncRunId !== undefined) {
+            // A tracked inline row settles in place — it IS the retained
+            // row, keeping its tool-call history and observed tail.
+            this.activity.setSyncTaskStatus(
+              options.syncRunId,
+              task.id,
+              outcome.status,
+              outcome.status === "ok"
+                ? (outcome.output ?? "")
+                : (outcome.error ?? outcome.output ?? "no output"),
+            );
           } else {
             this.activity.retainSyncRun({
               taskId: task.id,
@@ -614,7 +643,28 @@ export class DispatchCoordinator {
         integration: outcomes[task.index]?.integration ?? late.integration,
       };
       outcomes[task.index] = merged;
-      if (ticket) this.tickets.recordOutcome(ticket, merged);
+      if (ticket) {
+        this.tickets.recordOutcome(ticket, merged);
+      } else if (
+        options.syncRunId !== undefined &&
+        this.activity !== undefined
+      ) {
+        // A provisional row keeps its provisional status until worker
+        // truth lands — fold it so a live row never reads cancelled when
+        // the worker actually finished.
+        try {
+          this.activity.setSyncTaskStatus(
+            options.syncRunId,
+            task.id,
+            merged.status,
+            merged.status === "ok"
+              ? (merged.output ?? "")
+              : (merged.error ?? merged.output ?? "no output"),
+          );
+        } catch {
+          // Diagnostics only; the outcome is already recorded.
+        }
+      }
       // Worker truth can carry usage the provisional snapshot lacked —
       // it may be the write that crosses the limit.
       budgetExhausted();
@@ -824,10 +874,19 @@ export class DispatchCoordinator {
               holdTranscript: (path) => grant.holdTranscript(task.index, path),
               isAborted: () => signal.aborted,
               observe:
-                this.activity !== undefined && ticket !== undefined
+                this.activity !== undefined &&
+                (ticket !== undefined || options.syncRunId !== undefined)
                   ? (event) => {
                       try {
-                        this.activity?.observe(ticket.id, task.id, event);
+                        if (ticket !== undefined) {
+                          this.activity?.observe(ticket.id, task.id, event);
+                        } else if (options.syncRunId !== undefined) {
+                          this.activity?.observeSync(
+                            options.syncRunId,
+                            task.id,
+                            event,
+                          );
+                        }
                       } catch {
                         // execution.ts already guards the sink; this is belt.
                       }
@@ -880,7 +939,12 @@ export class DispatchCoordinator {
                 }
               },
             };
-            this.setTaskStatusSafely(ticket, task.id, "running");
+            this.setTaskStatusSafely(
+              ticket,
+              task.id,
+              "running",
+              options.syncRunId,
+            );
             // The Git evidence window (SPEC v3 "Observability —
             // Completion evidence") opens here — after admission, pause,
             // predecessor, and slot gates, immediately before the first
@@ -1026,10 +1090,15 @@ export class DispatchCoordinator {
     ticket: Ticket | undefined,
     taskId: string,
     status: "running" | "paused",
+    syncRunId?: string,
   ): void {
-    if (this.activity === undefined || ticket === undefined) return;
+    if (this.activity === undefined) return;
     try {
-      this.activity.setTicketTaskStatus(ticket.id, taskId, status);
+      if (ticket !== undefined) {
+        this.activity.setTicketTaskStatus(ticket.id, taskId, status);
+      } else if (syncRunId !== undefined) {
+        this.activity.setSyncTaskStatus(syncRunId, taskId, status);
+      }
     } catch (error) {
       console.error(
         `[delegate] task status update failed: ${error instanceof Error ? error.message : String(error)}`,

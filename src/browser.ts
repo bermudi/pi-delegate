@@ -32,6 +32,7 @@ import {
   type Component,
 } from "@earendil-works/pi-tui";
 import type { ActivityRow, ActivityStore } from "./activity.ts";
+import { formatDuration as fmtDuration } from "./format.ts";
 
 export interface BrowserControls {
   pauseTicket(ticketId: string): void;
@@ -40,17 +41,6 @@ export interface BrowserControls {
 }
 
 const ASSISTANT_TAIL_LIMIT = 32_768;
-
-function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${Math.max(0, Math.floor(ms))}ms`;
-  const seconds = ms / 1000;
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const minutes = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  if (minutes < 60) return `${minutes}m${secs}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h${minutes % 60}m`;
-}
 
 /** Live pause state wins over the store's possibly-lagging status. */
 function statusWord(row: ActivityRow, paused: boolean): string {

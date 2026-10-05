@@ -1,8 +1,10 @@
 /**
  * Live subagent activity: a bounded, display-only store feeding the
- * `/subagents` browser. The parent session owns the wiring — it tracks
- * ticket tasks, feeds session events via `observe`, and retains finished
- * sync runs. Full transcripts never live here: tool previews are capped at
+ * `/subagents` browser and the inline-batch live board (#119). The
+ * parent session owns the wiring — it tracks ticket tasks, tracks live
+ * ticket-less runs keyed by dispatch (`sync-run:<runId>:<taskId>`), feeds
+ * session events via `observe`/`observeSync`, and retains finished sync
+ * runs. Full transcripts never live here: tool previews are capped at
  * 512 chars, assistant text at a 32K tail, tool calls at 100, retained sync
  * runs at 20, settled ticket rows at 100.
  *
@@ -77,6 +79,34 @@ export interface ActivityStore {
     status: ActivityStatus,
   ): void;
   observe(ticketId: string, taskId: string, event: AgentSessionEvent): void;
+  /**
+   * Track a live row for a ticket-less (inline) dispatch's task (#119),
+   * keyed `sync:<runId>:<taskId>` so concurrent inline dispatches and
+   * repeated task ids stay distinct. The same row is what
+   * `setSyncTaskStatus` settles and what the retained sync history keeps.
+   */
+  trackSyncTask(info: {
+    runId: string;
+    taskId: string;
+    label: string;
+    prompt: string;
+  }): void;
+  /** Feed a session event to a live inline row. */
+  observeSync(runId: string, taskId: string, event: AgentSessionEvent): void;
+  /**
+   * Update a live inline row's status (`running` at slot grant, the
+   * settled status at outcome record). On settle, `summary` folds into
+   * the assistant tail when it carries something the stream did not —
+   * an empty tail gets it, and a non-ok outcome's error appends.
+   */
+  setSyncTaskStatus(
+    runId: string,
+    taskId: string,
+    status: ActivityStatus,
+    summary?: string,
+  ): void;
+  /** This dispatch's rows in start order — the pending-row board's source. */
+  syncRunRows(runId: string): readonly ActivityRow[];
   retainSyncRun(info: {
     taskId: string;
     label: string;
@@ -416,6 +446,35 @@ export function createActivityStore(): ActivityStore {
     return created;
   };
 
+  /**
+   * A live inline run's row, keyed `sync-run:<runId>:<taskId>` — a
+   * namespace separate from retained `sync:` keys so a bare task id or
+   * sequence can never collide with a dispatch-scoped row (#119).
+   */
+  const syncRunEntry = (runId: string, taskId: string): MutableEntry => {
+    const key = `sync-run:${runId}:${taskId}`;
+    const existing = entries.get(key);
+    if (existing) return existing;
+    const now = Date.now();
+    const created: MutableEntry = {
+      key,
+      kind: "sync",
+      ticketId: undefined,
+      taskId,
+      label: "inline",
+      status: "queued",
+      startedAt: now,
+      lastEventAt: now,
+      endedAt: undefined,
+      prompt: "",
+      toolCalls: [],
+      assistantTail: "",
+      openTools: new Map(),
+    };
+    entries.set(key, created);
+    return created;
+  };
+
   const appendCall = (
     entry: MutableEntry,
     at: number,
@@ -427,6 +486,65 @@ export function createActivityStore(): ActivityStore {
   ): void => {
     entry.toolCalls.push({ at, tool, preview, argPreview, inFlight, isError });
     shiftOpenTools(entry.openTools, trimToolCalls(entry.toolCalls));
+  };
+
+  /** The event-application half of observe/observeSync — shared verbatim. */
+  const applyEvent = (entry: MutableEntry, event: AgentSessionEvent): void => {
+    const now = Date.now();
+    entry.lastEventAt = now;
+
+    if (event.type === "tool_execution_start") {
+      const preview = truncateHead(argPreview(event.args), PREVIEW_LIMIT);
+      appendCall(entry, now, sanitizeLine(event.toolName) || "tool", preview, preview, true, false);
+      entry.openTools.set(event.toolCallId, {
+        index: entry.toolCalls.length - 1,
+        argPreview: preview,
+      });
+      return;
+    }
+    if (event.type === "tool_execution_end") {
+      const open = entry.openTools.get(event.toolCallId);
+      entry.openTools.delete(event.toolCallId);
+      const preview = callPreview(open?.argPreview ?? "", event.result);
+      if (open !== undefined && open.index < entry.toolCalls.length) {
+        const call = entry.toolCalls[open.index];
+        if (call) {
+          call.preview = preview;
+          call.inFlight = false;
+          call.isError = event.isError;
+        }
+      } else {
+        // End without a surviving start (evicted or never seen): still
+        // record the completion.
+        appendCall(
+          entry,
+          now,
+          sanitizeLine(event.toolName) || "tool",
+          preview,
+          "",
+          false,
+          event.isError,
+        );
+      }
+      return;
+    }
+    if (event.type === "message_end") {
+      const message = event.message;
+      if (message.role !== "assistant") return;
+      const parts: string[] = [];
+      for (const block of message.content) {
+        if (block.type === "text" && block.text) {
+          parts.push(sanitizeText(block.text));
+        }
+      }
+      if (parts.length > 0) {
+        entry.assistantTail = appendAssistantTail(
+          entry.assistantTail,
+          parts.join("\n\n"),
+        );
+      }
+    }
+    // Every other event type only bumps lastEventAt, already done above.
   };
 
   /** Evict oldest-settled entries of one kind past the retained limit. */
@@ -486,63 +604,48 @@ export function createActivityStore(): ActivityStore {
       }
     },
 
-    observe(ticketId, taskId, event): void {
-      const entry = lazyEntry(ticketId, taskId);
-      const now = Date.now();
-      entry.lastEventAt = now;
+    trackSyncTask(info): void {
+      const entry = syncRunEntry(info.runId, info.taskId);
+      entry.label = sanitizeLine(info.label) || "inline";
+      entry.prompt = truncateHead(sanitizeText(info.prompt), PROMPT_LIMIT);
+    },
 
-      if (event.type === "tool_execution_start") {
-        const preview = truncateHead(argPreview(event.args), PREVIEW_LIMIT);
-        appendCall(entry, now, sanitizeLine(event.toolName) || "tool", preview, preview, true, false);
-        entry.openTools.set(event.toolCallId, {
-          index: entry.toolCalls.length - 1,
-          argPreview: preview,
-        });
-        return;
-      }
-      if (event.type === "tool_execution_end") {
-        const open = entry.openTools.get(event.toolCallId);
-        entry.openTools.delete(event.toolCallId);
-        const preview = callPreview(open?.argPreview ?? "", event.result);
-        if (open !== undefined && open.index < entry.toolCalls.length) {
-          const call = entry.toolCalls[open.index];
-          if (call) {
-            call.preview = preview;
-            call.inFlight = false;
-            call.isError = event.isError;
-          }
-        } else {
-          // End without a surviving start (evicted or never seen): still
-          // record the completion.
-          appendCall(
-            entry,
-            now,
-            sanitizeLine(event.toolName) || "tool",
-            preview,
-            "",
-            false,
-            event.isError,
-          );
-        }
-        return;
-      }
-      if (event.type === "message_end") {
-        const message = event.message;
-        if (message.role !== "assistant") return;
-        const parts: string[] = [];
-        for (const block of message.content) {
-          if (block.type === "text" && block.text) {
-            parts.push(sanitizeText(block.text));
-          }
-        }
-        if (parts.length > 0) {
+    observeSync(runId, taskId, event): void {
+      applyEvent(syncRunEntry(runId, taskId), event);
+    },
+
+    setSyncTaskStatus(runId, taskId, status, summary): void {
+      const entry = syncRunEntry(runId, taskId);
+      entry.status = status;
+      entry.lastEventAt = Date.now();
+      entry.endedAt = isSettled(status) ? (entry.endedAt ?? Date.now()) : undefined;
+      if (isSettled(status)) {
+        entry.openTools.clear();
+        if (
+          summary !== undefined &&
+          summary !== "" &&
+          (entry.assistantTail === "" || status !== "ok")
+        ) {
           entry.assistantTail = appendAssistantTail(
             entry.assistantTail,
-            parts.join("\n\n"),
+            summary,
           );
         }
+        pruneSettled("sync", RETAINED_SYNC_LIMIT);
       }
-      // Every other event type only bumps lastEventAt, already done above.
+    },
+
+    syncRunRows(runId): readonly ActivityRow[] {
+      const prefix = `sync-run:${runId}:`;
+      const rows: ActivityRow[] = [];
+      for (const entry of entries.values()) {
+        if (entry.key.startsWith(prefix)) rows.push(rowOf(entry));
+      }
+      return rows.sort((a, b) => a.startedAt - b.startedAt);
+    },
+
+    observe(ticketId, taskId, event): void {
+      applyEvent(lazyEntry(ticketId, taskId), event);
     },
 
     retainSyncRun(info): void {

@@ -333,11 +333,59 @@ export const syncDispatchDetailsSchema = Type.Object(
 );
 export type SyncDispatchDetails = Static<typeof syncDispatchDetailsSchema>;
 
+/**
+ * `delegate` partial-result details for an in-flight synchronous dispatch
+ * (#119): the live board the pending tool row renders on each heartbeat —
+ * one entry per task with its state, elapsed anchors, and the current
+ * (or last) tool call. Display-only: partials never enter the session
+ * file or the model's context.
+ */
+export const liveDispatchDetailsSchema = Type.Object(
+  {
+    mode: Type.Literal("dispatch"),
+    async: Type.Literal(false),
+    live: Type.Object(
+      {
+        startedAt: Type.Number(),
+        tasks: readonlyArray(
+          Type.Object(
+            {
+              id: Type.String(),
+              label: Type.String(),
+              status: literalUnion([
+                "queued",
+                "running",
+                "paused",
+                "ok",
+                "failed",
+                "cancelled",
+                "blocked",
+                "interrupted",
+                "budget-exhausted",
+              ] as const),
+              startedAt: Type.Number(),
+              lastEventAt: Type.Number(),
+              tool: Type.Optional(Type.String()),
+              preview: Type.Optional(Type.String()),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+      { additionalProperties: false },
+    ),
+    notices: Type.Optional(noticesDetailsSchema),
+  },
+  { additionalProperties: false },
+);
+export type LiveDispatchDetails = Static<typeof liveDispatchDetailsSchema>;
+
 /** `delegate` result details: help or either dispatch mode. */
 export const delegateDetailsSchema = Type.Union([
   helpDetailsSchema,
   asyncDispatchDetailsSchema,
   syncDispatchDetailsSchema,
+  liveDispatchDetailsSchema,
 ]);
 
 const ticketActionSchema = literalUnion([

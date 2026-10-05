@@ -40,6 +40,18 @@ export function resumeMarker(
   return tag !== undefined && agent !== `resume:${tag}` ? ` ↻${tag}` : "";
 }
 
+/** Compact wall-clock duration: "800ms", "12.3s", "4m07s", "1h05m". */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.floor(ms))}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  if (minutes < 60) return `${minutes}m${String(secs).padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
 /** Human-readable activity age ("active now", "active 5s ago", …). */
 export function activityAge(lastEventAt: number | undefined): string {
   if (lastEventAt === undefined) return "";
