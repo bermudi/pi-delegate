@@ -23,8 +23,8 @@ import {
  * owner decision (2026-09-22); navigating with live tickets offers
  * cancel-or-stay only. The replacement guards fire on host events
  * (session_before_switch/fork) the harness cannot emit — verified by
- * typecheck and review; the browser's TUI surface is likewise not
- * boundary-testable (see TEST-MIGRATION.md "Operator-visibility signals").
+ * typecheck and review. Browser layout is now covered through the registered
+ * command/custom-UI boundary in tests/regression/browser-layout.test.ts.
  */
 
 /** A scripted subagent stream that blocks until `release` is invoked. */

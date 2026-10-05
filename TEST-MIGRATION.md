@@ -816,14 +816,21 @@ guards), `extension.ts` shutdown traces, `browser.ts`/`browser-state.ts`
   anymore). Live tests in `tests/contract/visibility.test.ts`.
 - **Regression:** footer dedupe must retry after a failed setStatus push
   (a stale context must not wedge the footer); a throwing activity sink
-  must never fail a dispatch.
+  must never fail a dispatch. `tests/regression/browser-layout.test.ts`
+  drives real provider-free dispatches and the registered `/subagents`
+  command through the host's custom-UI boundary: full-width framed
+  occlusion, one physical row per compact tool, multiline prompt safety,
+  expanded bounded previews, response switching, roster selection,
+  scrollback/live-follow, resize/tiny-terminal behavior, editor non-mutation,
+  whole-ticket pause/resume, Escape completion and refresh cleanup.
 - **Internal:** browser rendering internals (SelectList wiring, refresh
-  timer, generation counter), activity-store caps. Not ported: the TUI
-  overlay and the `session_before_switch`/`fork` guards cannot be driven
+  timer, generation counter), activity-store caps. The browser tests capture
+  the public custom component using a terminal fixture, not production
+  internals; an installed-Pi render-only check covers real-host composition.
+  Not ported: the `session_before_switch`/`fork` guards cannot be driven
   through the harness — verified by typecheck and fresh-context review;
   an accepted gap, not a coverage target.
-- **Gap:** live sync-run rows (deliberate divergence, #24); RUNNING/DONE
-  tool markers.
+- **Gap:** live sync-run rows (deliberate divergence, #24).
 
 ### Dependencies and handoffs (issue #18)
 

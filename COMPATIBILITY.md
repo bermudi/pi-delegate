@@ -519,9 +519,12 @@ from v1.
   the non-waking append at the current leaf), the quit/reload abort
   traces, and the live subagent browser (`/subagents`, Ctrl+Shift+B).
   Deliberate divergences recorded here, not planned work: live rows for
-  in-flight sync dispatches (finished sync calls are retained), per-call
-  RUNNING/DONE tool markers, and agent names in the shutdown summary
-  (ids only today).
+  in-flight sync dispatches (finished sync calls are retained), and agent
+  names in the shutdown summary (ids only today). Browser tool
+  activity now renders RUN/DONE/FAIL markers in compact one-line rows;
+  Enter expands retained previews (at most 512 characters, not full
+  commands or transcripts). Tab still switches to assistant text, and
+  navigation and whole-ticket pause/resume controls are unchanged.
 - **Large-output bounding (#25)** — shipped 2026-09-23 with v1's
   semantics: settled and synchronous results spill output past
   `output.spillThresholdChars` (default 8 000) to an owner-only temp

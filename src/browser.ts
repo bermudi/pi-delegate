@@ -1,8 +1,9 @@
 /**
  * Live subagent browser: the `/subagents` command and ctrl+shift+b shortcut
  * open a TUI overlay over the {@link ActivityStore} snapshot — a SelectList
- * roster, a per-row status line, the selected task's prompt, and a detail
- * pane toggled between tool activity and the assistant-text tail. `p`
+ * roster inside a full-width frame, the selected task's prompt, and a detail
+ * pane toggled between compact tool activity and the assistant-text tail.
+ * Enter expands the bounded tool previews. `p`
  * pauses/resumes the selected row's whole ticket through the parent-provided
  * controls; a 200ms render tick runs only while the overlay is open and is
  * cleared on close.
@@ -26,6 +27,7 @@ import {
   SelectList,
   stripTerminalSequences,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
   type Component,
 } from "@earendil-works/pi-tui";
@@ -64,31 +66,11 @@ function ageOrDuration(row: ActivityRow, now: number): string {
 }
 
 function rosterLabel(row: ActivityRow, now: number, paused: boolean): string {
-  const ticket = row.ticketId !== undefined ? ` · ${row.ticketId}` : "";
-  return `${statusWord(row, paused)} · ${ageOrDuration(row, now)} · ${row.label} · ${row.taskId}${ticket}`;
+  return `${statusWord(row, paused)} · ${row.label} · ${row.taskId} · ${ageOrDuration(row, now)}`;
 }
 
 function statusLine(row: ActivityRow, paused: boolean, now: number): string {
   return `${statusWord(row, paused)} · ${ageOrDuration(row, now)} · ${row.toolCalls.length} tools · Last event ${fmtDuration(Math.max(0, now - row.lastEventAt))} ago`;
-}
-
-function detailText(row: ActivityRow, responses: boolean): string {
-  if (responses) {
-    // The store embeds "[Earlier text omitted]" when the tail was cut.
-    return row.assistantTail.length > 0
-      ? row.assistantTail
-      : "No assistant text yet. Tool-only turns may have no text.";
-  }
-  if (row.toolCalls.length === 0) return "No tool calls yet.";
-  const lines: string[] = [];
-  for (const call of row.toolCalls) {
-    // In-flight calls appear with their argument preview; only failures are
-    // flagged (isError is set only when the call completes).
-    lines.push(
-      `${call.isError ? "FAILED " : ""}${call.tool}${call.preview ? ` ${call.preview}` : ""}`,
-    );
-  }
-  return lines.join("\n");
 }
 
 type PauseToggle = (row: ActivityRow) => string;
@@ -97,11 +79,13 @@ class SubagentBrowser implements Component {
   private selectedKey: string | undefined;
   private list: SelectList | undefined;
   private responses = false;
+  private expanded = false;
   private scroll: number | undefined;
   private pageSize = 8;
   private maxScroll = 0;
   private message = "";
   private controlsVisible = false;
+  private renderErrorReported = false;
 
   constructor(
     private readonly getRows: () => readonly ActivityRow[],
@@ -136,6 +120,9 @@ class SubagentBrowser implements Component {
     ) {
       this.responses = !this.responses;
       this.scroll = undefined;
+    } else if (matchesKey(data, "enter") && !this.responses && this.controlsVisible) {
+      this.expanded = !this.expanded;
+      this.scroll = undefined;
     } else if (matchesKey(data, "pageUp")) {
       this.scroll = Math.max(
         0,
@@ -161,20 +148,83 @@ class SubagentBrowser implements Component {
 
   render(width: number): string[] {
     try {
-      return this.renderInto(width);
-    } catch {
+      const lines = this.renderInto(width);
+      this.renderErrorReported = false;
+      return lines;
+    } catch (error) {
       // Fail soft: a broken render must never take down the host TUI.
-      return [""];
+      if (!this.renderErrorReported) {
+        console.error("[delegate] subagent browser render failed", error);
+        this.renderErrorReported = true;
+      }
+      return [truncateToWidth("Subagents unavailable · Esc closes", Math.max(1, width))];
     }
+  }
+
+  /** Paint every cell in the panel, including empty rows. The host still
+   * owns everything outside the frame; no editor or conversation mutation. */
+  private frame(body: string[], width: number, height: number, title: string): string[] {
+    if (width < 4 || height < 3) {
+      return [truncateToWidth("Subagents · Esc closes", width)];
+    }
+    const inner = width - 4;
+    const border = (text: string, left: string, right: string): string => {
+      const label = truncateToWidth(text ? `─ ${text} ` : "", width - 2);
+      return this.theme.fg("border", left + label + "─".repeat(width - 2 - visibleWidth(label)) + right);
+    };
+    const lines = [border(title, "╭", "╮")];
+    for (let index = 0; index < height - 2; index++) {
+      // Prompts may retain layout whitespace. One component line must be
+      // one physical terminal row; detail wrapping has already happened.
+      const text = truncateToWidth((body[index] ?? "").replace(/[\r\n\t]+/g, " "), inner);
+      lines.push(
+        this.theme.fg("border", "│") + " " + text +
+        " ".repeat(inner - visibleWidth(text)) + " " + this.theme.fg("border", "│"),
+      );
+    }
+    lines.push(border("", "╰", "╯"));
+    return lines;
+  }
+
+  private rule(width: number, label = ""): string {
+    const text = truncateToWidth(label ? `─ ${label} ` : "", width);
+    return this.theme.fg("border", text + "─".repeat(width - visibleWidth(text)));
+  }
+
+  private detailLines(row: ActivityRow, width: number): string[] {
+    if (this.responses) {
+      // The store embeds "[Earlier text omitted]" when the tail was cut.
+      const text = row.assistantTail || "No assistant text yet. Tool-only turns may have no text.";
+      return text.split("\n").flatMap((line) => wrapTextWithAnsi(line, width));
+    }
+    if (row.toolCalls.length === 0) return ["No tool calls yet."];
+    return row.toolCalls.flatMap((call) => {
+      const state = call.isError ? "FAIL" : call.inFlight ? "RUN " : "DONE";
+      const color = call.isError ? "error" : call.inFlight ? "accent" : "muted";
+      const prefix = `${state}  ${call.tool}`;
+      if (!this.expanded) {
+        // Arguments, not the merged result tail, make a useful scan line.
+        return [this.theme.fg(color, truncateToWidth(
+          `${prefix}${call.argPreview ? `  ${call.argPreview}` : ""}`, width,
+        ))];
+      }
+      // These are retained previews (at most 512 chars), not a transcript.
+      return [
+        this.theme.fg(color, prefix),
+        ...wrapTextWithAnsi(call.preview || "(no preview)", Math.max(1, width - 2))
+          .map((line) => `  ${line}`),
+        "",
+      ];
+    });
   }
 
   private renderInto(width: number): string[] {
     const height = Math.max(1, this.height());
-    this.controlsVisible = height >= 14 && width >= 25;
+    this.controlsVisible = height >= 16 && width >= 40;
     if (width <= 0) return [""];
-    const w = Math.max(1, width);
+    const w = width - 4;
     if (!this.controlsVisible) {
-      return [truncateToWidth("Subagents · enlarge terminal · Esc closes", w)];
+      return this.frame(["Enlarge terminal · Esc closes"], width, height, "Subagents");
     }
     const rows = this.getRows();
     if (!rows.some((row) => row.key === this.selectedKey)) {
@@ -184,8 +234,8 @@ class SubagentBrowser implements Component {
     const now = Date.now();
     const rosterHeight = Math.min(
       rows.length,
-      5,
-      Math.max(1, Math.floor(height / 4)),
+      4,
+      Math.max(1, Math.floor(height / 6)),
     );
     this.list = new SelectList(
       rows.map((row) => ({
@@ -210,56 +260,58 @@ class SubagentBrowser implements Component {
     this.list.onSelectionChange = (item) => {
       this.selectedKey = item.value;
       this.scroll = undefined;
+      this.expanded = false;
       this.message = "";
     };
     const row = rows.find((candidate) => candidate.key === this.selectedKey);
-    const lines: string[] = [
-      this.theme.fg("accent", "Subagents · live browser"),
-      ...this.list.render(w),
+    const lines = rows.length > 0 ? this.list.render(w) : [];
+    lines.push(this.rule(w));
+    const footer = [
+      this.rule(w),
+      "",
+      this.theme.fg("muted", w < 65
+        ? "↑↓ agent · PgUp/Dn scroll · Home/End"
+        : "↑↓ agent · PgUp/PgDn scroll · Home oldest · End live"),
+      this.theme.fg("muted", this.responses
+        ? "Tab tools · Esc close"
+        : w < 65
+          ? `Tab text · Enter ${this.expanded ? "compact" : "expand"} · Esc close`
+          : `Tab text · Enter ${this.expanded ? "compact" : "expand"} tools · Esc close`),
     ];
     if (row) {
       const paused = this.pausedOf(row);
       lines.push(
-        truncateToWidth(statusLine(row, paused, now), w),
-        truncateToWidth(`Task: ${row.prompt}`, w),
-        this.theme.fg(
-          "accent",
-          `${this.responses ? `Responses (${ASSISTANT_TAIL_LIMIT / 1024}K character tail)` : "Tool activity"} · ${this.scroll === undefined ? "following live" : "scrollback"} · Tab switches view`,
-        ),
+        this.theme.fg("muted", statusLine(row, paused, now)),
+        `Task: ${row.prompt}`,
+        this.theme.fg("dim", row.ticketId ? `Ticket: ${row.ticketId}` : "Retained inline result"),
       );
-      this.pageSize = Math.max(1, height - lines.length - 3);
-      const detail = detailText(row, this.responses)
-        .split("\n")
-        .flatMap((line) => wrapTextWithAnsi(line, w));
+      this.pageSize = Math.max(1, height - 2 - lines.length - 1 - footer.length);
+      const detail = this.detailLines(row, w);
       this.maxScroll = Math.max(0, detail.length - this.pageSize);
       const start =
         this.scroll === undefined
           ? this.maxScroll
           : Math.min(this.scroll, this.maxScroll);
+      const view = this.responses
+        ? `Responses · ${ASSISTANT_TAIL_LIMIT / 1024}K tail`
+        : this.expanded ? "Tool details · 512-char previews" : "Tools";
+      const position = `${start + 1}–${Math.min(detail.length, start + this.pageSize)}/${detail.length}`;
+      lines.push(this.rule(w, `${view} · ${this.scroll === undefined ? "LIVE" : "SCROLL"} · ${position}`));
       lines.push(...detail.slice(start, start + this.pageSize));
-      while (lines.length < height - 3) lines.push("");
-      const settled = row.status === "ok" || row.status === "failed" || row.status === "cancelled" || row.status === "interrupted" || row.status === "budget-exhausted";
+      const settled = row.status === "ok" || row.status === "failed" || row.status === "cancelled" || row.status === "blocked" || row.status === "interrupted" || row.status === "budget-exhausted";
       const pauseHint =
         row.kind === "ticket" && row.ticketId !== undefined && !settled
-          ? `p ${paused ? "resume" : "pause"} WHOLE ticket ${row.ticketId}`
-          : "Pause/resume available only for live ticket rows";
-      lines.push(this.theme.fg("muted", this.message || pauseHint));
+          ? `p ${paused ? "resume" : "pause"} whole ticket (all its tasks)`
+          : "Completed result · pause unavailable";
+      footer[1] = this.theme.fg("muted", this.message || pauseHint);
     } else {
       lines.push(
         "No subagents yet. This view includes live and retained completed tasks.",
       );
     }
-    lines.push(
-      this.theme.fg(
-        "dim",
-        "↑↓ select · PgUp/PgDn scroll · Home oldest · End live",
-      ),
-      this.theme.fg(
-        "dim",
-        "Tab activity/responses · p pause/resume ticket · Esc close",
-      ),
-    );
-    return lines.slice(0, height).map((line) => truncateToWidth(line, w));
+    while (lines.length < height - 2 - footer.length) lines.push("");
+    lines.push(...footer);
+    return this.frame(lines, width, height, `Subagents · ${rows.length} ${rows.length === 1 ? "task" : "tasks"}`);
   }
 }
 
@@ -348,7 +400,7 @@ export function registerSubagentBrowser(
         },
         {
           overlay: true,
-          overlayOptions: { width: "95%", maxHeight: "85%", anchor: "center" },
+          overlayOptions: { width: "100%", maxHeight: "85%", anchor: "center" },
         },
       );
     } catch (error) {

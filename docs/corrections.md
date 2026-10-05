@@ -74,3 +74,11 @@ runs both.
   review M1). Verify survived-behavior, not intent, before asserting
   carry-through — and close comments state gates honestly (found by the
   same review: the dogfood gate was never run).
+- 2026-10-04 — `/subagents` had no visual boundary and wrapped shell previews
+  overwhelmed the view (bermudi's screenshot). Use a full-width frame,
+  compact tool rows and explicit preview expansion; public-command layout
+  regressions cover occlusion, physical rows, resize and navigation.
+- 2026-10-04 — fresh UI review found multiline prompts could break the frame
+  and a test's forced completion hid broken Escape handling. Normalize row
+  whitespace at the frame boundary and require the real close callback
+  (`tests/regression/browser-layout.test.ts`).
