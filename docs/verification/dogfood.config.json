@@ -1,0 +1,7 @@
+{
+  "_comment": "Standing owner-approved model for delegate dogfood runs (scripts/dogfood.ts). The harness refuses to launch without provider+model AND provenance naming the owner — this file is how 'never choose a model' becomes a mechanical check instead of agent memory. To change the dogfood model, bermudi specifies a new value and the provenance is updated in the same edit.",
+  "provider": null,
+  "model": null,
+  "thinking": null,
+  "provenance": null
+}

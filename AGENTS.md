@@ -76,10 +76,17 @@ Run the tree per-session with
 here — pi hard-errors on duplicate tool names between project and user
 extensions, which bricks every normal session in the repo.
 
-Before calling any unit shipped, dogfood it: a fresh `pi -ne -e` session
-dispatching a real batch. The 2026-09-27 dogfood caught the deployment
-gap, a missing receipt note (#39), and confirmed the wake loop live in
-one run.
+Before calling any unit shipped, dogfood it: `bun run verify:dogfood`
+(scripts/dogfood.ts). It gates on the suite + typecheck, then drives fresh
+`pi -p -ne -e <repo>/delegate.ts` sessions on both surfaces, scoped by
+`DELEGATE_AGENT_DIR` to owner-only scratch dirs, and asserts on the marker
+file, session transcript, and telemetry — never the model's summary. The
+dogfood model is owner-pinned in docs/verification/dogfood.config.json
+(provider+model+provenance); the harness refuses to launch without it and
+agents never pick or change it — that file is the one exception to "ask
+which model" (the answer lives there). The 2026-09-27 dogfood caught the
+deployment gap, a missing receipt note (#39), and confirmed the wake loop
+live in one run.
 
 For isolated live checks, set `DELEGATE_AGENT_DIR` to an owner-only scratch
 directory containing the test `delegate.json`; leave the parent's native
