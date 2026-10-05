@@ -1,7 +1,11 @@
 {
   "_comment": "Standing owner-approved model for delegate dogfood runs (scripts/dogfood.ts). The harness refuses to launch without provider+model AND provenance naming the owner — this file is how 'never choose a model' becomes a mechanical check instead of agent memory. To change the dogfood model, bermudi specifies a new value and the provenance is updated in the same edit.",
-  "provider": null,
-  "model": null,
+  "provider": "zai",
+  "model": "glm-5.3-flash",
   "thinking": null,
-  "provenance": null
+  "provenance": {
+    "specifiedBy": "bermudi",
+    "specifiedAt": "2026-10-05",
+    "note": "Pinned in chat: 'zai/glm-5.3-flash is perfect'. Same model as the #61 live check."
+  }
 }
