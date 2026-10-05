@@ -43,7 +43,10 @@ describe("delegate public tool contract", () => {
     expect(guidelines.join(" ")).toMatch(/never see|self-contained/i);
     expect(guidelines.join(" ")).toMatch(/poll/i);
     expect(guidelines.join(" ")).toMatch(/isolated/);
-    expect(guidelines.join(" ")).toMatch(/truncat/i);
+    // #121: the size rule is now a hard cap, not truncation — guidance
+    // must teach the limit and the file-reference remedy.
+    expect(guidelines.join(" ")).toMatch(/32,?768/);
+    expect(guidelines.join(" ")).toMatch(/reference files by path/i);
     expect(guidelines.join(" ")).toMatch(/yourself/i);
     expect(guidelines.join(" ")).toMatch(/final message/i);
     expect(guidelines.join(" ")).toMatch(/Parallelize reads/);

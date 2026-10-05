@@ -1016,6 +1016,46 @@ describe("delegate telemetry contract", () => {
     },
   );
 
+  // #121: the prompt-size guard rejects before execution — its misfire
+  // row carries the verbatim caller-visible message (counts only, never
+  // prompt content) and the requested batch shape.
+  test("an oversized prompt records a validation misfire without body content", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dbPath = join(trackedTempDir(), "misfires.db");
+    configureDelegate(session, {
+      telemetry: { enabled: true, dbPath },
+    });
+    subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+
+    const result = await callDelegate(session, {
+      async: false,
+      tasks: [
+        { prompt: "small" },
+        { prompt: `SECRET-${"x".repeat(40_000)}` },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("at most 32768 characters");
+    expect(subagents.state.callCount).toBe(0);
+
+    const db = new DatabaseSync(dbPath);
+    try {
+      const misfires = rowsOf(db, "misfires");
+      expect(misfires).toHaveLength(1);
+      const row = misfires[0];
+      expect(row?.phase).toBe("validation");
+      expect(row?.message).toBe(result.text);
+      expect(row?.message).not.toContain("SECRET-");
+      expect(row?.task_count).toBe(2);
+      expect(rowsOf(db, "calls")).toHaveLength(0);
+      expect(rowsOf(db, "tasks")).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+
   // #61: removed field presence must still produce a validation misfire,
   // including null and agreement with the canonical spelling.
   for (const [field, canonical, value] of [

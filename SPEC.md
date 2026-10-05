@@ -188,6 +188,14 @@ mid-flight the parent can steer. The grammar:
   Errors name the canonical replacement; no synonym is silently ignored.
   A supplied malformed non-array `tasks` value rejects before flat recovery;
   it must never be discarded in favor of adjacent flat task fields.
+- **Prompt size bound (#121).** Each task `prompt` and the shared
+  `brief` accept at most 32,768 characters. Oversized values reject
+  at validation — before any task starts, identically on both
+  surfaces and for async and inline — with a teaching error naming
+  the field, the offending task, the limit, and the supplied count,
+  pointing at the remedy: reference files by path instead of inlining
+  contents. The bound is a constant, not a knob, and its diagnostics
+  carry counts, never content.
 - **Exact agent names.** Built-ins and discovered profiles resolve only by
   their exact, case-sensitive names. No automatic agent-name translations.
   User-authored profiles named `general` or `scout` remain valid exact

@@ -83,6 +83,7 @@ import {
 } from "./src/types.ts";
 import {
   MODEL_FIELD_REJECTION,
+  PROMPT_CHAR_LIMIT,
   REASONING_EFFORT_FIELD_REJECTION,
   THINKING_FIELD_REJECTION,
   validateDispatchCall,
@@ -119,7 +120,8 @@ const taskSchema = Type.Object(
     prompt: Type.Optional(
       Type.String({
         description:
-          "Self-contained task brief; optional only when resumeFrom continues a transcript. Subagents never see this conversation.",
+          `Self-contained task brief; optional only when resumeFrom continues a transcript. Subagents never see this conversation. ` +
+          `At most ${PROMPT_CHAR_LIMIT} characters — reference files by path instead of inlining contents; longer prompts reject.`,
       }),
     ),
     agent: Type.Optional(
@@ -319,7 +321,7 @@ const sessionSchema = Type.Object(
 // hiding. Full schemas remain the single canonical normalization vocabulary.
 const compactTaskSchema = Type.Object({
   ...Type.Pick(taskSchema, ["agent", "cwd", "workspace"]).properties,
-  prompt: Type.String({ description: "Self-contained task; children never see the parent conversation." }),
+  prompt: Type.String({ description: `Self-contained task; children never see the parent conversation. At most ${PROMPT_CHAR_LIMIT} characters — reference files by path instead of inlining contents.` }),
 }, { additionalProperties: false });
 const compactDelegateSchema = Type.Object({
   tasks: Type.Array(compactTaskSchema, {
@@ -1105,6 +1107,9 @@ const HELP_DISPATCH = `## delegate — ordinary dispatch
   or an exact custom profile name; omit for inline), \`cwd\`, \`workspace\`.
 - Top-level \`workspace\` is the batch default. \`brief\` prepends shared context
   to each prompt inside a delimited batch preamble; results note it once.
+- Every \`prompt\` and the \`brief\` accept at most 32,768 characters (#121):
+  reference files by path instead of inlining contents — subagents read the
+  working tree themselves — or the call rejects before any task starts.
 - When to delegate: side work that would flood your context. Do one-file
   checks and small edits yourself. Only each task's final message returns,
   so ask for the answer shape you need. Run reads in parallel; keep
@@ -2479,7 +2484,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           "Only a subagent's final message comes back: name the answer shape you need (file list, yes/no, short verdict) so reports stay short.",
           "Async results arrive on their own at your next step — do not poll in a loop; wait only when blocked on a ticket's result.",
           'Parallelize reads freely; keep edits to one writer where possible. Put dependent edits in one call on the shared workspace (they run in task order); use workspace "isolated" only for independent edits — overlapping changes still conflict at merge.',
-          "Split very large task batches across delegate calls; overlong tool calls get truncated.",
+          "Split very large task batches across delegate calls. Keep every prompt and the brief under " + PROMPT_CHAR_LIMIT + " characters — reference files by path instead of inlining contents; oversized values reject.",
         ],
         prepareArguments: (args) => {
           if (surfaceError) throw surfaceError;

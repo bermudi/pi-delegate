@@ -159,6 +159,23 @@ export const REASONING_EFFORT_FIELD_REJECTION =
   effortFieldRejection("reasoning_effort");
 
 /**
+ * The character cap on each task `prompt` and the shared batch `brief`
+ * (#121, the 2026-10-04 stream-livelock incident class). Delegate owns
+ * the extreme argument-size tail callers emit — measured maxima reach
+ * 923,192 bytes of arguments while legitimate prompts peak under 8k
+ * chars — so an inlined-content blob bloats accepted-call context and
+ * stretches the fragile tool-argument stream that upstream parser bugs
+ * feed on. The remedy the rejection teaches: reference files by path;
+ * subagents read the working tree themselves.
+ */
+export const PROMPT_CHAR_LIMIT = 32_768;
+
+/** The shared teaching tail for oversized prompts and briefs (#121). */
+const oversizedPromptRemedy =
+  `Reference files by path instead of inlining their contents — ` +
+  `the subagent reads the working tree itself.`;
+
+/**
  * Within-tool rules for `delegate_ticket`: `ticket` is required for every
  * action except `poll` (bare poll is the roster), `force` only accompanies
  * `cancel`, `timeoutMs` only `wait`, `taskId` belongs to `answer`,
@@ -367,6 +384,14 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
   // A whitespace-only brief prepends nothing; nonblank text stays verbatim.
   const brief =
     args.brief !== undefined && args.brief.trim() !== "" ? args.brief : undefined;
+  // The brief is prepended to every task's prompt, so the prompt cap
+  // (#121) binds it too — without this, a giant brief is the cap's
+  // workaround. Counts only; the body never echoes.
+  if (brief !== undefined && brief.length > PROMPT_CHAR_LIMIT) {
+    fail(
+      `brief must be at most ${PROMPT_CHAR_LIMIT} characters; got ${brief.length}; it is prepended to every task. ${oversizedPromptRemedy}`,
+    );
+  }
   // SPEC v3 "Batch token budget": the field is a positive integer — the
   // schema constrains it, but callers that bypass schema validation get
   // the same loud answer here rather than a silently-instant exhaustion.
@@ -421,6 +446,11 @@ function validateTasks(tasks: readonly TaskInput[]): void {
     }
     if (task.prompt !== undefined && task.prompt.trim() === "") {
       fail(`${where}: prompt must be a non-empty string.`);
+    }
+    if (task.prompt !== undefined && task.prompt.length > PROMPT_CHAR_LIMIT) {
+      fail(
+        `${where}: prompt must be at most ${PROMPT_CHAR_LIMIT} characters; got ${task.prompt.length}. ${oversizedPromptRemedy}`,
+      );
     }
     if (task.description !== undefined && task.description.length > 200) {
       fail(

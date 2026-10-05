@@ -1,5 +1,23 @@
 # Delegate v2 compatibility contract
 
+## Prompt size cap (#121)
+
+BREAKING: each task `prompt` and the shared `brief` longer than 32,768
+characters now reject at validation, before any task starts — previously
+such calls attempted execution. Owner-confirmed 2026-10-05, motivated by
+the 2026-10-04 stream-livelock incident class: delegate owns the extreme
+argument-size tail callers emit (measured max 923,192 bytes of arguments;
+largest legitimate recorded prompt 7,983 chars), and inlined-content
+prompts both bloat accepted-call context and stretch the tool-argument
+stream that the upstream pi-ai parser bug feeds on. Reference files by
+path instead of inlining contents — subagents read the working tree
+themselves. The cap is identical on compact and full surfaces and for
+async and inline calls; it is a constant with no config escape. Other
+fields are unchanged (`systemPrompt` uncapped in v1; `description` keeps
+its 200-character display-label bound). Rejections ride semantic
+validation — diagnostics name field, task, limit, and count only, never
+request-body dumps — and record `validation`-phase misfire rows.
+
 ## Task deadlines removed (#118, user-approved)
 
 BREAKING: `deadlineMs` is removed in both compact and full mode. Its presence

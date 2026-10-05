@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import {
   callDelegate,
   callDelegateSession,
@@ -356,6 +357,68 @@ describe("delegate validation contract", () => {
       expect(result.text).toMatch(/Known tools/i);
       // The provider was never reached: the rejection is pre-worker.
       expect(subagents.state.callCount).toBe(0);
+    },
+  );
+
+  // ── Prompt-size guard (#121, the 2026-10-04 incident class) ───────────
+
+  test(
+    "rejects a task prompt over the 32,768-character cap before any task starts",
+    async () => {
+      // Delegate owns the extreme argument-size tail callers emit
+      // (measured max 923,192 bytes of arguments; largest legitimate
+      // recorded prompt 7,983 chars). Inlining contents bloats
+      // accepted-call context; the rejection teaches the remedy and
+      // never echoes the body.
+      const result = await call({
+        async: false,
+        tasks: [
+          { id: "fine", prompt: "runs" },
+          { id: "huge", prompt: `SENTINEL-${"x".repeat(40_000)}` },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("tasks[1]");
+      expect(result.text).toContain("at most 32768 characters");
+      expect(result.text).toContain("got 40009");
+      expect(result.text).toContain("Reference files by path");
+      // Counts only — the body never echoes into the error.
+      expect(result.text).not.toContain("SENTINEL-");
+      expect(result.text).not.toContain("xxxx");
+    },
+  );
+
+  test(
+    "rejects an oversized brief under the same cap",
+    async () => {
+      // The brief is prepended to every task's prompt, so the prompt cap
+      // binds it too — a giant brief is otherwise the cap's workaround.
+      const result = await call({
+        async: false,
+        brief: `BRIEF-${"y".repeat(33_000)}`,
+        tasks: [{ prompt: "fine" }],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("brief must be at most 32768 characters");
+      expect(result.text).toContain("prepended to every task");
+      expect(result.text).not.toContain("BRIEF-");
+      expect(result.text).not.toContain("yyyy");
+    },
+  );
+
+  test(
+    "accepts a prompt at exactly the cap",
+    async () => {
+      // The bound is inclusive: 32,768 characters run normally.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      subagents.respond([fauxAssistantMessage("AT-CAP-RUNS")]);
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [{ prompt: "z".repeat(32_768) }],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("AT-CAP-RUNS");
     },
   );
 });
