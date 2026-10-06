@@ -434,7 +434,17 @@ export class TelemetryStore {
         const handle = new Database(destination);
         try {
           handle.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-          handle.exec("PRAGMA journal_mode = WAL");
+          // journal_mode = WAL needs an exclusive lock (no readers), unlike
+          // BEGIN IMMEDIATE which only waits on the active writer — under
+          // simultaneous first opens it is the contention point (#47). When
+          // the database is already WAL a read confirms it under a shared
+          // lock and the exclusive transition is skipped entirely.
+          const mode = handle.prepare("PRAGMA journal_mode").get() as
+            | { journal_mode?: unknown }
+            | undefined;
+          if (mode?.journal_mode !== "wal") {
+            handle.exec("PRAGMA journal_mode = WAL");
+          }
           ensureSchema(handle);
         } catch (error) {
           try {

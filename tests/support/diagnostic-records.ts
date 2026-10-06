@@ -3,7 +3,11 @@ export interface DiagnosticRecord {
   readonly level: string;
   readonly event: string;
   readonly context: Readonly<Record<string, unknown>>;
-  readonly error?: Readonly<{ class: string; code?: string }>;
+  readonly error?: Readonly<{
+    class: string;
+    code?: string;
+    errcode?: number;
+  }>;
 }
 
 function object(value: unknown): value is Record<string, unknown> {

@@ -128,7 +128,11 @@ function bounded(value: string, limit = 512): string {
 
 /** Data descriptors only: provider-controlled getters must never run. Follow only
  * bounded Error.cause links, retaining the first allowlisted operational code. */
-function safeError(error: unknown): { class: string; code?: string } {
+function safeError(error: unknown): {
+  class: string;
+  code?: string;
+  errcode?: number;
+} {
   const classes = [
     "Error",
     "TypeError",
@@ -177,6 +181,10 @@ function safeError(error: unknown): { class: string; code?: string } {
   };
   let name = "unknown";
   let code: string | undefined;
+  // node:sqlite failures carry a numeric SQLite result code (errcode 5 =
+  // SQLITE_BUSY) alongside a generic "ERR_SQLITE_ERROR" code — the number is
+  // the diagnostic fact, the generic string is not. Bounded integers only.
+  let errcode: number | undefined;
   const seen = new Set<unknown>();
   for (
     let depth = 0;
@@ -193,6 +201,15 @@ function safeError(error: unknown): { class: string; code?: string } {
         codes.includes(candidate)
       )
         code = candidate;
+      const numeric = data(error, "errcode");
+      if (
+        errcode === undefined &&
+        typeof numeric === "number" &&
+        Number.isInteger(numeric) &&
+        numeric >= 0 &&
+        numeric <= 0xffffffff
+      )
+        errcode = numeric;
       if (!(error instanceof Error)) break;
       if (depth === 0) {
         const candidateName = data(error, "name");
@@ -206,7 +223,11 @@ function safeError(error: unknown): { class: string; code?: string } {
       break;
     } // Revoked proxies/accessors are never serialized.
   }
-  return { class: name, ...(code === undefined ? {} : { code }) };
+  return {
+    class: name,
+    ...(code === undefined ? {} : { code }),
+    ...(errcode === undefined ? {} : { errcode }),
+  };
 }
 
 interface DiagnosticRoutingDetails {
