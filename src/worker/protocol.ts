@@ -16,8 +16,8 @@ export const WORKER_PROTOCOL_VERSION = 1;
 export const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 
 /**
- * What the parent hands the worker in `start`. The stage-B AgentSession
- * body consumes it; keep it self-contained (no live handles, no
+ * What the parent hands the worker in `start` (dormant — #43 declined).
+ * Keep it self-contained (no live handles, no
  * credentials) so it survives the wire verbatim.
  */
 export interface WorkerTaskSpec {

@@ -8,8 +8,11 @@
  *
  * Every spawn, cancellation phase, crash, and cleanup failure is logged
  * through `log` (stderr by default) with the worker's correlation id.
- * This is stage A: nothing in dispatch calls it yet — the cutover is a
- * later stage gated on the test harness's in-process double.
+ * This is stage A: nothing in dispatch calls it, and per the
+ * 2026-10-06 owner decision closing #43 as wontfix (in-process execution
+ * is permanent; no incumbent harness isolates subagents as subprocesses)
+ * nothing ever will unless #43 is reopened on observed evidence of a
+ * child session freezing the parent event loop.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import {

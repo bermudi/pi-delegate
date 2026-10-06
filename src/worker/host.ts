@@ -8,8 +8,9 @@
  *
  * This module is a library, not an entry point: a worker entry script
  * calls `runWorkerHost` with the body that actually runs the task. The
- * production body — building the AgentSession — lands with the stage-B
- * cutover; nothing in the parent invokes a worker before then.
+ * production body — building the AgentSession — was declined with #43
+ * (closed wontfix 2026-10-06); this module is dormant scaffolding and
+ * no parent ever invokes a worker.
  */
 import {
   createFrameDecoder,
