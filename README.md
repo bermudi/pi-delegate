@@ -32,6 +32,9 @@ delegate({
 `async: false` waits for inline results for any task count. Omitted `async`
 always means background execution. `tasks: []` shows the manual.
 
+Delegation is never automatic: the parent model decides whether to call
+these tools, so a model that never calls them does all the work itself.
+
 ## Compact and full interfaces
 
 Compact is the default: batch `tasks`, `async`, `workspace`, `brief`; each task
@@ -182,10 +185,14 @@ not prove other paths were untouched.
 
 ## Configuration
 
-`delegate.json` in the agent directory (`PI_AGENT_DIR` or `~/.pi/agent`).
+`delegate.json` in the agent directory (`DELEGATE_AGENT_DIR`, else Pi's
+`PI_CODING_AGENT_DIR`, else `~/.pi/agent` in a normal install).
 Unknown top-level keys are ignored; unknown keys inside the `telemetry`,
 `sessions`, and `models`/`modelsByParent` blocks are rejected. Malformed
-values fail loudly at the dispatch boundary.
+values fail loudly at the dispatch boundary. Retired v1 keys
+(`agentOverrides`, `agentOverridesByParentModel`, `maxAsyncTickets`,
+`allowUnsafeSharedWrites`) are among the ignored — a stale v1 config
+silently does nothing; see `COMPATIBILITY.md` for the mapping.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -194,7 +201,7 @@ values fail loudly at the dispatch boundary.
 | `concurrency.default` | unset | Fallback in-flight bound. |
 | `concurrency.providers` | `{}` | Per-provider bound, e.g. `{"anthropic": 2}`. |
 | `concurrency.models` | `{}` | Per-model bound, e.g. `{"openai/gpt-5.2": 1}`; wins over provider and default. |
-| `models` | `{}` | Model override per canonical agent, e.g. `{"coder": "openai/gpt-5.2"}`. No `default` entry — it mirrors the parent. |
+| `models` | `{}` | Model override per canonical agent, e.g. `{"coder": "openai/gpt-5.2"}`. No `default` entry — it mirrors the parent. Keys name built-ins and globally defined (`<agentDir>/agents`) profiles only; project `.pi/agents` profiles pin via their frontmatter `model:` instead. |
 | `modelsByParent` | `{}` | `models` scoped by exact normalized parent `provider/model-id`; wins over `models`. |
 | `stallTimeoutMs` | `900000` (15 min) | Inactivity watchdog: no session events for this long aborts the task. `0` disables. |
 | `sessions.maxIdle` | `4` | Idle pooled sessions kept resident in memory; beyond the bound the least-recently-idle unloads to its transcript and reloads on next use. `0` unloads every settled session. |

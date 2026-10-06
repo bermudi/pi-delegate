@@ -69,6 +69,10 @@ runs both.
 
 ## Correction log
 
+- 2026-10-06 — README's Configuration section and the #49 public reply
+  documented `PI_AGENT_DIR`, an env var nothing reads; the real variables
+  are `DELEGATE_AGENT_DIR` and Pi's `PI_CODING_AGENT_DIR`. Verify env var
+  names against the host package source before publishing them.
 - 2026-10-06 — attributed a stale native Working border to Pi merely because
   Pi owns the border; fresh investigation found Delegate's post-wait stderr
   logging reproduces the artifact. UI ownership is not causal attribution;
