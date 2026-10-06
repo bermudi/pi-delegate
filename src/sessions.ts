@@ -1,14 +1,10 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AdmissionController } from "./admission.ts";
 import { sanitizeText } from "./activity.ts";
 import type { ResolvedTask, TaskStatus } from "./types.ts";
 
-function log(context: string, error: unknown): void {
-  console.error(
-    `[delegate] ${context}: ${error instanceof Error ? error.message : String(error)}`,
-  );
-}
 
 /**
  * The configuration a `sessionId` freezes at first use. Every reuse is
@@ -105,7 +101,7 @@ function incompatibleReuse(sessionId: string, diffs: readonly string[]): Error {
  * Returns true when a transcript file exists on return (whether this
  * call wrote it or it pre-existed), false otherwise.
  */
-export function persistSessionHeader(sm: unknown): boolean {
+export function persistSessionHeader(diagnostics: DiagnosticSink, sm: unknown): boolean {
   const inner = sm as {
     getSessionFile?: () => string | undefined;
     _rewriteFile?: () => void;
@@ -118,7 +114,7 @@ export function persistSessionHeader(sm: unknown): boolean {
   } catch (error) {
     // Best effort — the caller reports no sessionFile when this fails,
     // but the failure itself must not vanish silently.
-    log("session transcript flush failed", error);
+    diagnostics.log("error", "session transcript flush failed", {}, error);
   }
   return existsSync(file);
 }
@@ -259,6 +255,8 @@ export interface SessionSettle {
  *   mutating.
  */
 export class SessionPool {
+  constructor(private readonly diagnostics: DiagnosticSink) {}
+
   private readonly entries = new Map<string, PooledSession>();
   /** Monotonic idle-order clock for residency eviction (#46). */
   private idleClock = 0;
@@ -367,7 +365,7 @@ export class SessionPool {
     try {
       entry.session.agent.clearAllQueues();
     } catch (error) {
-      log(`clearing message queues on pooled session '${task.sessionId}' failed`, error);
+      this.diagnostics.log("error", "session cleanup failed", { operation: `clearing message queues on pooled session '${task.sessionId}' failed` }, error);
     }
     entry.checkedOut = true;
     return entry;
@@ -435,9 +433,7 @@ export class SessionPool {
         });
         this.enforceResidency(maxIdle);
       } else {
-        console.error(
-          `[delegate] session '${sessionId}' succeeded but has no durable session file; not pooled.`,
-        );
+        this.diagnostics.log("warn", "session succeeded but has no durable session file; not pooled", { sessionId });
         this.dispose(session, sessionId);
       }
       return;
@@ -491,7 +487,7 @@ export class SessionPool {
     try {
       session.dispose();
     } catch (error) {
-      log(`dispose of pooled session '${sessionId}' failed`, error);
+      this.diagnostics.log("error", "session cleanup failed", { operation: `dispose of pooled session '${sessionId}' failed` }, error);
     }
   }
 
@@ -541,7 +537,7 @@ export class SessionPool {
     // dispose. An unloaded entry has no live session at all (#46).
     if (entry.session !== undefined) {
       entry.session.abort().catch((error: unknown) => {
-        log(`abort on close of session '${sessionId}' failed`, error);
+        this.diagnostics.log("error", "session cleanup failed", { operation: `abort on close of session '${sessionId}' failed` }, error);
       });
       this.dispose(entry.session, sessionId);
     }
@@ -555,29 +551,26 @@ export class SessionPool {
    */
   shutdown(): void {
     this.closed = true;
-    const failures: string[] = [];
+    let failures = 0;
     for (const entry of this.entries.values()) {
       // An unloaded entry (#46) owns no live session — nothing to tear down.
       if (entry.session === undefined) continue;
       if (entry.checkedOut) {
         entry.session.abort().catch((error: unknown) => {
-          log(`abort of session '${entry.sessionId}' during shutdown`, error);
+          this.diagnostics.log("error", "session cleanup failed", { operation: `abort of session '${entry.sessionId}' during shutdown` }, error);
         });
         continue;
       }
       try {
         entry.session.dispose();
       } catch (error) {
-        failures.push(
-          `${entry.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        failures += 1;
+        this.diagnostics.log("error", "session shutdown disposal failed", { sessionId: entry.sessionId }, error);
       }
     }
     this.entries.clear();
-    if (failures.length > 0) {
-      console.error(
-        `[delegate] session shutdown cleanup failures: ${failures.join("; ")}`,
-      );
+    if (failures > 0) {
+      this.diagnostics.log("error", "session shutdown cleanup failures", { count: failures });
     }
   }
 }

@@ -1,3 +1,4 @@
+import { DIAGNOSTIC_TREE, DiagnosticSink, diagnosticRoots, isDiagnosticPath } from "./diagnostics.ts";
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import {
@@ -24,6 +25,8 @@ export const DELEGATE_TREES = Object.freeze({
   isolated: "delegate-isolated",
   /** Durable ticket journal — rewritten on every recorded outcome. */
   tickets: "delegate-tickets",
+  /** Owner-only operational diagnostics (never part of worker copies). */
+  diagnostics: DIAGNOSTIC_TREE,
 } as const);
 
 /** Canonical path for admission comparisons (resolves symlinks). */
@@ -42,6 +45,27 @@ export function isWithin(root: string, candidate: string): boolean {
     rel === "" ||
     (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
   );
+}
+
+/** Discover reserved runtime trees (including aliases and previous-process
+ * fallbacks) without reading records. Actual roots cover not-yet-created logs.
+ * Used by every private Git snapshot, not just initial workspace preparation. */
+export async function diagnosticExclusions(diagnostics: DiagnosticSink, root: string): Promise<string[]> {
+  const excluded = new Set<string>();
+  for (const destination of diagnosticRoots(diagnostics)) {
+    for (const candidate of [resolvePath(destination), canonicalPath(destination)]) {
+      if (isWithin(root, candidate)) excluded.add(relative(root, candidate) || ".");
+    }
+  }
+  const walk = async (directory: string): Promise<void> => {
+    for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
+      const candidate = join(directory, entry.name);
+      if (isDiagnosticPath(candidate)) excluded.add(relative(root, candidate));
+      else if (entry.isDirectory() && entry.name !== ".git") await walk(candidate);
+    }
+  };
+  await walk(root);
+  return [...excluded];
 }
 
 /**
@@ -172,10 +196,8 @@ export function exec(
 /** Grace window between SIGTERM and SIGKILL when draining a workspace. */
 const PROCESS_GRACE_MS = 500;
 
-function log(context: string, error: unknown): void {
-  console.error(
-    `[delegate] ${context}: ${error instanceof Error ? error.message : String(error)}`,
-  );
+function log(diagnostics: DiagnosticSink, context: string, error: unknown): void {
+  diagnostics.log("error", "workspace process cleanup", { operation: context }, error);
 }
 
 /**
@@ -206,10 +228,10 @@ async function processesIn(root: string): Promise<number[]> {
  * removal treats that as litter-to-log; isolated reconciliation refuses to
  * accept output while a straggler lives.
  */
-export async function stopWorkspaceProcesses(root: string): Promise<void> {
+export async function stopWorkspaceProcesses(diagnostics: DiagnosticSink, root: string): Promise<void> {
   let pids = await processesIn(root);
   if (!pids.length) return;
-  log(`terminating ${pids.length} process(es) left in delegated workspace '${root}'`, "");
+  log(diagnostics, `terminating ${pids.length} process(es) left in delegated workspace '${root}'`, "");
   for (const pid of pids) {
     try {
       process.kill(pid, "SIGTERM");

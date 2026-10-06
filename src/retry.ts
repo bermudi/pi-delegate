@@ -4,7 +4,7 @@
 
 type FailureKind = "auth" | "quota" | "window" | "short-limit" | "transient" | "other";
 
-function classify(error: string | undefined): FailureKind {
+export function failureCategory(error: string | undefined): FailureKind {
   if (!error) return "other";
   // Provider prose and codes conventionally vary only in their word separators.
   const text = error.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
@@ -23,11 +23,11 @@ function classify(error: string | undefined): FailureKind {
 }
 
 export function isModelAttributableError(error: string | undefined): boolean {
-  return ["auth", "quota", "window"].includes(classify(error));
+  return ["auth", "quota", "window"].includes(failureCategory(error));
 }
 
 export function limitHint(error: string): string | undefined {
-  switch (classify(error)) {
+  switch (failureCategory(error)) {
     case "window":
       return "Provider limit with a reported reset window; the provider's hint is above. No immediate retry or automatic resume is scheduled.";
     case "auth":
@@ -42,7 +42,7 @@ export function limitHint(error: string): string | undefined {
 }
 
 export function isClearlyTransientError(error: string | undefined): boolean {
-  const kind = classify(error);
+  const kind = failureCategory(error);
   return kind === "short-limit" || kind === "transient";
 }
 

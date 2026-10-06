@@ -23,6 +23,7 @@ import {
   callDelegateTicket,
 } from "../support/pi-boundary.ts";
 import { armHold, releaseHold } from "../support/parent-hold.ts";
+import { diagnosticRecords } from "../support/diagnostic-records.ts";
 
 interface DirectResult {
   readonly content: readonly {
@@ -403,9 +404,9 @@ describe("async result delivery", () => {
     "delivery %s is surfaced and cannot undo settlement or polling",
     async (failure) => {
       // INVARIANTS: delivery failure never makes settled results unpollable.
-      // A synchronous throw reaches the extension's own log; an async
-      // rejection is consumed by Pi's runtime send wrapper and surfaced
-      // through its extension-error channel — both land on console.error.
+      // A synchronous throw reaches Delegate's safe structured diagnostic;
+      // an async rejection is consumed by Pi's runtime send wrapper and
+      // surfaced through its extension-error channel. Both remain observable.
       const { host, blocked, sends, ticket } = await setup();
       const errors = spyOn(console, "error").mockImplementation(() => {});
       if (failure === "reject")
@@ -416,11 +417,14 @@ describe("async result delivery", () => {
         });
       try {
         blocked.release();
-        await until(() =>
-          errors.mock.calls.some((args) =>
+        await until(() => failure === "throw"
+          ? diagnosticRecords(errors.mock.calls).some((record) =>
+            record.event === "delivering tickets failed (results remain pollable)" &&
+            record.context.ticketId === ticket && record.error?.class === "Error",
+          )
+          : errors.mock.calls.some((args) =>
             args.join(" ").includes("delivery-test-failure"),
-          ),
-        );
+          ));
         const poll = await callDelegateTicket(session, {
           action: "poll",
           ticket,
@@ -785,8 +789,9 @@ describe("async result delivery", () => {
       await Bun.sleep(300);
       expect(sends).not.toHaveBeenCalled();
       expect(
-        errors.mock.calls.some((args) =>
-          args.join(" ").includes(`delivery for ticket ${ticket} suppressed during shutdown`),
+        diagnosticRecords(errors.mock.calls).some((record) =>
+          record.event === "delivery suppressed during shutdown (result remains pollable)" &&
+          record.context.ticketId === ticket,
         ),
       ).toBe(true);
       const poll = await callDelegateTicket(session, {
@@ -906,12 +911,9 @@ describe("async result delivery", () => {
       await host.agent.waitForIdle();
       expect(sends).not.toHaveBeenCalled();
       expect(
-        errors.mock.calls.some((args) =>
-          args
-            .join(" ")
-            .includes(
-              `delivery for ticket ${ticket} skipped: result already returned by wait`,
-            ),
+        diagnosticRecords(errors.mock.calls).some((record) =>
+          record.event === "delivery skipped: result already returned" &&
+          record.context.ticketId === ticket && record.context.by === "wait",
         ),
       ).toBe(true);
     } finally {
@@ -959,12 +961,9 @@ describe("async result delivery", () => {
       await host.agent.waitForIdle();
       expect(sends).not.toHaveBeenCalled();
       expect(
-        errors.mock.calls.some((args) =>
-          args
-            .join(" ")
-            .includes(
-              `delivery for ticket ${ticket} skipped: result already returned by poll`,
-            ),
+        diagnosticRecords(errors.mock.calls).some((record) =>
+          record.event === "delivery skipped: result already returned" &&
+          record.context.ticketId === ticket && record.context.by === "poll",
         ),
       ).toBe(true);
     } finally {

@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { existsSync } from "node:fs";
 import type {
   AgentSession,
@@ -15,6 +16,7 @@ import {
   isClearlyTransientError,
   isModelAttributableError,
   MAX_TASK_ATTEMPTS,
+  failureCategory,
   MODEL_SWAP_HINT,
   RETRY_DELAY_MS,
   limitHint,
@@ -69,6 +71,8 @@ export interface RunControls {
 }
 
 export interface AttemptResult {
+  /** Internal-only cause for safe retry diagnostics; never copied to outcomes. */
+  readonly diagnosticCause?: unknown;
   readonly status: "ok" | "failed" | "cancelled" | "interrupted";
   readonly output?: string;
   readonly error?: string;
@@ -107,10 +111,8 @@ function abortedSignal(signal: AbortSignal): Promise<void> {
   );
 }
 
-function log(context: string, error: unknown): void {
-  console.error(
-    `[delegate] ${context}: ${error instanceof Error ? error.message : String(error)}`,
-  );
+function log(diagnostics: DiagnosticSink, context: string, error: unknown): void {
+  diagnostics.log("error", "execution cleanup/control failed", { operation: context }, error);
 }
 
 function usageOf(session: AgentSession): Usage {
@@ -249,13 +251,14 @@ function preferredReason(
  * rewrite, so provisional paths report whatever already exists.
  */
 function reportableTranscript(
+  diagnostics: DiagnosticSink,
   session: AgentSession | undefined,
   flushHeader: boolean,
 ): string | undefined {
   if (session === undefined) return undefined;
   const file = session.sessionFile;
   if (typeof file !== "string") return undefined;
-  if (flushHeader) persistSessionHeader(session.sessionManager);
+  if (flushHeader) persistSessionHeader(diagnostics, session.sessionManager);
   return existsSync(file) ? file : undefined;
 }
 
@@ -391,7 +394,7 @@ export class TaskExecution implements ExecutionHandle {
       // The session may still be mutating; quarantine it — never dispose,
       // never release its write reservations.
       this.quarantined = true;
-      log(`abort of task ${this.task.id} failed; session left undisposed`, error);
+      log(this.controls.env.diagnostics, `abort of task ${this.task.id} failed; session left undisposed`, error);
     }
   }
 
@@ -423,7 +426,7 @@ export class TaskExecution implements ExecutionHandle {
       this.injectedSteers.push(message);
       return true;
     } catch (error) {
-      log(`steer of task ${this.task.id} failed`, error);
+      log(this.controls.env.diagnostics, `steer of task ${this.task.id} failed`, error);
       return false;
     }
   }
@@ -466,7 +469,7 @@ export class TaskExecution implements ExecutionHandle {
   private transcriptOutcome(
     flushHeader: boolean,
   ): { sessionFile?: string; transcriptStart?: number } {
-    const file = reportableTranscript(this.session, flushHeader);
+    const file = reportableTranscript(this.controls.env.diagnostics, this.session, flushHeader);
     if (file === undefined) return {};
     return {
       sessionFile: file,
@@ -660,7 +663,7 @@ export class TaskExecution implements ExecutionHandle {
     try {
       this.session.dispose();
     } catch (error) {
-      log(`dispose of task ${this.task.id} failed`, error);
+      log(this.controls.env.diagnostics, `dispose of task ${this.task.id} failed`, error);
     }
   }
 
@@ -762,7 +765,7 @@ export class TaskExecution implements ExecutionHandle {
             await session.abort();
           } catch (error) {
             this.quarantined = true;
-            log(`abort during setup of task ${this.task.id} failed`, error);
+            log(this.controls.env.diagnostics, `abort during setup of task ${this.task.id} failed`, error);
           }
         }
         const watchdog = this.watchdogError();
@@ -820,9 +823,7 @@ export class TaskExecution implements ExecutionHandle {
         try {
           this.controls.observe?.(event);
         } catch (error) {
-          console.error(
-            `[delegate] activity observer failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          this.controls.env.diagnostics.log("error", "activity observer failed", {}, error);
         }
         if (event.type === "agent_start") {
           if (this.abortReason !== undefined || this.controls.isAborted()) {
@@ -957,6 +958,7 @@ export class TaskExecution implements ExecutionHandle {
       return {
         status: "failed",
         error: error instanceof Error ? error.message : String(error),
+        diagnosticCause: error,
         usage,
         hadSideEffects: this.hadSideEffects,
         quarantined: this.quarantined,
@@ -1146,7 +1148,7 @@ export async function runTask(
         );
       })
       .catch((error: unknown) => {
-        log(`late settlement of task ${task.id} failed to propagate`, error);
+        log(controls.env.diagnostics, `late settlement of task ${task.id} failed to propagate`, error);
       });
 
     if (last.status !== "failed" || controls.isAborted()) break;
@@ -1155,9 +1157,7 @@ export async function runTask(
     // The failed attempt's full injected set replaces the carried list —
     // it already contains everything the earlier attempts re-supplied.
     carriedSteers = execution.retainedSteers();
-    console.error(
-      `[delegate] retrying task ${task.id} after transient failure (attempt ${retries + 1} of ${MAX_TASK_ATTEMPTS}): ${last.error ?? "unknown error"}`,
-    );
+    controls.env.diagnostics.log("info", "retrying task after transient failure", { taskId: task.id, attempt: retries + 1, maxAttempts: MAX_TASK_ATTEMPTS, category: failureCategory(last.error) }, last.diagnosticCause ?? last.error);
     try {
       await sleep(RETRY_DELAY_MS, controls.signal);
     } catch {

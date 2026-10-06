@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { randomUUID } from "node:crypto";
 import {
   closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync,
@@ -128,7 +129,7 @@ export type SavedTicket = Static<typeof savedTicket>;
 export class TicketJournal {
   readonly dir: string;
 
-  constructor(agentDir: string) {
+  constructor(private readonly diagnostics: DiagnosticSink, agentDir: string) {
     this.dir = join(agentDir, DELEGATE_TREES.tickets);
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const stat = lstatSync(this.dir);
@@ -199,7 +200,7 @@ export class TicketJournal {
       if (fd !== undefined) closeSync(fd);
       try { unlinkSync(temp); } catch (cleanupError) {
         if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT")
-          console.error(`[delegate] ticket journal temp cleanup failed: ${String(cleanupError)}`);
+          this.diagnostics.log("error", "ticket journal temp cleanup failed", {}, cleanupError);
       }
       throw new Error(`Saving ticket ${ticket.id} in ${this.dir} failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }

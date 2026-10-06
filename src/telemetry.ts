@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, mkdirSync, openSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -151,10 +152,8 @@ export interface MisfireShape {
   readonly parentCwd: string;
 }
 
-function report(operation: string, destination: string, error: unknown): void {
-  console.error(
-    `[delegate] telemetry ${operation} failed for '${destination}': ${error instanceof Error ? error.message : String(error)}`,
-  );
+function report(diagnostics: DiagnosticSink, operation: string, destination: string, error: unknown): void {
+  diagnostics.log("error", "telemetry failed", { operation, path: destination }, error);
 }
 
 function isBusy(error: unknown): boolean {
@@ -287,6 +286,8 @@ export interface DispatchTelemetrySpan {
 }
 
 export class TelemetryStore {
+  constructor(private readonly diagnostics: DiagnosticSink) {}
+
   private db: DatabaseSync | undefined;
   private destination: string | undefined;
   private generation = 0;
@@ -405,7 +406,7 @@ export class TelemetryStore {
       try {
         tightenPermissions(destination);
       } catch (error) {
-        report("chmod", destination, error);
+        report(this.diagnostics, "chmod", destination, error);
       }
     }
   }
@@ -545,12 +546,12 @@ export class TelemetryStore {
     try {
       tightenPermissions(destination);
     } catch (error) {
-      report("chmod", destination, error);
+      report(this.diagnostics, "chmod", destination, error);
     }
   }
 
   private fail(destination: string, operation: string, error: unknown): void {
-    report(operation, destination, error);
+    report(this.diagnostics, operation, destination, error);
     this.failedDestination = destination;
     if (destination === this.destination) this.closeBackend();
   }
@@ -563,7 +564,7 @@ export class TelemetryStore {
     try {
       db.close();
     } catch (error) {
-      report("close", destination ?? "unknown destination", error);
+      report(this.diagnostics, "close", destination ?? "unknown destination", error);
     }
   }
 }

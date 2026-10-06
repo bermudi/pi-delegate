@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { createHash } from "node:crypto";
 
 const SETTLED_TTL_MS = 60 * 60 * 1000;
@@ -32,6 +33,8 @@ export function dispatchFingerprint(value: unknown): string {
 }
 
 export class OperationStore<Result> {
+  constructor(private readonly diagnostics: DiagnosticSink) {}
+
   private readonly records = new Map<string, OperationRecord<Result>>();
   private sequence = 0;
 
@@ -45,14 +48,10 @@ export class OperationStore<Result> {
     const existing = this.records.get(operationId);
     if (existing !== undefined) {
       if (existing.fingerprint === fingerprint) {
-        console.error(
-          `[delegate] operationId '${operationId}' reuses the original in-flight or settled result; no new execution starts`,
-        );
+        this.diagnostics.log("info", "operationId reuses original in-flight or settled result; no new execution starts", { operationId });
         return existing.promise;
       }
-      console.error(
-        `[delegate] operationId '${operationId}' conflicts: the same key is already bound to a different dispatch request`,
-      );
+      this.diagnostics.log("error", "operationId conflicts: key already bound to a different dispatch", { operationId });
       throw new Error(
         `operationId '${operationId}' is already bound to a different dispatch request; reuse the original request or choose a new operationId.`,
       );

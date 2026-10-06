@@ -1,3 +1,4 @@
+import { DiagnosticSink, isDiagnosticPath } from "./diagnostics.ts";
 /**
  * Git before/after completion evidence (SPEC v3 "Observability —
  * Completion evidence"; user decision 2026-10-02, live session 01a0fdba —
@@ -146,7 +147,8 @@ export async function snapshotRepo(cwd: string): Promise<RepoSnapshot | undefine
   const canonical = canonicalPath(root);
   const files = new Map<string, StatusEntry>();
   for (const [rel, entry] of parsePorcelain(status)) {
-    files.set(rel, { status: entry.status, stat: statOf(join(canonical, rel)) });
+    if (!isDiagnosticPath(join(canonical, rel)))
+      files.set(rel, { status: entry.status, stat: statOf(join(canonical, rel)) });
   }
   return { root: canonical, head, files };
 }
@@ -194,7 +196,7 @@ export async function changedRelPaths(
       }
     }
   }
-  return [...changed].sort();
+  return [...changed].filter((rel) => !isDiagnosticPath(join(after.root, rel))).sort();
 }
 
 /**
@@ -240,6 +242,8 @@ function windowsOverlap(record: WindowRecord, other: WindowRecord): boolean {
  * is pruned.
  */
 export class AttributionWindows {
+  constructor(private readonly diagnostics: DiagnosticSink) {}
+
   private records: WindowRecord[] = [];
 
   /**
@@ -257,9 +261,7 @@ export class AttributionWindows {
     try {
       before = await snapshotRepo(task.cwd);
     } catch (error) {
-      console.error(
-        `[delegate] git snapshot failed for ${task.id} in ${task.cwd}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      this.diagnostics.log("error", "git snapshot failed", { taskId: task.id, path: task.cwd }, error);
       return undefined;
     }
     if (before === undefined) return undefined;
@@ -331,9 +333,7 @@ export class AttributionWindows {
       record.endedAt = Date.now();
       record.before = undefined;
       this.prune();
-      console.error(
-        `[delegate] git snapshot failed for ${record.name} in ${record.root}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      this.diagnostics.log("error", "git snapshot failed", { taskId: record.name, path: record.root }, error);
       return { files: [], covered: false, concurrentWriters: [] };
     }
   }
@@ -380,7 +380,7 @@ export function withGitEvidence(
   outcome: TaskOutcome,
   evidence: WindowEvidence,
 ): TaskOutcome {
-  const observed = outcome.attributedFiles ?? [];
+  const observed = (outcome.attributedFiles ?? []).filter((file) => !isDiagnosticPath(file));
   const merged =
     evidence.covered && evidence.files.length > 0
       ? [...new Set([...observed, ...evidence.files])]

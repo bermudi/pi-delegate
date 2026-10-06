@@ -91,7 +91,8 @@ describe("regression: agentDir cwd fallback warns before proceeding (#12)", () =
         );
         expect(fallback).toHaveLength(1);
         expect(fallback[0]).toContain(session!.cwd);
-        expect(fallback[0]).toContain("delegate.json");
+        expect(fallback[0]).toContain("config and workspace trees use this path");
+        expect(fallback[0]).toContain("Diagnostics destination is independent");
         // (c) Warn-and-proceed is real: the sessionId task's pooled
         // transcript was created under the fallback dir.
         expect(existsSync(join(session!.cwd, "delegate-sessions"))).toBe(

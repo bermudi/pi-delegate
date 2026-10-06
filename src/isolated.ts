@@ -1,9 +1,11 @@
+import { DiagnosticSink, isDiagnosticPath } from "./diagnostics.ts";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
   canonicalPath,
   DELEGATE_TREES,
+  diagnosticExclusions,
   exec,
   type ExecOptions,
   type ExecResult,
@@ -43,10 +45,8 @@ function git(
   });
 }
 
-function log(context: string, error: unknown): void {
-  console.error(
-    `[delegate] ${context}: ${error instanceof Error ? error.message : String(error)}`,
-  );
+function log(diagnostics: DiagnosticSink, context: string, error: unknown): void {
+  diagnostics.log("error", "isolated workspace cleanup/evidence", { operation: context }, error);
 }
 
 function pathEntryExists(candidate: string): boolean {
@@ -123,6 +123,7 @@ function privateRef(batchId: string, suffix: string): string {
  * the same content set regardless of how the first was seeded.
  */
 export async function snapshotTree(
+  diagnostics: DiagnosticSink,
   root: string,
   base: string | undefined,
   indexPath: string,
@@ -138,16 +139,43 @@ export async function snapshotTree(
     ["read-tree", ...(base === undefined ? ["--empty"] : [base])],
     { cwd: root, env, signal },
   );
-  await git(
-    [
-      "add",
-      "-A",
-      "--",
-      ".",
-      ...excludePaths.map((exclude) => `:(exclude)${exclude}`),
-    ],
-    { cwd: root, env, signal },
-  );
+  // Remove seeded runtime entries as well as preventing new blobs: an
+  // excluded git-add path alone would leave tracked logs in read-tree's index.
+  const runtimeExcludes = await diagnosticExclusions(diagnostics, root);
+  const indexed = (await git(["ls-files", "-z"], { cwd: root, env, signal })).stdout
+    .split("\0").filter((name) => name !== "" && isDiagnosticPath(path.join(root, name)));
+  if (indexed.length > 0) await git(["update-index", "--force-remove", "-z", "--stdin"], {
+    cwd: root, env, signal, input: indexed.join("\0") + "\0",
+  });
+  // Never broadly stage the tree: a different process can create a runtime
+  // directory after exclusion discovery. Enumerate visible FILE names first,
+  // preserving tracked deletions and Git's ignore/clean-filter semantics, then
+  // give add only literal NUL-separated names (no recursive directory pathspec).
+  const visible = (await git([
+    "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", ".",
+    ...excludePaths.map((exclude) => `:(exclude)${exclude}`),
+    ...runtimeExcludes.map((exclude) => `:(exclude,literal)${exclude}`),
+  ], { cwd: root, env, signal })).stdout.split("\0");
+  const files = new Set<string>();
+  const replacedDirectories: string[] = [];
+  for (const name of visible) {
+    if (name === "" || isDiagnosticPath(path.join(root, name))) continue;
+    const stat = await fs.promises.lstat(path.join(root, name)).catch((error: unknown) => {
+      if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined;
+      throw error;
+    });
+    if (stat?.isDirectory()) replacedDirectories.push(name);
+    else files.add(name);
+  }
+  // A tracked file replaced by a directory must be removed explicitly; staging
+  // its old name would recurse into newly appearing, unlisted runtime files.
+  if (replacedDirectories.length > 0) await git(["update-index", "--force-remove", "-z", "--stdin"], {
+    cwd: root, env, signal, input: replacedDirectories.join("\0") + "\0",
+  });
+  if (files.size > 0) await git(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], {
+    cwd: root, env: { ...env, GIT_LITERAL_PATHSPECS: "1" }, signal,
+    input: [...files].join("\0") + "\0",
+  });
   return (await git(["write-tree"], { cwd: root, env, signal })).stdout.trim();
 }
 
@@ -187,20 +215,21 @@ async function addWorktree(
 
 /** True only when the worktree path is verifiably gone. */
 async function removeWorktree(
+  diagnostics: DiagnosticSink,
   root: string,
   destination: string,
 ): Promise<boolean> {
   try {
     await git(["worktree", "remove", "--force", destination], { cwd: root });
     if (!pathEntryExists(destination)) return true;
-    log(
+    log(diagnostics,
       `Git reported isolated worktree removal success but the path remains at ${JSON.stringify(destination)}`,
       "",
     );
     return false;
   } catch (error) {
     if (!pathEntryExists(destination)) return true;
-    log(`failed to remove isolated worktree '${destination}'`, error);
+    log(diagnostics, `failed to remove isolated worktree '${destination}'`, error);
     return false;
   }
 }
@@ -220,7 +249,7 @@ export async function changedFiles(
     ["diff", "--name-only", "-z", "--no-renames", from, to],
     { cwd: root },
   );
-  return output.stdout.split("\0").filter(Boolean);
+  return output.stdout.split("\0").filter((name) => name !== "" && !isDiagnosticPath(path.join(root, name)));
 }
 
 /**
@@ -300,6 +329,7 @@ async function writePatch(
 }
 
 interface IsolatedGroup {
+  readonly diagnostics: DiagnosticSink;
   readonly sourceRoot: string;
   readonly artifactRoot: string;
   readonly baselineCommit: string;
@@ -551,7 +581,7 @@ async function restorePreApplyState(
       skipped.push(relative);
     }
   }
-  if (firstError !== undefined) log("isolated rollback could not restore every path", firstError);
+  if (firstError !== undefined) log(group.diagnostics, "isolated rollback could not restore every path", firstError);
   return skipped;
 }
 
@@ -575,6 +605,7 @@ async function detectSourceDrift(
     // what the caller needs to see. The check is read-only and bounded
     // by the git exec timeout.
     const currentTree = await snapshotTree(
+      group.diagnostics,
       group.sourceRoot,
       group.baselineCommit,
       path.join(group.artifactRoot, "drift.index"),
@@ -591,7 +622,7 @@ async function detectSourceDrift(
     );
     return drift.sort().slice(0, SOURCE_DRIFT_LIMIT);
   } catch (error) {
-    log(`isolated source-drift check failed for '${group.sourceRoot}'`, error);
+    log(group.diagnostics, `isolated source-drift check failed for '${group.sourceRoot}'`, error);
     return undefined;
   }
 }
@@ -639,7 +670,7 @@ async function collectProposals(
     }
 
     try {
-      await stopWorkspaceProcesses(worker.workerRoot);
+      await stopWorkspaceProcesses(group.diagnostics, worker.workerRoot);
     } catch (error) {
       worker.retained = true;
       setIntegration({
@@ -653,7 +684,7 @@ async function collectProposals(
     }
 
     if (outcome.status !== "ok") {
-      const removed = await removeWorktree(group.sourceRoot, worker.workerRoot);
+      const removed = await removeWorktree(group.diagnostics, group.sourceRoot, worker.workerRoot);
       setIntegration({
         status: "discarded",
         reason: outcome.error ?? `task ${outcome.status}; nothing to apply`,
@@ -666,6 +697,7 @@ async function collectProposals(
 
     try {
       const proposalTree = await snapshotTree(
+        group.diagnostics,
         worker.workerRoot,
         group.baselineCommit,
         path.join(group.artifactRoot, `proposal-${taskIndex}.index`),
@@ -677,7 +709,7 @@ async function collectProposals(
         proposalTree,
       );
       if (!proposedFiles.length) {
-        const removed = await removeWorktree(
+        const removed = await removeWorktree(group.diagnostics,
           group.sourceRoot,
           worker.workerRoot,
         );
@@ -710,7 +742,7 @@ async function collectProposals(
         proposalCommit,
         worker.patchPath,
       );
-      const workerRemoved = await removeWorktree(
+      const workerRemoved = await removeWorktree(group.diagnostics,
         group.sourceRoot,
         worker.workerRoot,
       );
@@ -765,7 +797,7 @@ async function collectProposals(
         `pi-delegate integrate proposal ${taskIndex + 1}`,
         options.signal,
       );
-      await removeWorktree(group.sourceRoot, candidateRoot);
+      await removeWorktree(group.diagnostics, group.sourceRoot, candidateRoot);
       accepted.push({
         taskIndex,
         parent: integratedCommit,
@@ -1277,14 +1309,14 @@ async function applyToSource(
         );
         rollbackSucceeded = unrestored.length === 0;
         if (!rollbackSucceeded) {
-          log(
+          log(group.diagnostics,
             `isolated apply rollback left ${unrestored.join(", ")} unrestored for task ${proposal.taskIndex}; unrelated edits preserved, recovery artifacts retained`,
             "",
           );
         }
       } catch (rollbackError) {
         rollbackSucceeded = false;
-        log(
+        log(group.diagnostics,
           `isolated apply rollback failed for task ${proposal.taskIndex}; recovery artifacts retained`,
           rollbackError,
         );
@@ -1410,14 +1442,14 @@ async function cleanupGroup(
     try {
       await git(["update-ref", "-d", ref], { cwd: group.sourceRoot });
     } catch (error) {
-      log(`failed to clean isolated ref ${ref}`, error);
+      log(group.diagnostics, `failed to clean isolated ref ${ref}`, error);
     }
   }
   if (retainsArtifacts) return;
   try {
     await fs.promises.rm(group.artifactRoot, { recursive: true, force: true });
   } catch (error) {
-    log(`failed to remove isolated artifacts '${group.artifactRoot}'`, error);
+    log(group.diagnostics, `failed to remove isolated artifacts '${group.artifactRoot}'`, error);
   }
 }
 
@@ -1432,6 +1464,7 @@ async function cleanupGroup(
  * proposals applied.
  */
 export async function prepareIsolated(
+  diagnostics: DiagnosticSink,
   tasks: readonly ResolvedTask[],
   artifactBase: string,
   signal: AbortSignal | undefined,
@@ -1457,7 +1490,7 @@ export async function prepareIsolated(
     preparationUndone = true;
     let worktreeCleanupFailed = false;
     for (const worker of workers.values()) {
-      if (!(await removeWorktree(worker.group.sourceRoot, worker.workerRoot))) {
+      if (!(await removeWorktree(diagnostics, worker.group.sourceRoot, worker.workerRoot))) {
         worktreeCleanupFailed = true;
       }
     }
@@ -1467,7 +1500,7 @@ export async function prepareIsolated(
           cwd: group.sourceRoot,
         });
       } catch (cleanupError) {
-        log("failed to clean isolated baseline ref after preparation error", cleanupError);
+        log(diagnostics, "failed to clean isolated baseline ref after preparation error", cleanupError);
       }
       group.finishReconcile();
     }
@@ -1475,7 +1508,7 @@ export async function prepareIsolated(
       await fs.promises
         .rm(batchRoot, { recursive: true, force: true })
         .catch((cleanupError: unknown) =>
-          log("failed to remove isolated artifacts after preparation error", cleanupError),
+          log(diagnostics, "failed to remove isolated artifacts after preparation error", cleanupError),
         );
     }
   };
@@ -1521,6 +1554,7 @@ export async function prepareIsolated(
           }
         }
         const baselineTree = await snapshotTree(
+          diagnostics,
           sourceRoot,
           sourceHead,
           path.join(artifactRoot, "baseline.index"),
@@ -1551,6 +1585,7 @@ export async function prepareIsolated(
           artifactRoot,
           baselineCommit,
           baselineRef,
+          diagnostics,
           snapshotExcludes: excluded,
           taskIndexes: [],
           reconcileDone,
@@ -1631,7 +1666,7 @@ export async function prepareIsolated(
           // may have written the source whether or not its proposal
           // applied. The promise self-catches, so this never throws.
           drift = await driftPromise;
-          log("isolated group reconciliation failed", error);
+          log(diagnostics, "isolated group reconciliation failed", error);
           await markGroupFailure(group, workers, results, error);
         }
         // Drift is only attributable to a worker that ran a shell: a task
@@ -1673,12 +1708,12 @@ export async function prepareIsolated(
       if (!worker?.retained) return;
       await worker.group.reconcileDone;
       try {
-        await stopWorkspaceProcesses(worker.workerRoot);
+        await stopWorkspaceProcesses(diagnostics, worker.workerRoot);
       } catch (error) {
-        log(`deferred isolated worker cleanup could not stop processes in '${worker.workerRoot}'; retaining it`, error);
+        log(diagnostics, `deferred isolated worker cleanup could not stop processes in '${worker.workerRoot}'; retaining it`, error);
         return;
       }
-      if (await removeWorktree(worker.group.sourceRoot, worker.workerRoot)) {
+      if (await removeWorktree(diagnostics, worker.group.sourceRoot, worker.workerRoot)) {
         worker.retained = false;
         await fs.promises
           .rmdir(worker.group.artifactRoot)

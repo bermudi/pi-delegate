@@ -1,3 +1,4 @@
+import { DiagnosticSink, isDiagnosticPath } from "./diagnostics.ts";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -19,17 +20,13 @@ import type { ResolvedTask, TaskOutcome } from "./types.ts";
 // Probes fail fast and produce tiny output; the shared exec takes explicit
 // limits so the per-use divergence from the copy path stays visible.
 const PROBE_EXEC = { timeoutMs: 5_000, maxBuffer: 4 * 1024 * 1024 } as const;
-// A full (non-reflink) copy of a big tree legitimately takes a while.
-const COPY_EXEC = { timeoutMs: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 } as const;
 
 const FALLBACK_REMEDY =
   `Resubmit with workspace: "shared" to run in the source tree, ` +
   `or "isolated" for a detached Git worktree.`;
 
-function log(context: string, error: unknown): void {
-  console.error(
-    `[delegate] ${context}: ${error instanceof Error ? error.message : String(error)}`,
-  );
+function log(diagnostics: DiagnosticSink, context: string, error: unknown): void {
+  diagnostics.log("error", "scratch workspace cleanup/evidence", { operation: context }, error);
 }
 
 /**
@@ -79,37 +76,24 @@ async function copySourceOf(
   return { root, cwd: physicalCwd, gitRoot };
 }
 
-/**
- * Full copy of `source` at `destination` (which must not exist). GNU cp gets
- * the reflink fast path — cheap on copy-on-write filesystems, a transparent
- * full copy elsewhere. Non-GNU cp falls back to Node's copier with links
- * kept verbatim: escaping symlinks still resolve to the real tree, which is
- * fine — scratch guards ordinary relative writes, it is not a sandbox.
- */
+/** Filter before copying: copying then deleting would expose runtime records
+ * to workers and copied Git state. Node preserves links verbatim; the shared
+ * predicate omits reserved trees and their existing symlink aliases. */
 async function copyTree(
   source: string,
   destination: string,
   signal?: AbortSignal,
 ): Promise<void> {
   try {
-    await exec("cp", ["-a", "--reflink=auto", source, destination], {
-      ...COPY_EXEC,
-      signal,
-    });
-    return;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/unrecognized option|invalid option|illegal option/i.test(message)) {
-      throw new Error(
-        `workspace "scratch" could not copy '${source}': ${message} ${FALLBACK_REMEDY}`,
-      );
-    }
-  }
-  try {
-    if (signal?.aborted) throw new Error("aborted");
     await fs.promises.cp(source, destination, {
       recursive: true,
+      mode: fs.constants.COPYFILE_FICLONE,
+      preserveTimestamps: true,
       verbatimSymlinks: true,
+      filter: (candidate) => {
+        if (signal?.aborted) throw new Error("aborted");
+        return !isDiagnosticPath(candidate);
+      },
     });
   } catch (error) {
     throw new Error(
@@ -124,14 +108,14 @@ async function copyTree(
  * cleanup — a live pid's directory is never touched, including this one,
  * which may hold batches still running.
  */
-async function sweepStaleCopies(scratchBase: string): Promise<void> {
+async function sweepStaleCopies(diagnostics: DiagnosticSink, scratchBase: string): Promise<void> {
   let entries: fs.Dirent[];
   try {
     entries = await fs.promises.readdir(scratchBase, { withFileTypes: true });
   } catch (error) {
     // Nothing to sweep is normal; an unreadable base is worth a line, but
     // litter cleanup must never fail a dispatch.
-    log(`failed to list scratch copies in '${scratchBase}'`, error);
+    log(diagnostics, `failed to list scratch copies in '${scratchBase}'`, error);
     return;
   }
   for (const entry of entries) {
@@ -149,7 +133,7 @@ async function sweepStaleCopies(scratchBase: string): Promise<void> {
     await fs.promises
       .rm(path.join(scratchBase, entry.name), { recursive: true, force: true })
       .catch((error: unknown) =>
-        log(`failed to sweep stale scratch copies '${entry.name}'`, error),
+        log(diagnostics, `failed to sweep stale scratch copies '${entry.name}'`, error),
       );
   }
 }
@@ -200,6 +184,7 @@ interface ScratchDrift {
  * logs and skips, it never fails containment.
  */
 async function openDriftWindow(
+  diagnostics: DiagnosticSink,
   sourceRoot: string,
   phase: number,
   scratchBase: string,
@@ -239,6 +224,7 @@ async function openDriftWindow(
     // Unborn repository (no commits): the empty-index seed covers it.
   }
   const startTree = await snapshotTree(
+    diagnostics,
     sourceRoot,
     head,
     indexPath,
@@ -280,6 +266,7 @@ export interface ScratchPlan {
  * at its phase's start, after earlier phases' proposals applied.
  */
 export async function prepareScratch(
+  diagnostics: DiagnosticSink,
   tasks: readonly ResolvedTask[],
   scratchBase: string,
   signal: AbortSignal | undefined,
@@ -293,7 +280,7 @@ export async function prepareScratch(
     .filter((index) => index >= 0);
   if (!scratchIndexes.length) return undefined;
 
-  await sweepStaleCopies(scratchBase);
+  await sweepStaleCopies(diagnostics, scratchBase);
   const procRoot = path.join(scratchBase, `pid-${process.pid}`);
   const batchRoot = path.join(procRoot, randomUUID());
   const workers = new Map<number, ScratchWorker>();
@@ -336,6 +323,7 @@ export async function prepareScratch(
             drifts.set(
               root,
               await openDriftWindow(
+                diagnostics,
                 root,
                 phase,
                 scratchBase,
@@ -347,14 +335,12 @@ export async function prepareScratch(
             );
           } catch (error) {
             if (signal?.aborted) throw error;
-            log(`scratch drift evidence unavailable for '${root}'`, error);
+            log(diagnostics, `scratch drift evidence unavailable for '${root}'`, error);
           }
         }
       } else if (!noDriftWarned.has(root)) {
         noDriftWarned.add(root);
-        console.error(
-          `[delegate] scratch drift evidence unavailable for '${root}': not a usable Git repository`,
-        );
+        diagnostics.log("warn", "scratch drift evidence unavailable: not a usable Git repository", { path: root });
       }
       translated[taskIndex] = {
         ...task,
@@ -377,18 +363,18 @@ export async function prepareScratch(
     await fs.promises
       .rm(batchRoot, { recursive: true, force: true })
       .catch((cleanupError: unknown) =>
-        log("failed to remove scratch copies after preparation error", cleanupError),
+        log(diagnostics, "failed to remove scratch copies after preparation error", cleanupError),
       );
     throw error;
   }
 
   const discard = async (worker: ScratchWorker): Promise<boolean> => {
     try {
-      await stopWorkspaceProcesses(worker.copyRoot);
+      await stopWorkspaceProcesses(diagnostics, worker.copyRoot);
     } catch (error) {
       // A straggler keeps writing into an unlinked tree harmlessly; the
       // removal still proceeds — litter is worse than a wedged child.
-      log(
+      log(diagnostics,
         `could not stop leftover processes in scratch copy '${worker.copyRoot}'; removing it anyway`,
         error,
       );
@@ -397,7 +383,7 @@ export async function prepareScratch(
       await fs.promises.rm(worker.copyRoot, { recursive: true, force: true });
       return true;
     } catch (error) {
-      log(`failed to remove scratch copy '${worker.copyRoot}'`, error);
+      log(diagnostics, `failed to remove scratch copy '${worker.copyRoot}'`, error);
       return false;
     }
   };
@@ -419,6 +405,7 @@ export async function prepareScratch(
           // see. The end snapshot reuses the start index path (each
           // snapshotTree call removes it first).
           const endTree = await snapshotTree(
+            diagnostics,
             drift.sourceRoot,
             drift.startTree,
             drift.indexPath,
@@ -431,7 +418,7 @@ export async function prepareScratch(
             .sort()
             .slice(0, SOURCE_DRIFT_LIMIT);
         } catch (error) {
-          log(`scratch drift check failed for '${drift.sourceRoot}'`, error);
+          log(diagnostics, `scratch drift check failed for '${drift.sourceRoot}'`, error);
         }
       }
     },
@@ -500,9 +487,7 @@ export async function prepareScratch(
           }
         }
         if (unattributable) {
-          console.error(
-            `[delegate] scratch drift evidence suppressed for '${drift.sourceRoot}': a same-batch shared worker ran a shell in this tree`,
-          );
+          diagnostics.log("warn", "scratch drift evidence suppressed: same-batch shared worker ran a shell in this tree", { path: drift.sourceRoot });
           continue;
         }
         if (siblingAttributed.size > 0) {
@@ -511,9 +496,7 @@ export async function prepareScratch(
           );
           if (remaining.length === 0) continue;
           if (remaining.length !== drift.drift.length) {
-            console.error(
-              `[delegate] scratch drift for '${drift.sourceRoot}': excluded ${drift.drift.length - remaining.length} file(s) attributed to same-batch shared workers`,
-            );
+            diagnostics.log("info", "scratch drift: excluded files attributed to same-batch shared workers", { path: drift.sourceRoot, count: drift.drift.length - remaining.length });
           }
           drift.drift = remaining;
         }
@@ -539,7 +522,7 @@ export async function prepareScratch(
       await Promise.all(
         [...drifts.values()].map((drift) =>
           fs.promises.rm(drift.indexPath, { force: true }).catch((error) => {
-            log(`failed to remove scratch drift index '${drift.indexPath}'`, error);
+            log(diagnostics, `failed to remove scratch drift index '${drift.indexPath}'`, error);
           }),
         ),
       );
@@ -558,7 +541,7 @@ export async function prepareScratch(
       await fs.promises
         .rm(batchRoot, { recursive: true, force: true })
         .catch((error: unknown) =>
-          log("failed to remove unused scratch copies", error),
+          log(diagnostics, "failed to remove unused scratch copies", error),
         );
       await pruneEmpty(procRoot);
       await pruneEmpty(scratchBase);

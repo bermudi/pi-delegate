@@ -184,6 +184,7 @@ function expandedText(
   const outcomes = details.results.filter(isOutcome);
   if (outcomes.length === 0) return undefined;
   const sections = formatDispatchResult(
+    tickets.diagnostics,
     outcomes,
     [],
     UNBOUNDED_OUTPUT,
@@ -858,13 +859,21 @@ export function createResultRenderer(tickets: TicketStore) {
       context.lastComponent instanceof Text
         ? context.lastComponent
         : new Text("", 0, 0);
+    const warning = isRecord(result.details) && typeof result.details.diagnosticWarning === "string"
+      ? result.details.diagnosticWarning : undefined;
+    // Keep routing failures visible even when metadata replaces content, and
+    // outside collapsed preview budgets. Recorded details work without a store.
+    const setText = (body: string): void => component.setText(
+      warning !== undefined && !body.includes(warning)
+        ? `${body}\n${theme.fg("warning", displaySafe(warning))}` : body,
+    );
     // #119: a running inline dispatch's partial carries the live board —
     // never the collapsed/expanded result views, which only apply to the
     // settled record.
     if (options.isPartial) {
       const board = liveBoard(result, theme);
       if (board !== undefined) {
-        component.setText(board);
+        setText(board);
         return component;
       }
     }
@@ -874,14 +883,14 @@ export function createResultRenderer(tickets: TicketStore) {
     if (!options.expanded) {
       const collapsed = collapsedBody(result, tickets, theme);
       if (collapsed !== undefined) {
-        component.setText(collapsed);
+        setText(collapsed);
         return component;
       }
       // A roster poll keeps its entry lines — the bare "Tickets:" header
       // alone carries nothing (#63).
       const text = contentText(result);
       if (text.startsWith("Tickets:")) {
-        component.setText(collapsedRoster(text, theme));
+        setText(collapsedRoster(text, theme));
         return component;
       }
       // Receipts and sessions: the first content line — ticket ids
@@ -889,7 +898,7 @@ export function createResultRenderer(tickets: TicketStore) {
       // expand hint when more exists.
       const lines = text.split("\n");
       const first = lines.find((line) => line.trim() !== "") ?? "";
-      component.setText(
+      setText(
         styled(
           truncateLine(shortenTicketIds(first), COLLAPSED_LINE_LIMIT) +
             (lines.length > 1 ? expandHint(theme) : ""),
@@ -913,7 +922,7 @@ export function createResultRenderer(tickets: TicketStore) {
           );
       }
     }
-    component.setText(styled(body, theme));
+    setText(styled(body, theme));
     return component;
   };
 }

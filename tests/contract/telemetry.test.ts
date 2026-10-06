@@ -18,6 +18,7 @@ import {
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
+import { diagnosticRecords } from "../support/diagnostic-records.ts";
 import {
   callDelegate,
   configureDelegate,
@@ -300,8 +301,9 @@ describe("delegate telemetry contract", () => {
         expect(result.isError).toBe(false);
         expect(result.text).toContain("STILL-DONE");
         expect(
-          errors.mock.calls.some((arguments_) =>
-            String(arguments_[0]).includes("[delegate] telemetry"),
+          diagnosticRecords(errors.mock.calls).some((record) =>
+            record.event === "telemetry failed" &&
+            record.context.path === dbPath && record.level === "error",
           ),
         ).toBe(true);
       } finally {
@@ -335,8 +337,9 @@ describe("delegate telemetry contract", () => {
         expect(result.isError).toBe(false);
         expect(result.text).toContain("CORRUPT-OK");
         expect(
-          errors.mock.calls.some((arguments_) =>
-            String(arguments_[0]).includes("[delegate] telemetry"),
+          diagnosticRecords(errors.mock.calls).some((record) =>
+            record.event === "telemetry failed" &&
+            record.context.path === dbPath && record.level === "error",
           ),
         ).toBe(true);
       } finally {
@@ -375,8 +378,9 @@ describe("delegate telemetry contract", () => {
         expect(result.isError).toBe(false);
         expect(result.text).toContain("FUTURE-OK");
         expect(
-          errors.mock.calls.some((arguments_) =>
-            String(arguments_[0]).includes("[delegate] telemetry"),
+          diagnosticRecords(errors.mock.calls).some((record) =>
+            record.event === "telemetry failed" &&
+            record.context.path === dbPath && record.level === "error",
           ),
         ).toBe(true);
         const check = new DatabaseSync(dbPath);
@@ -691,8 +695,9 @@ describe("delegate telemetry contract", () => {
         });
         expect(first.isError).toBe(false);
         expect(
-          errors.mock.calls.some((arguments_) =>
-            String(arguments_[0]).includes("[delegate] telemetry"),
+          diagnosticRecords(errors.mock.calls).some((record) =>
+            record.event === "telemetry failed" &&
+            record.context.path === pathA && record.level === "error",
           ),
         ).toBe(true);
 

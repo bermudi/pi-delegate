@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
@@ -86,6 +87,7 @@ export interface ParentPromptService {
 }
 
 export interface HostEnvironment {
+  readonly diagnostics: DiagnosticSink;
   readonly ctx: ExtensionContext;
   readonly modelRuntime: ModelRuntime;
   readonly agentDir: string;
@@ -99,12 +101,14 @@ export interface HostEnvironment {
  * needs the provenance) and threads it here, so no path re-derives it.
  */
 export function hostEnvironment(
+  diagnostics: DiagnosticSink,
   ctx: ExtensionContext,
   agentDir: string,
   getActiveTools: () => readonly string[],
   parentPrompt: ParentPromptService,
 ): HostEnvironment {
   return {
+    diagnostics,
     ctx,
     modelRuntime: parentModelRuntime(ctx),
     agentDir,
@@ -269,7 +273,7 @@ export async function resolveTasks(
       const message =
         `Cannot resolve default-profile parent tools: ${detail}. ` +
         `Restore the parent tool inventory or supply explicit tools for every default-profile task.`;
-      console.error(`[delegate] ${message}`, error);
+      env.diagnostics.log("error", "Cannot resolve default-profile parent tools", {}, error);
       throw new Error(message, { cause: error });
     }
   }

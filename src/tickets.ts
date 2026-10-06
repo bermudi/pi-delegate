@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -180,6 +181,7 @@ export function recoveryWarning(ticket: Ticket): string | undefined {
 }
 
 function taskSection(
+  diagnostics: DiagnosticSink,
   ticket: Ticket,
   outcome: TaskOutcome,
   whole: boolean,
@@ -220,7 +222,7 @@ function taskSection(
       ? (output: string) => {
           const cached = renderedOutputs?.get(outcome);
           if (cached !== undefined) return cached;
-          const rendered = renderOutputForLLM(output, label, bounds);
+          const rendered = renderOutputForLLM(diagnostics, output, label, bounds);
           renderedOutputs?.set(outcome, rendered);
           return rendered;
         }
@@ -366,6 +368,7 @@ function liveCounts(ticket: Ticket, live: LiveState | undefined): string {
 
 /** Poll/wait view of one ticket. Poll is observational — never mutates. */
 function ticketView(
+  diagnostics: DiagnosticSink,
   ticket: Ticket,
   surface: DelegateSurface,
   whole = false,
@@ -390,7 +393,7 @@ function ticketView(
   for (let index = 0; index < ticket.outcomes.length; index++) {
     const outcome = ticket.outcomes[index];
     if (outcome) {
-      lines.push("", taskSection(ticket, outcome, whole, surface, renderedOutputs));
+      lines.push("", taskSection(diagnostics, ticket, outcome, whole, surface, renderedOutputs));
     } else if (!isTerminal(ticket.status)) {
       // A running ticket shows each unfinished task's live line — a
       // polling caller can tell a healthy worker from a spinning one.
@@ -494,7 +497,7 @@ export class TicketStore {
    * caller-visible mutation so visibility signals can resync. The store
    * never reads it beyond the call.
    */
-  constructor(
+  constructor(readonly diagnostics: DiagnosticSink,
     private readonly onChange?: () => void,
     private readonly onQuestion?: (ticket: Ticket, question: WorkerQuestion) => void,
     /** Optional live-activity sink shared with the coordinator; running
@@ -577,7 +580,7 @@ export class TicketStore {
       }
       return;
     }
-    const journal = new TicketJournal(agentDir);
+    const journal = new TicketJournal(this.diagnostics, agentDir);
     const saved = journal.load();
     // #54 owner liveness: a journaled `running` ticket settles
     // interrupted only when its recorded owner is provably dead — this
@@ -648,12 +651,7 @@ export class TicketStore {
     }
     this.journal = journal;
     if (saved.length > 0) {
-      console.info(
-        `[delegate] recovered ${saved.length} ticket record(s) from ${journal.dir}` +
-          (orphaned > 0
-            ? `; ${orphaned} still-running ticket(s) interrupted — owning session ended before settlement`
-            : "; unfinished work is never restarted"),
-      );
+      this.diagnostics.log("info", "recovered ticket records; unfinished work is never restarted", { count: saved.length, path: journal.dir, orphaned });
       this.changed();
     }
   }
@@ -681,9 +679,7 @@ export class TicketStore {
     try {
       this.journal?.save(record);
     } catch (error) {
-      console.error(
-        `[delegate] ticket ${record.id} recovery save failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      this.diagnostics.log("error", "ticket recovery save failed", { ticketId: record.id }, error);
       const writable = record as Writable<Ticket>;
       const note = "Ticket recovery save failed; after a restart the saved status or results may be stale. Check Delegate logs.";
       if (!writable.notices.includes(note)) writable.notices = [...writable.notices, note];
@@ -778,10 +774,10 @@ export class TicketStore {
       rt.finishedGate.resolved &&
       rt.executions.size === 0
     ) {
-      rt.settledView ??= ticketView(record, this.surface, false, rt.renderedOutputs, live);
+      rt.settledView ??= ticketView(this.diagnostics, record, this.surface, false, rt.renderedOutputs, live);
       return rt.settledView;
     }
-    return ticketView(record, this.surface, false, rt.renderedOutputs, live);
+    return ticketView(this.diagnostics, record, this.surface, false, rt.renderedOutputs, live);
   }
 
   /**
@@ -792,7 +788,7 @@ export class TicketStore {
    */
   fullView(ticket: Ticket): string {
     const { record, rt } = this.entry(ticket);
-    return ticketView(record, this.surface, true, undefined, {
+    return ticketView(this.diagnostics, record, this.surface, true, undefined, {
       activity: this.activity,
       executions: rt.executions,
     });
@@ -802,7 +798,7 @@ export class TicketStore {
   remove(id: string): void {
     this.tickets.delete(id);
     try { this.journal?.remove(id); }
-    catch (error) { console.error(`[delegate] removing unstarted ticket ${id} failed`, error); }
+    catch (error) { this.diagnostics.log("error", "removing unstarted ticket failed", { ticketId: id }, error); }
     this.changed();
   }
 
@@ -926,13 +922,13 @@ export class TicketStore {
       rt.pendingQuestions.set(question.id, { taskIndex, resolve, reject });
     });
     record.questions = [...record.questions, question];
-    console.info(`[delegate] ticket ${ticket.id} task ${question.taskId} waiting for answer ${question.id}`);
+    this.diagnostics.log("info", "task waiting for answer", { ticketId: ticket.id, taskId: question.taskId, questionId: question.id });
     this.changed();
     for (const notify of [...rt.waiters]) notify();
     try {
       this.onQuestion?.(ticket, question);
     } catch (error) {
-      console.error(`[delegate] notifying parent of question ${ticket.id}/${question.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.diagnostics.log("error", "notifying parent of question failed", { ticketId: ticket.id, questionId: question.id }, error);
     }
     const abort = () => rt.pendingQuestions.get(question.id)?.reject(new Error(`Question ${question.id} cancelled.`));
     signal.addEventListener("abort", abort, { once: true });
@@ -960,7 +956,7 @@ export class TicketStore {
       return `Answer ${questionId} already recorded for task ${taskAddress(ticket.id, taskId)}.`;
     }
     rt.answeredQuestions.set(questionId, { taskIndex: index, answer });
-    console.info(`[delegate] ticket ${ticket.id} task ${taskId} answered question ${questionId}`);
+    this.diagnostics.log("info", "task answered question", { ticketId: ticket.id, taskId, questionId });
     pending!.resolve(answer);
     return `Answer ${questionId} recorded for task ${taskAddress(ticket.id, taskId)}; worker will resume when capacity is available.`;
   }
@@ -1141,9 +1137,7 @@ export class TicketStore {
       delivered: steered,
       receipt,
     });
-    console.info(
-      `[delegate] ticket ${ticket.id} task ${taskId} steer ${steerId}: ${receipt.status}`,
-    );
+    this.diagnostics.log("info", "task steer receipt", { ticketId: ticket.id, taskId, steerId, status: receipt.status });
     return {
       text: receipt.text,
       isError: false,
@@ -1237,12 +1231,9 @@ export class TicketStore {
     // on it. The receipt reports the requested settlement; the outcome
     // records the truth when the run winds down.
     void handle.abort("interrupted").catch((error: unknown) => {
-      console.error(
-        `[delegate] interrupt abort of task ${taskId} on ticket ${ticket.id} failed`,
-        error,
-      );
+      this.diagnostics.log("error", "interrupt abort failed", { ticketId: ticket.id, taskId }, error);
     });
-    console.info(`[delegate] ticket ${ticket.id} task ${taskId}: interrupt requested`);
+    this.diagnostics.log("info", "task interrupt requested", { ticketId: ticket.id, taskId });
     return {
       text:
         `Interrupt for task "${taskAddress(ticket.id, taskId)}": interrupted — ` +
@@ -1507,7 +1498,7 @@ export class TicketStore {
     record.paused = false;
     this.save(record);
     for (const [id, question] of rt.pendingQuestions) {
-      console.info(`[delegate] ticket ${ticket.id} invalidated question ${id}: ${status}`);
+      this.diagnostics.log("info", "invalidated question", { ticketId: ticket.id, questionId: id, status });
       question.reject(new Error(`Question ${id} cancelled: ticket ${status}.`));
     }
     for (const index of [...rt.pendingSteers.keys()]) {
@@ -1601,9 +1592,7 @@ export class TicketStore {
     this.settle(ticket, "cancelled");
     for (const handle of [...rt.executions.values()]) {
       void handle.abort("cancelled").catch((error) => {
-        console.error(
-          `[delegate] aborting task on ticket ${ticket.id} failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        this.diagnostics.log("error", "aborting task on ticket failed", { ticketId: ticket.id }, error);
       });
     }
     return (

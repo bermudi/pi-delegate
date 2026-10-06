@@ -28,6 +28,70 @@ reservations and quarantine, paused/question-waiting worker safety, detachable
 bounded ticket waits/tails, and shutdown bounds remain unchanged. This removes
 only task deadlines, not unrelated internal timer bounds or batch token budgets.
 
+## Operational diagnostics (#122, user-authorized)
+
+Delegate diagnostics never write to an attached terminal: routing depends only
+on actual `process.stderr.isTTY`, not `ctx.hasUI`, print mode, or the working
+configuration/session directory. False or undefined means stderr for every
+level (`error`, `warn`, `info`), never diagnostic stdout. True means owner-only,
+append-only JSONL at `<DELEGATE_AGENT_DIR>/delegate-diagnostics/<pid>.jsonl`
+when the explicit environment override is nonempty; otherwise the base is Pi's
+public `getAgentDir()`. This destination is independent of the engine's
+context/session/cwd fallback. It explicitly overrides SPEC-V2's stderr logging
+promise, including consumed-result delivery skips.
+
+The diagnostic directory is 0700 and the regular, single-link file 0600,
+owned by the current user. Symlinks, insecure existing entries, foreign-owned
+bases, and writable/untrusted ancestors are rejected (root-owned sticky
+temporary ancestors are allowed). A failed primary destination routes to
+`<tmpdir>/pi-delegate-diagnostics-<uid>-<pid>/<pid>.jsonl` with the same privacy
+checks and safe primary-failure operation/path/class/code context. The fallback
+is deterministic per process and has no cached state or persistent handle.
+It never falls back to the terminal. Diagnostics MUST NOT control execution,
+state mutations, admission release, cancellation, quiescence, cleanup, recovery,
+or surface selection, even if both destinations fail. An extension-owned,
+nonthrowing sink retains a bounded failure count and safe routing context
+(event, primary destination/operation and primary/fallback class/code), reports
+through Pi-managed UI notices when available, and adds a warning to the next
+public tool result's content and per-return `details.diagnosticWarning`. This
+metadata is cloned, preserving the original typed fields without mutating cached
+operation/ticket results. All three tool renderers show it collapsed and expanded,
+including recorded-history views with no live store. A repaired operation replay
+must not retain an earlier return's warning. Notice failures remain explicitly visible in that warning;
+they never recurse into the unavailable logger. Original tool errors stand.
+A standalone dormant worker supervisor reports diagnostic failures on its exit
+result without changing its worker exit classification.
+
+Directory components exactly named `delegate-diagnostics` or
+`pi-delegate-diagnostics-<numeric uid>-<numeric pid>` are reserved runtime
+namespaces anywhere in a source tree, including retained other-process fallback
+trees. They and existing symlink aliases are excluded before scratch copying,
+from every private Git snapshot (including seeded tracked entries, before any
+new blobs are written), and from source-drift/completion-attribution evidence.
+A runtime tree created by another process during snapshot preparation must not
+be hashed into the source Git object database. Actual diagnostic destinations are
+also excluded when not yet created; exclusion never depends only on the engine's
+agent directory. Other ordinary source names (for example `delegate-diagnostics.md`
+and `pi-delegate-diagnostics-guide`) remain source. Delegate does not scrub
+historical objects already present in the user's Git database.
+
+Secure descriptor-relative file routing is currently supported only on Linux
+with getuid, O_NOFOLLOW, and O_DIRECTORY. Other platforms/capability gaps are
+reported as unsupported through the same managed warning path, without crashing
+Delegate or writing to an attached terminal. Foreign filesystem behavior is
+unverified; headless stderr routing remains available on every platform.
+
+Records carry a timestamp, pid, level, static operational event, and bounded
+operational metadata (at most 16 fields, strings at most 512 characters; event
+at most 192). JSON escapes terminal controls and additional line separators.
+Error diagnostics contain only allowlisted class/code (including codes found
+through at most four Error.cause links, without invoking accessors), never raw messages,
+stacks, provider payloads, or prompt/profile/question/answer/steer contents.
+Caller-facing tool errors are unchanged. Manual profile discovery retains its
+intentional silent warning sink. Framed worker stdout remains protocol-only.
+No interception of global console, mutable global state, new configuration
+knobs, or persistent file handles are introduced.
+
 ## Axioms
 
 1. **The weights are the platform.** Models arrive RL-trained on the

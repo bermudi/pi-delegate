@@ -2,12 +2,50 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import ts from "typescript";
 import {
   callDelegate,
   configureDelegate,
   installSubagentModel,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
+
+// #122: enforce diagnostic ownership without importing production internals.
+// Worker stdout is the framed protocol, not a diagnostic destination.
+test("production console and output-stream writes stay at their owned boundaries", () => {
+  const root = join(import.meta.dirname, "../..");
+  const paths = ["delegate.ts", ...readdirSync(join(root, "src"), { recursive: true, encoding: "utf8" })
+    .filter((path) => path.endsWith(".ts")).map((path) => `src/${path}`)];
+  const violations: string[] = [];
+  let protocolWrites = 0;
+  for (const path of paths) {
+    const source = ts.createSourceFile(path, readFileSync(join(root, path), "utf8"), ts.ScriptTarget.Latest, true);
+    const walk = (node: ts.Node): void => {
+      if (node.kind === ts.SyntaxKind.AnyKeyword) violations.push(`${path}: explicit any`);
+      if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        const object = node.expression.getText(source);
+        const property = ts.isPropertyAccessExpression(node) ? node.name.text
+          : ts.isStringLiteral(node.argumentExpression) ? node.argumentExpression.text : "computed";
+        if ((object === "console" || object === "globalThis.console") &&
+          !(path === "src/diagnostics.ts" && object === "console" && ["error", "warn"].includes(property))) {
+          violations.push(`${path}: console.${property}`);
+        }
+        if (property === "write" && /\b(?:stdout|stderr)\b/.test(object)) {
+          const call = node.parent;
+          const framed = path === "src/worker/host.ts" && node.getText(source) === "io.stdout.write"
+            && ts.isCallExpression(call) && call.arguments.length === 1
+            && call.arguments[0]?.getText(source) === "encodeFrame(message)";
+          if (framed) protocolWrites += 1;
+          else violations.push(`${path}: ${node.getText(source)}`);
+        }
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(source);
+  }
+  expect(violations).toEqual([]);
+  expect(protocolWrites).toBe(1);
+});
 
 // V2 review regression: opening a second boundary used to redirect the first
 // boundary's config reads and pooled transcript writes through process.env.

@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import type { DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AdmissionGrant } from "./admission.ts";
@@ -89,7 +90,7 @@ export class DispatchCoordinator {
   private readonly semaphore = new Semaphore(DEFAULT_CONFIG.maxConcurrent);
   private readonly modelSemaphores = new Map<string, Semaphore>();
 
-  constructor(
+  constructor(private readonly diagnostics: DiagnosticSink,
     private readonly tickets: TicketStore,
     /** Optional live-activity sink (issue #24 subagent browser). */
     private readonly activity?: ActivityStore,
@@ -317,9 +318,7 @@ export class DispatchCoordinator {
             // record pre-worker failures below; shared tasks have no
             // workspace to prepare and still run.
             prepError = error;
-            console.error(
-              `[delegate] workspace preparation for phase ${phase} failed: ${error instanceof Error ? error.message : String(error)}`,
-            );
+            this.diagnostics.log("error", "workspace preparation failed", { phase }, error);
           }
         }
         await Promise.all(
@@ -348,9 +347,7 @@ export class DispatchCoordinator {
         // must be visible.
         for (const task of phaseTasks) {
           if (outcomes[task.index] === undefined) {
-            console.error(
-              `[delegate] internal dispatch error for task ${task.id} (index ${task.index}): no outcome was recorded; quarantining its write scope and holding shutdown quiescence for this dispatch`,
-            );
+            this.diagnostics.log("error", "internal dispatch error: no outcome recorded; quarantining write scope and holding shutdown quiescence", { taskId: task.id, index: task.index });
             const outcome: TaskOutcome = {
               index: task.index,
               id: task.id,
@@ -382,11 +379,7 @@ export class DispatchCoordinator {
             const reason = `workspace reconciliation failed: ${
               error instanceof Error ? error.message : String(error)
             }`;
-            console.error(
-              `[delegate] workspace reconciliation for phase ${phase} failed: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
+            this.diagnostics.log("error", "workspace reconciliation failed", { phase }, error);
             for (const task of tasks) {
               if (outcomes[task.index] !== undefined) continue;
               const outcome: TaskOutcome = {
@@ -578,9 +571,7 @@ export class DispatchCoordinator {
             });
           }
         } catch (error) {
-          console.error(
-            `[delegate] activity feed failed for task ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          this.diagnostics.log("error", "activity feed failed", { taskId: task.id }, error);
         }
       }
       // A non-quarantined outcome confirms the worker is done (or never
@@ -606,9 +597,7 @@ export class DispatchCoordinator {
         try {
           options.onTaskSettled(task, outcome);
         } catch (error) {
-          console.error(
-            `[delegate] usage settlement sink failed for task ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          this.diagnostics.log("error", "usage settlement sink failed", { taskId: task.id }, error);
         }
       }
     };
@@ -684,9 +673,7 @@ export class DispatchCoordinator {
         try {
           await options.onWorkerQuiesced?.(task.index);
         } catch (error) {
-          console.error(
-            `[delegate] deferred cleanup after quiescence of task ${task.id} failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          this.diagnostics.log("error", "deferred cleanup after quiescence failed", { taskId: task.id }, error);
         }
         grant.releaseRetained(task.index);
         fully.resolve();
@@ -1014,9 +1001,7 @@ export class DispatchCoordinator {
                       }
                     } catch (error) {
                       attribution.abandon(openWindow);
-                      console.error(
-                        `[delegate] deferred git evidence settle for task ${task.id} failed: ${error instanceof Error ? error.message : String(error)}`,
-                      );
+                      this.diagnostics.log("error", "deferred git evidence settle failed", { taskId: task.id }, error);
                     }
                   })();
                 } else {
@@ -1100,9 +1085,7 @@ export class DispatchCoordinator {
         this.activity.setSyncTaskStatus(syncRunId, taskId, status);
       }
     } catch (error) {
-      console.error(
-        `[delegate] task status update failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      this.diagnostics.log("error", "task status update failed", {}, error);
     }
   }
 }

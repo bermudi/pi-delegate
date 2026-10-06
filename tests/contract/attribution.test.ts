@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { diagnosticRecords } from "../support/diagnostic-records.ts";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -595,7 +596,7 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
     expect(attributed[0]!.uncertain).toBe(false);
   });
 
-  test("a git snapshot failure logs to stderr and falls back to the unknown-shell mark without failing the task", async () => {
+  test("a git snapshot failure emits a diagnostic and falls back to the unknown-shell mark without failing the task", async () => {
     // Contract: SPEC "Completion evidence" — a snapshot failure degrades
     // to the uncovered-shell mark; it never fails the task. A corrupt
     // .git/index deterministically fails `git status` while rev-parse
@@ -620,10 +621,11 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
       });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("files: unknown (shell used outside git)");
-      const logged = errors.mock.calls
-        .map((call) => call.map(String).join(" "))
-        .join("\n");
-      expect(logged).toContain(`[delegate] git snapshot failed for task-1 in ${repo}`);
+      expect(diagnosticRecords(errors.mock.calls).some((record) =>
+        record.event === "git snapshot failed" &&
+        record.context.taskId === "task-1" && record.context.path === repo &&
+        record.level === "error",
+      )).toBe(true);
       const attributed = attributedOf(result.details);
       expect(attributed[0]!.uncertain).toBe(true);
     } finally {

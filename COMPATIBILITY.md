@@ -1,5 +1,55 @@
 # Delegate v2 compatibility contract
 
+## Terminal-safe operational diagnostics (#122)
+
+This supersedes inherited SPEC-V2 stderr-only logging (including delivery-skip
+logs). Delegate chooses the destination from actual `process.stderr.isTTY`:
+false/undefined uses stderr for error/warn/info; true appends private JSONL to
+`<agentDir>/delegate-diagnostics/<pid>.jsonl`. Here `agentDir` is the nonempty
+explicit `DELEGATE_AGENT_DIR`, otherwise Pi's public `getAgentDir()` — never the
+engine's context/session/cwd fallback. Even print mode uses the file when its
+stderr remains terminal-attached. Diagnostic stdout is never used; worker
+stdout remains its framed protocol.
+
+New diagnostic directories/files are owner-only 0700/0600. Existing insecure,
+foreign-owned, linked, or symlinked entries reject rather than being repaired
+or followed. A blocked primary uses the equally private deterministic
+`<tmpdir>/pi-delegate-diagnostics-<uid>-<pid>/<pid>.jsonl`, recording bounded,
+safe primary-failure context. No attached-terminal fallback is allowed. Only
+failure of both secure destinations produces a bounded managed warning, never
+an execution/lifecycle exception: the extension-owned sink retains safe event,
+primary destination/operation and primary/fallback class/code context, reports
+via Pi UI notices when available and the next public tool result. A failed
+notice remains visible in that result warning, without recursive logging.
+The per-return `details.diagnosticWarning` is attached to cloned metadata, not
+cached operation/ticket outcomes; all three tools render it collapsed/expanded
+and on history replay without a live store. After repair, replaying an operation
+must not carry its previous return's warning.
+Cancellation, quiescence, admission release, cleanup, surface selection and
+telemetry/recovery remain noninterfering even with no writable destination.
+Standalone dormant supervisors include warnings in their exit results without
+changing worker classification. Secure file routing is Linux-only until foreign
+filesystem behavior is verified; missing getuid/no-follow/directory capabilities
+and non-Linux attached streams produce safe unsupported warnings, not terminal
+fallback or dispatch failure. Headless stderr works independently of this limit.
+Records are bounded structured events
+with safe operational ids/paths/counts and allowlisted error class/code, not
+raw error messages/stacks or request/profile/provider content. Allowlisted
+operational codes survive bounded Error.cause traversal without invoking error
+accessors. Caller-visible
+tool errors, task lifecycle, models, and settings remain unchanged. Neither
+log rotation nor automatic deletion is introduced; operators can remove old
+process logs. No global console interception or diagnostic config knobs.
+Whole directory components `delegate-diagnostics` and
+`pi-delegate-diagnostics-<numeric uid>-<numeric pid>` are reserved runtime
+namespaces anywhere under source, independent of engine agentDir and current
+environment. Scratch copies, all private Git snapshots (including tracked seeds),
+and drift/attribution omit them and existing symlink aliases; actual destinations
+are excluded even before creation. This covers retained fallback trees from other
+processes. Ordinary similarly named source (`delegate-diagnostics.md`,
+`pi-delegate-diagnostics-guide`) remains included. Existing historical Git objects
+are not rewritten or scrubbed.
+
 ## Prompt size cap (#121)
 
 BREAKING: each task `prompt` and the shared `brief` longer than 32,768

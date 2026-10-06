@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -88,6 +89,7 @@ function errorCode(error: unknown): unknown {
  * collisions retry.
  */
 export function spillToTempFile(
+  diagnostics: DiagnosticSink,
   output: string,
   label: string,
 ): string | null {
@@ -116,9 +118,7 @@ export function spillToTempFile(
         try {
           fs.rmSync(lastPath, { force: true });
         } catch (cleanupError) {
-          console.warn(
-            `[delegate] spill partial-file cleanup failed (${lastPath}): ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-          );
+          diagnostics.log("warn", "spill partial-file cleanup failed", { path: lastPath }, cleanupError);
         }
       }
       if (errorCode(error) === "EEXIST") continue;
@@ -126,9 +126,7 @@ export function spillToTempFile(
     }
   }
 
-  console.warn(
-    `[delegate] spill write failed (${lastPath}): ${lastError instanceof Error ? lastError.message : String(lastError)}`,
-  );
+  diagnostics.log("warn", "spill write failed", { path: lastPath }, lastError);
   return null;
 }
 
@@ -141,6 +139,7 @@ export function spillToTempFile(
  *   - over threshold + write fail → output unchanged (degrade), warn-logged
  */
 export function renderOutputForLLM(
+  diagnostics: DiagnosticSink,
   output: string,
   label: string,
   bounds: OutputBounds,
@@ -154,7 +153,7 @@ export function renderOutputForLLM(
   const decision = decideSpill(output, bounds);
   if (!decision.spill) return output;
 
-  const filePath = spillToTempFile(output, label);
+  const filePath = spillToTempFile(diagnostics, output, label);
   // Lossless degrade: write failed → return full output, never hard-truncate.
   if (!filePath) return output;
 

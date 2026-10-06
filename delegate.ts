@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./src/diagnostics.ts";
 import {
   Type,
   type Static,
@@ -10,6 +11,7 @@ import {
   defineTool,
   type AgentToolResult,
   type ExtensionAPI,
+  type ToolDefinition,
   type ExtensionContext,
   type NormalizedBuildSystemPromptOptions,
 } from "@earendil-works/pi-coding-agent";
@@ -1388,6 +1390,32 @@ function customProfileSection(ctx: ExtensionContext): string {
 }
 
 export default function delegateExtension(api: ExtensionAPI): void {
+  const diagnostics = new DiagnosticSink();
+  const diagnostic = diagnostics.log;
+  const captureDiagnosticContext = (ctx: ExtensionContext): void => {
+    diagnostics.setNotice(ctx.hasUI ? (text) => ctx.ui.notify(text, "warning") : undefined);
+  };
+  // A failed notice is retained by the sink, not sent back to the dead logger.
+  const managedTool = <Schema extends TSchema, Details, State>(
+    tool: ToolDefinition<Schema, Details, State>,
+  ): ToolDefinition<Schema, Details, State> => {
+    const execute = tool.execute;
+    return {
+      ...tool,
+      execute: async (...args: Parameters<typeof execute>) => {
+        captureDiagnosticContext(args[4]);
+        const result = await execute(...args);
+        const warning = diagnostics.takeWarning();
+        // A per-return annotation, never a mutation of cached operations or
+        // ticket outcomes. Recorded metadata is what human/replay views render.
+        return warning ? {
+          ...result,
+          content: [...result.content, { type: "text" as const, text: warning }],
+          details: { ...result.details, diagnosticWarning: warning },
+        } : result;
+      },
+    };
+  };
   let surfaceError: Error | undefined;
   // Host-compat probes (issue #9): exercise the reaches into Pi internals
   // that dispatch depends on — the private model-runtime handle and the
@@ -1400,14 +1428,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // definitive check stays at dispatch, which fails with the same cause and
   // the same actionable message as before the probe existed.
   api.on("session_start", (_event, ctx) => {
+    captureDiagnosticContext(ctx);
     const probe = (reach: string, run: () => void): void => {
       try {
         run();
       } catch (error) {
-        console.error(
-          `[delegate] session-start probe failed (${reach}): ${error instanceof Error ? error.message : String(error)}. ` +
-            `The first delegate dispatch will fail with this cause; every other tool is unaffected.`,
-        );
+        diagnostic("error", "session-start probe failed", { reach }, error);
       }
     };
     probe("parent model runtime", () => parentModelRuntime(ctx));
@@ -1416,10 +1442,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
       const surface = loadDelegateSurface(resolveAgentDir(ctx).dir);
       surfaceError = undefined;
       registerTools(surface);
-      console.error(`[delegate] surface selected: ${surface} (fixed until /reload).`);
+      diagnostic("info", "surface selected (fixed until /reload)", { surface });
     } catch (error) {
       surfaceError = error instanceof Error ? error : new Error(String(error));
-      console.error(`[delegate] surface selection failed: ${surfaceError.message}. Fix delegate.json and /reload.`);
+      diagnostic("error", "surface selection failed; fix delegate.json and /reload", {}, surfaceError);
     }
   });
 
@@ -1429,7 +1455,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // per-task rows from the same sink the coordinator feeds.
   const questionContexts = new Map<string, ExtensionContext>();
   const activity = createActivityStore();
-  const tickets = new TicketStore(() => {
+  const tickets = new TicketStore(diagnostics, () => {
     visibility.sync();
     for (const id of questionContexts.keys()) {
       if (tickets.get(id)?.status !== "running") questionContexts.delete(id);
@@ -1461,18 +1487,18 @@ export default function delegateExtension(api: ExtensionAPI): void {
         ctx.ui.notify(`Worker "${ticket.id}#${question.taskId}" asks a question; poll and answer it with delegate_ticket on this branch.`, "info");
       }
     } catch (error) {
-      console.error(`[delegate] notifying question ${ticket.id}/${question.id} failed (poll it with delegate_ticket): ${error instanceof Error ? error.message : String(error)}`);
+      diagnostic("error", "notifying question failed (poll it with delegate_ticket)", { ticketId: ticket.id, questionId: question.id }, error);
     }
   }, activity,
   // #57: pooled sessions are declared below; the lookup defers until a
   // steer/interrupt receipt is built, so the binding is safe.
   (sessionId) => sessions.transcriptFileOf(sessionId));
-  const visibility = new VisibilitySignals(() => tickets.list());
+  const visibility = new VisibilitySignals(diagnostics, () => tickets.list());
   const admission = new AdmissionController();
-  const sessions = new SessionPool();
-  const coordinator = new DispatchCoordinator(tickets, activity);
-  const telemetry = new TelemetryStore();
-  const operations = new OperationStore<DelegateResult>();
+  const sessions = new SessionPool(diagnostics);
+  const coordinator = new DispatchCoordinator(diagnostics, tickets, activity);
+  const telemetry = new TelemetryStore(diagnostics);
+  const operations = new OperationStore<DelegateResult>(diagnostics);
   let callSeq = 0;
   // Owned by this closure: one fallback warning per extension instance, not
   // per call (see resolveAgentDir for why the fallback exists at all).
@@ -1511,9 +1537,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     } catch (error) {
       // The event is a best-effort wake (#60): a stale ctx after session
       // replacement or a bus-level fault must never unsettle a task.
-      console.error(
-        `[delegate] ${USAGE_EVENT_NAME} emit failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      diagnostic("error", "usage emit failed", {}, error);
     }
   };
   /** One settled task's usage payload: the provider/model that burned it. */
@@ -1576,7 +1600,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
    * repository root still see each other; parent mutations flag every
    * open window via the tool-event hooks below.
    */
-  const attributionWindows = new AttributionWindows();
+  const attributionWindows = new AttributionWindows(diagnostics);
 
   /**
    * "Same leaf" means same branch: the parent's own turn appends entries
@@ -1656,9 +1680,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     if (batch.length === 0) return;
     if (shuttingDown) {
       for (const { ticket } of batch) {
-        console.error(
-          `[delegate] delivery for ticket ${ticket.id} suppressed during shutdown (result remains pollable)`,
-        );
+        diagnostic("error", "delivery suppressed during shutdown (result remains pollable)", { ticketId: ticket.id });
       }
       return;
     }
@@ -1671,9 +1693,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       if (consumed === undefined || tickets.view(ticket) !== consumed.view) {
         return true;
       }
-      console.error(
-        `[delegate] delivery for ticket ${ticket.id} skipped: result already returned by ${consumed.by}`,
-      );
+      diagnostic("info", "delivery skipped: result already returned", { ticketId: ticket.id, by: consumed.by });
       return false;
     });
     const wake: QueuedDelivery[] = [];
@@ -1689,9 +1709,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         // reaching here means the session is gone outright. Delivering a
         // computed-wrong or dead message is worse than none: the settled
         // result stays pollable (and journal-recoverable) either way.
-        console.error(
-          `[delegate] delivery for ticket ${queued.ticket.id} skipped: the dispatch context is no longer active (result remains pollable)`,
-        );
+        diagnostic("error", "delivery skipped: dispatch context no longer active (result remains pollable)", { ticketId: queued.ticket.id });
       }
     }
     if (wake.length === 0 && moved.length === 0) return;
@@ -1706,9 +1724,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
       group: readonly QueuedDelivery[],
       error: unknown,
     ): void => {
-      console.error(
-        `[delegate] delivering ticket(s) ${ids(group)} failed (results remain pollable): ${error instanceof Error ? error.message : String(error)}`,
-      );
+      diagnostic("error", "delivering tickets failed (results remain pollable)", {
+        ticketId: group.map(({ ticket }) => ticket.id).join(", "), count: group.length,
+      }, error);
       try {
         group[0]!.ctx.ui.notify(
           `Delegate ticket(s) ${ids(group)} settled but their results could not be delivered; poll them for the results.`,
@@ -1763,9 +1781,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
    */
   const enqueueDelivery = (ticket: Ticket, ctx: ExtensionContext): void => {
     if (shuttingDown) {
-      console.error(
-        `[delegate] delivery for ticket ${ticket.id} suppressed during shutdown (result remains pollable)`,
-      );
+      diagnostic("error", "delivery suppressed during shutdown (result remains pollable)", { ticketId: ticket.id });
       return;
     }
     if (enqueuedDeliveries.has(ticket.id)) return;
@@ -1797,9 +1813,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     warnForcedInheritanceSkip(): void {
       if (warnedForcedPrompt) return;
       warnedForcedPrompt = true;
-      console.warn(
-        "[delegate] The parent's system prompt was force-replaced by an extension; subagents cannot inherit it safely and run on the stock base prompt instead.",
-      );
+      diagnostic("warn", "The parent system prompt was force-replaced; subagents cannot inherit it safely and run on the stock base prompt instead");
     },
   };
 
@@ -1867,9 +1881,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         parentCwd: ctx.cwd,
       });
     } catch (recordError) {
-      console.error(
-        `[delegate] misfire telemetry failed (the dispatch rejection stands): ${recordError instanceof Error ? recordError.message : String(recordError)}`,
-      );
+      diagnostic("error", "misfire telemetry failed (dispatch rejection stands)", {}, recordError);
     }
   };
 
@@ -1880,7 +1892,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
     workspace: "shared" | "scratch" | "isolated" | undefined;
     async: boolean;
   }>();
-  api.on("tool_execution_start", (event) => {
+  api.on("tool_execution_start", (event, ctx) => {
+    captureDiagnosticContext(ctx);
     // Parent mutating-tool events flag every open evidence window —
     // content-free: the fact alone is recorded, never the arguments.
     if (PARENT_MUTATING_TOOLS.has(event.toolName)) {
@@ -1930,7 +1943,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       noteMisfire(ctx, agentDir, telemetryConfigHint(agentDir), "validation",
         new Error(message), metadata.tasks, metadata.workspace, metadata.async);
     } catch (error) {
-      console.error(`[delegate] preflight misfire telemetry failed: ${error instanceof Error ? error.message : String(error)}`);
+      diagnostic("error", "preflight misfire telemetry failed", {}, error);
     }
   });
 
@@ -2040,11 +2053,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
       const agentDirResolution = resolveAgentDir(ctx);
       if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
         warnedAgentDirFallback = true;
-        console.warn(
-          `[delegate] Falling back to '${agentDirResolution.dir}' as the agent directory: delegate.json will be read from there, and delegate-sessions/, delegate-scratch/, delegate-isolated/ may be created under it. Set DELEGATE_AGENT_DIR to choose an agent directory explicitly. This warning appears once.`,
-        );
+        diagnostic("warn", "Falling back to agent directory; config and workspace trees use this path. Set DELEGATE_AGENT_DIR explicitly. Diagnostics destination is independent", { path: agentDirResolution.dir });
       }
       const env = hostEnvironment(
+        diagnostics,
         ctx,
         agentDirResolution.dir,
         () => api.getActiveTools(),
@@ -2052,6 +2064,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       );
       const catalog = discoverProfiles(ctx.cwd, agentDirResolution.dir, {
         warnedPaths: warnedProfilePaths,
+        diagnostics,
       });
       // Misfire phases (SPEC v3 "Observability"): config-load failures
       // record under "config" (telemetry status salvaged from the raw
@@ -2141,6 +2154,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         { async: ticket !== undefined, startedAt: Date.now(), tasks },
       );
       plan = await prepareWorkspaces(
+        diagnostics,
         tasks,
         env.agentDir,
         dispatchSignal,
@@ -2193,9 +2207,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               try {
                 options.onTaskSettled(task, outcome);
               } catch (error) {
-                console.error(
-                  `[delegate] settle observer failed for task ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
-                );
+                diagnostic("error", "settle observer failed", { taskId: task.id }, error);
               }
             }
           },
@@ -2259,10 +2271,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       try {
         await plan?.dispose();
       } catch (cleanupError) {
-        console.error(
-          `[delegate] workspace disposal after preparation failure failed (root cause preserved): ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-          cleanupError,
-        );
+        diagnostic("error", "workspace disposal after preparation failure failed (root cause preserved)", {}, cleanupError);
       }
       if (
         ticket !== undefined &&
@@ -2281,9 +2290,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         // wiring as any batch. Telemetry records nothing — the span above
         // is never finished for a failed preparation (SPEC.md
         // "Telemetry": failed preparation records nothing).
-        console.error(
-          `[delegate] async dispatch preparation for ticket ${cancelledTicket.id} aborted after cancellation; settling as cancelled: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        diagnostic("info", "async dispatch preparation aborted after cancellation; settling as cancelled", { ticketId: cancelledTicket.id }, error);
         return {
           notices: batch.notices,
           ticket: cancelledTicket,
@@ -2385,6 +2392,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
   // The live subagent browser: /subagents or Ctrl+Shift+B (TUI only).
   registerSubagentBrowser(api, {
+    diagnostics,
     store: activity,
     controls: {
       pauseTicket: (id) => {
@@ -2403,6 +2411,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
   });
 
   api.on("session_shutdown", async (event, ctx) => {
+    captureDiagnosticContext(ctx);
     shuttingDown = true;
     // A delivery flush armed before the latch must not fire after
     // teardown: cancel the timer and drain the queue with the same
@@ -2413,9 +2422,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       deliveryFlushTimer = undefined;
     }
     for (const { ticket } of deliveryQueue.splice(0)) {
-      console.error(
-        `[delegate] delivery for ticket ${ticket.id} suppressed during shutdown (result remains pollable)`,
-      );
+      diagnostic("error", "delivery suppressed during shutdown (result remains pollable)", { ticketId: ticket.id });
     }
     // v1's quit/reload traces: name the live work being killed before the
     // force-cancel makes it invisible (quit → stderr; reload → notify).
@@ -2455,9 +2462,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       } catch {
         // The UI may already be gone; the log line below still reports it.
       }
-      console.error(
-        `[delegate] shutdown waiting for ${pending.length} dispatch(es) to reach quiescence (${names})`,
-      );
+      diagnostic("info", "shutdown waiting for dispatches to reach quiescence", { count: pending.length });
       const budgetMs = shutdownQuiescenceBudgetMs();
       const quiesced = await Promise.race([
         Promise.all(pending.map(([promise]) => promise)).then(() => true),
@@ -2470,16 +2475,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
         // are never released without confirmed quiescence, so nothing is
         // unblocked by proceeding — the host simply stops waiting on work
         // that may never stop.
-        console.error(
-          `[delegate] shutdown quiescence budget (${budgetMs}ms) expired with ${pending.length} dispatch(es) still unconfirmed (${names}) — proceeding; their workers may still be mutating`,
-        );
+        diagnostic("error", "shutdown quiescence budget expired; workers may still be mutating", { budgetMs, count: pending.length });
         try {
           ctx.ui.notify(
             `Delegate: exiting with ${pending.length} dispatch(es) still stopping (${names}); they may still be mutating.`,
             "warning",
           );
         } catch {
-          // The UI may already be gone; the stderr line above carries it.
+          // The UI may already be gone; the diagnostic above carries it.
         }
       }
     }
@@ -2491,7 +2494,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     // views and receipts render hints valid for the active schema.
     tickets.setSurface(surface);
     api.registerTool(
-      defineTool<TUnsafe<DelegateArguments>, DelegateDetails>({
+      managedTool(defineTool<TUnsafe<DelegateArguments>, DelegateDetails>({
         name: "delegate",
         label: "Delegate to Subagents",
         description:
@@ -2610,9 +2613,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               ])
                 .then(() => enqueueDelivery(ticket, ctx))
                 .catch((error: unknown) => {
-                  console.error(
-                    `[delegate] delivering ticket ${ticket.id} crashed (result remains pollable): ${error instanceof Error ? error.message : String(error)}`,
-                  );
+                  diagnostic("error", "delivering ticket crashed (result remains pollable)", { ticketId: ticket.id }, error);
                 });
             };
 
@@ -2766,9 +2767,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 // and resolves it on this same rejection path; here the
                 // ticket just settles failed and the crash is reported.
                 tickets.settle(ticket, "failed");
-                console.error(
-                  `[delegate] background ticket ${ticket.id} crashed: ${error instanceof Error ? error.message : String(error)}`,
-                );
+                diagnostic("error", "background ticket crashed", { ticketId: ticket.id }, error);
               });
               armDelivery(ticket);
               return {
@@ -2832,7 +2831,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   type: "text" as const,
                   text:
                     (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
-                    formatDispatchResult(result.outcomes, tasks, outputBounds, surface, call.brief, result.tokenBudget),
+                    formatDispatchResult(diagnostics, result.outcomes, tasks, outputBounds, surface, call.brief, result.tokenBudget),
                 },
               ],
               details: ({
@@ -2936,11 +2935,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
             throw error;
           }
         },
-      }),
+      })),
     );
 
     api.registerTool(
-      defineTool<TUnsafe<TicketToolArguments>, DelegateDetails>({
+      managedTool(defineTool<TUnsafe<TicketToolArguments>, DelegateDetails>({
         name: "delegate_ticket",
         label: "Delegate Tickets",
         description:
@@ -3047,11 +3046,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
             isError: result.isError,
           };
         },
-      }),
+      })),
     );
 
     api.registerTool(
-      defineTool<typeof sessionSchema, DelegateDetails>({
+      managedTool(defineTool<typeof sessionSchema, DelegateDetails>({
         name: "delegate_session",
         label: "Delegate Sessions",
         // #64: the compact surface cannot create pooled sessions — its
@@ -3081,7 +3080,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             isError: result.isError,
           };
         },
-      }),
+      })),
     );
   }
 

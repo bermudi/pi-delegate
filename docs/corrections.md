@@ -24,16 +24,19 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 
 **Enforced on every change:**
 
-- `bun run typecheck` (strict `tsc --noEmit`); `bun test` — 518 tests in 49
-  files, all driven through the registered public tools, never production
-  internals.
+- `bun run typecheck` (strict `tsc --noEmit`); `bun test` — public-tool
+  regressions, with the documented dormant-worker protocol boundary waiver.
+- `boundary-isolation.test.ts`: production `any` and direct console/terminal
+  writes are rejected; private diagnostic routing owns the stderr exception.
+- Real-PTY diagnostic fault tests preserve answers, shutdown and startup;
+  public Git/copy tests prevent private records entering worker state.
 - `.github/workflows/ci.yml`: install + typecheck + test + build on every
   push/PR to main. Publishing separately gated (`publish-npm.yml`): tag must
   equal `package.json` version, OIDC, no local npm auth.
 
 **Prose only (soft):**
 
-- `AGENTS.md`: no `any`, zod at boundaries, issue-first sequencing, reviews
+- `AGENTS.md`: zod at boundaries, issue-first sequencing, reviews
   need fresh context, commit-often-no-push, no module-level mutable state,
   test-migration provenance rules.
 - Ladder candidate: "no module-level mutable state" is an architectural
@@ -66,6 +69,10 @@ runs both.
 
 ## Correction log
 
+- 2026-10-06 — attributed a stale native Working border to Pi merely because
+  Pi owns the border; fresh investigation found Delegate's post-wait stderr
+  logging reproduces the artifact. UI ownership is not causal attribution;
+  verify the triggering boundary (`docs/verification/ui-working-stderr-2026-10-06.md`).
 - 2026-10-04 — put this repo's practice notes in the personal wiki
   (`~/Documents/AgenticWiki`) instead of the repo itself; operational state
   belongs where the operators read (bermudi).
@@ -82,3 +89,7 @@ runs both.
   and a test's forced completion hid broken Escape handling. Normalize row
   whitespace at the frame boundary and require the real close callback
   (`tests/regression/browser-layout.test.ts`).
+- 2026-10-06 — #122 final review: diagnostic roots are not engine agentDir, and content-only warnings vanish in metadata renderers. Reserve runtime namespaces across copying/snapshots/evidence; clone per-return warning details and render them in live/replay views (public Git/PTY and registered-renderer regressions).
+- 2026-10-06 — #122 first review reproduced diagnostic throws stranding answered workers and bypassing shutdown. Logging is an owned, nonthrowing observation; real-PTY dual-destination failures enforce lifecycle independence.
+- 2026-10-06 — #122 namespace review reproduced ordinary POSIX backslash filenames being omitted. Use platform path separators; public copy and attribution regressions retain the exact filename.
+- 2026-10-06 — delegated edit scripts used bare `python3` despite the standing uv rule. Corrected the worker: Python edits also require `uv run`; Bun remains preferred here.

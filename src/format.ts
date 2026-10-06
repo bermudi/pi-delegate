@@ -1,3 +1,4 @@
+import type { DiagnosticSink } from "./diagnostics.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { relative } from "node:path";
 import type { DelegateSurface } from "./config.ts";
@@ -429,6 +430,7 @@ export function overlapLines(
  * partial output is bounded the same way.
  */
 export function formatDispatchResult(
+  diagnostics: DiagnosticSink,
   outcomes: readonly TaskOutcome[],
   tasks: Ticket["tasks"],
   bounds: OutputBounds,
@@ -470,7 +472,7 @@ export function formatDispatchResult(
       .join("\n");
     const files = evidence !== "" ? `\n${evidence}` : "";
     if (outcome.status === "ok") {
-      return `${head}${files}\n${renderOutputForLLM(outcome.output ?? "", label, bounds)}${quarantined}${integration}`;
+      return `${head}${files}\n${renderOutputForLLM(diagnostics, outcome.output ?? "", label, bounds)}${quarantined}${integration}`;
     }
     const detail = outcome.error ?? "no output";
     const session =
@@ -478,7 +480,7 @@ export function formatDispatchResult(
         ? `\n${recoveryLines(outcome.sessionFile, surface).join("\n")}`
         : "";
     const partial = outcome.output
-      ? `\n\nPartial output:\n${renderOutputForLLM(outcome.output, label, bounds)}`
+      ? `\n\nPartial output:\n${renderOutputForLLM(diagnostics, outcome.output, label, bounds)}`
       : "";
     return `${head}${files}\n${detail}${partial}${session}${quarantined}${integration}`;
   });

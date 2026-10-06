@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 /**
  * Operator-visibility safety signals (issue #24): the footer status line,
  * the once-per-ticket settle warning, session-replacement consent guards,
@@ -88,7 +89,7 @@ export class VisibilitySignals {
   private footerCtx: StatusCtx | undefined;
   private lastFooter: string | undefined;
 
-  constructor(readTickets: () => readonly SignalTicket[]) {
+  constructor(private readonly diagnostics: DiagnosticSink, readTickets: () => readonly SignalTicket[]) {
     this.readTickets = readTickets;
   }
 
@@ -239,14 +240,14 @@ export class VisibilitySignals {
     if (active.length === 0) return;
     const summary = activeSummary(active);
     if (reason === "quit") {
-      console.error(`[delegate] pi exited with ${summary} — aborted.`);
+      this.diagnostics.log("warn", "pi exited with active tickets; aborted", { count: active.length });
       return;
     }
     if (reason === "reload") {
       try {
         ctx?.ui.notify(`[delegate] reload aborted ${summary}`, "warning");
       } catch {
-        console.error(`[delegate] reload aborted ${summary}`);
+        this.diagnostics.log("warn", "reload aborted active tickets", { count: active.length });
       }
     }
   }

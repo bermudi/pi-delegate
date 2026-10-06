@@ -305,3 +305,46 @@ bun test
 
 The extension entry point is `delegate.ts`; `package.json` exposes it via
 `pi.extensions` for local development.
+
+## Operational diagnostics
+
+Delegate does not print diagnostics over Pi's terminal UI. When stderr is
+terminal-attached, error/warn/info records append to
+`<agentDir>/delegate-diagnostics/<pid>.jsonl` (directory 0700, file 0600).
+`agentDir` here means nonempty `DELEGATE_AGENT_DIR`, otherwise Pi's public
+`getAgentDir()` (`PI_CODING_AGENT_DIR` or `~/.pi/agent`), independent of any
+context/session/cwd fallback used for configuration. Print mode also logs to
+this file if stderr is still attached to the terminal. With redirected/piped
+stderr, all levels go to stderr instead; diagnostic stdout is never used.
+
+If the primary path is blocked or insecure, the private fallback is
+`<system-temp>/pi-delegate-diagnostics-<uid>-<pid>/<pid>.jsonl`; its records
+include safe primary-failure context. Existing symlinks, insecure permissions,
+foreign ownership, and linked log files are rejected, never silently repaired.
+If both secure destinations fail, work and cleanup still finish. Delegate
+reports a safe warning through Pi's managed notices and the next public tool
+result, including the primary path/operation and both failure codes. Failed
+notices remain visible in the result warning; logs never fall back to the
+attached terminal. Startup, recovery, telemetry and cancellation remain
+noninterfering even when neither destination is writable. The warning also rides
+cloned per-return `details.diagnosticWarning`, visible in collapsed/expanded tool
+views and history replay; it never contaminates cached operation/ticket results.
+
+Whole directory components `delegate-diagnostics` and
+`pi-delegate-diagnostics-<numeric uid>-<numeric pid>` are reserved runtime trees
+anywhere under source. Both worker-copy kinds, private Git snapshots, and
+source-drift/file-attribution evidence omit them and existing symlink aliases,
+regardless of the engine's agent directory. Retained fallback trees are covered;
+ordinary names such as `delegate-diagnostics.md` or
+`pi-delegate-diagnostics-guide` remain source. Historical Git objects already in
+your repository are not scrubbed.
+
+Secure file routing is currently Linux-only and requires user-id and no-follow
+filesystem capabilities. Other attached platforms report a managed unsupported
+warning rather than crashing; foreign filesystem behavior has not been verified.
+Headless/piped stderr remains available on every platform.
+
+Records are bounded JSON events with operational metadata and safe error
+class/code, not raw errors/stacks, provider payloads, or task/profile/question/
+answer/steering contents. Logs are append-only, with no rotation or automatic
+cleanup; remove old process logs when no longer needed.

@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 /**
  * Live subagent browser: the `/subagents` command and ctrl+shift+b shortcut
  * open a TUI overlay over the {@link ActivityStore} snapshot — a SelectList
@@ -78,6 +79,7 @@ class SubagentBrowser implements Component {
   private renderErrorReported = false;
 
   constructor(
+    private readonly diagnostics: DiagnosticSink,
     private readonly getRows: () => readonly ActivityRow[],
     private readonly theme: Pick<Theme, "fg">,
     private readonly isPaused: (ticketId: string) => boolean,
@@ -144,7 +146,7 @@ class SubagentBrowser implements Component {
     } catch (error) {
       // Fail soft: a broken render must never take down the host TUI.
       if (!this.renderErrorReported) {
-        console.error("[delegate] subagent browser render failed", error);
+        this.diagnostics.log("error", "subagent browser render failed", {}, error);
         this.renderErrorReported = true;
       }
       return [truncateToWidth("Subagents unavailable · Esc closes", Math.max(1, width))];
@@ -310,7 +312,7 @@ class SubagentBrowser implements Component {
  * outlive their overlay. */
 export function registerSubagentBrowser(
   api: ExtensionAPI,
-  deps: { store: ActivityStore; controls: BrowserControls },
+  deps: { diagnostics: DiagnosticSink; store: ActivityStore; controls: BrowserControls },
 ): void {
   let generation = 0;
   let open = false;
@@ -346,6 +348,7 @@ export function registerSubagentBrowser(
             if (!stale()) done();
           };
           return new SubagentBrowser(
+            deps.diagnostics,
             () => {
               try {
                 return deps.store.snapshot();
@@ -380,7 +383,7 @@ export function registerSubagentBrowser(
                 }
                 return "";
               } catch (error) {
-                console.error("[delegate] browser pause/resume failed", error);
+                deps.diagnostics.log("error", "browser pause/resume failed", {}, error);
                 return stripTerminalSequences(
                   `Pause/resume failed: ${error instanceof Error ? error.message : String(error)}`,
                 );
@@ -394,7 +397,7 @@ export function registerSubagentBrowser(
         },
       );
     } catch (error) {
-      console.error("[delegate] subagent browser failed", error);
+      deps.diagnostics.log("error", "subagent browser failed", {}, error);
       ctx.ui.notify(
         stripTerminalSequences(
           `Subagent browser failed: ${error instanceof Error ? error.message : String(error)}`,

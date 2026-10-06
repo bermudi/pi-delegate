@@ -7,13 +7,14 @@
  * Descendants share the worker's process group and die with it.
  *
  * Every spawn, cancellation phase, crash, and cleanup failure is logged
- * through `log` (stderr by default) with the worker's correlation id.
+ * through safe diagnostics with the worker's correlation id.
  * This is stage A: nothing in dispatch calls it, and per the
  * 2026-10-06 owner decision closing #43 as wontfix (in-process execution
  * is permanent; no incumbent harness isolates subagents as subprocesses)
  * nothing ever will unless #43 is reopened on observed evidence of a
  * child session freezing the parent event loop.
  */
+import { DiagnosticSink } from "../diagnostics.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   createFrameDecoder,
@@ -27,6 +28,8 @@ import {
 } from "./protocol.ts";
 
 export interface WorkerExit {
+  /** Diagnostic failure does not change the worker exit classification. */
+  readonly diagnosticWarning?: string;
   readonly class: WorkerExitClass;
   /** The process exit code, or null when a signal ended it. */
   readonly code: number | null;
@@ -38,6 +41,7 @@ export interface WorkerExit {
 }
 
 export interface WorkerSupervisorOptions {
+  readonly diagnostics?: DiagnosticSink;
   /** Executable plus entry arguments — the task spec is NOT in here. */
   readonly command: readonly string[];
   readonly spec: WorkerTaskSpec;
@@ -51,7 +55,7 @@ export interface WorkerSupervisorOptions {
   readonly startupTimeoutMs?: number;
   /** Non-result messages stream here as they arrive. */
   readonly onMessage?: (message: WorkerMessage) => void;
-  /** Correlated log sink; default prefixes `[delegate worker <id>]`. */
+  /** Optional sink for static lifecycle labels only; raw worker payloads never log. */
   readonly log?: (line: string) => void;
 }
 
@@ -70,8 +74,25 @@ export function spawnWorker(
   options: WorkerSupervisorOptions,
 ): WorkerSupervisor {
   const taskId = options.spec.taskId;
-  const log = (line: string): void => {
-    (options.log ?? ((text) => console.error(`[delegate worker ${taskId}] ${text}`)))(line);
+  const diagnostics = options.diagnostics ?? new DiagnosticSink();
+  const log = (
+    event: string,
+    context: Parameters<DiagnosticSink["log"]>[2] = {},
+    error?: unknown,
+  ): void => {
+    // Protocol parsing historically accepts arbitrary fatal class strings. Do not
+    // let that opaque payload into diagnostics or the optional legacy log sink.
+    const status = ["settled", "aborted", "crashed", "startup-failed", "protocol-failed", "killed"]
+      .includes(String(context.status)) ? context.status : undefined;
+    if (options.log) {
+      try { options.log(event + (status === undefined ? "" : ` class=${status}`)); }
+      catch (failure) { diagnostics.reportFailure(failure); }
+    } else {
+      const level = /fatal|protocol error|spawn failed|startup timeout|signal failed|write failed/.test(event)
+        || (event === "worker exited" && status !== "settled" && status !== "aborted") ? "error"
+        : /stderr|grace expired|SIGTERM ignored/.test(event) ? "warn" : "info";
+      diagnostics.log(level, event, { taskId, ...context, status }, error);
+    }
   };
   const graceMs = options.graceMs ?? 5000;
   const killGraceMs = options.killGraceMs ?? 2000;
@@ -126,7 +147,7 @@ export function spawnWorker(
           child.kill(signal);
         } catch (inner) {
           log(
-            `${signal} failed for group and worker: ${inner instanceof Error ? inner.message : String(inner)}`,
+            "worker group signal failed", { signal }, inner,
           );
         }
       }
@@ -138,12 +159,13 @@ export function spawnWorker(
     exited = true;
     clearTimers();
     log(
-      `exited class=${exit.class} code=${exit.code ?? "∅"} signal=${exit.signal ?? "∅"}`,
+      "worker exited", { status: exit.class, code: exit.code ?? undefined, signal: exit.signal ?? undefined },
     );
     child.stdin?.destroy();
     child.stdout?.destroy();
     child.stderr?.destroy();
-    resolveSettled(exit);
+    const diagnosticWarning = diagnostics.warning();
+    resolveSettled({ ...exit, ...(diagnosticWarning ? { diagnosticWarning } : {}) });
   };
 
   const classify = (code: number | null, signal: string | null): WorkerExit => {
@@ -176,7 +198,7 @@ export function spawnWorker(
         fatalMessage =
           error instanceof Error ? error.message : String(error);
         fatalClass = "protocol-failed";
-        log(`protocol error: ${fatalMessage}`);
+        log("worker protocol error");
         // A peer that cannot speak the protocol cannot be asked to stop;
         // kill its group so nothing orphans.
         groupSignal("SIGKILL");
@@ -188,13 +210,13 @@ export function spawnWorker(
           fatalMessage =
             `protocol version ${message.protocol} — expected ${WORKER_PROTOCOL_VERSION}`;
           fatalClass = "protocol-failed";
-          log(`protocol error: ${fatalMessage}`);
+          log("worker protocol error");
           groupSignal("SIGKILL");
           finish({ class: "protocol-failed", code: null, signal: null, fatal: fatalMessage });
           return;
         }
         sawHello = true;
-        log(`hello from pid ${message.pid}`);
+        log("worker hello", { pid: message.pid });
         return;
       }
       if (message.type === "result") {
@@ -203,13 +225,13 @@ export function spawnWorker(
       }
       if (message.type === "quiescent") {
         sawQuiescent = true;
-        log(`quiescent: ${message.reason}`);
+        log("worker quiescent");
         return;
       }
       if (message.type === "fatal") {
         fatalMessage = message.message;
         fatalClass = message.class;
-        log(`fatal (${message.class}): ${message.message}`);
+        log("worker fatal", { status: message.class });
         return;
       }
       options.onMessage?.(message);
@@ -217,7 +239,7 @@ export function spawnWorker(
     (error) => {
       fatalMessage = error.message;
       fatalClass = "protocol-failed";
-      log(`protocol error: ${error.message}`);
+      log("worker protocol error", {}, error);
       groupSignal("SIGKILL");
       finish({ class: "protocol-failed", code: null, signal: null, fatal: error.message });
     },
@@ -225,14 +247,11 @@ export function spawnWorker(
 
   child.stdout?.on("data", (chunk: Buffer) => decode(chunk));
   child.stderr?.on("data", (chunk: Buffer) => {
-    // Worker stderr is operational chatter: correlated, line-wise, never
-    // silently dropped.
-    for (const line of chunk.toString("utf8").split("\n")) {
-      if (line.trim() !== "") log(`stderr: ${line}`);
-    }
+    // Raw stderr can carry provider/prompt contents. Record occurrence only.
+    if (chunk.length > 0) log("worker stderr received (payload omitted)", { bytes: chunk.length });
   });
   child.on("error", (error) => {
-    log(`spawn error: ${error.message}`);
+    log("worker spawn failed", {}, error);
     finish({ class: "startup-failed", code: null, signal: null, fatal: error.message });
   });
   child.on("exit", (code, signal) => {
@@ -250,7 +269,7 @@ export function spawnWorker(
     try {
       child.stdin.write(encodeFrame(command));
     } catch (error) {
-      log(`control write failed: ${error instanceof Error ? error.message : String(error)}`);
+      log("worker control write failed", {}, error);
     }
   };
 
@@ -258,7 +277,7 @@ export function spawnWorker(
   // startup-failed — kill it rather than wait forever.
   after(startupTimeoutMs, () => {
     if (!sawHello && !exited) {
-      log(`startup timeout after ${startupTimeoutMs}ms — killing`);
+      log("worker startup timeout; killing", { budgetMs: startupTimeoutMs });
       killSent = true;
       groupSignal("SIGKILL");
       finish({ class: "startup-failed", code: null, signal: null });
@@ -271,7 +290,7 @@ export function spawnWorker(
     stopRequested = true;
     stopping = (async () => {
       send({ type: "abort", reason });
-      log(`abort requested (${reason}); grace ${graceMs}ms`);
+      log("worker abort requested", { budgetMs: graceMs });
       // Cooperative phase: quiescent or exit within the grace window
       // means gentle means sufficed.
       const gentle = await Promise.race([
@@ -281,7 +300,7 @@ export function spawnWorker(
         ),
       ]);
       if (gentle === "exited") return settled;
-      log(`grace expired — SIGTERM process group`);
+      log("worker grace expired; SIGTERM process group");
       termSent = true;
       groupSignal("SIGTERM");
       const terminated = await Promise.race([
@@ -291,7 +310,7 @@ export function spawnWorker(
         ),
       ]);
       if (terminated === "exited") return settled;
-      log(`SIGTERM ignored — SIGKILL process group`);
+      log("worker SIGTERM ignored; SIGKILL process group");
       killSent = true;
       groupSignal("SIGKILL");
       return settled;
@@ -301,7 +320,7 @@ export function spawnWorker(
 
   // Kick the spec over the control channel as soon as the pipe is ready.
   send({ type: "start", spec: options.spec });
-  log(`spawned pid ${child.pid ?? "?"}`);
+  log("worker spawned", { pid: child.pid });
 
   return {
     get pid() {

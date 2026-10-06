@@ -3,6 +3,55 @@
 The v1 suite is evidence, not source material. Tests are rewritten against the
 registered `delegate` tool; they do not import implementation helpers.
 
+## Terminal-safe diagnostic routing (#122)
+
+- **Regression:** raw Delegate console diagnostics moved Pi's shared terminal
+  cursor; the older duplicate pending tool header is a separate native Pi bug.
+- **Static coverage:** `tests/regression/boundary-isolation.test.ts` reads
+  production sources without importing implementation helpers and restricts
+  console/output-stream writes to the diagnostic router and framed worker
+  stdout respectively.
+- **Public boundary coverage:** `tests/regression/diagnostics-routing.test.ts`
+  uses real piped streams and Linux pseudo-terminals, registered dispatch/wait/
+  answer/steer tools, and faux child models. It verifies no attached-terminal
+  chatter, clean machine stdout, retained startup/profile/telemetry/delivery/
+  question/steer signals, body omission, private permissions/ownership, two
+  concurrent explicit agent directories, and fallback without modifying
+  blocked, symlinked, hard-linked, or insecure destinations. The blocked
+  telemetry destination remains fail-open. Both destinations blocked after a
+  worker question prove answer receipt/resumption, shutdown cancellation and
+  confirmed quiescence, and pooled-session admission release through public tools.
+  Temporary startup routing failure cannot poison dispatch; recovery and
+  operation-id replay prove warnings do not mutate cached results. Registered
+  callbacks for all three tools retain failed-notice warnings and safe routing
+  context collapsed/expanded, including content-free recorded details rendered
+  against another boundary's empty store. Repaired operation-id replay carries
+  no old warning in content, metadata, or rendering. Error-outcome and help/content
+  fallback views show exactly one warning; thrown preflight errors remain original
+  and leave the warning for the next returned result. Boundary fault injection
+  covers missing getuid/no-follow and a foreign-platform flag; this does not verify macOS or any foreign filesystem.
+  Bounded Error.cause codes survive while hostile error accessors never run.
+  PTY cases skip on hosts without Linux `script`; no helper-only diagnostic tests
+  are introduced here. Dormant worker supervision uses its existing stage-A real
+  process boundary (no public dispatch exists), checking logging failures never
+  escape stream handlers or change exit classification.
+- **Runtime exclusion regression:** `tests/regression/diagnostic-workspaces.test.ts`
+  uses synthetic source Git and real PTYs with default Pi diagnostics inside
+  source (fixture HOME, distinct inferred engine agentDir) and blocked-primary
+  fallback under source TMPDIR. Both isolated and scratch workers execute copy
+  probes; provider-visible tool responses, not summaries, prove records, tracked
+  runtime seeds, aliases, and retained other-process fallback trees are omitted,
+  while ordinary similarly named source remains. An all-object source Git blob
+  scan rejects newly introduced record sentinels, including unreachable snapshots.
+  A shim at the real Git process boundary creates another PID's fallback after
+  file discovery, immediately before private-index staging: it must never be
+  hashed or copied. Dirty/deleted tracked files, newline/glob/pathspec-looking
+  filenames, untracked files, and a synthetic Git clean filter remain correct.
+  Ordinary source-escape controls prove drift/attribution remain active while
+  diagnostic appends are absent; shared Git attribution has its own control.
+  Fixtures contain no genuine auth/private files; PTY cases skip without Linux
+  `script`. No production diagnostic internals are imported.
+
 ## Task deadline removal (#118, user-approved)
 
 The user said “cut deadline.” SPEC.md overrides inherited SPEC-V2 deadlines;

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { diagnosticRecords } from "../support/diagnostic-records.ts";
 import { fauxAssistantMessage, getCurrentTools } from "@earendil-works/pi-ai";
 import { createTestSession, type TestSession } from "@marcfargas/pi-test-harness";
 import { join, resolve } from "node:path";
@@ -59,7 +60,10 @@ describe("regression: parent tool mirroring", () => {
       expect(result.text).toContain("parent tool inventory unavailable");
       expect(result.text).toMatch(/explicit.*tools|restore.*parent/i);
       expect(subagents.state.callCount).toBe(0);
-      expect(logged.mock.calls.flat().join(" ")).toContain("parent tool inventory unavailable");
+      expect(diagnosticRecords(logged.mock.calls).some((record) =>
+        record.event === "Cannot resolve default-profile parent tools" &&
+        record.error?.class === "Error",
+      )).toBe(true);
       const roster = await callDelegateTicket(session, { action: "poll" });
       expect(roster.text).not.toContain("running");
     });

@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { join } from "node:path";
 import { DELEGATE_TREES } from "./fsx.ts";
 import { prepareIsolated, type IsolatedPlan } from "./isolated.ts";
@@ -79,6 +80,7 @@ interface PhasePlans {
 }
 
 export async function prepareWorkspaces(
+  diagnostics: DiagnosticSink,
   tasks: readonly ResolvedTask[],
   agentDir: string,
   signal?: AbortSignal,
@@ -97,6 +99,7 @@ export async function prepareWorkspaces(
   const prepareOne = async (phase: number): Promise<void> => {
     if (preparedPhases.has(phase)) return;
     const scratchPlan = await prepareScratch(
+      diagnostics,
       prepared,
       join(agentDir, DELEGATE_TREES.scratch),
       signal,
@@ -111,6 +114,7 @@ export async function prepareWorkspaces(
     let isolatedPlan: IsolatedPlan | undefined;
     try {
       isolatedPlan = await prepareIsolated(
+        diagnostics,
         prepared,
         join(agentDir, DELEGATE_TREES.isolated),
         signal,
@@ -126,10 +130,7 @@ export async function prepareWorkspaces(
       try {
         await scratchPlan?.dispose();
       } catch (cleanupError) {
-        console.error(
-          `[delegate] scratch disposal after isolated preparation failure failed (root cause preserved): ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-          cleanupError,
-        );
+        diagnostics.log("error", "scratch disposal after isolated preparation failure failed (root cause preserved)", {}, cleanupError);
       }
       throw error;
     }
@@ -196,10 +197,7 @@ export async function prepareWorkspaces(
         outcome.status === "rejected" ? [outcome.reason] : [],
       );
       for (const failure of failures) {
-        console.error(
-          `[delegate] workspace dispose failed: ${failure instanceof Error ? failure.message : String(failure)}`,
-          failure,
-        );
+        diagnostics.log("error", "workspace dispose failed", {}, failure);
       }
       if (failures.length > 0) throw failures[0];
     },

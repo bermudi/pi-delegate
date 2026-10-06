@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { existsSync, readdirSync, readFileSync, type Dirent } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -291,7 +292,7 @@ function sanitizeYamlScalars(yaml: string): string {
 function parseProfileFrontmatter(
   content: string,
   filePath: string,
-  warnPath: (filePath: string, message: string) => void,
+  warnPath: (filePath: string, message: string, error?: unknown) => void,
 ): { data: Record<string, string>; body: string } {
   // Windows-authored profiles arrive CRLF-ended; normalize before matching
   // so the fence, YAML sanitization, and body all follow the LF path.
@@ -317,7 +318,8 @@ function parseProfileFrontmatter(
   } catch (error) {
     warnPath(
       filePath,
-      `[delegate] malformed agent frontmatter (${filePath}): ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
+      "malformed agent frontmatter",
+      error,
     );
     return { data: {}, body };
   }
@@ -334,12 +336,13 @@ function parseProfileFrontmatter(
  */
 function loadProfileFile(
   filePath: string,
-  warnPath: (filePath: string, message: string) => void,
+  warnPath: (filePath: string, message: string, error?: unknown) => void,
 ): AgentProfile | null {
-  const warn = (problem: string): null => {
+  const warn = (problem: string, error?: unknown): null => {
     warnPath(
       filePath,
-      `[delegate] ignoring agent profile ${filePath}: ${problem}`,
+      `ignoring agent profile: ${problem}`,
+      error,
     );
     return null;
   };
@@ -351,7 +354,8 @@ function loadProfileFile(
     // profile — silence here would make a permissions problem look like a
     // missing profile.
     return warn(
-      `unreadable (${error instanceof Error ? error.message : String(error)}).`,
+      "unreadable",
+      error,
     );
   }
   const { data, body } = parseProfileFrontmatter(content, filePath, warnPath);
@@ -368,7 +372,7 @@ function loadProfileFile(
         .filter(Boolean),
     );
     if (typeof expanded === "string") {
-      return warn(`invalid tools (${expanded}).`);
+      return warn("invalid tools");
     }
     tools = expanded;
   }
@@ -377,7 +381,7 @@ function loadProfileFile(
     const level = data.thinking.trim();
     if (!THINKING_LEVELS.has(level)) {
       return warn(
-        `invalid thinking '${level}'. Known levels: ${[...THINKING_LEVELS].join(", ")}.`,
+        "invalid thinking level",
       );
     }
     thinking = level as ThinkingLevel;
@@ -388,7 +392,7 @@ function loadProfileFile(
     try {
       pin = parseModelEntry(data.model, `model`, filePath);
     } catch (error) {
-      return warn(error instanceof Error ? error.message : String(error));
+      return warn("invalid model pin", error);
     }
     modelPin = pin.ref;
     // An explicit `thinking` field outranks the model's :effort suffix.
@@ -406,12 +410,11 @@ function loadProfileFile(
 }
 
 /** Options for {@link discoverProfiles}. */
-export interface ProfileDiscoveryOptions {
+interface ProfileDiscoveryOptionsBase {
   /**
-   * Sink for profile warnings; defaults to `console.warn`. The manual's
+   * Sink for safe profile warnings; dispatch supplies its owned diagnostic sink. The manual's
    * profile listing passes a silent sink — asking for help must not scold.
    */
-  readonly warn?: (message: string) => void;
   /**
    * File paths already warned about, owned by the caller (the extension
    * closure holds one set per session): a broken profile file warns once
@@ -430,20 +433,24 @@ export interface ProfileDiscoveryOptions {
  * visited in name order — readdir order is filesystem-dependent, and the
  * winner between two same-named files must not be.
  */
+export type ProfileDiscoveryOptions = ProfileDiscoveryOptionsBase & (
+  { readonly diagnostics: DiagnosticSink; readonly warn?: never } | { readonly warn: (message: string) => void; readonly diagnostics?: never }
+);
+
 export function discoverProfiles(
   cwd: string,
   agentDir: string,
-  options: ProfileDiscoveryOptions = {},
+  options: ProfileDiscoveryOptions,
 ): ProfileCatalog {
-  const warn = options.warn ?? ((message: string) => console.warn(message));
   const warnedPaths = options.warnedPaths;
   /** Emit one warning per file path for the options' lifetime. */
-  const warnPath = (filePath: string, message: string): void => {
+  const warnPath = (filePath: string, message: string, error?: unknown): void => {
     if (warnedPaths !== undefined) {
       if (warnedPaths.has(filePath)) return;
       warnedPaths.add(filePath);
     }
-    warn(message);
+    if (options.warn) options.warn(`[delegate] ${message}: ${filePath}`);
+    else options.diagnostics.log("warn", message, { path: filePath }, error);
   };
   const profiles = new Map<string, AgentProfile>();
   for (const name of knownAgentNames()) {
@@ -475,7 +482,7 @@ export function discoverProfiles(
       if (getBuiltinProfile(profile.name) !== undefined) {
         warnPath(
           filePath,
-          `[delegate] ignoring agent profile ${filePath}: '${profile.name}' is a built-in agent and cannot be overridden.`,
+          "ignoring agent profile: built-in agent cannot be overridden",
         );
         continue;
       }
