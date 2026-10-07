@@ -232,6 +232,15 @@ background delivery/reliability → worker questions → automatic handoffs →
 restart recovery/live browser → later steering/team messages. This is planning
 order, not a claim of implemented or newly promised behavior.
 
+Post-ratification rulings that bound the sequencing (2026-10-06, owner):
+in-process worker execution is permanent — subprocess workers (#96) closed
+wontfix, restart reconnect/rematerialization (#44) declined; running work is
+lost by design across host death, and the "restart recovery" phase reduces
+to its record-level half (landed: #79, #107, #123, #124) plus the #48
+browser. Full record with rationale and revisit trigger:
+docs/decisions/0001-in-process-execution-permanent.md. Decisions of this
+weight get an ADR there at ruling time — not issue comments alone.
+
 ## Consulting v1
 
 V1 is evidence for behavior, never a design source. When consulting it:
