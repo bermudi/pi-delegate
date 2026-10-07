@@ -46,6 +46,14 @@ on the model-facing surface answers to this first:
 - Teach the delta at the boundary: every contract that differs from the
   incumbent default must be legible in the tool description — it is the
   only channel that reaches trained weights.
+- Enumerate-or-inherit, never free-text-name: any model-facing error
+  that rejects a named resource (agent, tool, config key) lists the
+  resolvable set. Weights know a months-stale catalog — on custom
+  setups a free-text pick is a guaranteed miss that fails two layers
+  late (verified 2026-10-08 against pi-subagent's `--provider/--model`
+  free-text surface: pi passes unknown ids through to the provider's
+  400). Current enumerations: dispatch unknown-agent, `delegate.json`
+  model-key validation, profile tool lists.
 - Watch for collisions: where a trained reflex hits our walls, prefer
   bending the surface over blaming the model.
 
