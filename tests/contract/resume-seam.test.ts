@@ -54,7 +54,7 @@ describe("resume over crash-shaped transcripts (issue #124)", () => {
    * for `read` and the host died before the result was recorded — plus,
    * in the "torn" variant, a final line cut mid-write.
    */
-  function craftTorn(cwd: string, trailing: "torn" | "clean"): Crafted {
+  function craftTorn(cwd: string, trailing: "torn" | "clean" | "nonl"): Crafted {
     const path = join(cwd, `torn-${trailing}.jsonl`);
     const danglingCallId = "call_124dangling0001";
     const lines = [
@@ -96,12 +96,18 @@ describe("resume over crash-shaped transcripts (issue #124)", () => {
     if (trailing === "torn") {
       // A write cut mid-line: valid JSON prefix, no newline terminator.
       text += `{"type":"message","id":"e3","parent`;
+    } else if (trailing === "nonl") {
+      // A complete valid entry whose write finished without the trailing
+      // newline — pins the loader's repair leg (append "\n" before the
+      // next append, so this entry parses and the continuation's first
+      // entry does not glue onto it).
+      text = `${lines.join("\n")}`;
     }
     writeFileSync(path, text, { flag: "wx" });
     return { path, danglingCallId };
   }
 
-  for (const variant of ["torn", "clean"] as const) {
+  for (const variant of ["torn", "clean", "nonl"] as const) {
     test(`${variant} transcript: resume loads, continues, never re-executes the orphaned call`, async () => {
       const session = await openDelegateBoundary(); // full surface: resumeFrom
       sessions.push(session);

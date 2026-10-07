@@ -39,7 +39,7 @@ describe("recovery resume hints (issue #123)", () => {
   interface SavedRow {
     status: string;
     owner?: { pid: number; bootId?: string; sessionId?: string };
-    tasks: ({ sessionFile?: string; transcriptStart?: number })[];
+    tasks: ({ sessionFile?: string; transcriptStart?: number; sessionId?: string })[];
     outcomes: ({ status?: string; error?: string; sessionFile?: string } | null)[];
     notices: string[];
   }
@@ -179,6 +179,42 @@ describe("recovery resume hints (issue #123)", () => {
       expect(poll.text).not.toContain("session: ");
       expect(poll.text).not.toContain("resumeFrom");
       expect(journalOf(first.cwd, ticket).outcomes[0]?.sessionFile).toBeUndefined();
+    } finally {
+      release();
+    }
+  });
+
+  test("recovered-record receipts append the resumeFrom continuation (review P2-1)", async () => {
+    const first = await openAt();
+    const provider = await installSubagentModel(first);
+    const { ticket, release } = await dispatchTwoTurn(first, provider);
+    try {
+      const claimed = journalOf(first.cwd, ticket).tasks[0]?.sessionFile;
+      expect(typeof claimed).toBe("string");
+      const dead = await deadPid();
+      rewriteJournal(first.cwd, ticket, (row) => {
+        row.owner = { ...row.owner!, pid: dead };
+        // A pooled sessionId on a recovered record must never yield the
+        // pooled-session continuation — the pool died with the host.
+        row.tasks[0]!.sessionId = "s-reviewp2";
+      });
+      const next = await openAt(first.cwd);
+
+      // Steer on the recovered record is not-applied, but the receipt
+      // now names the durable transcript — continuationFor's recovered
+      // branch (blanket "" removed by #123), pinned here.
+      const steer = await callDelegateTicket(next, {
+        action: "steer",
+        ticket,
+        message: "continue the work",
+      });
+      expect(steer.isError).toBe(false);
+      expect(steer.text).toContain("not-applied");
+      expect(steer.text).toContain("resumeFrom");
+      expect(steer.text).toContain(JSON.stringify(claimed!));
+      // The pooled-sessionId continuation stays dead for recovered
+      // records even when one is recorded on the task.
+      expect(steer.text).not.toContain("pooled session still holds");
     } finally {
       release();
     }

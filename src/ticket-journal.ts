@@ -95,7 +95,9 @@ const savedTicket = Type.Object({
     cwd: Type.Optional(Type.String()),
     // Optional (#123): the transcript a worker claimed before its run's
     // first turn, journaled at claim time so crash recovery can name it.
-    // Records written before recovery hints carry none and never hint.
+    // Records written before claim-time journaling carry no task-level
+    // pointer — their synthesized outcomes never hint (a settled outcome
+    // that already carried its own sessionFile keeps rendering it).
     sessionFile: Type.Optional(Type.String()),
     transcriptStart: Type.Optional(Type.Integer({ minimum: 0 })),
   }), { minItems: 1 }),
