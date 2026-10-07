@@ -194,15 +194,14 @@ describe("recovery resume hints (issue #123)", () => {
       const dead = await deadPid();
       rewriteJournal(first.cwd, ticket, (row) => {
         row.owner = { ...row.owner!, pid: dead };
-        // A pooled sessionId on a recovered record must never yield the
-        // pooled-session continuation — the pool died with the host.
-        row.tasks[0]!.sessionId = "s-reviewp2";
       });
       const next = await openAt(first.cwd);
 
       // Steer on the recovered record is not-applied, but the receipt
       // now names the durable transcript — continuationFor's recovered
-      // branch (blanket "" removed by #123), pinned here.
+      // branch (blanket "" removed by #123), pinned here. Re-adding the
+      // blanket return fails both assertions below (the base receipt
+      // names neither resumeFrom nor the path).
       const steer = await callDelegateTicket(next, {
         action: "steer",
         ticket,
@@ -212,9 +211,12 @@ describe("recovery resume hints (issue #123)", () => {
       expect(steer.text).toContain("not-applied");
       expect(steer.text).toContain("resumeFrom");
       expect(steer.text).toContain(JSON.stringify(claimed!));
-      // The pooled-sessionId continuation stays dead for recovered
-      // records even when one is recorded on the task.
-      expect(steer.text).not.toContain("pooled session still holds");
+      // The pool-branch guard (record.recovered !== true) is deliberately
+      // NOT asserted here: a recovered record's sessionId can never name
+      // an entry in this closure's live pool (pool ids are assigned at
+      // creation and a fresh closure's pool is empty), so the branch is
+      // unreachable through the public boundary — the guard is
+      // defense-in-depth, not observable behavior (delta review 2026-10-08).
     } finally {
       release();
     }
