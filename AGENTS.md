@@ -280,7 +280,9 @@ V1 is evidence for behavior, never a design source. When consulting it:
   not be weakened to make implementation easier.
 - Async tickets now save owner-only full outcomes under the agent directory;
   cold polling recovers results, but running snapshots become `interrupted`
-  (never resumed or delivered). `operationId` stays host-lifetime; do not
+  (never resumed or delivered — the recovered view names the transcript
+  journaled at claim time (#123) for a deliberate `resumeFrom`, it never
+  resumes automatically). `operationId` stays host-lifetime; do not
   mistake ticket recovery for exactly-once dispatch.
 - Pi's child `AgentSession` auto-retries retryable provider errors by default
   before Delegate sees them. Child session settings disable that in memory;

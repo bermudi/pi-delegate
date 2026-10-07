@@ -344,7 +344,12 @@ storage. On a new extension instance, poll, wait, and the roster expose saved
 tickets without starting children or replaying delivery. A ticket last recorded
 as running becomes terminal `interrupted`: its saved outcomes remain visible,
 but unfinished tasks have unknown effects and are never restarted by polling,
-waiting, or redispatching an `operationId`. A recovered terminal cancellation
+waiting, or redispatching an `operationId`. Since #123 the interrupted outcome
+carries the worker's transcript when it was journaled at claim time — recovery
+renders the `session:` line and the same `resumeFrom` retry recipe a failed
+outcome offers — but naming the file is a continuation affordance, never an
+automatic resume; records written before claim-time journaling carry no
+pointer and render unchanged. A recovered terminal cancellation
 with missing task outcomes or a recorded quarantined worker warns that tasks
 may still have had effects, including in the roster when every outcome is
 recorded; the terminal status alone does not prove their workers stopped. An

@@ -307,8 +307,8 @@ export interface Ticket {
   readonly totalTasks: number;
   /** Index-aligned per-task outcomes; entries appear as tasks finish. */
   readonly outcomes: readonly (TaskOutcome | undefined)[];
-  /** Labels, correlation ids, resume tags, alias/normalization notes — plus the task cwd, which relativizes attributed-file display (optional: records written before file attribution carry none). `sessionId` is journaled so a settled pooled task's continuation hint survives a restart (#57). */
-  readonly tasks: readonly (Pick<ResolvedTask, "id" | "agent" | "sessionId" | "resumeTag" | "aliasedFrom" | "normalizedFrom" | "description"> & { readonly cwd?: string })[];
+  /** Labels, correlation ids, resume tags, alias/normalization notes — plus the task cwd, which relativizes attributed-file display (optional: records written before file attribution carry none). `sessionId` is journaled so a settled pooled task's continuation hint survives a restart (#57). `sessionFile`/`transcriptStart` are journaled at claim time (#123): the transcript a worker claimed before its first turn, so crash recovery can name the durable file in the interrupted outcome. */
+  readonly tasks: readonly (Pick<ResolvedTask, "id" | "agent" | "sessionId" | "resumeTag" | "aliasedFrom" | "normalizedFrom" | "description"> & { readonly cwd?: string; readonly sessionFile?: string; readonly transcriptStart?: number })[];
   /** Unanswered worker questions (never persisted across host shutdown). */
   readonly questions: readonly WorkerQuestion[];
   /**

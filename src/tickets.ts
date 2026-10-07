@@ -528,15 +528,15 @@ export class TicketStore {
    * teaches `resumeFrom` (the same pointer failure views render); a task
    * with neither gets today's text unchanged. Under the compact surface
    * the `resumeFrom` pointer names the full-mode requirement first — the
-   * bare call would reject. Recovered records never
-   * hint — the pool and the run belong to another session lifetime.
+   * bare call would reject. A recovered record's pool never survives the
+   * restart, but a journaled transcript does (#123): the resumeFrom
+   * branch fires for a recovered outcome that carries a sessionFile.
    */
   private continuationFor(
     record: Ticket,
     callTaskId: string | undefined,
     resolvedIndex?: number,
   ): string {
-    if (record.recovered === true) return "";
     const index =
       resolvedIndex ??
       (callTaskId !== undefined
@@ -548,6 +548,7 @@ export class TicketStore {
     const task = record.tasks[index];
     if (task === undefined) return "";
     if (
+      record.recovered !== true &&
       task.sessionId !== undefined &&
       this.pooledTranscript?.(task.sessionId) !== undefined
     ) {
@@ -593,17 +594,28 @@ export class TicketStore {
     for (const item of saved) {
       const orphanedRunning =
         item.status === "running" && ownerIsDead(item.owner, bootId);
-      const outcomes = item.outcomes.map((outcome, index) =>
-        outcome ??
-        (orphanedRunning
-          ? {
-              index,
-              id: item.tasks[index]!.id,
-              status: "interrupted" as const,
-              retries: 0,
-              error: ORPHANED_OWNER_REASON,
-            }
-          : undefined));
+      const outcomes = item.outcomes.map((outcome, index) => {
+        if (outcome !== undefined && outcome !== null) return outcome;
+        if (!orphanedRunning) return undefined;
+        const claimed = item.tasks[index];
+        return {
+          index,
+          id: item.tasks[index]!.id,
+          status: "interrupted" as const,
+          retries: 0,
+          error: ORPHANED_OWNER_REASON,
+          // #123: the transcript claimed before the crash — carried into
+          // the outcome so the settled view's recovery lines and the
+          // continuation hints name the durable file. Rendering gates on
+          // resumability; records written before #123 carry none.
+          ...(claimed?.sessionFile !== undefined
+            ? { sessionFile: claimed.sessionFile }
+            : {}),
+          ...(claimed?.transcriptStart !== undefined
+            ? { transcriptStart: claimed.transcriptStart }
+            : {}),
+        };
+      });
       const recovered: Ticket = {
         id: item.id,
         status: orphanedRunning ? "interrupted" : item.status,
@@ -619,6 +631,8 @@ export class TicketStore {
           // Optional in the journal — records written before file
           // attribution have none; their paths render absolute.
           ...(task.cwd !== undefined ? { cwd: task.cwd } : {}),
+          ...(task.sessionFile !== undefined ? { sessionFile: task.sessionFile } : {}),
+          ...(task.transcriptStart !== undefined ? { transcriptStart: task.transcriptStart } : {}),
         })),
         totalTasks: item.tasks.length,
         outcomes,
@@ -877,6 +891,29 @@ export class TicketStore {
   noteTokenBudget(ticket: Ticket, report: TokenBudgetReport): void {
     const writable = this.entry(ticket).record as Writable<Ticket>;
     writable.tokenBudget = report;
+    this.save(writable);
+    this.changed();
+  }
+
+  /**
+   * #123: the transcript a worker claimed before its run's first turn —
+   * journaled at claim time (not settlement) so an unclean restart's
+   * recovery can name the durable file in the interrupted outcome.
+   * Sole-writer cast, same discipline as recordOutcome; retries
+   * overwrite because the newest claim is the live worker's.
+   */
+  noteTaskTranscript(
+    ticket: Ticket,
+    index: number,
+    file: string,
+    start: number,
+  ): void {
+    const writable = this.entry(ticket).record as Writable<Ticket>;
+    const tasks = writable.tasks as Writable<Ticket["tasks"][number]>[];
+    const task = tasks[index];
+    if (task === undefined) return;
+    task.sessionFile = file;
+    task.transcriptStart = start;
     this.save(writable);
     this.changed();
   }

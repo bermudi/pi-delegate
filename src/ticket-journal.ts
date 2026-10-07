@@ -93,6 +93,11 @@ const savedTicket = Type.Object({
     // Optional: records written before file attribution have no cwd —
     // their attributed paths render absolute instead of relative.
     cwd: Type.Optional(Type.String()),
+    // Optional (#123): the transcript a worker claimed before its run's
+    // first turn, journaled at claim time so crash recovery can name it.
+    // Records written before recovery hints carry none and never hint.
+    sessionFile: Type.Optional(Type.String()),
+    transcriptStart: Type.Optional(Type.Integer({ minimum: 0 })),
   }), { minItems: 1 }),
   outcomes: Type.Array(Type.Union([outcome, Type.Null()])),
   // The shared batch brief (SPEC v3 "Batch brief"); optional — records
@@ -177,7 +182,7 @@ export class TicketJournal {
       version: 1,
       id: ticket.id,
       status: ticket.status,
-      tasks: ticket.tasks.map(({ id, agent, sessionId, resumeTag, aliasedFrom, description, normalizedFrom, cwd }) => ({ id, agent, sessionId, resumeTag, aliasedFrom, description, normalizedFrom, cwd })),
+      tasks: ticket.tasks.map(({ id, agent, sessionId, resumeTag, aliasedFrom, description, normalizedFrom, cwd, sessionFile, transcriptStart }) => ({ id, agent, sessionId, resumeTag, aliasedFrom, description, normalizedFrom, cwd, sessionFile, transcriptStart })),
       outcomes: ticket.outcomes.map((item) => item ?? null),
       brief: ticket.brief,
       tokenBudget: ticket.tokenBudget,

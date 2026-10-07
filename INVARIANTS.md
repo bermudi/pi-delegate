@@ -104,7 +104,11 @@ use any design that makes these properties true and testable.
   outcomes MUST remain pollable on a new extension instance using the same
   agent directory. A formerly running ticket MUST be reported as interrupted
   after an unclean restart, never resumed, delivered, or mistaken for an
-  ordinary failure. Completed outcomes remain visible; unfinished effects
+  ordinary failure. A worker's claimed transcript MUST be journaled before
+  its first turn (#123) so the interrupted outcome can name the durable
+  file for a deliberate `resumeFrom` — an affordance, never an automatic
+  resume; records without the pointer render without it. Completed
+  outcomes remain visible; unfinished effects
   are unknown. A recovered cancelled ticket with an unconfirmed worker MUST
   warn in the roster even if every task has an outcome. Persistence failures
   MUST be visible, not swallowed.

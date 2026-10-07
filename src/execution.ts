@@ -60,6 +60,13 @@ export interface RunControls {
    */
   readonly holdTranscript?: (path: string) => void;
   /**
+   * #123: report the claimed transcript (file + byte offset before this
+   * run's first turn) so ticket recovery can journal it at claim time —
+   * the crash window is worker start, not settlement. Retries fire it
+   * again for their newer claim; the last claim wins.
+   */
+  readonly noteTranscript?: (path: string, start: number) => void;
+  /**
    * Steer messages parked while no run was live (SPEC v3 "Steering").
    * Drained just before prompt(): each message is queued on the child's
    * steering queue, where the agent loop merges it at run start — so a
@@ -755,6 +762,14 @@ export class TaskExecution implements ExecutionHandle {
         typeof spanFile === "string"
           ? { file: spanFile, start: transcriptSize(spanFile) }
           : undefined;
+      // #123: journal the claim before the first turn can write — a
+      // crash between claim and settlement must still name this file.
+      if (this.transcriptSpan !== undefined) {
+        this.controls.noteTranscript?.(
+          this.transcriptSpan.file,
+          this.transcriptSpan.start,
+        );
+      }
       // A cancellation that landed during session creation found no session
       // to abort; honor it now — the session must never be prompted. A
       // checked-out pooled session is quiescent by definition: it is simply

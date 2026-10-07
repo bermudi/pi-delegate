@@ -1228,6 +1228,10 @@ pause/resume/tail, wait-any tickets, timeoutMs, steerId, offset and waitMs.
   from \`cancel\`, which tears the whole ticket down. \`taskId\`
   defaults to the only still-running task; interrupting a settled,
   already-interrupted, or not-yet-running task receipts \`not-applied\`.
+- A recovered \`interrupted\` task (restart recovery) names its durable
+  transcript in the settled view — \`session:\` line plus a retry recipe.
+  Re-dispatch with \`resumeFrom\` when a continuation is deliberately
+  wanted; recovery itself never resumes work.
 - \`{ action: "tail", ticket, taskId?, offset?, waitMs? }\` — read one
   task's clean assistant output incrementally. Returns \`{text,
   nextOffset, done, taskState}\` in details: \`text\` is the output-so-far

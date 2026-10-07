@@ -185,7 +185,10 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   changes for budgetless calls.
 - Landed since: steering receipts (#37), `delegate_ticket interrupt`
   (#42 — abort one task's in-flight turn; it settles `interrupted`,
-  resumable, distinct from `cancel`'s ticket teardown).
+  resumable, distinct from `cancel`'s ticket teardown), recovery resume
+  hints (#123 — the worker's claimed transcript is journaled before its
+  first turn; a recovered `interrupted` outcome names the durable file
+  with the same `resumeFrom` recipe a failed outcome renders).
 - **Changed — shutdown quiescence is bounded (#52, 0.3.2).** Session
   shutdown waits for live dispatches' confirmed quiescence up to ~30s
   (`DELEGATE_SHUTDOWN_QUIESCENCE_MS`), then proceeds, logging the
@@ -255,7 +258,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   as specified in `SPEC.md` "Background delivery".
 - Saved async ticket results are pollable on a cold extension instance; an
   unfinished snapshot is `interrupted`, not resumed or automatically delivered.
-  Recovered cancelled tickets warn in the roster when a recorded worker's
+  Since #123 the interrupted outcome carries the transcript journaled at claim
+  time — recovery names the file for a deliberate `resumeFrom`, never an
+  automatic resume. Recovered cancelled tickets warn in the roster when a recorded worker's
   termination was unconfirmed, even if all task outcomes were saved.
   Subagent Pi auto-retry is disabled in favor of Delegate's bounded,
   side-effect-aware retry, including provider reset-window handling. Explicit
@@ -623,7 +628,11 @@ worked around with a host modification.
   survive `/reload` and session replacement under the same agent directory;
   orderly shutdown cancels active tickets. An unclean exit leaves a running
   ticket `interrupted` with any saved outcomes, never a resumed worker.
-  Undelivered results are not automatically delivered on restart. OperationId
+  Since #123 the interrupted outcome names the transcript journaled at claim
+  time (the `session:` line and `resumeFrom` retry recipe) — a continuation
+  affordance for a deliberate re-dispatch, not a resume; records written
+  before claim-time journaling render unchanged. Undelivered results are not
+  automatically delivered on restart. OperationId
   records, worker sessions, write reservations, and unfinished side effects
   are not restored; this is not an exactly-once or replay guarantee.
 - **Current-leaf append.** A result that cannot wake its origin leaf is

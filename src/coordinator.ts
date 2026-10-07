@@ -859,6 +859,13 @@ export class DispatchCoordinator {
               stallTimeoutMs: options.config.stallTimeoutMs,
               maxIdleSessions: options.config.sessions.maxIdle,
               holdTranscript: (path) => grant.holdTranscript(task.index, path),
+              // #123: claim-time journaling. Sync runs carry no ticket
+              // and nothing to journal — the callback stays undefined.
+              noteTranscript:
+                ticket !== undefined
+                  ? (path: string, start: number) =>
+                      this.tickets.noteTaskTranscript(ticket, task.index, path, start)
+                  : undefined,
               isAborted: () => signal.aborted,
               observe:
                 this.activity !== undefined &&

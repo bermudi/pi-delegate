@@ -1364,6 +1364,33 @@ the never-resume invariant is unchanged.
   session's own ticket lists, and explicit-id poll still reads a hidden
   ticket (settled records stay pollable per SPEC axiom 2).
 
+### Recovery resume hints (v3, #123)
+
+New v3 contract — no v1/v2 analog (recovery previously dropped the
+transcript pointer entirely: `sessionFile` was journaled only on settled
+outcomes, so an interrupted-at-recovery task had no continuation
+affordance while a live interrupt did). The engine now journals each
+worker's claimed `sessionFile`/`transcriptStart` at claim time — before
+the first turn writes — and recovery copies them into the interrupted
+outcome; the settled view's `session:` line and `resumeFrom` retry
+recipe render through the existing `recoveryLines` machinery. Origin:
+pi-subagent comparison + verified pi session-load tolerance, 2026-10-08.
+
+- **Contract:** mid-run (before any settlement) the journal row already
+  carries `tasks[i].sessionFile` and `transcriptStart`, and the claimed
+  file exists with the persisted first turn. A dead-owner recovery
+  settles the outcome `interrupted` carrying the pointer — the poll view
+  renders `session: <path>` and the `resumeFrom` recipe, the settled
+  journal round-trips `outcomes[i].sessionFile`, and a third startup
+  renders the same view. Pre-#123 records (pointer stripped) recover
+  unchanged: no `session:` line, no `resumeFrom` mention — never-auto-
+  resume is untouched; naming the file is an affordance, not a resume.
+- **Covered now:** `tests/contract/recovery-hints.test.ts` — claim-time
+  journaling mid-second-turn (first turn persisted, outcome still null),
+  the recovered-view recipe + journal round-trip + third-startup
+  stability, and the stripped-pointer backward-compat path. Cold starts
+  follow `owner-liveness.test.ts`'s dead-pid orphaning pattern.
+
 ### Wait-any (v3, #58)
 
 Extends "Event-sensitive ticket waits" — SPEC.md "Waiting is explicit

@@ -105,7 +105,10 @@ knobs, or persistent file handles are introduced.
 
 2. **Records survive supervisors.** The supervision of record outlives
    any session: settled outcomes are durable and cold-recoverable,
-   running snapshots report `interrupted` honestly, delivery is
+   running snapshots report `interrupted` honestly — and name the
+   worker's journaled transcript when one was claimed before the crash
+   (#123), so the same `resumeFrom` continuation a live interrupt
+   offers is available to a deliberate re-dispatch — delivery is
    at-most-once — a suppressed or failed wake-up never undoes settlement,
    and settled results remain pollable. The parent agent is a fallible
    client above a dispatch service, not the ledger.
