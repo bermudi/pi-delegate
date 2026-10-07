@@ -1391,6 +1391,30 @@ pi-subagent comparison + verified pi session-load tolerance, 2026-10-08.
   stability, and the stripped-pointer backward-compat path. Cold starts
   follow `owner-liveness.test.ts`'s dead-pid orphaning pattern.
 
+### Resume seam pinning (v3, #124)
+
+New v3 contract — pure verification debt, no production behavior
+change. `resumeFrom`, #123's recovery hints, and pooled reloads (#46)
+depend on pi's session-load tolerance: malformed final lines skipped,
+missing trailing newline repaired, orphaned toolCalls synthesized as
+error toolResults by provider conversion, errored/aborted assistant
+turns dropped from replay. Verified live against pi 1.0.4 with a real
+provider (2026-10-08); pinned at the dev-resolved pi-ai by
+`tests/contract/resume-seam.test.ts`.
+
+- **Contract:** a transcript whose branch ends in a dangling toolCall —
+  with and without a torn final line — loads and resumes: the dispatch
+  settles ok, the model context replays the assistant turn (stopReason
+  `toolUse` is kept, unlike error/aborted), the orphaned call is never
+  re-executed (no toolResult for it appears in the continued
+  transcript), and pi-ai's exported `transformMessages` synthesizes the
+  `"No result provided"` error result between the orphaned call and the
+  new user turn. Faux caveat: the faux provider receives raw context
+  and bypasses provider conversion, so the synthesis is asserted
+  directly against the export, not through a boundary call.
+- **Covered now:** `tests/contract/resume-seam.test.ts` — the torn and
+  clean boundary variants plus the direct transform pin.
+
 ### Wait-any (v3, #58)
 
 Extends "Event-sensitive ticket waits" — SPEC.md "Waiting is explicit

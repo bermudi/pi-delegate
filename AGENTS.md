@@ -179,6 +179,17 @@ model call — and treats it as a turn trigger on an idle agent; verified
 in pi-coding-agent 0.87.0 (`sendCustomMessage` → `agent.steer`,
 agent-loop.js steering poll) and 1.0.0. Recheck that drain on Pi bumps.
 
+Session-load tolerance (#124, verified 2026-10-08 against pi 1.0.4 live
+and pi-ai 0.87.0 pinned): the loader skips malformed final lines and
+repairs a missing trailing newline; the provider conversion layer
+(pi-ai `transformMessages`) synthesizes `"No result provided"` error
+toolResults for orphaned toolCalls and drops errored/aborted assistant
+turns from replay. `resumeFrom`, #123's recovery hints, and pooled
+reloads all ride this — pinned by `tests/contract/resume-seam.test.ts`
+(note: the faux provider sees raw context and bypasses provider
+conversion, so the synthesis is pinned directly against pi-ai's
+exported transform). Recheck on Pi bumps.
+
 ## Workflow
 
 ```bash
