@@ -188,6 +188,18 @@ use any design that makes these properties true and testable.
   one call whose dependency graph orders every overlapping pair (see
   "Dependencies and handoffs").
 - Inherited Git redirection with bash-capable multiple writers MUST fail closed.
+- Scratch source copying MUST hold a temporary read reservation on the
+  canonical tree being copied. Overlapping Delegate-owned shared/isolated
+  writers or quarantined writers MUST reject copying; new overlapping
+  writers MUST reject while the copy reservation is held. Concurrent copy
+  readers MAY coexist. Same-call planned writers MAY be exempted only when
+  they have not started; earlier-phase writers MUST be confirmed quiescent
+  before exemption. A copy reservation MUST remain held until copying stops,
+  including on cancellation or failure, and MUST release before the scratch
+  worker runs. Scratch worker execution holds no source write reservation.
+- Git-scope and inherited-redirection failures MUST include the relevant
+  correction and retry guidance, without suggesting an unconditional scratch
+  bypass.
 - V2 ships no unsafe-write bypass: no operator or caller setting may skip
   admission. Reintroducing one is a contract change, not a restoration.
 - Admission MUST NOT claim path confinement, cross-process locking, or

@@ -440,7 +440,27 @@ contract:
 - Engine behaviors unchanged in v3: workspaces
   (shared/scratch/isolated) and their admission semantics, session
   pools, `operationId` idempotency, spill, delivery once-ness,
-  evidence-bearing telemetry rows.
+  evidence-bearing telemetry rows — except the scratch-copy admission
+  strengthening below.
+- **Scratch-copy admission (this repository's #50, owner-approved
+  2026-10-07).** Scratch holds no source write reservation during worker
+  execution, but copying takes a temporary read reservation on the
+  canonical source tree. An overlapping shared/isolated writer or
+  quarantined writer rejects copying; a new overlapping writer rejects
+  while copying is underway. Rejection, not waiting or a race warning,
+  is the policy. Concurrent scratch readers may coexist. Same-call
+  not-yet-started writers may coexist because each phase's copies finish
+  before that phase's workers start; earlier-phase writers must be
+  confirmed quiescent before they can be exempted. Copy claims release
+  on success, failure, or cancellation only after copying stops, before
+  the scratch worker starts. This protects against Delegate-owned writers
+  in the same host, not external processes or an atomic filesystem
+  snapshot.
+- **Actionable scope failures (this repository's #51).** Git-scope
+  discovery failures explain how to repair discovery and retry; inherited
+  Git-redirection failures name the offending variables and tell the
+  caller to clear or correct them before retrying. Neither failure
+  recommends scratch as an unconditional safety workaround.
 - **Workspace path guard (#62).** Isolated and scratch copies protect
   relative writes; absolute paths into the original tree previously
   sailed past the copy (observed live: workers edited the source tree

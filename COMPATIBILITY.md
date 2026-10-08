@@ -277,6 +277,15 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 - `shared` edits the source tree; `scratch` discards a reflink copy;
   `isolated` reconciles Git proposals. Scratch and isolated remain one-shot and
   are not advertised as security boundaries.
+- Owner-approved scratch-copy strengthening (this repository's #50,
+  2026-10-07): copying holds a temporary source read reservation and rejects
+  overlapping active/reserved shared or isolated writers, including quarantine;
+  new overlapping writers reject during copying. Concurrent scratch readers
+  may coexist. Same-call planned writers are safe only before they start,
+  and earlier-phase writers require confirmed quiescence. The claim releases
+  after copying stops on every exit, before worker execution; scratch workers
+  still hold no source write reservation. This is same-host Delegate admission,
+  not cross-process protection or an atomic tree snapshot.
 - Fail-closed shared-write admission, canonical overlap rules, unknown tools as
   writers, same-call serialization, and cross-call rejection.
 - Isolated preservation of dirty/untracked baseline state and the user's
@@ -289,6 +298,10 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 
 - Actionable errors that preserve the relevant correction, even if wording
   changes.
+  Current Git-scope failures explain how to repair discovery and retry;
+  inherited-redirection failures name the variables to clear or correct before
+  retrying (this repository's #51). Historical scratch-recommendation helpers
+  and exact clauses are not restored: scratch is not a general safety bypass.
 - Host-compatibility probes at session start log, they never throw
   (issue #9, additive): the reaches into Pi internals a dispatch depends
   on — the parent model-runtime handle and agent-directory resolution —
