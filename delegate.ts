@@ -2522,7 +2522,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           "Subagents cannot delegate further — plan the full fan-out yourself; ask_parent is a worker's only escalation.",
           "Only a subagent's final message comes back: name the answer shape you need (file list, yes/no, short verdict) so reports stay short.",
           "Async results arrive on their own at your next step — do not poll in a loop; wait only when blocked on a ticket's result.",
-          'Parallelize reads freely; keep edits to one writer where possible. Put dependent edits in one call on the shared workspace with dependsOn between them — same-phase same-root writers reject; use workspace "isolated" for independent edits, noting overlapping changes still conflict at merge.',
+          'Parallelize reads freely — read-only tasks (explore) admit concurrently beside anything. Before dispatching 2+ write-capable tasks to one repo in a call, pick the shape: independent edits → workspace "isolated" (private worktrees, parallel, merged in task order); dependent edits → dependsOn chain on shared. Same-phase unordered writers reject; overlapping writers in separate calls reject.',
           "Split very large task batches across delegate calls. Keep every prompt and the brief under " + PROMPT_CHAR_LIMIT + " characters — reference files by path instead of inlining contents; oversized values reject.",
         ],
         prepareArguments: (args) => {

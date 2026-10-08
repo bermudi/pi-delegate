@@ -55,6 +55,12 @@ describe("delegate public tool contract", () => {
     expect(guidelines.join(" ")).toMatch(/yourself/i);
     expect(guidelines.join(" ")).toMatch(/final message/i);
     expect(guidelines.join(" ")).toMatch(/Parallelize reads/);
+    // #126: the fan-out decision procedure is its own guideline — the old
+    // "keep edits to one writer" advice contradicted the isolated remedy.
+    expect(guidelines.join(" ")).toMatch(/2\+ write-capable tasks/);
+    expect(guidelines.join(" ")).toMatch(/workspace "isolated"/);
+    expect(guidelines.join(" ")).toMatch(/dependsOn chain/);
+    expect(guidelines.join(" ")).not.toMatch(/one writer where possible/);
   });
 
   test("publishes the canonical operation and task fields", async () => {
