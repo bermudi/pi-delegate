@@ -280,7 +280,12 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       subagents.respond([held.step, fauxAssistantMessage("TASK-TWO")]);
       const dispatched = await callDelegate(session, {
         async: true,
-        tasks: [{ prompt: "one" }, { id: "second", prompt: "two" }],
+        // #126 vehicle: read-only tasks admit; maxConcurrent 1 still
+        // parks task-2, which is the not-applied shape under test.
+        tasks: [
+          { prompt: "one", tools: ["read"] },
+          { id: "second", prompt: "two", tools: ["read"] },
+        ],
       });
       const ticket = ticketIdOf(dispatched.text);
       await waitFor(

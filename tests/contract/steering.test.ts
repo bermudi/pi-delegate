@@ -141,9 +141,11 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       subagents.respond([first.step, queued]);
 
       const dispatched = await callDelegate(session, {
+        // #126 vehicle: read-only tasks admit; maxConcurrent 1 still
+        // queues task-2 behind the slot — the activated shape under test.
         tasks: [
-          { prompt: "holds the slot" },
-          { prompt: "waits behind" },
+          { prompt: "holds the slot", tools: ["read"] },
+          { prompt: "waits behind", tools: ["read"] },
         ],
         async: true,
       });
@@ -333,7 +335,12 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       subagents.respond([first.step, queued]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "one" }, { prompt: "two" }],
+        // #126 vehicle: read-only tasks admit; maxConcurrent 1 still
+        // queues task-2 — cancel must catch it queued, never started.
+        tasks: [
+          { prompt: "one", tools: ["read"] },
+          { prompt: "two", tools: ["read"] },
+        ],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -468,9 +475,11 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       subagents.respond([first.step, failedAttempt, retriedAttempt]);
 
       const dispatched = await callDelegate(session, {
+        // #126 vehicle: read-only tasks admit; maxConcurrent 1 still
+        // queues task-2 behind the slot — the parked-drain shape under test.
         tasks: [
-          { prompt: "holds the slot" },
-          { prompt: "waits behind" },
+          { prompt: "holds the slot", tools: ["read"] },
+          { prompt: "waits behind", tools: ["read"] },
         ],
         async: true,
       });
@@ -648,9 +657,12 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         }),
       ]);
       const dispatched = await callDelegate(session, {
+        // #126 vehicle: dependsOn keeps the pinned assignment
+        // deterministic — doomed must consume the error so blocked
+        // never runs (the plain-text branch under test).
         tasks: [
           { id: "done", prompt: "fresh one" },
-          { id: "doomed", prompt: "dies on the provider" },
+          { id: "doomed", prompt: "dies on the provider", dependsOn: ["done"] },
           { id: "blocked", prompt: "never ran", dependsOn: ["doomed"] },
         ],
         async: true,

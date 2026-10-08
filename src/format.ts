@@ -148,9 +148,11 @@ export function recoveryLines(
 
 /**
  * One advisory line per serialized shared-writer group: which tasks, which
- * write scope, and the isolated-workspace remedy. The notice exists so the
- * caller learns that independent same-repo work can run in parallel — a
- * serialized batch is the expensive way to discover that.
+ * write scope, and the isolated-workspace remedy. Since #126 every group
+ * here is cross-phase (same-phase overlapping shared writers reject at
+ * admission) — graph-ordered or incidentally separated — so the notice
+ * reinforces the parallel alternative for the next dispatch: a serialized
+ * batch is still the slow way to run independent work.
  */
 export function serializedNotices(
   tasks: readonly ResolvedTask[],
@@ -163,8 +165,9 @@ export function serializedNotices(
     const roots = group.roots.join(", ");
     return (
       `Notice — serialized writers: ${names} share write scope '${roots}' and ` +
-      `will run one at a time in this order. If they are independent edits, ` +
-      `workspace "isolated" runs them in parallel and merges in task order.`
+      `run one at a time in task order. Independent edits belong in ` +
+      `workspace "isolated" — same-repo writers run in parallel there and ` +
+      `merge in task order.`
     );
   });
 }

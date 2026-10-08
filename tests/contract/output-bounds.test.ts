@@ -213,7 +213,12 @@ describe("delegate output bounding", () => {
       subagents.respond([fauxAssistantMessage(output), blocked.step]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "done-fast" }, { prompt: "blocked" }],
+        // #126 vehicle: read-only tasks — the subject is poll bounding of a
+        // finished task beside a blocked one.
+        tasks: [
+          { prompt: "done-fast", tools: ["read"] },
+          { prompt: "blocked", tools: ["read"] },
+        ],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);

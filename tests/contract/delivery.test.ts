@@ -474,7 +474,12 @@ describe("async result delivery", () => {
     model.respond([blocked.step, fauxAssistantMessage("SECOND-RESULT")]);
     const sends = spyOn(host, "sendCustomMessage");
     const dispatch = await callDelegate(session, {
-      tasks: [{ prompt: "first" }, { prompt: "second" }],
+      // #126 vehicle: same-cwd writers serialize only with a dependsOn
+      // edge — the paused timeline pins one in flight, one still queued.
+      tasks: [
+        { id: "first", prompt: "first" },
+        { id: "second", prompt: "second", dependsOn: ["first"] },
+      ],
       async: true,
     });
     const ticket = ticketIdOf(dispatch.text);

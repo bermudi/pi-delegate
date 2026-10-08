@@ -28,11 +28,13 @@ describe("admission root overlap (bugs 4+8)", () => {
     }
   });
 
-  test("a writer at / serializes against a subdir writer instead of bypassing overlap", async () => {
+  test("a writer at / rejects with a subdir writer instead of bypassing overlap", async () => {
     // Bug 4: without the sep special-case, "/" + sep is "//", which no
     // absolute path starts with — so a writer at "/" never overlapped
     // anything and escaped both same-call serialization and cross-call
-    // rejection. INVARIANTS: canonical ancestor roots overlap.
+    // rejection. INVARIANTS: canonical ancestor roots overlap. Since #126
+    // the detected overlap expresses as the unordered rejection: pre-fix
+    // these landed in disjoint groups with no notice and both ran.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
     const dir = tempDir();
@@ -48,12 +50,12 @@ describe("admission root overlap (bugs 4+8)", () => {
         { prompt: "subdir writer", cwd: dir, tools: ["write"] },
       ],
     });
-    expect(result.isError).toBe(false);
-    expect(result.text).toContain("ROOT-DONE");
-    expect(result.text).toContain("SUB-DONE");
-    // Serialization evidence: pre-fix these landed in disjoint groups with
-    // no notice; the serialized advisory names the remedy.
-    expect(result.text).toMatch(/serialized/i);
+    expect(result.isError).toBe(true);
+    // Overlap evidence: the unordered rejection names both tasks and the
+    // remedies — only the canonical ancestor/descendant overlap produces
+    // this message.
+    expect(result.text).toMatch(/Unordered shared writers/i);
+    expect(result.text).toMatch(/dependsOn/);
     expect(result.text).toMatch(/isolated/);
   });
 });

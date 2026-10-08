@@ -235,16 +235,48 @@ export class AdmissionController {
           );
         }
       }
-      // Same-call shared writers serialize in task order, chaining
-      // consecutive writers in (phase, index) order — including across
-      // phases. The phase boundary awaits recorded outcomes, not
-      // confirmed quiescence, so without a cross-phase edge a later-phase
-      // writer could start while an earlier quarantined writer still
-      // mutates the root. The sort keeps every predecessor in the same
-      // or an earlier phase, so an edge never points at a task whose
-      // phase has not started — that direction would deadlock the loop.
+      // Same-call shared writers serialize, chaining consecutive writers
+      // in (phase, index) order. #126: same-phase overlapping shared
+      // writers reject below — a graph edge always lands in a later phase,
+      // so every same-phase pair is unordered by construction. Cross-phase
+      // pairs (graph-ordered or incidentally separated) keep the chain:
+      // every chained predecessor sits in an earlier phase, so an edge
+      // never points at a task whose phase has not started — that
+      // direction would deadlock the loop.
       const writers = group.filter((task) => task.workspace === "shared");
       if (writers.length > 1) {
+        // #126: same-phase overlapping shared writers reject instead of
+        // silently serializing. The advisory notice shipped 2026-09-12
+        // (e0998c3) and was delivered five times in session 01a11872
+        // with zero behavior change — the incumbent-trained fan-out
+        // reflex beats prose on every fresh dispatch. Cross-phase pairs
+        // keep the serialization contract below: their separation is
+        // sound (a phase fully settles, quarantine included, before the
+        // next admits) and dependsOn would change failure semantics
+        // (blocking) where the caller asked for sequencing only.
+        const phaseCounts = new Map<number, { count: number; ids: string[] }>();
+        for (const task of writers) {
+          const entry = phaseCounts.get(task.phase) ?? { count: 0, ids: [] };
+          entry.count += 1;
+          entry.ids.push(task.id);
+          phaseCounts.set(task.phase, entry);
+        }
+        const concurrent = [...phaseCounts.values()].filter(
+          (entry) => entry.count > 1,
+        );
+        if (concurrent.length > 0) {
+          const roots = [
+            ...new Set(group.flatMap((task) => task.writeRoots!)),
+          ].join(", ");
+          const names = concurrent
+            .flatMap((entry) => entry.ids)
+            .map((id) => `'${id}'`)
+            .join(", ");
+          throw new Error(
+            `Unordered shared writers: tasks ${names} reserve overlapping write scope at ${roots} with no dependsOn ordering. ` +
+              `Order them with dependsOn (they run one at a time in order), run independent edits with workspace "isolated" (parallel, merged in task order), or split them into separate calls.`,
+          );
+        }
         const ordered = [...writers].sort(
           (a, b) => a.phase - b.phase || a.index - b.index,
         );

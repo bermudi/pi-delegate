@@ -263,9 +263,11 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       model.respond([byPrompt, byPrompt]);
 
       const dispatched = await callDelegate(session, {
+        // #126 vehicle: two bash-carrying verifiers are same-phase writers
+        // — order them so the batch admits; both verdicts still settle.
         tasks: [
           { id: "v-one", agent: "verifier", prompt: "verify one" },
-          { id: "v-two", agent: "verifier", prompt: "verify two" },
+          { id: "v-two", agent: "verifier", prompt: "verify two", dependsOn: ["v-one"] },
         ],
         async: true,
       });
@@ -345,9 +347,11 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       model.respond([byPrompt, byPrompt]);
 
       const result = await callDelegate(session, {
+        // #126 vehicle: the coder runs read-only so it admits beside the
+        // bash-carrying verifier — the subject is profile-keyed rendering.
         tasks: [
           { id: "v", agent: "verifier", prompt: "verify" },
-          { id: "c", agent: "coder", prompt: "build" },
+          { id: "c", agent: "coder", prompt: "build", tools: ["read"] },
         ],
         async: false,
       });

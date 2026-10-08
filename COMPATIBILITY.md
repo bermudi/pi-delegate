@@ -79,6 +79,29 @@ SPEC-V2's deadline field and its loading, retry, pause, question, and session
 rules. Stall detection, abort/quiescence, reservations, worker-question/paused
 safety, ticket wait/tail bounds, shutdown bounds, and token budgets are unchanged.
 
+## Unordered shared-writer rejection (#126, owner-approved 2026-10-08)
+
+BREAKING: same-phase overlapping shared writers in one call now reject
+before execution, enumerating the remedies: order with `dependsOn`, run
+independent edits in workspace `isolated`, or split into separate calls.
+Formerly such batches serialized silently in task order with an advisory
+notice — the notice shipped 2026-09-12 (`e0998c3`) and was delivered five
+times in session `01a11872` with zero behavior change, so the advisory tier
+is retired as measurably ineffective for the fan-out shape it targeted.
+
+Scope is the admission wave, not graph order: a `dependsOn` edge always
+lands the dependent in a later phase, so same-phase pairs are unordered by
+construction — that is the fan-out shape that rejected nothing and cost
+hours. Cross-phase overlapping writers keep the old contract unchanged:
+serialized in (phase, task) order with the later waiting for the earlier's
+confirmed quiescence, an incidentally-ordered successor still runs after a
+predecessor fails, and the advisory notice still fires (reworded).
+Deliberate loss: failure-tolerant sequencing for same-phase writers now
+requires split calls or isolated. Until #120's worktree provisioning lands,
+the `isolated` remedy stays degraded for suite-running tasks (no
+`node_modules` in fresh worktrees). Cross-call and mixed-kind unordered
+rejections are unchanged.
+
 ## Simplified v3 surface (#61, user-approved 2026-09-29)
 
 This section supersedes the older alias and cardinality entries below.
@@ -288,7 +311,8 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   still hold no source write reservation. This is same-host Delegate admission,
   not cross-process protection or an atomic tree snapshot.
 - Fail-closed shared-write admission, canonical overlap rules, unknown tools as
-  writers, same-call serialization, and cross-call rejection.
+  writers, same-phase unordered rejection with cross-phase serialization
+  (#126), and cross-call rejection.
 - Isolated preservation of dirty/untracked baseline state and the user's
   branch/index; task-order, all-or-nothing application; retained conflict and
   cancellation artifacts; `applied_unverified` wording.
@@ -330,6 +354,10 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   unrelated branches run. Same-call shared/isolated write-scope overlap is
   newly admitted when the graph orders every overlapping cross-kind pair —
   a relaxation of a former whole-call rejection, in the permissive direction.
+  Conversely (#126), same-phase unordered shared-writer overlap in one call
+  now rejects before execution with enumerated remedies (dependsOn,
+  `isolated`, separate calls) — the strictness direction, replacing silent
+  serialization whose advisory notice was measurably ignored.
 - Opt-in, fail-open local telemetry that never stores prompt/output content,
   with stable call/task outcome meaning and explicit migration or versioning
   for existing databases. Telemetry stays disabled unless the user sets
@@ -356,9 +384,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   lists on partial failure. V2 outcomes carried no touched-file data at
   all. **Restored under v3 the same day (SPEC v3 "Observability —
   Completion evidence", #38) — see the restoration note below.**
-  Same-call writers still serialize (completion notices name the
-  serialized tasks) and cross-call conflicts still
-  reject. Decided during
+  Same-call graph-ordered writers still serialize (completion notices name
+  the serialized tasks) and cross-call conflicts still reject; same-phase
+  unordered shared writers reject at admission since #126. Decided during
   the 2026-09-27 gap audit (V1-V2-MAP §3d item 1).
 
   **Restored in lighter form by SPEC v3 "Observability — Completion

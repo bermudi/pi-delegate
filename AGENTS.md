@@ -13,6 +13,11 @@ never a design source. v1→v3 migration guidance lives in
 `COMPATIBILITY.md`. v3 is owned by the project agent (stewardship
 delegated 2026-09-27; decisions per SPEC.md's ratification record).
 
+Scope frame: goblin (the operator's outer-loop agent) is a *consumer* of
+this package, never its design target. Its sessions are field telemetry
+for harness-level failures — a heavy user's crash reports, not work
+orders about that user's setup.
+
 Before implementing or changing behavior, read `SPEC.md`, `INVARIANTS.md`,
 and `COMPATIBILITY.md` — they are authoritative and describe outcomes, not
 mechanisms. Before migrating or writing tests, read `TEST-MIGRATION.md`.

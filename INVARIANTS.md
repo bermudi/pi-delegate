@@ -180,9 +180,17 @@ use any design that makes these properties true and testable.
   Canonical equal, ancestor, and descendant roots overlap.
 - `read`, `grep`, `find`, `ls`, and `web_search` are read-only for admission;
   unknown tools are mutating.
-- Same-call overlapping shared writers MUST serialize in task order. A
-  predecessor failure MUST still allow its successor to run. Serialization
-  MUST NOT consume scarce execution capacity while no task can execute.
+- Same-call overlapping shared writers never run concurrently, and
+  same-phase overlap MUST reject before execution, enumerating the
+  remedies (order with `dependsOn`, run independent edits in workspace
+  `isolated`, or split into separate calls) — a graph edge always lands
+  the dependent in a later phase, so any same-phase pair is unordered by
+  construction. Cross-phase overlapping writers MUST serialize in
+  (phase, task) order, the later waiting for the earlier's confirmed
+  quiescence; a failure MUST still allow an incidentally-ordered
+  successor to run (only graph dependents block on failure).
+  Serialization MUST NOT consume scarce execution capacity while no task
+  can execute.
 - Overlap with another active sync/async dispatch or quarantined task MUST
   reject, not queue. Shared/isolated overlap MUST reject — except within
   one call whose dependency graph orders every overlapping pair (see

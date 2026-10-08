@@ -59,7 +59,12 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
 
       const result = await callDelegate(session, {
         brief: "PROJECT-CONTEXT: the repo is ESM-only",
-        tasks: [{ prompt: "alpha task" }, { prompt: "beta task" }],
+        // #126 vehicle: two same-cwd tasks must be read-only to admit
+        // concurrently — the subject is the brief, not write admission.
+        tasks: [
+          { prompt: "alpha task", tools: ["read"] },
+          { prompt: "beta task", tools: ["read"] },
+        ],
         async: true,
       });
       expect(result.isError).toBe(false);
@@ -104,7 +109,12 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
 
       const result = await callDelegate(session, {
         brief: "BRIEF-HEADER-CHECK",
-        tasks: [{ prompt: "a" }, { prompt: "b" }],
+        // #126 vehicle: same-cwd siblings run read-only (subject is the
+        // header rendering, not write admission).
+        tasks: [
+          { prompt: "a", tools: ["read"] },
+          { prompt: "b", tools: ["read"] },
+        ],
         async: false,
       });
       expect(result.isError).toBe(false);

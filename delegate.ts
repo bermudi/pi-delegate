@@ -166,7 +166,7 @@ const taskSchema = Type.Object(
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
         description:
-          "shared/scratch/isolated. 'shared' edits the tree; writers in one repo run one at a time in task order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order. 'scratch' runs once in a disposable copy and discards every change — for write-capable tasks whose value is the answer, not the edits; read-only tasks cannot use it. Copying rejects overlap with active or quarantined source writers; worker execution may overlap after copying.",
+          "shared/scratch/isolated. 'shared' edits the tree; same-root writers in one call should be ordered with dependsOn — same-phase unordered overlap rejects; ordered writers run one at a time in order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order. 'scratch' runs once in a disposable copy and discards every change — for write-capable tasks whose value is the answer, not the edits; read-only tasks cannot use it. Copying rejects overlap with active or quarantined source writers; worker execution may overlap after copying.",
       }),
     ),
     dependsOn: Type.Optional(
@@ -1116,9 +1116,10 @@ const HELP_DISPATCH = `## delegate — ordinary dispatch
   working tree themselves — or the call rejects before any task starts.
 - When to delegate: side work that would flood your context. Do one-file
   checks and small edits yourself. Only each task's final message returns,
-  so ask for the answer shape you need. Run reads in parallel; keep
-  dependent edits in one shared-workspace call (they run in task order) and
-  use \`isolated\` only for independent edits.`;
+  so ask for the answer shape you need. Run reads in parallel; put
+  dependent edits in one shared-workspace call ordered with dependsOn
+  (same-phase same-root writers reject) and use \`isolated\` for
+  independent edits.`;
 
 const HELP_FULL_CONTROLS = `## delegate — full-mode controls
 - Task \`id\` correlates results; \`description\` is a display label only.
@@ -1165,7 +1166,10 @@ function helpWorkspaces(full: boolean): string {
   const sessionFields = full ? " Cannot use \`sessionId\` or \`resumeFrom\`." : "";
   return `## Workspaces
 - \`shared\` (default): the task edits the caller's tree directly. Writers
-  whose scope overlaps in one call run one at a time, in task order — each
+  whose scope overlaps in one call must be ordered with \`dependsOn\` —
+  same-phase unordered overlap rejects before execution listing the remedies
+  (order with \`dependsOn\`, use \`isolated\`, or split into separate
+  calls). Ordered writers run one at a time, in task order — each
   sees its predecessor's changes. Use it for dependent edits.
 - \`isolated\`: each task works in a detached Git worktree; successful
   changes merge into the source in task order. Independent edits to the
@@ -2507,7 +2511,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         name: "delegate",
         label: "Delegate to Subagents",
         description:
-          "Run self-contained subagent tasks. Every nonempty call returns a background ticket; results arrive at your next step on their own — async: false returns inline results for any task count. Batch related work in one call: shared-tree writers serialize within a batch and overlapping writers in separate calls reject. The explore role is read-only and admits concurrently; reviewer uses bash and counts as a writer. Use isolated for parallel edits or scratch to discard changes. Named Markdown profiles supply tools and base instructions. tasks: [] shows the manual." +
+          "Run self-contained subagent tasks. Every nonempty call returns a background ticket; results arrive at your next step on their own — async: false returns inline results for any task count. Batch related work in one call: same-root shared writers need dependsOn ordering (same-phase unordered overlap rejects listing remedies); overlapping writers in separate calls reject. The explore role is read-only and admits concurrently; reviewer uses bash and counts as a writer. Use isolated for parallel edits or scratch to discard changes. Named Markdown profiles supply tools and base instructions. tasks: [] shows the manual." +
           (surface === "compact" ? " Compact surface; enable advanced controls with \"surface\": \"full\" in user-global delegate.json and /reload." : " Full surface; advanced task and batch controls are enabled."),
         parameters: Type.Unsafe<DelegateArguments>(surface === "full" ? delegateSchema : compactDelegateSchema),
         promptSnippet:
@@ -2518,7 +2522,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           "Subagents cannot delegate further — plan the full fan-out yourself; ask_parent is a worker's only escalation.",
           "Only a subagent's final message comes back: name the answer shape you need (file list, yes/no, short verdict) so reports stay short.",
           "Async results arrive on their own at your next step — do not poll in a loop; wait only when blocked on a ticket's result.",
-          'Parallelize reads freely; keep edits to one writer where possible. Put dependent edits in one call on the shared workspace (they run in task order); use workspace "isolated" only for independent edits — overlapping changes still conflict at merge.',
+          'Parallelize reads freely; keep edits to one writer where possible. Put dependent edits in one call on the shared workspace with dependsOn between them — same-phase same-root writers reject; use workspace "isolated" for independent edits, noting overlapping changes still conflict at merge.',
           "Split very large task batches across delegate calls. Keep every prompt and the brief under " + PROMPT_CHAR_LIMIT + " characters — reference files by path instead of inlining contents; oversized values reject.",
         ],
         prepareArguments: (args) => {

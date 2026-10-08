@@ -638,7 +638,12 @@ describe("delegate telemetry contract", () => {
       subagents.respond([fauxAssistantMessage("EARLY-OK"), step]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "quick" }, { prompt: "slow" }],
+        // #126 vehicle: read-only tasks — one settles early, one stays
+        // gated for the force-cancel; the subject is the call status row.
+        tasks: [
+          { prompt: "quick", tools: ["read"] },
+          { prompt: "slow", tools: ["read"] },
+        ],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -1222,6 +1227,49 @@ describe("delegate telemetry contract", () => {
       db.close();
     }
   });
+
+  test(
+    "a same-phase shared-writer rejection records a misfire row (#126)",
+    async () => {
+      // #126: the rejection that replaced silent serialization rides the
+      // same admission-misfire path — message verbatim, both workspaces
+      // recorded, no worker started.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "misfires-126.db");
+      configureDelegate(session, {
+        telemetry: { enabled: true, dbPath },
+      });
+      subagents.respond([fauxAssistantMessage("NEVER-RUNS")]);
+
+      const result = await callDelegate(session, {
+        tasks: [
+          { id: "w1", prompt: "first writer", tools: ["write"] },
+          { id: "w2", prompt: "second writer", tools: ["write"] },
+        ],
+        async: true,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(subagents.state.callCount).toBe(0);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const misfires = rowsOf(db, "misfires");
+        expect(misfires).toHaveLength(1);
+        const row = misfires[0];
+        expect(row?.phase).toBe("admission");
+        expect(String(row?.message)).toBe(result.text);
+        expect(String(row?.message)).toMatch(/Unordered shared writers/i);
+        expect(JSON.parse(String(row?.workspaces))).toEqual([
+          "shared",
+          "shared",
+        ]);
+      } finally {
+        db.close();
+      }
+    },
+  );
 
   test(
     "an admission rejection records a misfire row",
