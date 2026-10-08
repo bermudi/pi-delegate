@@ -97,10 +97,39 @@ serialized in (phase, task) order with the later waiting for the earlier's
 confirmed quiescence, an incidentally-ordered successor still runs after a
 predecessor fails, and the advisory notice still fires (reworded).
 Deliberate loss: failure-tolerant sequencing for same-phase writers now
-requires split calls or isolated. Until #120's worktree provisioning lands,
-the `isolated` remedy stays degraded for suite-running tasks (no
-`node_modules` in fresh worktrees). Cross-call and mixed-kind unordered
-rejections are unchanged.
+requires split calls or isolated; the `isolated` remedy's
+dependency-provisioning gap for suite-running tasks closed with #120
+below. Cross-call and mixed-kind unordered rejections are unchanged.
+
+## Isolated worktree dependency provisioning (#120)
+
+Isolated worker worktrees are no longer tracked-state-only: at group
+preparation each worktree is provisioned with the source root's
+Git-ignored entries (collapsed form — `node_modules/` materializes as
+one tree), copied with reflink/Copy-on-Write where the filesystem
+supports it and a plain copy otherwise. This closes the degradation
+the #126 record called out: `isolated` is now a usable parallel path
+for suite-running tasks (reviews that run `bun test` / `tsc`), not
+just edit fan-outs.
+
+Invariants unchanged: ignored files never enter proposals, merges, or
+drift — they are read-only inputs, and worker-local mutations of them
+(e.g. a `bun install` inside the worktree) are discarded with the
+worktree at reconcile. Baselines, candidate worktrees, and drift
+checks are never provisioned. Provisioning failures fail the group
+loud; a source entry that vanishes between listing and copying is
+skipped silently (a racy source is not worth failing a batch).
+
+Design provenance: port-of-idea from xai-org/grok-build's
+`xai-fast-worktree` copy arm, second pass (`execute.rs:832-871`,
+`copy/skip.rs:19-40`) — pass 1 is `git worktree add` at the synthetic
+baseline. Its overlay/btrfs-subvolume arms were not adopted: whole-
+volume snapshots including `.git` conflict with the
+baseline-commit/proposal machinery, which needs real linked worktrees
+of the source repo. v1's reflink probe/fail-loud discipline is
+consciously NOT adopted either — provisioning degrades to a full copy
+on ext4/tmpfs instead of failing (in-repo precedent:
+`src/scratch.ts` `copyTree`).
 
 ## Simplified v3 surface (#61, user-approved 2026-09-29)
 

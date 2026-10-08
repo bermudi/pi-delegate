@@ -441,7 +441,8 @@ contract:
   (shared/scratch/isolated) and their admission semantics, session
   pools, `operationId` idempotency, spill, delivery once-ness,
   evidence-bearing telemetry rows — except the scratch-copy admission
-  strengthening below and the unordered-shared-writer rejection (#126).
+  strengthening below, the unordered-shared-writer rejection (#126),
+  and the isolated worktree dependency provisioning (#120) below.
 - **Scratch-copy admission (this repository's #50, owner-approved
   2026-10-07).** Scratch holds no source write reservation during worker
   execution, but copying takes a temporary read reservation on the
@@ -496,6 +497,17 @@ contract:
   different or missing owner session is another session's — and count
   the hidden remainder in a trailing note teaching explicit-id poll.
   Naming a ticket by id reaches it unchanged regardless of owner.
+- **Isolated worktree dependency provisioning (#120).** Each isolated
+  worker worktree is provisioned, at preparation, with the source
+  root's Git-ignored entries in collapsed form (e.g. `node_modules/`
+  copies as one tree) — reflink/Copy-on-Write where the filesystem
+  supports it, a plain copy otherwise — so suite-running tasks work in
+  isolation. Ignored files never enter proposals, merges, or drift:
+  they are read-only inputs, and worker-local mutations of them are
+  discarded with the worktree at reconcile. Baselines, candidate
+  worktrees, and drift checks are never provisioned; a source entry
+  that vanishes between listing and copying is skipped, while any
+  other provisioning failure fails the group loud.
 
 ## Compatibility posture
 
