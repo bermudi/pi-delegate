@@ -213,6 +213,69 @@ async function addWorktree(
   });
 }
 
+/**
+ * The source root's Git-ignored entries, repository-relative and collapsed
+ * (an ignored directory lists once, trailing slash included — plain
+ * `--ignored`, never `=matching`). Delegate-owned diagnostic paths are
+ * skipped: they are runtime records, not source dependencies. Porcelain v1
+ * `-z` records are `XY <path>`; only `!! ` records are ignored state.
+ */
+async function ignoredEntries(
+  root: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const output = await git(
+    ["status", "--porcelain", "-z", "--ignored"],
+    { cwd: root, signal },
+  );
+  return output.stdout
+    .split("\0")
+    .filter((record) => record.startsWith("!! "))
+    .map((record) => record.slice(3))
+    .filter((entry) => !isDiagnosticPath(path.join(root, entry)));
+}
+
+/**
+ * Materialize ignored entries (e.g. `node_modules/`) into a fresh worker
+ * worktree (#120): a worktree holds only tracked state, so suite-running
+ * tasks had a broken environment. Port-of-idea from xai-org/grok-build's
+ * `xai-fast-worktree` copy arm, second pass (execute.rs:832-871,
+ * copy/skip.rs:19-40) — pass 1 is `git worktree add` at the baseline commit,
+ * this fills the ignored remainder. Copy discipline mirrors `src/scratch.ts`
+ * `copyTree`: reflink/Copy-on-Write where the filesystem supports it
+ * (silent plain-copy fallback — v1's probe/fail-loud reflink requirement is
+ * deliberately not adopted, provisioning must not brick ext4/tmpfs
+ * machines), timestamps preserved, symlinks verbatim. Source entries are
+ * read-only inputs and are never written back. An entry that vanished
+ * between listing and copying is skipped — a racy source is not worth
+ * failing a batch — while any other failure throws, failing the group prep
+ * loud (the caller's undo path cleans up).
+ */
+async function provisionIgnoredEntries(
+  sourceRoot: string,
+  workerRoot: string,
+  entries: readonly string[],
+): Promise<void> {
+  for (const entry of entries) {
+    const source = path.join(sourceRoot, entry);
+    const destination = path.join(workerRoot, entry);
+    await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+    try {
+      await fs.promises.cp(source, destination, {
+        recursive: true,
+        mode: fs.constants.COPYFILE_FICLONE,
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw new Error(
+        `isolated worktree provisioning could not copy ignored entry '${entry}' from '${source}' into '${destination}': ${error instanceof Error ? error.message : String(error)}. The source tree's ignored files are read-only inputs; fix the underlying error (e.g. disk space or permissions) and retry the dispatch.`,
+      );
+    }
+  }
+}
+
 /** True only when the worktree path is verifiably gone. */
 async function removeWorktree(
   diagnostics: DiagnosticSink,
@@ -343,6 +406,11 @@ interface IsolatedGroup {
    */
   readonly snapshotExcludes: readonly string[];
   readonly taskIndexes: number[];
+  /**
+   * Provisioning observability fires once per group prep, not once per
+   * worker (#120): the count line must not scale with fan-out.
+   */
+  provisionLogged: boolean;
   /**
    * Resolves when this group's reconciliation (including artifact cleanup)
    * has finished all Git operations. Deferred quarantine cleanups wait on it
@@ -1588,6 +1656,7 @@ export async function prepareIsolated(
           diagnostics,
           snapshotExcludes: excluded,
           taskIndexes: [],
+          provisionLogged: false,
           reconcileDone,
           finishReconcile,
         };
@@ -1613,6 +1682,28 @@ export async function prepareIsolated(
       // A task cwd that was untracked or ignored in the source may be absent
       // from the baseline tree; the worker still needs a directory.
       await fs.promises.mkdir(workerCwd, { recursive: true });
+      // #120: dependencies live in ignored state Git never materializes into
+      // a worktree; without them suite-running tasks (bun test, tsc) see a
+      // broken environment. Each worker gets its own copy — the CoW design,
+      // never a shared symlink into the source — so worker-local installs
+      // stay worker-local and writes can never reach the source through the
+      // provisioned path. Observability stays bounded: one count-only line
+      // per group prep, never the entry list.
+      const provisionedEntries = await ignoredEntries(sourceRoot, signal);
+      await provisionIgnoredEntries(
+        sourceRoot,
+        workerRoot,
+        provisionedEntries,
+      );
+      if (!group.provisionLogged) {
+        group.provisionLogged = true;
+        // Allowlisted metadata only (path/count) — count stays bounded by
+        // construction, the entry list itself is never logged.
+        diagnostics.log("info", "isolated worktree provisioning", {
+          path: sourceRoot,
+          count: provisionedEntries.length,
+        });
+      }
       group.taskIndexes.push(taskIndex);
       translated[taskIndex] = {
         ...task,
