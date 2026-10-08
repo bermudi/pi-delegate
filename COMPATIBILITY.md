@@ -660,7 +660,11 @@ with the approved roadmap, not cancelled — and have now shipped. Each
 entry records what shipped, its issue, and any deliberate divergences
 from v1.
 
-- **Operator-visibility layer (#24)** — shipped 2026-09-22: the footer
+- **Operator-visibility layer (#24)** — shipped 2026-09-22; the subagent
+  browser was redesigned 2026-10-08 (#128) after failing at fleet scale
+  (a roster hard-capped at four rows for a 50-task fleet, a tool-spam
+  detail pane, no ticket grouping, and full absolute paths eating the
+  scan lines): the footer
   status line, the once-per-ticket settle warning, the switch/fork consent
   guards, the tree-navigation consent prompt (2-way: cancel force-cancels
   live tickets and proceeds, stay blocks the transition, dismissal stays;
@@ -670,11 +674,26 @@ from v1.
   traces, and the live subagent browser (`/subagents`, Ctrl+Shift+B).
   Deliberate divergences recorded here, not planned work: live rows for
   in-flight sync dispatches (finished sync calls are retained), and agent
-  names in the shutdown summary (ids only today). Browser tool
-  activity now renders RUN/DONE/FAIL markers in compact one-line rows;
-  Enter expands retained previews (at most 512 characters, not full
-  commands or transcripts). Tab still switches to assistant text, and
-  navigation and whole-ticket pause/resume controls are unchanged.
+  names in the shutdown summary (ids only today).
+  The #128 browser is a two-pane fleet dashboard: a ticket-grouped roster
+  owning the full panel height (live tickets expanded, settled tickets
+  collapsed to one row each, retained inline runs grouped, newest first)
+  beside the selected agent's interleaved transcript — assistant text and
+  condensed tool one-liners in stream order, tail-following live with
+  PgUp/PgDn/Home/End scrollback. Tool scan lines condense absolute paths
+  to their last two segments and fold consecutive identical settled calls
+  with a `×N` multiplier; in-flight calls mark `⏳`, failed calls `✗` and
+  never fold. Enter expands retained previews (at most 512 characters,
+  not full commands or transcripts) and expands/collapses the selected
+  ticket group, diving to its first task; ← collapses back to the header.
+  Tab switches to the text-only view (the 32K assistant tail); retained
+  sync runs without recorded events render that tail as their
+  transcript. Whole-ticket pause/resume (`p`) is unchanged and works
+  from both a ticket's header and its task rows; the store additionally
+  journals a bounded chronological event log per task (250 events,
+  2 000 characters per text event) feeding the interleaved view.
+  Below ~96 columns the panes stack; below 40×16 the browser asks for a
+  larger terminal.
 - **Large-output bounding (#25)** — shipped 2026-09-23 with v1's
   semantics: settled and synchronous results spill output past
   `output.spillThresholdChars` (default 8 000) to an owner-only temp
