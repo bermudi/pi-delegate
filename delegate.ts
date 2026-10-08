@@ -2515,6 +2515,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         promptGuidelines: [
           "Delegate side work that would flood your context — broad searches, long logs, independent parallel jobs. Do one-file checks and small edits yourself; writing the brief costs more than the work.",
           "Subagents never see this conversation — give each delegate task a self-contained brief (use brief for context the whole batch shares).",
+          "Subagents cannot delegate further — plan the full fan-out yourself; ask_parent is a worker's only escalation.",
           "Only a subagent's final message comes back: name the answer shape you need (file list, yes/no, short verdict) so reports stay short.",
           "Async results arrive on their own at your next step — do not poll in a loop; wait only when blocked on a ticket's result.",
           'Parallelize reads freely; keep edits to one writer where possible. Put dependent edits in one call on the shared workspace (they run in task order); use workspace "isolated" only for independent edits — overlapping changes still conflict at merge.',

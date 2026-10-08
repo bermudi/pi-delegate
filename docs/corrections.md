@@ -69,6 +69,11 @@ runs both.
 
 ## Correction log
 
+- 2026-10-07 — operator asked to go over a review list "one by one"; agent
+  dumped all twelve items plus a summary table in one turn. "One by one" is
+  a stepwise discussion: present one item, get agreement, move to the next —
+  the walkthrough cadence is the operator's, not the agent's (CC-docs
+  §3 defense review session).
 - 2026-10-07 — #125 automated review caught inherited Git redirects in new
   fixture setup; hostile-environment verification also exposed two status queries.
   All new fixture Git commands now scrub `GIT_*`; both regression files pass

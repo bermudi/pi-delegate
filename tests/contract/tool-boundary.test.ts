@@ -39,8 +39,13 @@ describe("delegate public tool contract", () => {
   test("delegate's prompt guidance names its workflow rules", async () => {
     session = await openDelegateBoundary();
     const guidelines = delegateTool(session).promptGuidelines ?? [];
-    expect(guidelines.length).toBe(6);
+    expect(guidelines.length).toBe(7);
     expect(guidelines.join(" ")).toMatch(/never see|self-contained/i);
+    // #45: the nesting rule is spoken at the parent boundary (manual-only
+    // teaching never reaches the models that need it — the failure lands
+    // inside the child, invisible to misfire telemetry).
+    expect(guidelines.join(" ")).toMatch(/cannot delegate further/);
+    expect(guidelines.join(" ")).toMatch(/ask_parent/);
     expect(guidelines.join(" ")).toMatch(/poll/i);
     expect(guidelines.join(" ")).toMatch(/isolated/);
     // #121: the size rule is now a hard cap, not truncation — guidance
