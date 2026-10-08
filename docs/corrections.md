@@ -16,6 +16,11 @@ move. This file is the ledger; the reasoning behind the ladder lives in
   the scope frame in AGENTS.md (Scope frame paragraph); the rule is that
   goblin sessions are field telemetry, never the design target. Chat +
   AGENTS.md.
+- 2026-10-08 — Reported a verified review fix done without committing it;
+  the operator had to demand the commit. "Commit often, small and
+  working" means verified work lands before the report, not after a
+  reminder (tests/regression/scope-error-advice.test.ts, committed on
+  demand as 711a9f5).
 
 ## Enforcement map (surveyed 2026-10-04 @ d030bfd, v0.3.3)
 
