@@ -282,7 +282,8 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   overlapping active/reserved shared or isolated writers, including quarantine;
   new overlapping writers reject during copying. Concurrent scratch readers
   may coexist. Same-call planned writers are safe only before they start,
-  and earlier-phase writers require confirmed quiescence. The claim releases
+  and earlier-phase writers require confirmed quiescence through source-mutating
+  deferred cleanup and reconciliation. The claim releases
   after copying stops on every exit, before worker execution; scratch workers
   still hold no source write reservation. This is same-host Delegate admission,
   not cross-process protection or an atomic tree snapshot.

@@ -451,7 +451,8 @@ contract:
   is the policy. Concurrent scratch readers may coexist. Same-call
   not-yet-started writers may coexist because each phase's copies finish
   before that phase's workers start; earlier-phase writers must be
-  confirmed quiescent before they can be exempted. Copy claims release
+  confirmed quiescent, including source-mutating deferred cleanup and
+  reconciliation, before they can be exempted. Copy claims release
   on success, failure, or cancellation only after copying stops, before
   the scratch worker starts. This protects against Delegate-owned writers
   in the same host, not external processes or an atomic filesystem

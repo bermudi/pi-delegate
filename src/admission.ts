@@ -57,7 +57,7 @@ interface Reservation {
 export interface AdmissionGrant {
   /** Read protection only during a scratch source copy; release after cp settles. */
   readonly acquireSourceRead: (taskIndex: number, root: string) => () => void;
-  /** Coordinator proof: worker and phase reconciliation can no longer write. */
+  /** Coordinator proof: worker, deferred cleanup, and reconciliation are done. */
   readonly confirmTaskQuiescence: (taskIndex: number) => void;
   /**
    * Task index → task index of the predecessor it must wait for. Same-call
@@ -399,7 +399,7 @@ export class AdmissionController {
           if (!rootsOverlap(root, held.root)) continue;
           // Own current/future phase writers have not started: phase preparation
           // finishes before workers begin. Earlier phase writers are exempt only
-          // after the coordinator proves quiescence AND reconciliation finished.
+          // after worker/deferred cleanup quiescence AND reconciliation finished.
           if (held.owner === owner) {
             const writer = tasks.find((candidate) => candidate.index === held.taskIndex)!;
             if (writer.phase >= task.phase || quiescent.has(held.taskIndex)) continue;

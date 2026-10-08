@@ -194,7 +194,8 @@ use any design that makes these properties true and testable.
   writers MUST reject while the copy reservation is held. Concurrent copy
   readers MAY coexist. Same-call planned writers MAY be exempted only when
   they have not started; earlier-phase writers MUST be confirmed quiescent
-  before exemption. A copy reservation MUST remain held until copying stops,
+  including source-mutating deferred cleanup and reconciliation before exemption.
+  A copy reservation MUST remain held until copying stops,
   including on cancellation or failure, and MUST release before the scratch
   worker runs. Scratch worker execution holds no source write reservation.
 - Git-scope and inherited-redirection failures MUST include the relevant

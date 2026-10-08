@@ -413,20 +413,24 @@ export class DispatchCoordinator {
             }
           }
         }
-        // Phase source effects (including isolated applies) have finished.
-        // A provisional/quarantined outcome is never proof for scratch copying.
+        // Reconciliation has finished, but late worker truth may already have
+        // replaced a quarantined outcome while deferred cleanup still mutates
+        // source Git metadata. Only the full worker+cleanup barrier is proof
+        // for exempting this writer during a later scratch copy.
         for (const task of phaseTasks) {
-          if (outcomes[task.index] && !outcomes[task.index]!.quarantined) {
+          if (fullyQuiesced.get(task.index)!.resolved) {
             grant.confirmTaskQuiescence(task.index);
           }
         }
       }
     } finally {
-      // Tasks whose sessions could not be confirmed quiescent keep their
-      // reservations: their roots may still be mutating.
+      // Late worker truth can look nonquarantined before its cleanup tail
+      // finishes. Keep reservations through that full barrier too, otherwise
+      // a new dispatch could copy the source after this batch returns while
+      // isolated cleanup still changes its Git metadata.
       const retained = new Set<number>();
-      for (const outcome of outcomes) {
-        if (outcome?.quarantined) retained.add(outcome.index);
+      for (const task of tasks) {
+        if (!fullyQuiesced.get(task.index)!.resolved) retained.add(task.index);
       }
       grant.release(retained);
       // The budget account is final once every outcome has landed: the

@@ -669,7 +669,7 @@ gaps.
   #50): overlapping writers reject in both directions, concurrent readers may
   coexist, and claims release only after copying stops on every exit. Same-call
   planned writers may coexist before they start; earlier-phase writers require
-  confirmed quiescence.
+  confirmed quiescence through deferred cleanup and reconciliation.
 - **Regression:** stale-copy sweep (pid-namespaced, dead pids collected);
   linked-worktree rejection (a `.git` file redirects Git into the real
   repository); setup failure appends the `workspace:"shared"` remedy.

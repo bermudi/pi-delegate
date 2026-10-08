@@ -69,6 +69,10 @@ runs both.
 
 ## Correction log
 
+- 2026-10-07 — #50 P1 review reproduced late worker truth enabling a scratch copy
+  while deferred isolated cleanup still changed source Git metadata. Earlier-phase
+  exemptions require the full worker-and-cleanup barrier, not an outcome flag
+  (`src/coordinator.ts`, scratch-copy admission regression).
 - 2026-10-07 — #50/#51 review: replaced invented Git permission-denied stderr
   with a real malformed-config failure and observed Git output; explicitly
   labeled synthetic faults and registered-execute tests' bypassed host layers
