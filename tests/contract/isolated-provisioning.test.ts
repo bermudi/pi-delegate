@@ -177,6 +177,67 @@ describe("isolated worktree dependency provisioning contract (#120)", () => {
   );
 
   test(
+    "delegate trees under an ignored in-repo agent dir are never provisioned",
+    async () => {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInitWithIgnoredDeps(dir);
+      // The agent dir lives inside the source repo and is gitignored: git
+      // lists it under `!! `, and the delegate-isolated tree it holds
+      // contains the workers' own worktrees — including this worker's
+      // destination. Without the exclusion, provisioning either copies
+      // sibling workers' live worktrees into every worker or fails the
+      // whole group (fs.cp refuses copying a directory into itself).
+      writeFileSync(join(dir, ".gitignore"), "node_modules/\n.trees/\n");
+      mkdirSync(join(dir, ".trees"), { recursive: true });
+      execSync("git add .gitignore && git commit -qm ignore-trees", {
+        cwd: dir,
+      });
+
+      const probe: FauxResponseFactory = async (context) => {
+        if (context.messages.some((m) => m.role === "toolResult")) {
+          return fauxAssistantMessage(`PROBE:${toolResultText(context)}`);
+        }
+        return fauxAssistantMessage([
+          fauxToolCall("bash", {
+            command:
+              "cat node_modules/dep-marker.txt; if [ -e .trees ]; then printf 'TREES_PRESENT'; else printf 'TREES_ABSENT'; fi",
+          }),
+        ]);
+      };
+      subagents.respond([probe, probe]);
+
+      const previous = process.env.DELEGATE_AGENT_DIR;
+      process.env.DELEGATE_AGENT_DIR = join(dir, ".trees");
+      let result: Awaited<ReturnType<typeof callDelegate>>;
+      try {
+        result = await callDelegate(session, {
+          async: false,
+          tasks: [
+            {
+              prompt: "probe",
+              cwd: dir,
+              workspace: "isolated",
+              tools: ["bash"],
+            },
+          ],
+        });
+      } finally {
+        if (previous === undefined) delete process.env.DELEGATE_AGENT_DIR;
+        else process.env.DELEGATE_AGENT_DIR = previous;
+      }
+      expect(result.isError).toBe(false);
+      // Real ignored dependencies still provision…
+      expect(result.text).toContain("PROBE:provisioned-dep-42");
+      // …while the in-repo agent dir never reaches the worker.
+      expect(result.text).toContain("TREES_ABSENT");
+      expect(result.text).not.toContain("TREES_PRESENT");
+    },
+    30_000,
+  );
+
+  test(
     "a repository with no ignored entries dispatches isolated unchanged",
     async () => {
       session = await openDelegateBoundary();

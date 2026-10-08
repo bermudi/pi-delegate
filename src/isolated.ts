@@ -219,20 +219,42 @@ async function addWorktree(
  * `--ignored`, never `=matching`). Delegate-owned diagnostic paths are
  * skipped: they are runtime records, not source dependencies. Porcelain v1
  * `-z` records are `XY <path>`; only `!! ` records are ignored state.
+ * `excludes` are absolute delegate-owned roots (artifact base, batch root,
+ * agent-dir delegate trees): an agent dir living inside the source repo
+ * under a gitignore would otherwise be provisioned into the very workers
+ * it sits beside — and the artifact base holds the destination worktree
+ * itself, which fs.cp refuses outright (ERR_FS_CP_EINVAL, #120 review).
+ * An entry is skipped when it overlaps an excluded root in either
+ * direction: a descendant is a slice of runtime state, and an ancestor
+ * (the collapsed `.agent-dir/` a gitignore lists) would copy the whole
+ * artifact tree inside it.
  */
 async function ignoredEntries(
   root: string,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  excludes: readonly string[],
 ): Promise<string[]> {
   const output = await git(
     ["status", "--porcelain", "-z", "--ignored"],
     { cwd: root, signal },
   );
+  const overlaps = (a: string, b: string): boolean =>
+    isWithin(a, b) || isWithin(b, a);
   return output.stdout
     .split("\0")
     .filter((record) => record.startsWith("!! "))
     .map((record) => record.slice(3))
-    .filter((entry) => !isDiagnosticPath(path.join(root, entry)));
+    .filter((entry) => {
+      if (isDiagnosticPath(path.join(root, entry))) return false;
+      // Both spellings (the diagnosticExclusions discipline): an entry
+      // path may traverse a symlinked alias of an excluded root.
+      const resolved = path.resolve(root, entry);
+      return !excludes.some(
+        (exclude) =>
+          overlaps(exclude, resolved) ||
+          overlaps(exclude, canonicalPath(resolved)),
+      );
+    });
 }
 
 /**
@@ -405,6 +427,15 @@ interface IsolatedGroup {
    * drift (#62).
    */
   readonly snapshotExcludes: readonly string[];
+  /**
+   * The same delegate-owned roots in absolute form, both symlink
+   * spellings: provisioning's on-disk match for paths that must never be
+   * materialized into a worker (#120). The baseline keeps them out via
+   * pathspec; provisioning keeps them out via overlap, because the
+   * artifact base can sit inside a gitignored source tree — and a
+   * collapsed ignored ancestor of it would copy it whole.
+   */
+  readonly provisionExcludes: readonly string[];
   readonly taskIndexes: number[];
   /**
    * Provisioning observability fires once per group prep, not once per
@@ -1607,6 +1638,7 @@ export async function prepareIsolated(
         // root.
         const delegateDir = path.dirname(artifactBase);
         const excluded: string[] = [];
+        const provisionExcludes: string[] = [];
         for (const base of [
           artifactBase,
           batchRoot,
@@ -1619,6 +1651,17 @@ export async function prepareIsolated(
           const relative = path.relative(sourceRoot, resolved);
           if (relative !== "" && isWithin(sourceRoot, resolved)) {
             excluded.push(relative);
+          }
+          // Provisioning matches on-disk ignored entries, which Git spells
+          // through any symlinked alias: keep the delegate-owned roots in
+          // absolute form, both spellings, so the #120 filter cannot miss
+          // one. Roots outside the source tree never appear in
+          // `git status --ignored` output and are dropped here.
+          for (const candidate of new Set([path.resolve(base), resolved])) {
+            const candidateRelative = path.relative(sourceRoot, candidate);
+            if (candidateRelative !== "" && isWithin(sourceRoot, candidate)) {
+              provisionExcludes.push(candidate);
+            }
           }
         }
         const baselineTree = await snapshotTree(
@@ -1655,6 +1698,7 @@ export async function prepareIsolated(
           baselineRef,
           diagnostics,
           snapshotExcludes: excluded,
+          provisionExcludes,
           taskIndexes: [],
           provisionLogged: false,
           reconcileDone,
@@ -1689,7 +1733,11 @@ export async function prepareIsolated(
       // stay worker-local and writes can never reach the source through the
       // provisioned path. Observability stays bounded: one count-only line
       // per group prep, never the entry list.
-      const provisionedEntries = await ignoredEntries(sourceRoot, signal);
+      const provisionedEntries = await ignoredEntries(
+        sourceRoot,
+        signal,
+        group.provisionExcludes,
+      );
       await provisionIgnoredEntries(
         sourceRoot,
         workerRoot,

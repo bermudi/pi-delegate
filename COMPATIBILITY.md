@@ -115,8 +115,14 @@ just edit fan-outs.
 Invariants unchanged: ignored files never enter proposals, merges, or
 drift — they are read-only inputs, and worker-local mutations of them
 (e.g. a `bun install` inside the worktree) are discarded with the
-worktree at reconcile. Baselines, candidate worktrees, and drift
-checks are never provisioned. Provisioning failures fail the group
+worktree at reconcile. Delegate-owned runtime trees (artifact roots
+and the agent-dir delegate trees) are never provisioned, however the
+source's gitignore covers them — including a collapsed ignored
+ancestor (an ignored agent dir under the repo) that contains them;
+without this, provisioning sibling workers' live worktrees is wasted
+disk and copying the artifact base fails outright (fs.cp refuses
+copying a directory into itself). Baselines, candidate worktrees, and
+drift checks are never provisioned. Provisioning failures fail the group
 loud; a source entry that vanishes between listing and copying is
 skipped silently (a racy source is not worth failing a batch).
 

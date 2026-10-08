@@ -504,10 +504,13 @@ contract:
   supports it, a plain copy otherwise — so suite-running tasks work in
   isolation. Ignored files never enter proposals, merges, or drift:
   they are read-only inputs, and worker-local mutations of them are
-  discarded with the worktree at reconcile. Baselines, candidate
-  worktrees, and drift checks are never provisioned; a source entry
-  that vanishes between listing and copying is skipped, while any
-  other provisioning failure fails the group loud.
+  discarded with the worktree at reconcile. Delegate-owned runtime
+  trees (artifact roots and the agent-dir delegate trees) are never
+  provisioned, however the source's gitignore covers them — including
+  a collapsed ignored ancestor that contains them. Baselines,
+  candidate worktrees, and drift checks are never provisioned; a
+  source entry that vanishes between listing and copying is skipped,
+  while any other provisioning failure fails the group loud.
 
 ## Compatibility posture
 

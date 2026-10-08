@@ -764,7 +764,10 @@ gaps.
   the ignored marker lands the tracked edit in the source, leaves the
   source marker byte-identical, and lists no `node_modules` path in its
   proposal; an ignored-entry-free repo still dispatches isolated
-  (regression guard).
+  (regression guard); an agent dir nested inside the repo under a
+  gitignore never provisions (worker probes absence while the ignored
+  dependency still arrives — the pre-fix behavior failed the whole
+  group on fs.cp's copy-into-self EINVAL).
 - **Gap:** binary-content proposals end-to-end — patches always carry
   `--binary` and the failed-apply tests fault that invocation, but no test
   pushes actual non-text content through a live proposal; index/branch
