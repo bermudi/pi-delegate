@@ -69,6 +69,11 @@ runs both.
 
 ## Correction log
 
+- 2026-10-07 — #50/#51 review: replaced invented Git permission-denied stderr
+  with a real malformed-config failure and observed Git output; explicitly
+  labeled synthetic faults and registered-execute tests' bypassed host layers
+  (`scope-error-advice.test.ts`, `scratch-copy-admission.test.ts`).
+
 - 2026-10-06 — README's Configuration section and the #49 public reply
   documented `PI_AGENT_DIR`, an env var nothing reads; the real variables
   are `DELEGATE_AGENT_DIR` and Pi's `PI_CODING_AGENT_DIR`. Verify env var

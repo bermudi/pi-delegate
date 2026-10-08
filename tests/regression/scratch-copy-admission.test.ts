@@ -12,8 +12,11 @@ import {
 } from "../support/pi-boundary.ts";
 
 // Literal repository #50: public copying/read-vs-write regression scenarios.
-// Registered tool execution permits concurrent calls on one extension instance;
-// no production admission/workspace internals are imported.
+// Registered-execute engine boundary: concurrent calls on one extension
+// instance bypass Pi host preparation/schema validation, tool-call handlers,
+// and execution events. Delegate's execute-level validation/admission still run.
+// callDelegate/callDelegateTicket scenarios below use the full session.run path.
+// No production admission/workspace internals are imported.
 interface Result {
   content: readonly { text?: string }[];
   isError?: boolean;
@@ -28,8 +31,8 @@ function dispatchFrom(session: TestSession) {
   let id = 0;
   return (params: Record<string, unknown>, signal = new AbortController().signal) =>
     tool.execute(`scratch-copy-${++id}`, params, signal, () => {}, ctx)
-      // Pi reports thrown tool errors as error results; mirror that public
-      // boundary when invoking registered tools concurrently without a turn.
+      // Mirror thrown-error presentation only, not host preparation/validation,
+      // when invoking registered tools concurrently without a parent turn.
       .catch((error: unknown) => ({ isError: true, content: [{ text: error instanceof Error ? error.message : String(error) }] }));
 }
 function textOf(result: Result) {
