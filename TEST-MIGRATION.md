@@ -628,15 +628,19 @@ gaps.
 
 - **Contract:** fail closed on ambiguous Git/cwd scope; canonical equal /
   ancestor / descendant roots overlap; `read`, `grep`, `find`, `ls`,
-  `web_search` are read-only; unknown tools count as mutating; same-call
-  overlapping writers serialize in task order; overlap with active or
-  quarantined work rejects; shared/isolated overlap rejects. (The v1
-  operator-only warned bypass is deliberately not carried — see
+  `web_search` are read-only; unknown tools count as mutating; same-phase
+  overlapping shared writers reject with enumerated remedies while
+  cross-phase pairs serialize in (phase, task) order (#126); overlap with
+  active or quarantined work rejects; shared/isolated overlap rejects.
+  (The v1 operator-only warned bypass is deliberately not carried — see
   `COMPATIBILITY.md` 2026-09-21.)
 - **Regression:** symlink canonicalization; inherited `GIT_DIR`/
   `GIT_COMMON_DIR`/`core.worktree` redirection fails closed with bash-capable
   writers; nested repositories reject; path-prefix siblings are not nested;
-  a predecessor failure does not block a serialized successor.
+  a same-phase same-root shared-writer pair rejects naming the tasks and
+  remedies (#126); an incidentally-ordered cross-phase successor still runs
+  after its predecessor fails; a later-phase writer waits for an earlier
+  overlapping writer's confirmed quiescence.
 - **Internal:** `findSharedWriteConflicts` grouping internals, canonical-path
   helpers.
 - **Covered now:** same-call writer serialization order; cross-call
@@ -1648,12 +1652,14 @@ tasks were independent and `isolated` was the right call):
   one-field spelling of parallel same-repo edits. It is rejected when
   orphaned on ticket/session operations.
 - Schema descriptions and the help manual now carry the decision rule:
-  `shared` serializes overlapping same-repo writers in task order;
-  `isolated` runs independent edits in parallel and merges in order.
-- Admission exposes `serialized` groups on the grant; results prepend a
-  notice naming the serialized tasks and scope with the isolated remedy
-  (sync: live `onUpdate` frame plus the final result; async: ticket
-  creation text and poll/wait views).
+  `shared` wants `dependsOn` ordering between same-root writers and rejects
+  same-phase unordered overlap with enumerated remedies (#126);
+  cross-phase writers serialize in task order; `isolated` runs independent
+  edits in parallel and merges in order.
+- Admission exposes `serialized` groups on the grant (cross-phase only
+  since #126); results prepend a notice naming the serialized tasks and
+  scope with the isolated remedy (sync: live `onUpdate` frame plus the final
+  result; async: ticket creation text and poll/wait views).
 
 New live tests: the serialization test asserts the notice and remedy; a
 batch-default test proves parallel isolated execution and source

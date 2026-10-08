@@ -209,8 +209,9 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
   test("two tasks attributed the same file produce one overlap line naming the path and both ids", async () => {
     // Contract: SPEC "Completion evidence" — "when two tasks in one batch
     // are attributed the same file, the result says so". Same-call shared
-    // writers serialize (admission keeps them ordered), and the overlap is
-    // still reported — evidence is not suppressed by ordering.
+    // writers are dependsOn-ordered since #126 (unordered overlap rejects),
+    // and the overlap is still reported — evidence is not suppressed by
+    // ordering.
     const session = await openAt();
     const model = await installSubagentModel(session);
     model.respond([
@@ -225,8 +226,8 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
     ]);
     const result = await callDelegate(session, {
       tasks: [
-        { prompt: "write shared file first" },
-        { prompt: "write shared file second" },
+        { id: "task-1", prompt: "write shared file first" },
+        { id: "task-2", prompt: "write shared file second", dependsOn: ["task-1"] },
       ],
       async: false,
     });

@@ -77,7 +77,9 @@ describe("delegate workspace and shared-write contract", () => {
     async () => {
       // v1 evidence: dispatch.test.ts "serialized successor still runs after a
       // failed predecessor" and ordering chain tests; INVARIANTS: same-call
-      // overlapping shared writers serialize in task order.
+      // overlapping shared writers serialize in task order. Since #126 the
+      // pair must be graph-ordered — unordered overlap rejects — so this
+      // pins the ordered-serialization contract.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const dir = tempDir();
@@ -98,14 +100,14 @@ describe("delegate workspace and shared-write contract", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { prompt: "w1", cwd: dir,  tools: ["write"] },
-          { prompt: "w2", cwd: dir,  tools: ["write"] },
+          { id: "w1", prompt: "w1", cwd: dir,  tools: ["write"] },
+          { id: "w2", prompt: "w2", cwd: dir,  tools: ["write"], dependsOn: ["w1"] },
         ],
       });
       expect(result.isError).toBe(false);
 
       // Serialized: the second writer's interval starts only after the first
-      // ends, and the order follows the task array.
+      // ends, and the order follows the dependency edge.
       expect(timeline).toEqual([
         "start:first",
         "end:first",
@@ -116,6 +118,74 @@ describe("delegate workspace and shared-write contract", () => {
       // silent hour-long serial batches are the failure mode this prevents.
       expect(result.text).toMatch(/serialized/i);
       expect(result.text).toMatch(/isolated/);
+    },
+  );
+
+  test(
+    "unordered same-root shared writers reject with enumerated remedies",
+    async () => {
+      // #126: the advisory notice shipped 2026-09-12 (e0998c3) was delivered
+      // five times in session 01a11872 with zero behavior change, so
+      // unordered overlap now rejects before execution instead of silently
+      // serializing. The rejection enumerates every escape hatch.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+
+      let executions = 0;
+      subagents.respond([
+        async () => {
+          executions += 1;
+          return fauxAssistantMessage("SHOULD-NOT-RUN");
+        },
+      ]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          { id: "w1", prompt: "w1", cwd: dir,  tools: ["write"] },
+          { id: "w2", prompt: "w2", cwd: dir,  tools: ["write"] },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(executions).toBe(0);
+      expect(result.text).toMatch(/Unordered shared writers/i);
+      expect(result.text).toMatch(/'w1'/);
+      expect(result.text).toMatch(/'w2'/);
+      expect(result.text).toMatch(/dependsOn/);
+      expect(result.text).toMatch(/isolated/);
+      expect(result.text).toMatch(/separate calls/);
+    },
+  );
+
+  test(
+    "three same-root writers with one unordered pair reject together",
+    async () => {
+      // A→B is ordered, C is unordered against both: one unordered pair is
+      // enough to reject the whole group before execution.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+
+      let executions = 0;
+      subagents.respond([
+        async () => {
+          executions += 1;
+          return fauxAssistantMessage("SHOULD-NOT-RUN");
+        },
+      ]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          { id: "a", prompt: "a", cwd: dir,  tools: ["write"] },
+          { id: "b", prompt: "b", cwd: dir,  tools: ["write"], dependsOn: ["a"] },
+          { id: "c", prompt: "c", cwd: dir,  tools: ["write"] },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(executions).toBe(0);
+      expect(result.text).toMatch(/Unordered shared writers/i);
     },
   );
 
@@ -519,10 +589,15 @@ describe("delegate workspace and shared-write contract", () => {
         else process.env.GIT_DIR = previous;
       }
 
-      // Same repository scope → the writers serialize despite disjoint cwds.
-      expect(result?.isError).toBe(false);
-      expect(maxActive).toBe(1);
-      expect(subagents.state.callCount).toBe(2);
+      // Same repository scope → the overlap is detected through the
+      // canonical root despite disjoint cwds, so the unordered pair
+      // rejects (#126). The specific rejection message proves the scope
+      // was resolved (an ambiguity fallback would fail closed with a
+      // different, Git-scope error; a per-cwd fallback would run both).
+      expect(result?.isError).toBe(true);
+      expect(result?.text).toMatch(/Unordered shared writers/i);
+      expect(maxActive).toBe(0);
+      expect(subagents.state.callCount).toBe(0);
     },
   );
 

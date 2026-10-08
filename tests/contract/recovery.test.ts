@@ -122,9 +122,11 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     provider.respond([fauxAssistantMessage("COMPLETED-FIRST"), blocked]);
     try {
       const dispatched = await callDelegate(first, {
+        // #126 vehicle: dependsOn keeps the pinned split deterministic —
+        // first must be recorded completed before later is in flight.
         tasks: [
           { id: "first", prompt: "completed task" },
-          { id: "later", prompt: "long task" },
+          { id: "later", prompt: "long task", dependsOn: ["first"] },
         ],
         async: true,
       });

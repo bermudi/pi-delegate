@@ -42,9 +42,11 @@ describe("delegate dispatch contract", () => {
       // bare multi-task default is async since v3 grammar unit 1.
       const result = await callDelegate(session, {
         async: false,
+        // #126 vehicle: same-cwd writers need a dependsOn edge; the pinned
+        // input-order result needs the serialized timeline anyway.
         tasks: [
-          { prompt: "first" },
-          { prompt: "second" },
+          { id: "first", prompt: "first" },
+          { id: "second", prompt: "second", dependsOn: ["first"] },
         ],
       });
 
@@ -106,9 +108,11 @@ describe("delegate dispatch contract", () => {
 
       const result = await callDelegate(session, {
         async: false,
+        // #126 vehicle: read-only siblings admit concurrently — the
+        // subject is failure independence, not write admission.
         tasks: [
-          { prompt: "fine" },
-          { prompt: "doomed" },
+          { prompt: "fine", tools: ["read"] },
+          { prompt: "doomed", tools: ["read"] },
         ],
       });
 

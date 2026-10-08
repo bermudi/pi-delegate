@@ -408,8 +408,8 @@ mid-flight the parent can steer. The grammar:
   the phase, the caller-visible rejection message verbatim, and the
   batch shape (task count, requested agents, workspace selections,
   sync/async). Retention is identical to dispatch rows — one policy,
-  no extra knobs. Serialized — not rejected — batches keep riding
-  normal completed rows.
+  no extra knobs. Same-call shared writers that serialize (cross-phase
+  batches, #126) keep riding normal completed rows.
 
   Pre-schema errors carry paths and diagnostic messages only, never Pi's
   request-body dump. Caller-visible diagnostics are safe before persistence,
@@ -441,7 +441,7 @@ contract:
   (shared/scratch/isolated) and their admission semantics, session
   pools, `operationId` idempotency, spill, delivery once-ness,
   evidence-bearing telemetry rows — except the scratch-copy admission
-  strengthening below.
+  strengthening below and the unordered-shared-writer rejection (#126).
 - **Scratch-copy admission (this repository's #50, owner-approved
   2026-10-07).** Scratch holds no source write reservation during worker
   execution, but copying takes a temporary read reservation on the

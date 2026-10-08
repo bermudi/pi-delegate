@@ -517,7 +517,12 @@ describe("delegate:usage events (#60)", () => {
         fauxAssistantMessage("B2"),
       ]);
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "a" }, { prompt: "b" }],
+        // #126 vehicle: read-only tasks admit concurrently — subject is
+        // the usage payload, not write admission.
+        tasks: [
+          { prompt: "a", tools: ["read"] },
+          { prompt: "b", tools: ["read"] },
+        ],
         async: true,
       });
       expect(dispatched.isError).toBe(false);

@@ -72,11 +72,63 @@ describe("regression: failure propagation and retries", () => {
   );
 
   test(
-    "a serialized shared writer still runs after its predecessor fails",
+    "an incidentally-ordered cross-phase successor still runs after its predecessor fails",
     async () => {
-      // v1 evidence: dispatch.test.ts "serialized successor still runs after
-      // a failed predecessor". INVARIANTS: a predecessor failure MUST still
-      // allow its successor to run.
+      // #126 keeps cross-phase chaining semantics: a phase-1 writer whose
+      // only edge is to a reader is incidentally ordered behind a phase-0
+      // writer — sound serialization (a phase settles, quarantine included,
+      // before the next admits) — and a failure MUST still let it run;
+      // only graph dependents block on failure.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const cwd = session.cwd;
+
+      const ran: string[] = [];
+      const turn: FauxResponseFactory = async (context) => {
+        const messages = JSON.stringify(context.messages);
+        if (messages.includes('"w1"') || messages.includes("first writer")) {
+          ran.push("first");
+          return fauxAssistantMessage("", {
+            stopReason: "error",
+            errorMessage: "usage limit exceeded; upgrade your plan",
+          });
+        }
+        if (messages.includes('"w2"') || messages.includes("second writer")) {
+          ran.push("second");
+          return fauxAssistantMessage("SECOND-RAN");
+        }
+        ran.push("reader");
+        return fauxAssistantMessage("READ-OK");
+      };
+      subagents.respond([turn, turn, turn]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          { id: "w1", prompt: "first writer", cwd, tools: ["write"] },
+          { id: "r", prompt: "scout", cwd, tools: ["read"] },
+          { id: "w2", prompt: "second writer", cwd, tools: ["write"], dependsOn: ["r"] },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("SECOND-RAN");
+      expect(ran).toContain("first");
+      expect(ran).toContain("reader");
+      expect(ran).toContain("second");
+    },
+  );
+
+  test(
+    "an unordered same-root pair whose predecessor would fail rejects instead of chaining",
+    async () => {
+      // #126 deliberately removed implicit failure-tolerant chaining: v1
+      // (dispatch.test.ts "serialized successor still runs after a failed
+      // predecessor") let an unordered pair run one-after-the-other with
+      // the successor surviving the predecessor's failure. Unordered
+      // overlap now rejects before execution; ordered pairs follow
+      // dependency semantics (a failed prerequisite blocks dependents —
+      // pinned in dependencies.test.ts). Failure-tolerant sequencing is
+      // split calls or isolated.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const cwd = session.cwd;
@@ -102,8 +154,9 @@ describe("regression: failure propagation and retries", () => {
           { prompt: "w2", cwd,  tools: ["write"] },
         ],
       });
-      expect(result.text).toContain("SECOND-RAN");
-      expect(ran).toEqual(["first", "second"]);
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/Unordered shared writers/i);
+      expect(ran).toEqual([]);
     },
   );
 

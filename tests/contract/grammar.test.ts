@@ -58,7 +58,11 @@ describe("delegate interaction grammar (SPEC v3, #61)", () => {
       ));
       const result = await callDelegate(session, {
         async: false,
-        tasks: Array.from({ length: count }, (_, i) => ({ prompt: `task ${i}` })),
+        // #126 vehicle: read-only tasks admit concurrently — subject is
+        // the inline/background grammar, not write admission.
+        tasks: Array.from({ length: count }, (_, i) => ({
+          prompt: `task ${i}`, tools: ["read"],
+        })),
       });
       expect(result.isError).toBe(false);
       expect(objectOf(result.details, "details").async).toBe(false);

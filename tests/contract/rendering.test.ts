@@ -191,7 +191,13 @@ test(
     subagents.respond([fauxAssistantMessage(output), blocked.step]);
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "done-fast" }, { prompt: "blocked" }],
+      // #126 vehicle: read-only tasks — subject is output bounding, and
+      // one blocked reader mid-flight is exactly the recorded/running
+      // split under test.
+      tasks: [
+        { prompt: "done-fast", tools: ["read"] },
+        { prompt: "blocked", tools: ["read"] },
+      ],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -535,7 +541,12 @@ test(
     subagents.respond([blocked.step]);
 
     const result = await callDelegate(session, {
-      tasks: [{ prompt: "bg" }, { prompt: "bg2" }],
+      // #126 vehicle: read-only tasks admit; one stays gated mid-flight
+      // while the receipt collapses — the subject is the one-line shape.
+      tasks: [
+        { prompt: "bg", tools: ["read"] },
+        { prompt: "bg2", tools: ["read"] },
+      ],
       async: true,
     });
     const collapsed = renderToolResult(session, result, false);

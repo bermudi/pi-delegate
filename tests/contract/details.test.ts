@@ -98,10 +98,11 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "write a file" },
-          { id: "check", agent: "verifier", prompt: "verify claim X" },
+          { id: "task-1", prompt: "write a file" },
+          { id: "check", agent: "verifier", prompt: "verify claim X", dependsOn: ["task-1"] },
         ],
-        // Explicit inline mode; overlapping writers still serialize.
+        // Explicit inline mode; the dependsOn edge orders the two writers
+        // (#126: unordered same-root overlap rejects) so they serialize.
         async: false,
         brief: "SHARED-BRIEF",
         tokenBudget: 10_000_000,

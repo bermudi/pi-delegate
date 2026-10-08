@@ -247,17 +247,18 @@ describe("delegate ticket contract", () => {
 
       const dispatched = await callDelegate(session, {
         tasks: [
-          { prompt: "quick" },
-          { prompt: "slow" },
+          { id: "quick", prompt: "quick" },
+          { id: "slow", prompt: "slow", dependsOn: ["quick"] },
         ],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
 
-      // The tasks serialize on their shared write scope, so the second
-      // worker's stream call proves the first task's outcome is already
-      // recorded — cancelling earlier could beat task start and lose the
-      // completed output this test exists to retain.
+      // The tasks serialize on their shared write scope (ordered via
+      // dependsOn since #126), so the second worker's stream call proves
+      // the first task's outcome is already recorded — cancelling earlier
+      // could beat task start and lose the completed output this test
+      // exists to retain.
       await waitFor(
         () => subagents.state.callCount >= 2,
         "second worker stream to start",
@@ -294,9 +295,12 @@ describe("delegate ticket contract", () => {
       subagents.respond([step, fauxAssistantMessage("OUTPUT-QUEUED")]);
 
       const dispatched = await callDelegate(session, {
+        // #126 vehicle: dependsOn ordering — first holds the gate active
+        // while second stays queued behind the edge, the parked shape
+        // under test.
         tasks: [
-          { prompt: "first" },
-          { prompt: "second" },
+          { id: "first", prompt: "first" },
+          { id: "second", prompt: "second", dependsOn: ["first"] },
         ],
         async: true,
       });
@@ -350,7 +354,12 @@ describe("delegate ticket contract", () => {
       subagents.respond([forPrompt, forPrompt]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "succeed-task" }, { prompt: "fail-task" }],
+        // #126 vehicle: read-only tasks admit concurrently — the subject
+        // is failure independence in a partial settlement.
+        tasks: [
+          { prompt: "succeed-task", tools: ["read"] },
+          { prompt: "fail-task", tools: ["read"] },
+        ],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);

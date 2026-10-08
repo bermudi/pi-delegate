@@ -171,10 +171,12 @@ describe("delegate dependency graph and handoffs", () => {
 
       const result = await callDelegate(session, {
         async: false,
+        // #126 vehicle: read-only tasks so the free branch and the failer
+        // stay unordered siblings that admit concurrently.
         tasks: [
-          { id: "failer", prompt: "FAILER task" },
-          { id: "dependent", prompt: "depends", dependsOn: ["failer"] },
-          { id: "free", prompt: "FREE independent" },
+          { id: "failer", prompt: "FAILER task", tools: ["read"] },
+          { id: "dependent", prompt: "depends", dependsOn: ["failer"], tools: ["read"] },
+          { id: "free", prompt: "FREE independent", tools: ["read"] },
         ],
       });
       // Two non-successes and one success → a normal (partial) result.
@@ -274,10 +276,12 @@ describe("delegate dependency graph and handoffs", () => {
 
       const sends = spyOn(host, "sendCustomMessage");
       const dispatched = await callDelegate(session, {
+        // #126 vehicle: read-only tasks so the free branch and the failer
+        // stay unordered siblings that admit concurrently.
         tasks: [
-          { id: "free", prompt: "FREE independent" },
-          { id: "failer", prompt: "FAILER task" },
-          { id: "dependent", prompt: "depends", dependsOn: ["failer"] },
+          { id: "free", prompt: "FREE independent", tools: ["read"] },
+          { id: "failer", prompt: "FAILER task", tools: ["read"] },
+          { id: "dependent", prompt: "depends", dependsOn: ["failer"], tools: ["read"] },
         ],
         async: true,
       });
@@ -589,12 +593,14 @@ describe("delegate dependency graph and handoffs", () => {
         async: false,
         tasks: [
           { id: "w1", prompt: "write one", cwd: dir, tools: ["write"] },
-          { id: "w2", prompt: "write two", cwd: dir, tools: ["write"] },
+          { id: "w2", prompt: "write two", cwd: dir, tools: ["write"], dependsOn: ["w1"] },
         ],
       });
       expect(result.isError).toBe(false);
-      // Both writers completed, strictly serialized in task order: the
-      // successor's interval starts only after the predecessor ends.
+      // Both writers completed, strictly serialized in dependency order: the
+      // successor's interval starts only after the predecessor ends. Since
+      // #126 the pair must carry the dependsOn edge (unordered overlap
+      // rejects); the no-slot-while-waiting invariant is unchanged.
       expect(timeline).toEqual([
         "start:first",
         "end:first",

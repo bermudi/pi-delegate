@@ -276,7 +276,12 @@ describe("delegate explicit operation identity", () => {
       const { release, step } = gate();
       subagents.respond([fauxAssistantMessage("EARLY-OK"), step]);
       const args = {
-        tasks: [{ prompt: "quick" }, { prompt: "slow" }],
+        // #126 vehicle: read-only tasks admit concurrently — the gate
+        // holds one mid-flight for the force-cancel either way.
+        tasks: [
+          { prompt: "quick", tools: ["read"] },
+          { prompt: "slow", tools: ["read"] },
+        ],
         async: true,
         operationId: "op-cancel",
       };

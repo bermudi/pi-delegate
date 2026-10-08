@@ -7,15 +7,26 @@ impossible > types/lint/CI > prose rules > memory — updating the map as things
 move. This file is the ledger; the reasoning behind the ladder lives in
 `AGENTS.md` and the contracts.
 
+## Correction log
+
+- 2026-10-08 — Scoped a harness-level fix to goblin (the outer-loop
+  consumer) three times in one session: proposed its AGENTS.md as the
+  teaching channel (rejected: shared with other harnesses), then
+  goblin-scoped config, then “goblin’s coder profile”. Fixed by encoding
+  the scope frame in AGENTS.md (Scope frame paragraph); the rule is that
+  goblin sessions are field telemetry, never the design target. Chat +
+  AGENTS.md.
+
 ## Enforcement map (surveyed 2026-10-04 @ d030bfd, v0.3.3)
 
 **Impossible by construction:**
 
 - Nested dispatch: the three delegate tools are silently stripped from every
   child toolset (#45) — a subagent cannot re-dispatch.
-- Shared-write collisions: admission serializes same-tree writers within a
-  batch and rejects overlapping writers across calls (INVARIANTS "Shared
-  writes").
+- Shared-write collisions: admission serializes cross-phase same-tree
+  writers within a batch, rejects same-phase same-tree writer overlap with
+  enumerated remedies (#126), and rejects overlapping writers across calls
+  (INVARIANTS "Shared writes").
 - Duplicate runtime modules: host-provided packages (`typebox`,
   `pi-agent-core`) ride `peerDependencies: "*"` — a physical dependency would
   fork modules and the loader warns.

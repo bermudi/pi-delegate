@@ -224,7 +224,12 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
       const dispatched = await callDelegate(session, {
         tokenBudget: 1,
         async: true,
-        tasks: [{ prompt: "one" }, { prompt: "two" }],
+        // #126 vehicle: read-only tasks — maxConcurrent 1 still queues
+        // task two behind the slot, which the budget then stops.
+        tasks: [
+          { prompt: "one", tools: ["read"] },
+          { prompt: "two", tools: ["read"] },
+        ],
       });
       expect(dispatched.isError).toBe(false);
       await callDelegate(session, {
@@ -301,7 +306,13 @@ describe("batch token budget — fan-out cost ceiling (SPEC v3, issue #47)", () 
 
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "one" }, { prompt: "two" }, { prompt: "three" }],
+        // #126 vehicle: read-only tasks — maxConcurrent 1 still serializes
+        // the wave through the slot; the subject is the missing budget.
+        tasks: [
+          { prompt: "one", tools: ["read"] },
+          { prompt: "two", tools: ["read"] },
+          { prompt: "three", tools: ["read"] },
+        ],
       });
       expect(result.isError).toBe(false);
       expect(subagents.state.callCount).toBe(3);
