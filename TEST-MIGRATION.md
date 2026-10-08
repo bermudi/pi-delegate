@@ -705,6 +705,11 @@ gaps.
   accepted; prior shared/isolated phase writes reach dependent copies only
   after confirmed quiescence and reconciliation; quarantined prior-phase
   writers still reject copying; future-phase planned writers remain accepted.
+  Two late-isolated-settlement regressions use real source Git metadata to
+  cover cleanup still pending after group reconciliation and settlement before
+  a second repository's proposal collection. Both require rejection through
+  deferred cleanup/reconciliation, actual metadata removal, and successful retry;
+  the first also checks cross-call rejection after the original batch returns.
   Concurrent pre-worker cases use the registered-execute engine boundary
   (Delegate validation/admission, bypassing Pi host preparation/schema
   validation, handlers, and execution events); `callDelegate`/ticket cases
