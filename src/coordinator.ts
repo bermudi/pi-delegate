@@ -413,6 +413,13 @@ export class DispatchCoordinator {
             }
           }
         }
+        // Phase source effects (including isolated applies) have finished.
+        // A provisional/quarantined outcome is never proof for scratch copying.
+        for (const task of phaseTasks) {
+          if (outcomes[task.index] && !outcomes[task.index]!.quarantined) {
+            grant.confirmTaskQuiescence(task.index);
+          }
+        }
       }
     } finally {
       // Tasks whose sessions could not be confirmed quiescent keep their

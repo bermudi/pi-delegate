@@ -1,3 +1,4 @@
+import type { AdmissionGrant } from "./admission.ts";
 import { DiagnosticSink } from "./diagnostics.ts";
 import { join } from "node:path";
 import { DELEGATE_TREES } from "./fsx.ts";
@@ -82,6 +83,7 @@ interface PhasePlans {
 export async function prepareWorkspaces(
   diagnostics: DiagnosticSink,
   tasks: readonly ResolvedTask[],
+  grant: AdmissionGrant,
   agentDir: string,
   signal?: AbortSignal,
   excludedPaths: readonly string[] = [],
@@ -101,6 +103,7 @@ export async function prepareWorkspaces(
     const scratchPlan = await prepareScratch(
       diagnostics,
       prepared,
+      grant,
       join(agentDir, DELEGATE_TREES.scratch),
       signal,
       phase,

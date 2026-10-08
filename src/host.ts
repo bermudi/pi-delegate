@@ -163,13 +163,13 @@ export async function writeRootsOf(cwd: string): Promise<readonly string[]> {
       stderr || (error instanceof Error ? error.message : String(error));
     throw new Error(
       `Could not safely determine the Git scope for '${physicalCwd}': ${detail}. ` +
-        `Refusing to admit shared-write tasks with an ambiguous write scope.`,
+        `Refusing to admit shared-write tasks with an ambiguous write scope. Repair the Git repository context and access (including Git availability and permissions), then retry.`,
     );
   }
   if (!top) {
     throw new Error(
       `Could not safely determine the Git scope for '${physicalCwd}': git returned an empty repository root. ` +
-        `Refusing to admit shared-write tasks with an ambiguous write scope.`,
+        `Refusing to admit shared-write tasks with an ambiguous write scope. Repair the Git repository context and access (including Git availability and permissions), then retry.`,
     );
   }
   const root = canonicalPath(top);
