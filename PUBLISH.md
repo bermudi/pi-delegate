@@ -1,5 +1,11 @@
 # Publishing v3 (gated — do not run without bermudi's explicit yes)
 
+The yes must name the publish/release itself. Approval of a subset of a
+bundled ask ("merge", "ship it to main") is NOT release approval —
+learned 2026-10-08 when "merge please" was executed as merge + tag +
+npm publish. If the operator's reply does not say publish/release/tag,
+ask once, plainly, before pushing any `pi-delegate-v*` tag.
+
 v3 ships as `@bermudi/pi-delegate@0.3.1`, displacing v1 (0.1.23) for
 every machine on next `pi update` or repin. The minor bump inside the
 0.x line continues v1's versioning; the v3 surface is documented in

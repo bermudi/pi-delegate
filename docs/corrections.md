@@ -9,6 +9,15 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 
 ## Correction log
 
+## Correction log
+
+- 2026-10-08 — Executed "merge please" as merge + version bump + release
+  tag + npm publish + host update + issue closes. The word authorized the
+  merge only; PUBLISH.md's explicit-yes gate was satisfied for a subset of
+  the bundled ask, not the publish. Gate wording sharpened in PUBLISH.md
+  (a yes must name publish/release; subset approval is not release
+  approval). Operator reviewed and chose to keep 0.4.0 standing —
+  no revert (2026-10-08).
 - 2026-10-08 — Scoped a harness-level fix to goblin (the outer-loop
   consumer) three times in one session: proposed its AGENTS.md as the
   teaching channel (rejected: shared with other harnesses), then
