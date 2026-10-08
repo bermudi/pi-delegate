@@ -166,7 +166,7 @@ const taskSchema = Type.Object(
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
         description:
-          "shared/scratch/isolated. 'shared' edits the tree; same-root writers in one call should be ordered with dependsOn — same-phase unordered overlap rejects; ordered writers run one at a time in order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order. 'scratch' runs once in a disposable copy and discards every change — for write-capable tasks whose value is the answer, not the edits; read-only tasks cannot use it. Copying rejects overlap with active or quarantined source writers; worker execution may overlap after copying.",
+          "shared/scratch/isolated. 'shared' edits the tree; same-root writers in one call should be ordered with dependsOn — same-phase unordered overlap rejects; ordered writers run one at a time in order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order, with ignored files (e.g. node_modules) copied into each worktree (reflink/Copy-on-Write when the filesystem supports it). 'scratch' runs once in a disposable copy and discards every change — for write-capable tasks whose value is the answer, not the edits; read-only tasks cannot use it. Copying rejects overlap with active or quarantined source writers; worker execution may overlap after copying.",
       }),
     ),
     dependsOn: Type.Optional(
@@ -1174,7 +1174,9 @@ function helpWorkspaces(full: boolean): string {
 - \`isolated\`: each task works in a detached Git worktree; successful
   changes merge into the source in task order. Independent edits to the
   same repository run in parallel — much faster than shared for
-  independent work.${sessionFields}
+  independent work. Ignored files (e.g. \`node_modules\`) are copied
+  into each worktree, reflink/Copy-on-Write when the filesystem
+  supports it.${sessionFields}
 - \`scratch\`: one task, one disposable copy of the tree (reflinked when
   the filesystem supports it); every change is discarded. Use it for
   tasks that may write or run commands but whose output is the answer,
@@ -2511,7 +2513,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
         name: "delegate",
         label: "Delegate to Subagents",
         description:
-          "Run self-contained subagent tasks. Every nonempty call returns a background ticket; results arrive at your next step on their own — async: false returns inline results for any task count. Batch related work in one call: same-root shared writers need dependsOn ordering (same-phase unordered overlap rejects listing remedies); overlapping writers in separate calls reject. The explore role is read-only and admits concurrently; reviewer uses bash and counts as a writer. Use isolated for parallel edits or scratch to discard changes. Named Markdown profiles supply tools and base instructions. tasks: [] shows the manual." +
+          "Run self-contained subagent tasks. Every nonempty call returns a background ticket; results arrive at your next step on their own — async: false returns inline results for any task count. Batch related work in one call: same-root shared writers need dependsOn ordering (same-phase unordered overlap rejects listing remedies); overlapping writers in separate calls reject. The explore role is read-only and admits concurrently; reviewer uses bash and counts as a writer. Use isolated for parallel edits — ignored files (e.g. node_modules) are copied into each worktree, reflink/Copy-on-Write when the filesystem supports it — or scratch to discard changes. Named Markdown profiles supply tools and base instructions. tasks: [] shows the manual." +
           (surface === "compact" ? " Compact surface; enable advanced controls with \"surface\": \"full\" in user-global delegate.json and /reload." : " Full surface; advanced task and batch controls are enabled."),
         parameters: Type.Unsafe<DelegateArguments>(surface === "full" ? delegateSchema : compactDelegateSchema),
         promptSnippet:

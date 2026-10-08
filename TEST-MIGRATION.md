@@ -728,7 +728,10 @@ gaps.
   user's index/branch preserved; task-order all-or-nothing reconciliation;
   conflicts and pre-apply cancellation retain recoverable artifacts;
   `applied_unverified` never claims correctness; worker activity ends before
-  output is accepted.
+  output is accepted. Ignored entries (e.g. `node_modules/`) are provisioned
+  into each worker worktree (#120): the worker sees them, worker-local
+  mutations of them are discarded at reconcile, and they never enter
+  proposals — repos with no ignored entries behave exactly as before.
 - **Regression:** source changed mid-execution refuses apply; failed workers
   are discarded; abandoned workers are never snapshotted or applied;
   proposals with no changes leave nothing behind.
@@ -754,7 +757,17 @@ gaps.
   earlier write's attribution on the same path, delegate-owned agent-dir
   churn under the repo is excluded from drift, and a cancelled batch's
   drift report still lands (the check runs off the dispatch abort signal,
-  `-z --no-renames`).
+  `-z --no-renames`). #120 provisioning coverage (new suite
+  `tests/contract/isolated-provisioning.test.ts`, public boundary,
+  faux bash): a worker `cat`s a provisioned `node_modules/dep-marker.txt`
+  and reports its content; a worker that mutates both a tracked file and
+  the ignored marker lands the tracked edit in the source, leaves the
+  source marker byte-identical, and lists no `node_modules` path in its
+  proposal; an ignored-entry-free repo still dispatches isolated
+  (regression guard); an agent dir nested inside the repo under a
+  gitignore never provisions (worker probes absence while the ignored
+  dependency still arrives — the pre-fix behavior failed the whole
+  group on fs.cp's copy-into-self EINVAL).
 - **Gap:** binary-content proposals end-to-end — patches always carry
   `--binary` and the failed-apply tests fault that invocation, but no test
   pushes actual non-text content through a live proposal; index/branch
