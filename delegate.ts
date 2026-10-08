@@ -166,7 +166,7 @@ const taskSchema = Type.Object(
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
         description:
-          "shared/scratch/isolated. 'shared' edits the tree; writers in one repo run one at a time in task order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order. 'scratch' runs once in a disposable copy and discards every change — for write-capable tasks whose value is the answer, not the edits; read-only tasks cannot use it.",
+          "shared/scratch/isolated. 'shared' edits the tree; writers in one repo run one at a time in task order. 'isolated' runs each task in a private Git worktree — same-repo edits run in parallel and merge in order. 'scratch' runs once in a disposable copy and discards every change — for write-capable tasks whose value is the answer, not the edits; read-only tasks cannot use it. Copying rejects overlap with active or quarantined source writers; worker execution may overlap after copying.",
       }),
     ),
     dependsOn: Type.Optional(
@@ -202,7 +202,7 @@ const delegateSchema = Type.Object(
     workspace: Type.Optional(
       stringEnum(["shared", "scratch", "isolated"], {
         description:
-          "Default workspace for every task lacking its own. 'isolated' = parallel same-repo edits. 'scratch' = disposable copy, changes discarded.",
+          "Default workspace for every task lacking its own. 'isolated' = parallel same-repo edits. 'scratch' = disposable copy, changes discarded; copying rejects active source writers, execution may overlap afterward.",
       }),
     ),
     brief: Type.Optional(
@@ -1175,6 +1175,10 @@ function helpWorkspaces(full: boolean): string {
   the filesystem supports it); every change is discarded. Use it for
   tasks that may write or run commands but whose output is the answer,
   not the edits. A read-only task cannot use it — it needs no copy.${sessionFields}
+  During copying, the actual source root rejects overlapping active or
+  quarantined shared/isolated writers, and new writers reject until copying
+  settles. Scratch readers may copy concurrently; worker execution may overlap
+  writers after the copy. Same-call phase copies finish before phase workers start.
 - In \`isolated\` and \`scratch\`, write/edit calls into the original tree
   are refused — edit the same path inside the worker's copy — but shell
   commands are not confined; drift a worker's shell caused in the original
@@ -1498,7 +1502,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // steer/interrupt receipt is built, so the binding is safe.
   (sessionId) => sessions.transcriptFileOf(sessionId));
   const visibility = new VisibilitySignals(diagnostics, () => tickets.list());
-  const admission = new AdmissionController();
+  const admission = new AdmissionController(diagnostics);
   const sessions = new SessionPool(diagnostics);
   const coordinator = new DispatchCoordinator(diagnostics, tickets, activity);
   const telemetry = new TelemetryStore(diagnostics);
@@ -2160,6 +2164,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       plan = await prepareWorkspaces(
         diagnostics,
         tasks,
+        grant,
         env.agentDir,
         dispatchSignal,
         telemetrySpan.ownedPaths,

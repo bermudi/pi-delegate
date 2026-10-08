@@ -645,17 +645,31 @@ gaps.
   (task + owner) (#51); shared + isolated same-call rejection;
   an inherited `GIT_DIR` redirect fails closed for a bash-capable
   multi-writer batch; the scope probe runs with `GIT_*` scrubbed so a bogus
-  redirect cannot shrink the reserved scope.
+  redirect cannot shrink the reserved scope. Current tests name all three
+  inherited redirects and require clear/fix-and-retry guidance with no worker
+  execution; `scope-error-advice.test.ts` requires repair-and-retry guidance
+  for failed/empty scope discovery, no unconditional scratch recommendation,
+  and successful retry after repairing the boundary. Ordinary Git failure
+  uses real malformed configuration and observed stderr; unavailable Git and
+  empty stdout are explicitly synthetic boundary fault injection.
 - **Gap:** read-only + writer parallelism allowed; unknown-but-real tools
   treated as mutating; symlink canonicalization; external `core.worktree`
-  dual-root reservation; scratch
-  suggestion in rejection prose.
+  dual-root reservation.
+- **Superseded (this repository's #51):** the v1 scratch-recommendation
+  helpers and exact clauses are not restored. Current scope failures require
+  repair-and-retry advice; inherited redirects require clearing or correcting
+  the named variables. Scratch is not an unconditional admission bypass.
 
 ### Scratch workspaces
 
 - **Contract:** one-shot; disposable copy; changes discarded; no `sessionId`
   or `resumeFrom`; relative-write protection only; actionable setup-failure
-  remedy; read-only tasks rejected; no source write reservation.
+  remedy; read-only tasks rejected; no source write reservation during worker
+  execution. Copying holds a temporary source read claim (this repository's
+  #50): overlapping writers reject in both directions, concurrent readers may
+  coexist, and claims release only after copying stops on every exit. Same-call
+  planned writers may coexist before they start; earlier-phase writers require
+  confirmed quiescence through deferred cleanup and reconciliation.
 - **Regression:** stale-copy sweep (pid-namespaced, dead pids collected);
   linked-worktree rejection (a `.git` file redirects Git into the real
   repository); setup failure appends the `workspace:"shared"` remedy.
@@ -665,8 +679,9 @@ gaps.
 - **Internal:** lease layout/markers, sweep mechanics, copy strategy.
 - **Covered now:** discarded mutations never reach the source tree;
   read-only tasks reject before any provider call; a linked worktree
-  rejects with the shared/isolated remedy; a scratch task does not
-  conflict with an overlapping shared writer; copies from dead processes
+  rejects with the shared/isolated remedy; same-call scratch copying finishes
+  before that phase's shared workers start, and scratch execution may coexist
+  with a shared writer after copying; copies from dead processes
   are swept; copies land under the agent dir, never beside the source;
   an `edit` to the absolute source path is refused naming the copy-mapped
   path and leaves the source untouched (#62); a shell escape into the
@@ -680,6 +695,25 @@ gaps.
   pinning for the overlapped root entirely (unattributable, logged); a
   shell-less worker is never pinned; non-Git sources get no evidence and
   log once.
+- **Copy-admission regressions (#50, literal repository issue):**
+  `scratch-copy-admission.test.ts` covers active shared/isolated writers,
+  the actual canonical Git top-level through a cwd symlink, concurrent
+  copying readers, ancestor/descendant writer rejection during real paused
+  copying, and writer admission after copying while scratch workers remain
+  active. Real copy-filter failure and cancellation retain protection until
+  copying settles, then permit retry. Same-phase planned writers remain
+  accepted; prior shared/isolated phase writes reach dependent copies only
+  after confirmed quiescence and reconciliation; quarantined prior-phase
+  writers still reject copying; future-phase planned writers remain accepted.
+  Two late-isolated-settlement regressions use real source Git metadata to
+  cover cleanup still pending after group reconciliation and settlement before
+  a second repository's proposal collection. Both require rejection through
+  deferred cleanup/reconciliation, actual metadata removal, and successful retry;
+  the first also checks cross-call rejection after the original batch returns.
+  Concurrent pre-worker cases use the registered-execute engine boundary
+  (Delegate validation/admission, bypassing Pi host preparation/schema
+  validation, handlers, and execution events); `callDelegate`/ticket cases
+  traverse the full `session.run` boundary.
 - **Gap:** nested repositories whose `.git` files use absolute gitdirs
   (accepted risk: an ordinary copy preserves them, and scratch is not a
   security boundary).

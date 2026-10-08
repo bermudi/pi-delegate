@@ -1,3 +1,4 @@
+import type { AdmissionGrant } from "./admission.ts";
 import { DiagnosticSink, isDiagnosticPath } from "./diagnostics.ts";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
@@ -268,6 +269,7 @@ export interface ScratchPlan {
 export async function prepareScratch(
   diagnostics: DiagnosticSink,
   tasks: readonly ResolvedTask[],
+  grant: AdmissionGrant,
   scratchBase: string,
   signal: AbortSignal | undefined,
   phase: number,
@@ -303,7 +305,14 @@ export async function prepareScratch(
         recursive: true,
         mode: 0o700,
       });
-      await copyTree(root, copyRoot, signal);
+      const releaseSource = grant.acquireSourceRead(task.index, root);
+      try {
+        // Do not race this promise against abort: Node cp can still be reading
+        // after cancellation. Its actual settlement is the release boundary.
+        await copyTree(root, copyRoot, signal);
+      } finally {
+        releaseSource();
+      }
       if (signal?.aborted) {
         throw new Error("aborted");
       }

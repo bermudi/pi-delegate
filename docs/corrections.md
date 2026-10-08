@@ -69,6 +69,23 @@ runs both.
 
 ## Correction log
 
+- 2026-10-07 — #125 automated review caught inherited Git redirects in new
+  fixture setup; hostile-environment verification also exposed two status queries.
+  All new fixture Git commands now scrub `GIT_*`; both regression files pass
+  with three inherited redirects, and the redirected destination stays untouched.
+- 2026-10-07 — #50 P1 review reproduced late worker truth enabling a scratch copy
+  while deferred isolated cleanup still changed source Git metadata. Earlier-phase
+  exemptions require the full worker-and-cleanup barrier, not an outcome flag
+  (`src/coordinator.ts`, scratch-copy admission regression).
+- 2026-10-07 — follow-up #50 review reproduced late settlement before proposal
+  collection bypassing cleanup's retention guard and releasing source admission.
+  Reconciliation must finish before checking whether cleanup is owed
+  (`src/isolated.ts`, multi-repository scratch-copy regression).
+- 2026-10-07 — #50/#51 review: replaced invented Git permission-denied stderr
+  with a real malformed-config failure and observed Git output; explicitly
+  labeled synthetic faults and registered-execute tests' bypassed host layers
+  (`scope-error-advice.test.ts`, `scratch-copy-admission.test.ts`).
+
 - 2026-10-06 — README's Configuration section and the #49 public reply
   documented `PI_AGENT_DIR`, an env var nothing reads; the real variables
   are `DELEGATE_AGENT_DIR` and Pi's `PI_CODING_AGENT_DIR`. Verify env var
@@ -97,3 +114,4 @@ runs both.
 - 2026-10-06 — #122 first review reproduced diagnostic throws stranding answered workers and bypassing shutdown. Logging is an owned, nonthrowing observation; real-PTY dual-destination failures enforce lifecycle independence.
 - 2026-10-06 — #122 namespace review reproduced ordinary POSIX backslash filenames being omitted. Use platform path separators; public copy and attribution regressions retain the exact filename.
 - 2026-10-06 — delegated edit scripts used bare `python3` despite the standing uv rule. Corrected the worker: Python edits also require `uv run`; Bun remains preferred here.
+- 2026-10-07 — #50/#51 implementation repeated bare `python3` edit scripts despite the uv rule; corrected to Bun edits in the shared implementation session.

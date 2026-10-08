@@ -425,7 +425,7 @@ describe("delegate workspace and shared-write contract", () => {
   );
 
   test(
-    "inherited GIT_DIR redirect fails closed for a bash-capable multi-writer batch",
+    "inherited Git redirects fail closed with repair advice for a bash-capable multi-writer batch",
     async () => {
       // INVARIANTS: admission must fail closed when inherited Git redirects
       // could make a bash-capable writer escape the reserved scope.
@@ -434,8 +434,9 @@ describe("delegate workspace and shared-write contract", () => {
       const dir = tempDir();
       gitInit(dir);
 
-      const previous = process.env.GIT_DIR;
-      process.env.GIT_DIR = join(dir, "bogus-git-dir");
+      const redirects = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as const;
+      const previous = redirects.map((name) => process.env[name]);
+      for (const name of redirects) process.env[name] = join(dir, "bogus-git-dir");
       try {
         const result = await callDelegate(session, {
           async: false,
@@ -453,10 +454,15 @@ describe("delegate workspace and shared-write contract", () => {
           ],
         });
         expect(result.isError).toBe(true);
-        expect(result.text).toMatch(/git|redirect|scope|unsafe/i);
+        // Literal repository #51: name every redirect and teach how to repair it.
+        for (const name of redirects) expect(result.text).toContain(name);
+        expect(result.text).toMatch(/clear or fix.*redirects.*retry/i);
+        expect(result.text).not.toMatch(/scratch/i);
       } finally {
-        if (previous === undefined) delete process.env.GIT_DIR;
-        else process.env.GIT_DIR = previous;
+        redirects.forEach((name, index) => {
+          if (previous[index] === undefined) delete process.env[name];
+          else process.env[name] = previous[index];
+        });
       }
       expect(subagents.state.callCount).toBe(0);
     },

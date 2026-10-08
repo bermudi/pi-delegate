@@ -1705,8 +1705,13 @@ export async function prepareIsolated(
     },
     async cleanupWorker(taskIndex: number): Promise<void> {
       const worker = workers.get(taskIndex);
-      if (!worker?.retained) return;
+      if (!worker) return;
+      // Late worker truth may arrive before this group has even collected its
+      // proposal. Reconciliation can still remove source Git metadata, and
+      // retention is not decided yet. Do not authorize reservation release
+      // merely because the worktree has not been marked retained.
       await worker.group.reconcileDone;
+      if (!worker.retained) return;
       try {
         await stopWorkspaceProcesses(diagnostics, worker.workerRoot);
       } catch (error) {

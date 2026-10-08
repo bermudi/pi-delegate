@@ -1,3 +1,4 @@
+import { DiagnosticSink } from "./diagnostics.ts";
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { dependsTransitively } from "./graph.ts";
@@ -54,6 +55,10 @@ interface Reservation {
 }
 
 export interface AdmissionGrant {
+  /** Read protection only during a scratch source copy; release after cp settles. */
+  readonly acquireSourceRead: (taskIndex: number, root: string) => () => void;
+  /** Coordinator proof: worker, deferred cleanup, and reconciliation are done. */
+  readonly confirmTaskQuiescence: (taskIndex: number) => void;
   /**
    * Task index → task index of the predecessor it must wait for. Same-call
    * overlapping shared writers serialize in task order.
@@ -100,6 +105,9 @@ export interface AdmissionGrant {
  */
 export class AdmissionController {
   private readonly reservations: Reservation[] = [];
+  private readonly sourceReads: { root: string; owner: string; taskId: string }[] = [];
+
+  constructor(private readonly diagnostics: DiagnosticSink) {}
   private readonly busySessions = new Map<string, { owner: string; taskIndex: number }>();
   /** Canonical transcript files owned by live work (resumeFrom or a pooled
    * session's file). One transcript, one owner at a time. */
@@ -150,7 +158,7 @@ export class AdmissionController {
       reserving.some((task) => task.tools.includes("bash"))
     ) {
       throw new Error(
-        `Could not safely verify a bash-capable multi-writer batch while ${redirects.join(", ")} redirects Git repository context.`,
+        `Could not safely verify a bash-capable multi-writer batch while ${redirects.join(", ")} redirects Git repository context. Clear or fix these inherited environment redirects, then retry.`,
       );
     }
 
@@ -270,6 +278,19 @@ export class AdmissionController {
       }
     }
 
+    // Reverse direction: writer admission is atomic against copying readers.
+    for (const task of reserving) {
+      for (const read of this.sourceReads) {
+        if (!task.writeRoots!.some((root) => rootsOverlap(root, read.root))) continue;
+        this.diagnostics.log("info", "scratch source read conflict", {
+          taskId: task.id, by: read.owner, path: read.root, operation: "writer admission",
+        });
+        throw new Error(
+          `Task ${task.id} conflicts with scratch source copying at ${read.root} (owner: ${read.owner}, task: ${read.taskId}). Wait for the copy to finish, then retry; scratch worker execution does not hold this read claim.`,
+        );
+      }
+    }
+
     // Sessions: a sessionId in use by a live call or ticket is busy.
     for (const task of tasks) {
       if (task.sessionId === undefined) continue;
@@ -343,6 +364,7 @@ export class AdmissionController {
       this.busyTranscripts.set(held.path, { owner, taskIndex: held.taskIndex });
     }
 
+    const quiescent = new Set<number>();
     let released = false;
     const allIndexes = new Set(tasks.map((task) => task.index));
     const releaseIndexes = (indexes: ReadonlySet<number>): void => {
@@ -367,6 +389,40 @@ export class AdmissionController {
       }
     };
     return {
+      confirmTaskQuiescence: (taskIndex) => { quiescent.add(taskIndex); },
+      acquireSourceRead: (taskIndex, root) => {
+        const task = tasks.find((candidate) => candidate.index === taskIndex);
+        if (released || task === undefined || task.workspace !== "scratch") {
+          throw new Error("Cannot claim scratch source copying without a live scratch task owner.");
+        }
+        for (const held of this.reservations) {
+          if (!rootsOverlap(root, held.root)) continue;
+          // Own current/future phase writers have not started: phase preparation
+          // finishes before workers begin. Earlier phase writers are exempt only
+          // after worker/deferred cleanup quiescence AND reconciliation finished.
+          if (held.owner === owner) {
+            const writer = tasks.find((candidate) => candidate.index === held.taskIndex)!;
+            if (writer.phase >= task.phase || quiescent.has(held.taskIndex)) continue;
+          }
+          this.diagnostics.log("info", "scratch source read conflict", {
+            taskId: task.id, by: held.owner, path: root, operation: "source read acquisition",
+            status: held.kind,
+          });
+          throw new Error(
+            `Scratch task ${task.id} cannot copy source ${root}: overlapping ${held.kind} writer ${held.taskId} (owner: ${held.owner}) is active or quarantined. Wait for confirmed quiescence, then retry.`,
+          );
+        }
+        const read = { root, owner, taskId: task.id };
+        this.sourceReads.push(read);
+        this.diagnostics.log("info", "scratch source read acquired", { taskId: task.id, by: owner, path: root });
+        let done = false;
+        return () => {
+          if (done) return;
+          done = true;
+          this.sourceReads.splice(this.sourceReads.indexOf(read), 1);
+          this.diagnostics.log("info", "scratch source read released", { taskId: task.id, by: owner, path: root });
+        };
+      },
       predecessors,
       serialized,
       holdTranscript: (taskIndex: number, rawPath: string): void => {
