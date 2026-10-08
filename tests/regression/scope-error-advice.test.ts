@@ -29,7 +29,10 @@ describe("Git scope discovery repair advice (#51)", () => {
       session = await openDelegateBoundary();
       const model = await installSubagentModel(session);
       const source = tempDir(), shim = tempDir();
-      execSync("git init -q", { cwd: source });
+      const env = Object.fromEntries(
+        Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+      );
+      execSync("git init -q", { cwd: source, env });
       const configPath = join(source, ".git", "config");
       const originalConfig = readFileSync(configPath);
       if (failure === "empty Git root") {

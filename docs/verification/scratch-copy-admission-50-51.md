@@ -19,7 +19,8 @@ Owner approved rejection rather than waiting/warning on 2026-10-07.
 
 ## Verification
 
-Final code: `9c410b5`.
+Final production code: `9c410b5`; subsequent test-only changes isolate Git
+fixture commands from inherited redirects.
 
 | Check | Observed result |
 | --- | --- |
@@ -29,6 +30,7 @@ Final code: `9c410b5`.
 | `bun run verify:dogfood -- --keep` | Passed, compact and full |
 | Independent focused review suites | 64 + 44 passed, 0 failed |
 | Independent late-settlement repeats | Both cases passed on each of 5 runs |
+| Both new regression files with three inherited Git redirects | 17 passed; redirected destination remained empty |
 
 Dogfood used the unchanged owner pin in `dogfood.config.json`
 (`zai/glm-5.3-flash`). It verified marker files, session tool results, and
@@ -72,6 +74,10 @@ but did not rerun those negative controls.
   `~/.cache/pi-delegate-dogfood.cu2o8s`. The unchanged final harness passed.
 - Existing absent-scratch-directory cleanup `ENOENT` logs appeared during tests;
   they remain unchanged and nonfailing.
+- Automated PR review caught inherited redirects in fixture setup. The first
+  hostile-environment run then exposed two unisolated fixture status queries
+  (15 passed, 2 failed). All new fixture Git commands now scrub `GIT_*`;
+  the repeat passed all 17 tests without touching the redirect destination.
 - Protection is host-local Delegate admission, not cross-process locking,
   shell confinement, or an atomic filesystem snapshot.
 - No package version change, protected-branch merge/push, deployment, or publish.

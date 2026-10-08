@@ -51,8 +51,13 @@ async function bounded<T>(promise: Promise<T>): Promise<T> {
     })]);
   } finally { clearTimeout(timer); }
 }
+function gitFixtureEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+  );
+}
 function gitInit(root: string) {
-  execSync("git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty", { cwd: root });
+  execSync("git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty", { cwd: root, env: gitFixtureEnv() });
 }
 
 /** Pause the REAL fs.cp inside its asynchronous filter. Node's copy promise
@@ -447,7 +452,7 @@ describe("scratch source copying admission (#50)", () => {
       expect(retry.isError).toBe(false);
       expect(retry.text).toContain("scratch retry allowed");
       expect(fs.existsSync(metadata)).toBe(false);
-      expect(execSync("git worktree list --porcelain", { cwd: source, encoding: "utf8" })).not.toContain("worker-0");
+      expect(execSync("git worktree list --porcelain", { cwd: source, encoding: "utf8", env: gitFixtureEnv() })).not.toContain("worker-0");
       expect(copyCalls).toBe(1);
       expect(model.state.callCount).toBe(3);
     } finally {
@@ -555,7 +560,7 @@ describe("scratch source copying admission (#50)", () => {
       expect(completed.text).toMatch(/done|complet/i);
       expect(fs.existsSync(firstMetadata)).toBe(false);
       expect(fs.existsSync(secondMetadata)).toBe(false);
-      expect(execSync("git worktree list --porcelain", { cwd: secondSource, encoding: "utf8" })).not.toContain("worker-1");
+      expect(execSync("git worktree list --porcelain", { cwd: secondSource, encoding: "utf8", env: gitFixtureEnv() })).not.toContain("worker-1");
       copy.release();
       const retry = await bounded(callDelegate(session, { async: false, tasks: [
         { prompt: "scratch after both repositories reconcile", cwd: secondSource, workspace: "scratch", tools: ["write"] },

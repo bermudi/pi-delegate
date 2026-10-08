@@ -69,6 +69,10 @@ runs both.
 
 ## Correction log
 
+- 2026-10-07 — #125 automated review caught inherited Git redirects in new
+  fixture setup; hostile-environment verification also exposed two status queries.
+  All new fixture Git commands now scrub `GIT_*`; both regression files pass
+  with three inherited redirects, and the redirected destination stays untouched.
 - 2026-10-07 — #50 P1 review reproduced late worker truth enabling a scratch copy
   while deferred isolated cleanup still changed source Git metadata. Earlier-phase
   exemptions require the full worker-and-cleanup barrier, not an outcome flag
