@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai";
@@ -340,4 +340,121 @@ describe("scratch source copying admission (#50)", () => {
       expect(model.state.callCount).toBe(2);
     });
   }
+
+  // Fresh P1 review of #50: late worker truth can lose its quarantine flag
+  // before deferred Git cleanup stops mutating the source. Exercise both
+  // same-call phase exemption and reservation retention after the call ends.
+  // Linux /proc scanning is the real filesystem boundary before worktree remove.
+  (process.platform === "linux" ? test : test.skip)("late isolated settlement does not exempt scratch copying while source Git cleanup is pending", async () => {
+    session = await openDelegateBoundary();
+    configureDelegate(session, { stallTimeoutMs: 500 });
+    const model = await installSubagentModel(session);
+    const source = tempDir(); gitInit(source);
+    const metadata = join(source, ".git", "worktrees", "worker-0");
+    const worker = gate(), reconcileEntered = gate(), finishReconcile = gate();
+    const cleanupEntered = gate(), finishCleanup = gate();
+    let batchRoot: string | undefined;
+    let cleanupArmed = false, cleanupHeld = false, copyCalls = 0;
+    const response: FauxResponseFactory = async (context) => {
+      if (JSON.stringify(context.messages).includes("late isolated writer")) {
+        // Discover the actual detached worktree through Git's source metadata,
+        // rather than importing a production workspace plan or private state.
+        const gitFile = fs.readFileSync(join(metadata, "gitdir"), "utf8").trim();
+        batchRoot = dirname(dirname(dirname(gitFile)));
+        await worker.promise;
+        return fauxAssistantMessage("late worker truth");
+      }
+      return fauxAssistantMessage("scratch retry allowed");
+    };
+    model.respond([response, response, response, response]);
+
+    const originalRmdir = fs.promises.rmdir;
+    const rmdirSpy = spyOn(fs.promises, "rmdir").mockImplementation(async (path, options) => {
+      if (String(path) === batchRoot && !cleanupArmed) {
+        // Proposal discard and group reconciliation have finished, but the
+        // phase has not returned. Now let the REAL stalled worker settle.
+        cleanupArmed = true;
+        reconcileEntered.release();
+        await finishReconcile.promise;
+      }
+      return originalRmdir(path, options);
+    });
+    const originalReaddir = fs.promises.readdir;
+    const readdirSpy = spyOn(fs.promises, "readdir").mockImplementation((async (...args: Parameters<typeof originalReaddir>) => {
+      if (String(args[0]) === "/proc" && cleanupArmed && !cleanupHeld) {
+        // onWorkerSettled has recorded nonquarantined late truth before
+        // entering this real scan. Hold cleanup BEFORE git worktree remove.
+        cleanupHeld = true;
+        cleanupEntered.release();
+        await finishCleanup.promise;
+      }
+      return originalReaddir(...args);
+    }) as typeof originalReaddir);
+    const originalCp = fs.promises.cp;
+    const cpSpy = spyOn(fs.promises, "cp").mockImplementation(async (src, dst, options) => {
+      if (String(src) === source) copyCalls++;
+      return originalCp(src, dst, options);
+    });
+    const pending = callDelegate(session, { async: false, tasks: [
+      { id: "late", prompt: "late isolated writer", cwd: source, workspace: "isolated", tools: ["write"] },
+      { id: "ready", prompt: "quick prerequisite", cwd: source, tools: ["read"] },
+      { id: "copy", prompt: "later-phase scratch must not run", cwd: source, workspace: "scratch", tools: ["write"], dependsOn: ["ready"] },
+    ] });
+    try {
+      await bounded(reconcileEntered.promise);
+      expect(fs.existsSync(metadata)).toBe(true);
+      expect(model.state.callCount).toBe(2);
+      worker.release();
+      await bounded(cleanupEntered.promise);
+      expect(fs.existsSync(metadata)).toBe(true);
+      finishReconcile.release();
+      // Reject, not wait: the batch must finish with cleanup still held.
+      const result = await bounded(pending);
+      const details = result.details as { results: { id: string; quarantined?: boolean; integration?: { status: string; reason?: string } }[] };
+      const late = details.results.find((outcome) => outcome.id === "late")!;
+      expect(late.quarantined).not.toBe(true);
+      expect(late.integration?.status).toBe("discarded");
+      expect(late.integration?.reason).toMatch(/termination was never confirmed/);
+      expect(result.text).toMatch(/cannot copy source/);
+      expect(result.text).toMatch(/writer late.*active or quarantined/);
+      expect(copyCalls).toBe(0);
+      expect(model.state.callCount).toBe(2);
+      expect(fs.existsSync(metadata)).toBe(true);
+
+      // A separate public call must also reject after the original dispatch
+      // returned: replacing quarantine truth must not release its reservation.
+      const rejected = await bounded(callDelegate(session, { async: false, tasks: [
+        { prompt: "cross-call scratch must not run", cwd: source, workspace: "scratch", tools: ["write"] },
+      ] }));
+      expect(rejected.isError).toBe(true);
+      expect(rejected.text).toMatch(/cannot copy source/);
+      expect(copyCalls).toBe(0);
+      expect(model.state.callCount).toBe(2);
+      expect(fs.existsSync(metadata)).toBe(true);
+
+      finishCleanup.release();
+      // Admission itself proves release; no production-internal quiescence
+      // probe. Real Git removal must also have changed the source metadata.
+      let retry;
+      const end = Date.now() + 5000;
+      do {
+        retry = await callDelegate(session, { async: false, tasks: [
+          { prompt: "scratch after cleanup", cwd: source, workspace: "scratch", tools: ["write"] },
+        ] });
+        if (!retry.isError) break;
+        await Bun.sleep(5);
+      } while (Date.now() < end);
+      expect(retry.isError).toBe(false);
+      expect(retry.text).toContain("scratch retry allowed");
+      expect(fs.existsSync(metadata)).toBe(false);
+      expect(execSync("git worktree list --porcelain", { cwd: source, encoding: "utf8" })).not.toContain("worker-0");
+      expect(copyCalls).toBe(1);
+      expect(model.state.callCount).toBe(3);
+    } finally {
+      worker.release(); finishReconcile.release(); finishCleanup.release();
+      try { await bounded(pending); } finally {
+        rmdirSpy.mockRestore(); readdirSpy.mockRestore(); cpSpy.mockRestore();
+      }
+    }
+  }, 15_000);
 });
