@@ -73,6 +73,10 @@ runs both.
   while deferred isolated cleanup still changed source Git metadata. Earlier-phase
   exemptions require the full worker-and-cleanup barrier, not an outcome flag
   (`src/coordinator.ts`, scratch-copy admission regression).
+- 2026-10-07 — follow-up #50 review reproduced late settlement before proposal
+  collection bypassing cleanup's retention guard and releasing source admission.
+  Reconciliation must finish before checking whether cleanup is owed
+  (`src/isolated.ts`, multi-repository scratch-copy regression).
 - 2026-10-07 — #50/#51 review: replaced invented Git permission-denied stderr
   with a real malformed-config failure and observed Git output; explicitly
   labeled synthetic faults and registered-execute tests' bypassed host layers
