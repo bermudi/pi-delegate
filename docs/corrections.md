@@ -97,3 +97,4 @@ runs both.
 - 2026-10-06 — #122 first review reproduced diagnostic throws stranding answered workers and bypassing shutdown. Logging is an owned, nonthrowing observation; real-PTY dual-destination failures enforce lifecycle independence.
 - 2026-10-06 — #122 namespace review reproduced ordinary POSIX backslash filenames being omitted. Use platform path separators; public copy and attribution regressions retain the exact filename.
 - 2026-10-06 — delegated edit scripts used bare `python3` despite the standing uv rule. Corrected the worker: Python edits also require `uv run`; Bun remains preferred here.
+- 2026-10-07 — #50/#51 implementation repeated bare `python3` edit scripts despite the uv rule; corrected to Bun edits in the shared implementation session.

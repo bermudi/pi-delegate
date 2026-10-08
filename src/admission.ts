@@ -283,7 +283,7 @@ export class AdmissionController {
       for (const read of this.sourceReads) {
         if (!task.writeRoots!.some((root) => rootsOverlap(root, read.root))) continue;
         this.diagnostics.log("info", "scratch source read conflict", {
-          taskId: task.id, by: owner, path: read.root, operationId: read.owner,
+          taskId: task.id, by: read.owner, path: read.root, operation: "writer admission",
         });
         throw new Error(
           `Task ${task.id} conflicts with scratch source copying at ${read.root} (owner: ${read.owner}, task: ${read.taskId}). Wait for the copy to finish, then retry; scratch worker execution does not hold this read claim.`,
@@ -405,7 +405,7 @@ export class AdmissionController {
             if (writer.phase >= task.phase || quiescent.has(held.taskIndex)) continue;
           }
           this.diagnostics.log("info", "scratch source read conflict", {
-            taskId: task.id, by: owner, path: root, operationId: held.owner,
+            taskId: task.id, by: held.owner, path: root, operation: "source read acquisition",
             status: held.kind,
           });
           throw new Error(

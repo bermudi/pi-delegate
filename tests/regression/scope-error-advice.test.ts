@@ -1,0 +1,57 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { execSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { TestSession } from "@marcfargas/pi-test-harness";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { callDelegate, installSubagentModel, openDelegateBoundary } from "../support/pi-boundary.ts";
+
+// Literal repository #51: fail-closed admission errors must teach repair/retry,
+// never suggest scratch as an unconditional workaround for ambiguous scope.
+describe("Git scope discovery repair advice (#51)", () => {
+  let session: TestSession | undefined;
+  const dirs: string[] = [];
+  function tempDir() {
+    const dir = mkdtempSync(join(tmpdir(), "delegate-scope-advice-"));
+    dirs.push(dir);
+    return dir;
+  }
+  afterEach(() => {
+    session?.dispose(); session = undefined;
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  for (const failure of ["unavailable Git", "repository access error", "empty Git root"] as const) {
+    test(`${failure} rejects with repair and retry advice before any worker starts`, async () => {
+      session = await openDelegateBoundary();
+      const model = await installSubagentModel(session);
+      const source = tempDir(), shim = tempDir();
+      execSync("git init -q", { cwd: source });
+      if (failure !== "unavailable Git") {
+        writeFileSync(join(shim, "git"), failure === "empty Git root"
+          ? "#!/bin/sh\nexit 0\n"
+          : "#!/bin/sh\nprintf 'fatal: cannot access repository: Permission denied' >&2\nexit 128\n", { mode: 0o755 });
+      }
+      const previousPath = process.env.PATH;
+      const args = { async: false, tasks: [{ prompt: "write after repair", cwd: source, tools: ["write"] }] };
+      try {
+        process.env.PATH = shim;
+        const result = await callDelegate(session, args);
+        expect(result.isError).toBe(true);
+        expect(result.text).toMatch(/could not safely determine.*Git scope/i);
+        expect(result.text).toMatch(/repair.*Git.*context.*access.*retry/i);
+        expect(result.text).not.toMatch(/scratch/i);
+        expect(model.state.callCount).toBe(0);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+      }
+      model.respond([fauxAssistantMessage("repaired scope accepted")]);
+      const repaired = await callDelegate(session, args);
+      expect(repaired.isError).toBe(false);
+      expect(repaired.text).toContain("repaired scope accepted");
+      expect(model.state.callCount).toBe(1);
+    });
+  }
+});
