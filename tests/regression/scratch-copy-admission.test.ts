@@ -457,4 +457,122 @@ describe("scratch source copying admission (#50)", () => {
       }
     }
   }, 15_000);
+
+  // Second independently reproduced #50 P1: another repository reconciles
+  // first, so late truth arrives BEFORE the target group's proposal collection
+  // has decided retention. Source reservations must cover that future Git tail.
+  (process.platform === "linux" ? test : test.skip)("late isolated settlement before target-group reconciliation still rejects scratch copying", async () => {
+    session = await openDelegateBoundary();
+    configureDelegate(session, { stallTimeoutMs: 500 });
+    const model = await installSubagentModel(session);
+    const firstSource = tempDir(), secondSource = tempDir();
+    gitInit(firstSource); gitInit(secondSource);
+    const firstMetadata = join(firstSource, ".git", "worktrees", "worker-0");
+    const secondMetadata = join(secondSource, ".git", "worktrees", "worker-1");
+    const worker = gate(), reconcileEntered = gate(), finishReconcile = gate();
+    let scans = 0, armed = false;
+    const response: FauxResponseFactory = async (context) => {
+      if (JSON.stringify(context.messages).includes("second gated writer")) {
+        await worker.promise;
+        return fauxAssistantMessage("late second worker truth");
+      }
+      armed = true;
+      return fauxAssistantMessage("first worker finished");
+    };
+    model.respond([response, response, fauxAssistantMessage("scratch retry allowed")]);
+
+    const originalReaddir = fs.promises.readdir;
+    const readdirSpy = spyOn(fs.promises, "readdir").mockImplementation((async (...args: Parameters<typeof originalReaddir>) => {
+      if (String(args[0]) === "/proc" && armed && ++scans === 1) {
+        // The actual first group's process scan precedes proposal snapshotting
+        // and Git removal. Sequential repository reconciliation has not yet
+        // reached the second group; no retention decision exists there.
+        reconcileEntered.release();
+        await finishReconcile.promise;
+      }
+      return originalReaddir(...args);
+    }) as typeof originalReaddir);
+    const copy = holdCopy(secondSource);
+    let copyEntered = false;
+    const copyStarted = copy.entered.then(() => { copyEntered = true; });
+    let ticket: string | undefined;
+    let scratch: ReturnType<typeof callDelegate> | undefined;
+    type Outcomes = { results: { id: string; quarantined?: boolean; integration?: { status: string } }[] };
+    try {
+      const receipt = await bounded(callDelegate(session, { async: true, tasks: [
+        { id: "first", prompt: "first normal writer", cwd: firstSource, workspace: "isolated", tools: ["write"] },
+        { id: "late", prompt: "second gated writer", cwd: secondSource, workspace: "isolated", tools: ["write"] },
+      ] }));
+      expect(receipt.isError).toBe(false);
+      ticket = ticketIdOf(receipt.text);
+      await bounded(reconcileEntered.promise);
+      expect(model.state.callCount).toBe(2);
+      expect(fs.existsSync(firstMetadata)).toBe(true);
+      expect(fs.existsSync(secondMetadata)).toBe(true);
+      const provisional = await bounded(callDelegateTicket(session, { action: "poll", ticket }));
+      const before = (provisional.details as Outcomes).results.find((outcome) => outcome.id === "late")!;
+      expect(before.quarantined).toBe(true);
+      expect(before.integration).toBeUndefined();
+
+      worker.release();
+      // Provider return alone is not worker truth. Observe the public ticket's
+      // replacement outcome (no longer quarantined) before probing
+      // admission, while the first group's real reconciliation is still held.
+      await bounded((async () => {
+        const end = Date.now() + 5000;
+        while (Date.now() < end) {
+          const polled = await callDelegateTicket(session!, { action: "poll", ticket });
+          const late = (polled.details as Outcomes).results.find((outcome) => outcome.id === "late");
+          if (late && !late.quarantined) {
+            expect(late.integration).toBeUndefined();
+            return;
+          }
+          await Bun.sleep(5);
+        }
+        throw new Error("late worker truth never reached the public ticket");
+      })());
+      expect(scans).toBe(1);
+      expect(fs.existsSync(secondMetadata)).toBe(true);
+      scratch = callDelegate(session, { async: false, tasks: [
+        { prompt: "scratch must reject before second reconciliation", cwd: secondSource, workspace: "scratch", tools: ["write"] },
+      ] });
+      // A broken guard admits REAL cp; stop its filter instead of letting it
+      // race Git removal or hang this test. The negative control must fail on
+      // this observable copy start, not on an incidental copy/Git exception.
+      const rejected = await bounded(Promise.race([scratch, copyStarted.then(() => undefined)]));
+      expect(fs.promises.cp).not.toHaveBeenCalled();
+      expect(copyEntered).toBe(false);
+      expect(rejected?.isError).toBe(true);
+      expect(rejected?.text).toMatch(/cannot copy source/);
+      expect(rejected?.text).toMatch(/writer late.*active or quarantined/);
+      expect(model.state.callCount).toBe(2);
+      expect(scans).toBe(1);
+      expect(fs.existsSync(secondMetadata)).toBe(true);
+
+      finishReconcile.release();
+      const completed = await bounded(callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 }));
+      expect(completed.isError).toBe(false);
+      expect(completed.text).toMatch(/done|complet/i);
+      expect(fs.existsSync(firstMetadata)).toBe(false);
+      expect(fs.existsSync(secondMetadata)).toBe(false);
+      expect(execSync("git worktree list --porcelain", { cwd: secondSource, encoding: "utf8" })).not.toContain("worker-1");
+      copy.release();
+      const retry = await bounded(callDelegate(session, { async: false, tasks: [
+        { prompt: "scratch after both repositories reconcile", cwd: secondSource, workspace: "scratch", tools: ["write"] },
+      ] }));
+      expect(retry.isError).toBe(false);
+      expect(retry.text).toContain("scratch retry allowed");
+      expect(fs.promises.cp).toHaveBeenCalledTimes(1);
+      expect(copyEntered).toBe(true);
+      expect(model.state.callCount).toBe(3);
+    } finally {
+      worker.release(); finishReconcile.release(); copy.release();
+      try {
+        if (scratch) await bounded(scratch);
+        if (ticket) await bounded(callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 }));
+      } finally {
+        readdirSpy.mockRestore(); copy.restore();
+      }
+    }
+  }, 15_000);
 });
