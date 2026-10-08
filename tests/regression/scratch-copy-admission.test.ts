@@ -280,42 +280,61 @@ describe("scratch source copying admission (#50)", () => {
     });
   }
 
-  test("an earlier quarantined phase writer is not exempted by same-call ownership", async () => {
-    session = await openDelegateBoundary();
-    configureDelegate(session, { stallTimeoutMs: 500 });
-    const model = await installSubagentModel(session);
-    const source = tempDir();
-    const worker = gate();
-    const response: FauxResponseFactory = async (context) => {
-      if (JSON.stringify(context.messages).includes("stuck writer")) {
-        await worker.promise;
-        return fauxAssistantMessage("too late");
-      }
-      return fauxAssistantMessage("prerequisite done");
-    };
-    model.respond([response, response, response]);
-    try {
+  for (const workspace of ["shared", "isolated"] as const) {
+    test(`an earlier quarantined ${workspace} phase writer is not exempted by same-call ownership`, async () => {
+      session = await openDelegateBoundary();
+      configureDelegate(session, { stallTimeoutMs: 500 });
+      const model = await installSubagentModel(session);
+      const source = tempDir(); gitInit(source);
+      const worker = gate();
+      const response: FauxResponseFactory = async (context) => {
+        if (JSON.stringify(context.messages).includes("stuck writer")) {
+          await worker.promise;
+          return fauxAssistantMessage("too late");
+        }
+        return fauxAssistantMessage("prerequisite done");
+      };
+      model.respond([response, response, response]);
+      try {
+        const result = await callDelegate(session, { async: false, tasks: [
+          { id: "stuck", prompt: "stuck writer", cwd: source, workspace, tools: ["write"] },
+          { id: "ready", prompt: "quick prerequisite", cwd: source, tools: ["read"] },
+          { id: "copy", prompt: "scratch must not run", cwd: source, workspace: "scratch", tools: ["write"], dependsOn: ["ready"] },
+        ] });
+        expect(model.state.callCount).toBe(2);
+        expect(result.text).toMatch(/cannot copy source/);
+        expect(result.text).toMatch(/writer stuck.*active or quarantined/);
+        const rejected = await callDelegate(session, { async: false, tasks: [{ prompt: "new scratch", cwd: source, workspace: "scratch", tools: ["write"] }] });
+        expect(rejected.isError).toBe(true);
+        expect(model.state.callCount).toBe(2);
+      } finally { worker.release(); }
+      // Wait for confirmed late quiescence, with admission itself as the signal.
+      let after;
+      const end = Date.now() + 5000;
+      do {
+        after = await callDelegate(session, { async: false, tasks: [{ prompt: "copy after quiescence", cwd: source, workspace: "scratch", tools: ["write"] }] });
+        if (!after.isError) break;
+        await Bun.sleep(5);
+      } while (Date.now() < end);
+      expect(after.isError).toBe(false);
+      expect(model.state.callCount).toBe(3);
+    });
+  }
+
+  for (const workspace of ["shared", "isolated"] as const) {
+    test(`scratch copying exempts a planned future-phase ${workspace} writer`, async () => {
+      session = await openDelegateBoundary();
+      const model = await installSubagentModel(session);
+      const source = tempDir(); gitInit(source);
+      model.respond([fauxAssistantMessage("copy finished"), fauxAssistantMessage("future writer finished")]);
       const result = await callDelegate(session, { async: false, tasks: [
-        { id: "stuck", prompt: "stuck writer", cwd: source, tools: ["write"] },
-        { id: "ready", prompt: "quick prerequisite", cwd: source, tools: ["read"] },
-        { id: "copy", prompt: "scratch must not run", cwd: source, workspace: "scratch", tools: ["write"], dependsOn: ["ready"] },
+        { id: "copy", prompt: "scratch now", cwd: source, workspace: "scratch", tools: ["write"] },
+        { prompt: "writer later", cwd: source, workspace, tools: ["write"], dependsOn: ["copy"] },
       ] });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("copy finished");
+      expect(result.text).toContain("future writer finished");
       expect(model.state.callCount).toBe(2);
-      expect(result.text).toMatch(/cannot copy source/);
-      expect(result.text).toMatch(/writer stuck.*active or quarantined/);
-      const rejected = await callDelegate(session, { async: false, tasks: [{ prompt: "new scratch", cwd: source, workspace: "scratch", tools: ["write"] }] });
-      expect(rejected.isError).toBe(true);
-      expect(model.state.callCount).toBe(2);
-    } finally { worker.release(); }
-    // Wait for confirmed late quiescence, with admission itself as the signal.
-    let after;
-    const end = Date.now() + 5000;
-    do {
-      after = await callDelegate(session, { async: false, tasks: [{ prompt: "copy after quiescence", cwd: source, workspace: "scratch", tools: ["write"] }] });
-      if (!after.isError) break;
-      await Bun.sleep(5);
-    } while (Date.now() < end);
-    expect(after.isError).toBe(false);
-    expect(model.state.callCount).toBe(3);
-  });
+    });
+  }
 });
