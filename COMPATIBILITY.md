@@ -261,6 +261,13 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   removed; historical telemetry columns and journal fields stay
   readable for pre-removal records. The former #47 entry survives
   only in this note.
+- **Removed — batch `operationId` (#130, 2026-10-07).** Dispatches are
+  no longer caller-deduplicated: the idempotency store, fingerprint
+  conflict checks, and settled-record retention are gone, and a
+  supplied `operationId` rejects with teaching before any work
+  starts. Identical requests execute independently; if a transport
+  retry ever double-runs a writer batch, the remedy is an automatic
+  derived key (the steer pattern), never a manual caller field.
 - Landed since: steering receipts (#37), `delegate_ticket interrupt`
   (#42 — abort one task's in-flight turn; it settles `interrupted`,
   resumable, distinct from `cancel`'s ticket teardown), recovery resume

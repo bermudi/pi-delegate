@@ -152,7 +152,6 @@ describe("delegate telemetry contract", () => {
           { id: "corr-alpha", prompt: "first", tools: ["read"] },
           { prompt: "second" },
         ],
-        operationId: "op-private-1",
       });
 
       expect(result.isError).toBe(false);
@@ -1174,7 +1173,7 @@ describe("delegate telemetry contract", () => {
     const dbPath = join(trackedTempDir(), "misfires.db");
     configureDelegate(session, { telemetry: { enabled: true, dbPath } });
     for (const patch of [
-      { operationId: { prompt: "PRIVATE-NESTED-PROMPT" } },
+      { brief: { prompt: "PRIVATE-NESTED-PROMPT" } },
       { async: "PRIVATE-BOOLEAN-TEXT" },
       { timeoutMs: { systemPrompt: "PRIVATE-BASE-TEXT" } },
       { tasks: [{ prompt: "PRIVATE-PROMPT", tools: "PRIVATE AMBIGUOUS TOOLS" }] },

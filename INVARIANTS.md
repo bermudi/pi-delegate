@@ -32,28 +32,16 @@ use any design that makes these properties true and testable.
 
 ## Dispatch identity
 
-- The same live `operationId` and normalized request MUST share one
-  execution and one result — the original in-flight promise or settled
-  value, never a second run.
-- The same `operationId` with a changed normalized request MUST conflict
-  before any work, admission, or config resolution starts.
-- Unkeyed dispatches MUST never be deduplicated; identical requests without
-  an `operationId` execute independently.
-- An in-flight operation MUST never be evicted or dropped by retention
-  bounds; an async operation remains in-flight until its ticket's batch
-  finishes.
-- The first caller MUST own the dispatch signal, host context, progress
-  reporting, and delivery origin; a duplicate dispatch call's signal MUST
-  NOT cancel the original operation. Ticket RPC cancellation authority is
-  unchanged: any caller holding the ticket id MAY cancel it through the
-  ordinary ticket RPC.
-- Cancellation or failure MUST be retained as the operation's result and
-  MUST NOT restart the operation while the record lives.
-- Settled-record retention MUST be bounded: expiry after one hour, at most
-  256 settled records, oldest-settled evicted first.
-- Operation identity MUST live only as long as the host extension/session;
-  saved tickets MUST NOT deduplicate a new dispatch by operationId, and no
-  exactly-once execution claim may be made.
+- Dispatches are not caller-deduplicated (#130 removed `operationId`;
+  the former idempotency store is gone). Identical requests execute
+  independently, and a supplied `operationId` rejects with teaching
+  before any work starts. No exactly-once execution claim may be made:
+  a transport-level retry of a dispatch may run the work twice — the
+  known cost of the removal, accepted because zero of 2,001 production
+  dispatches ever armed the key. Steer dedup remains automatic and
+  caller-free (derived `steer:<toolCallId>`).
+- Ticket RPC cancellation authority is unchanged: any caller holding
+  the ticket id MAY cancel it through the ordinary ticket RPC.
 
 ## Surface selection
 

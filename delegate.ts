@@ -56,10 +56,6 @@ import {
   type ParentPromptInputs,
   type ParentPromptService,
 } from "./src/host.ts";
-import {
-  dispatchFingerprint,
-  OperationStore,
-} from "./src/operations.ts";
 import { createActivityStore } from "./src/activity.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
 import { currentBootId } from "./src/owner.ts";
@@ -206,13 +202,6 @@ const delegateSchema = Type.Object(
       Type.String({
         description:
           "Shared batch brief — context every task needs (spec, conventions, goal). Prepended to each task's prompt as a delimited preamble; the result header notes it once. Each task's 'prompt' stays required.",
-      }),
-    ),
-    operationId: Type.Optional(
-      Type.String({
-        pattern: "^[A-Za-z0-9._-]{1,64}$",
-        description:
-          "Bounded duplicate-safe dispatch key; same key plus the same request reuses the original in-flight or settled result, same key plus a changed request errors.",
       }),
     ),
   },
@@ -402,7 +391,6 @@ const dispatchFieldNames = [
   "tasks",
   "async",
   "workspace",
-  "operationId",
   ...taskFieldNames.filter(
     (field) => field !== "sessionId",
   ),
@@ -658,6 +646,16 @@ function rejectTokenBudget(record: Record<string, unknown>): void {
   }
 }
 
+/** #130: dispatch dedup keys are gone; presence rejects with teaching. */
+function rejectOperationId(record: Record<string, unknown>): void {
+  if (Object.hasOwn(record, "operationId")) {
+    throw new Error(
+      "The operationId field has been removed — dispatches are not caller-deduplicated. " +
+        "Remove it; identical requests execute independently by design, and steers dedupe automatically from their derived id.",
+    );
+  }
+}
+
 function normalizeTask(value: unknown, index: number): unknown {
   if (!isRecord(value)) return value;
   const task = { ...value };
@@ -696,14 +694,6 @@ function normalizeTask(value: unknown, index: number): unknown {
  * a throw surfaces to the caller as a normal whole-call tool error.
  */
 function rejectAmbiguousShapes(args: Record<string, unknown>): void {
-  if (
-    args.operationId !== undefined &&
-    typeof args.operationId !== "string"
-  ) {
-    throw new Error(
-      "'operationId' must be a string of 1-64 letters, digits, dots, underscores, or hyphens.",
-    );
-  }
   if (typeof args.async === "string") {
     throw new Error(
       "'async' must be a boolean, not a string.",
@@ -737,6 +727,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   const args = { ...value };
   rejectTaskDeadline(args);
   rejectTokenBudget(args);
+  rejectOperationId(args);
   rejectObsoleteContext(args);
   rejectFieldAliases(args, false);
   if (Object.hasOwn(args, "message")) {
@@ -746,7 +737,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   // — before null stripping, so a `null` presence still teaches.
   rejectForeignContextFields(args);
   stripNulls(args);
-  stripBlank(args, ["operationId", "sessionId", "cwd", "resumeFrom", "agent"]);
+  stripBlank(args, ["sessionId", "cwd", "resumeFrom", "agent"]);
 
   // Fields the pre-split tool owned: guidance with an example to the right
   // tool beats a bare additionalProperties failure.
@@ -1367,7 +1358,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
   const sessions = new SessionPool(diagnostics);
   const coordinator = new DispatchCoordinator(diagnostics, tickets, activity);
   const telemetry = new TelemetryStore(diagnostics);
-  const operations = new OperationStore<DelegateResult>(diagnostics);
   let callSeq = 0;
   // Owned by this closure: one fallback warning per extension instance, not
   // per call (see resolveAgentDir for why the fallback exists at all).
@@ -2445,7 +2435,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
               details: ({ mode: "help" as const } satisfies HelpDetails),
             };
           }
-          let operationTicket: Ticket | undefined;
           const executeDispatch = async () => {
             // Decided in execute's synchronous prefix (same microtask as
             // the host's tool dispatch): a dispatch still preparing when
@@ -2596,7 +2585,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
                           sessionId: ctx.sessionManager.getSessionId(),
                         },
                       });
-                      operationTicket = created;
                       questionContexts.set(created.id, ctx);
                       // The barrier now has its durable name for the
                       // shutdown status.
@@ -2747,41 +2735,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             };
           };
 
-          if (call.operationId === undefined) return executeDispatch();
-          // An operationId/fingerprint conflict rejects synchronously —
-          // a dispatch that ends before execution, so it records a
-          // validation misfire. `run` returns a promise for the dispatch
-          // itself; this catch sees only the synchronous conflict throw,
-          // never an execution-phase rejection.
-          try {
-            return operations.run(
-              call.operationId,
-              // Fingerprint canonical normalized content, not render metadata.
-              dispatchFingerprint({
-                async: call.async,
-                // The brief is request content — a call differing only in
-                // its brief is a different dispatch, not a duplicate.
-                brief: call.brief,
-                tasks: call.tasks,
-              }),
-              executeDispatch,
-              () =>
-                operationTicket
-                  ? tickets.finishedPromise(operationTicket)
-                  : Promise.resolve(),
-            );
-          } catch (error) {
-            try {
-              const agentDir = resolveAgentDir(ctx).dir;
-              noteMisfire(
-                ctx, agentDir, telemetryConfigHint(agentDir),
-                "validation", error, call.tasks, undefined, call.async,
-              );
-            } catch {
-              // The original rejection stands; nothing here may throw.
-            }
-            throw error;
-          }
+          return executeDispatch();
         },
       })),
     );

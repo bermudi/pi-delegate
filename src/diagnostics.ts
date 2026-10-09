@@ -88,7 +88,6 @@ const CONTEXT_KEYS = Object.freeze([
   "ticketId",
   "questionId",
   "sessionId",
-  "operationId",
   "path",
   "phase",
   "count",

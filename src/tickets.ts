@@ -90,7 +90,7 @@ interface TicketRuntime {
   readonly answeredQuestions: Map<string, { taskIndex: number; answer: string }>;
   /**
    * steerId → the recorded attempt, for idempotent replay and conflict
-   * detection (operationId discipline). Entries are written only once a
+   * detection (derived-id discipline). Entries are written only once a
    * target task resolved — malformed calls consume no id.
    */
   readonly steers: Map<string, SteerRecord>;

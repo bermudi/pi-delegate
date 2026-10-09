@@ -76,7 +76,6 @@ describe("delegate public tool contract", () => {
       [
         "async",
         "brief",
-        "operationId",
         "tasks",
         "workspace",
       ].sort(),

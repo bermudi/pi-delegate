@@ -32,7 +32,7 @@ describe("the single delegate surface", () => {
   test("the declared and executable schema is the single full vocabulary", async () => {
     const session = await open();
     const top = properties(session);
-    expect(Object.keys(top).sort()).toEqual(["async", "brief", "operationId", "tasks", "workspace"]);
+    expect(Object.keys(top).sort()).toEqual(["async", "brief", "tasks", "workspace"]);
     const task = objectOf(objectOf(top.tasks).items);
     expect(Object.keys(objectOf(task.properties)).sort()).toEqual([
       "agent", "cwd", "dependsOn", "description", "id", "prompt",
@@ -202,31 +202,25 @@ describe("the single delegate surface", () => {
     }
   });
 
-  test("omitted async and explicit true share an operation; false conflicts", async () => {
+  test("identical unkeyed dispatches execute independently (#130: operationId removed)", async () => {
     const session = await open();
     const subagents = await installSubagentModel(session);
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    subagents.respond([async () => {
-      await gate;
-      return fauxAssistantMessage("ONE-OPERATION");
-    }]);
-    const args = {
-      operationId: "stable-default", tasks: [{ prompt: "work", agent: "explore" }],
-    };
-    try {
-      const first = await callDelegate(session, args);
-      const second = await callDelegate(session, { ...args, async: true });
-      expect(ticketIdOf(second.text)).toBe(ticketIdOf(first.text));
-      const conflict = await callDelegate(session, { ...args, async: false });
-      expect(conflict.isError).toBe(true);
-      expect(conflict.text).toMatch(/different dispatch request|already bound/i);
-      release();
-      const settled = await callDelegateTicket(session, { action: "wait", ticket: ticketIdOf(first.text) });
-      expect(settled.text).toContain("ONE-OPERATION");
-      expect(subagents.state.callCount).toBe(1);
-    } finally {
-      release();
-    }
+    subagents.respond([
+      fauxAssistantMessage("FIRST-RUN"),
+      fauxAssistantMessage("SECOND-RUN"),
+    ]);
+    const args = { tasks: [{ prompt: "work", agent: "explore" }] };
+    const first = await callDelegate(session, { ...args, async: false });
+    const second = await callDelegate(session, { ...args, async: false });
+    expect(first.isError).toBe(false);
+    expect(second.isError).toBe(false);
+    // No dedup layer exists: identical requests are two executions by
+    // design, and a supplied operationId rejects with teaching.
+    expect(subagents.state.callCount).toBe(2);
+    const rejected = await callDelegate(session, {
+      tasks: [{ prompt: "work", agent: "explore" }], operationId: "retry",
+    });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.text).toContain("operationId field has been removed");
   });
 });

@@ -28,7 +28,6 @@ export type DispatchCall =
        * value is absent. Prepended to every task's prompt at dispatch.
        */
       readonly brief: string | undefined;
-      readonly operationId: string | undefined;
     };
 
 /** Post-schema delegate_ticket arguments. */
@@ -74,7 +73,6 @@ export interface DispatchArguments {
    * prepended to each prompt as a delimited preamble.
    */
   readonly brief?: string;
-  readonly operationId?: string;
   /**
    * Shared batch token ceiling (SPEC v3 "Batch token budget"): settled
    * tasks' recorded usage counts against it; once exhausted, queued tasks
@@ -362,9 +360,6 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
     if (args.brief !== undefined) {
       fail(`brief requires at least one task; it is a dispatch field.`);
     }
-    if (args.operationId !== undefined) {
-      fail(`operationId requires a non-empty dispatch task list.`);
-    }
     return { mode: "help" };
   }
 
@@ -401,7 +396,6 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
     brief,
     // Background execution is the default independently of task count.
     async: args.async ?? true,
-    operationId: args.operationId,
   };
 }
 

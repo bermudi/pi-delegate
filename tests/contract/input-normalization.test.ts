@@ -50,18 +50,8 @@ describe("input normalization contract", () => {
 
   // ── null means "not given" ────────────────────────────────────────────────
 
-  test("a null operationId dispatches normally", async () => {
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-    subagents.respond([fauxAssistantMessage("NULL-OPID")]);
-    const result = await callDelegate(session, {
-      async: false,
-      tasks: [{ prompt: "run" }],
-      operationId: null,
-    });
-    expect(result.isError).toBe(false);
-    expect(result.text).toContain("NULL-OPID");
-  });
+  // #130: operationId was removed; its null-stripping case went with it —
+  // a supplied operationId now rejects with teaching (validation.ts).
 
   test("task-level null fields are stripped before dispatch", async () => {
     session = await openDelegateBoundary();
@@ -248,7 +238,6 @@ describe("input normalization contract", () => {
       ],
       [{ action: "poll", async: true }, "delegate("],
       [{ action: "poll", workspace: "isolated" }, "delegate("],
-      [{ action: "poll", operationId: "op-1" }, "delegate("],
       [{ action: "poll", prompt: "x" }, 'delegate({ tasks: [{ prompt: "..." }] })'],
     ] as const) {
       const result = await callTicket(arguments_);

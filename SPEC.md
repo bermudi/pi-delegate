@@ -245,9 +245,9 @@ mid-flight the parent can steer. The grammar:
 ## Canonical surface (#61, user-approved 2026-09-29)
 
 - **One spelling per field.** Canonical dispatch fields are `tasks`,
-  `async`, `workspace`, `brief`, and `operationId` (`tokenBudget` was
-  canonical until #129 removed it — its rejection is taught at the
-  boundary). Task fields retain their canonical names. Cross-harness
+  `async`, `workspace`, and `brief` (`tokenBudget` and `operationId`
+  were canonical until #129/#130 removed them — their rejections are
+  taught at the boundary). Task fields retain their canonical names. Cross-harness
   synonyms (`subagent_type`, `agent_type`, `task_name`, task `message`,
   `run_in_background`, top-level `context`, `timeout_ms`) reject
   before any execution, even when null or supplied beside a canonical field.
@@ -282,7 +282,7 @@ mid-flight the parent can steer. The grammar:
   through recovery normalization. Dispatch advertises `tasks`, `async`,
   `workspace`, and `brief`; each task has `prompt`, `agent`, `cwd`,
   `workspace`, `id`, `description`, `tools`, `systemPrompt`,
-  `sessionId`, `resumeFrom`, and `dependsOn`; batch `operationId`;
+  `sessionId`, `resumeFrom`, and `dependsOn`;
   ticket actions are poll, wait, cancel, pause, resume,
   answer, steer, interrupt, and tail, with wait-any `tickets`,
   `timeoutMs`, `steerId`, `offset`, and `waitMs`. (Field set as of the
@@ -439,7 +439,7 @@ contract:
   application — the red lines earned their keep in the comparison).
 - Engine behaviors unchanged in v3: workspaces
   (shared/scratch/isolated) and their admission semantics, session
-  pools, `operationId` idempotency, spill, delivery once-ness,
+  pools, spill, delivery once-ness,
   evidence-bearing telemetry rows — except the scratch-copy admission
   strengthening below, the unordered-shared-writer rejection (#126),
   and the isolated worktree dependency provisioning (#120) below.

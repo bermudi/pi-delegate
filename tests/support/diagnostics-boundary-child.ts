@@ -187,12 +187,12 @@ try {
     if (scenario === "failure-startup") {
       model.respond([
         fauxAssistantMessage("STARTUP_OK"),
+        fauxAssistantMessage("STARTUP_AGAIN"),
         fauxAssistantMessage("RECOVERY_OK"),
       ]);
       const first = await execute(delegate, {
         tasks: [{ prompt: "PRIVATE_STARTUP", tools: [] }],
         async: false,
-        operationId: "diagnostic-repeat",
       }, true);
       assert(
         !first.isError && text(first).includes("STARTUP_OK"),
@@ -210,28 +210,21 @@ try {
       const historySession = registeredTool(history, "delegate_session") as unknown as TicketTool;
       renderedWarning(delegate, first, historyDelegate);
       recoverRouting();
-      const replay = await execute(delegate, {
+      // #130 removed the operationId replay cache this block used to prove
+      // the warning never mutated cached results. The surviving property is
+      // the per-return annotation itself: routing is repaired, so a fresh
+      // dispatch carries no warning and does not see the earlier one.
+      const fresh = await execute(delegate, {
         tasks: [{ prompt: "PRIVATE_STARTUP", tools: [] }],
         async: false,
-        operationId: "diagnostic-repeat",
       });
       assert(
-        text(replay).includes("STARTUP_OK") &&
-          !text(replay).includes("routing failed"),
-        "Logger warning mutated cached operation result",
+        text(fresh).includes("STARTUP_AGAIN") &&
+          !text(fresh).includes("routing failed"),
+        "Recovered routing still warned on a fresh result",
       );
-      assert(model.state.callCount === 1, "Replay dispatched new work");
-      assert(!JSON.stringify(replay.details).includes("diagnosticWarning"), "Warning polluted cached details");
-      const cleanDetails = { ...objectOf(first.details) };
-      delete cleanDetails.diagnosticWarning;
-      assert(JSON.stringify(cleanDetails) === JSON.stringify(replay.details), "Warning annotation changed original typed details");
-      assert(JSON.stringify(cleanDetails.results).includes("STARTUP_OK"), "Original recorded outcome was lost");
-      for (const expanded of [false, true]) {
-        const rendered = (delegate as RenderingTool).renderResult(replay, { expanded, isPartial: false }, {
-          fg: (_color, body) => body, bold: (body) => body,
-        }, { lastComponent: undefined }).render(8192).join("\n");
-        assert(!rendered.includes("routing failed"), "Repaired operation replay retained warning");
-      }
+      assert(model.state.callCount === 2, "Unkeyed identical dispatch did not execute independently");
+      assert(!JSON.stringify(fresh.details).includes("diagnosticWarning"), "Warning polluted a clean result");
       const second = await execute(delegate, {
         tasks: [{ prompt: "PRIVATE_RECOVERY", tools: [] }],
         async: false,
