@@ -1,4 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentSession, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { TestSession } from "@marcfargas/pi-test-harness";
@@ -207,15 +209,23 @@ test("the roster groups tickets, settles collapse by default, and expanding dive
 test("the transcript interleaves narrative with tools, condenses paths, and folds repeats", async () => {
   session = await openDelegateBoundary();
   const subagents = await installSubagentModel(session);
+  // Fixture lives inside the session's temp cwd — tools must succeed on any
+  // machine (fold only applies to non-error events, and a no-match grep
+  // exits 1 = error). Never point fixtures at paths outside the sandbox:
+  // CI has no $HOME (2026-10-09 CI red on f6a4169).
+  const fixtureDir = join(session.cwd, "src", "turn");
+  mkdirSync(fixtureDir, { recursive: true });
+  const fixture = join(fixtureDir, "stream.ts");
+  writeFileSync(fixture, "export const LiveWire = 1;\n// LiveWire trailing reference\n");
   subagents.respond([
     fauxAssistantMessage([
       { type: "text", text: "Reading the stream module first." },
-      fauxToolCall("read", { file_path: "/home/daniel/build/little-goblin/src/turn/stream.ts" }),
+      fauxToolCall("read", { file_path: fixture }),
     ]),
     fauxAssistantMessage([
       { type: "text", text: "Now the repeated greps." },
-      fauxToolCall("bash", { command: "grep -n LiveWire /home/daniel/build/little-goblin/src/turn/stream.ts" }),
-      fauxToolCall("bash", { command: "grep -n LiveWire /home/daniel/build/little-goblin/src/turn/stream.ts" }),
+      fauxToolCall("bash", { command: `grep -n LiveWire ${fixture}` }),
+      fauxToolCall("bash", { command: `grep -n LiveWire ${fixture}` }),
     ]),
   ]);
   const dispatched = await callDelegate(session, {
@@ -239,7 +249,7 @@ test("the transcript interleaves narrative with tools, condenses paths, and fold
   expect(bashTool).toBeGreaterThan(second);
   // Absolute paths condense to their last two segments; identical
   // consecutive calls fold with a multiplier.
-  expect(text).not.toContain("/home/daniel/build/little-goblin");
+  expect(text).not.toContain(session.cwd);
   expect(text).toContain("grep -n LiveWire turn/stream.ts ×2");
 });
 
