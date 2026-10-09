@@ -157,6 +157,8 @@ test("empty and resized panels have a complete opaque frame and preserve the edi
   browser.terminal.rowsValue = 20;
   const minimum = browser.render();
   expectPanel(minimum, 40, 18);
+  // The narrow footer (width < 65) abbreviates to `Esc`; Esc-to-close
+  // itself is exercised by the close() helper in every test here.
   expect(plain(minimum).join("\n")).toContain("Esc");
   browser.terminal.columnsValue = 2;
   browser.terminal.rowsValue = 1;
@@ -178,23 +180,28 @@ test("the roster groups tickets, settles collapse by default, and expanding dive
   await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
   const browser = await openBrowser();
   browser.render();
+  // Roster segment of each frame line: the first 37 plain columns cover
+  // the 34-column roster pane plus its gutter, so assertions about roster
+  // membership cannot be satisfied from the detail pane.
+  const rosterOf = (lines: string[]): string[] => lines.map((line) => line.slice(0, 37));
   // Settled ticket: one roster row (short id), no task rows, and the full
   // ticket id only ever appears in the detail column.
   let text = plain(browser.render());
   const shortId = ticket.slice(0, 10);
-  expect(text.filter((line) => line.includes(shortId))).toHaveLength(1);
-  expect(text.join("\n")).not.toContain("collapse probe prompt body");
+  expect(rosterOf(text).filter((line) => line.includes(shortId))).toHaveLength(1);
+  expect(rosterOf(text).some((line) => line.includes("task-1"))).toBe(false);
   expect(text.join("\n")).toContain(`Ticket ${ticket}`);
   // Enter expands the group and lands on its first task.
   browser.key("\r");
   text = plain(browser.render());
-  expect(text.filter((line) => line.includes(shortId)).length).toBeGreaterThanOrEqual(2);
+  expect(rosterOf(text).some((line) => line.includes("task-1"))).toBe(true);
   expect(text.join("\n")).toContain("collapse probe prompt body");
   expect(text.join("\n")).toContain("SEAM-ONE-RESULT");
   // Left collapses the group again and returns selection to the header.
   browser.key("\x1b[D");
   text = plain(browser.render());
-  expect(text.filter((line) => line.includes(shortId))).toHaveLength(1);
+  expect(rosterOf(text).some((line) => line.includes("task-1"))).toBe(false);
+  expect(rosterOf(text).filter((line) => line.includes(shortId))).toHaveLength(1);
 });
 
 test("the transcript interleaves narrative with tools, condenses paths, and folds repeats", async () => {
@@ -295,6 +302,42 @@ test("the roster shows the whole fleet, not a fixed-height window", async () => 
   const fleetRows = text.filter((line) => line.includes("✓ inline task-"));
   expect(fleetRows.length).toBeGreaterThanOrEqual(12);
   expect(text.join("\n")).not.toMatch(/↓ \d+ more/);
+});
+
+test("a roster longer than its pane keeps every item reachable", async () => {
+  session = await openDelegateBoundary();
+  const subagents = await installSubagentModel(session);
+  subagents.respond(Array.from({ length: 40 }, () => fauxAssistantMessage("done")));
+  const dispatched = await callDelegate(session, {
+    // Ordered chain: same-phase shared-writer admission rejects an
+    // unordered 40-task batch over one tree.
+    tasks: Array.from({ length: 40 }, (_, index) => ({
+      id: `w${index}`,
+      prompt: `window probe ${index}`,
+      dependsOn: index === 0 ? [] : [`w${index - 1}`],
+    })),
+    async: true,
+  });
+  const ticket = ticketIdOf(dispatched.text);
+  await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 30_000 });
+  const browser = await openBrowser();
+  browser.render();
+  browser.key("\r"); // expand the settled ticket; selection dives to w0
+  const rosterOf = (lines: string[]): string[] => lines.map((line) => line.slice(0, 37));
+  // 41 roster items against a 29-row pane — the windowed regime. Walking
+  // to the last item must keep it rendered (review #128: the old window
+  // math pinned maxStart against the raw pane height, hiding the tail).
+  for (let index = 0; index < 39; index++) browser.key("\x1b[B");
+  let roster = rosterOf(plain(browser.render()));
+  expect(roster.some((line) => line.includes("w39"))).toBe(true);
+  expect(roster.some((line) => line.includes("w0"))).toBe(false);
+  expect(roster.join("\n")).not.toMatch(/↓ \d+ more/); // the window covers the end
+  expect(roster[1]).toMatch(/↑ \d+ more/); // frame line 0 is the title border
+  // Walking back up restores the head of the list.
+  for (let index = 0; index < 39; index++) browser.key("\x1b[A");
+  roster = rosterOf(plain(browser.render()));
+  expect(roster.some((line) => line.includes("w0"))).toBe(true);
+  expect(roster.some((line) => line.includes("w39"))).toBe(false);
 });
 
 test("retained agents remain selectable; response scrollback and live-follow survive resize", async () => {

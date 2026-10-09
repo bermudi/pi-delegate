@@ -191,8 +191,10 @@ class SubagentBrowser implements Component {
     } else if (matchesKey(data, "enter")) {
       if (item?.kind === "group") {
         this.toggleGroup(item.group);
-        // Diving into a group lands on its first task; collapsing a group
-        // whose task was selected returns to the header.
+        // `item.group.expanded` is the pre-toggle snapshot: false means the
+        // group just opened, so dive to its first task. Collapsing keeps
+        // selection on the header (Enter acted on it); the ← key is the
+        // path that walks a selected task back out to its header.
         if (!item.group.expanded && item.group.rows[0] !== undefined) {
           this.selectedKey = item.group.rows[0].key;
           this.scroll = LIVE;
@@ -483,29 +485,36 @@ class SubagentBrowser implements Component {
 
   private rosterColumn(items: Item[], selectedIndex: number, height: number, width: number, now: number): string[] {
     if (items.length === 0 || height <= 0) return [];
-    // Keep the selected item inside the window; reserve rows for the
-    // `↑/↓ more` indicators so they never evict the selection.
-    const maxStart = Math.max(0, items.length - height);
+    // A window starting at `s` shows `fit` items: `height` rows minus one
+    // for the `↑ more` indicator when s > 0, minus one for `↓ more` when
+    // the window stops short of the end. maxStart is where the window's
+    // last row IS the last item — computed against the indicator-adjusted
+    // fit, so the list's tail stays reachable (review #128: computing it
+    // against the raw height left the final items permanently hidden).
+    const fitAt = (start: number): number => {
+      let fit = height - (start > 0 ? 1 : 0);
+      if (items.length - (start + fit) > 0) fit -= 1;
+      return Math.max(1, Math.min(fit, items.length - start));
+    };
+    const maxStart = Math.max(0, items.length - (height - 1));
     let start = Math.min(Math.max(0, this.windowStart), maxStart);
-    if (selectedIndex < start) start = selectedIndex;
-    if (selectedIndex >= start + height) start = selectedIndex - height + 1;
-    start = Math.min(Math.max(0, start), maxStart);
-    let fit = height;
-    if (start > 0) fit -= 1;
-    if (items.length - (start + fit) > 0) fit -= 1;
-    for (let pass = 0; pass < 2; pass++) {
-      if (selectedIndex >= start + Math.max(1, fit)) {
-        start = Math.min(maxStart, selectedIndex - Math.max(1, fit) + 1);
-        fit = height;
-        if (start > 0) fit -= 1;
-        if (items.length - (start + fit) > 0) fit -= 1;
+    for (let pass = 0; pass < 3; pass++) {
+      const fit = fitAt(start);
+      if (selectedIndex < start) {
+        start = Math.max(0, selectedIndex);
+        continue;
       }
+      if (selectedIndex >= start + fit) {
+        start = Math.min(maxStart, selectedIndex - fit + 1);
+        continue;
+      }
+      break;
     }
-    fit = Math.max(1, fit);
+    const fit = fitAt(start);
     this.windowStart = start;
     const lines: string[] = [];
     if (start > 0) lines.push(this.theme.fg("dim", `↑ ${start} more`));
-    for (let offset = 0; offset < fit && start + offset < items.length; offset++) {
+    for (let offset = 0; offset < fit; offset++) {
       const index = start + offset;
       lines.push(this.rosterLine(items[index]!, now, width, index === selectedIndex));
     }
@@ -646,7 +655,7 @@ class SubagentBrowser implements Component {
     for (const row of group.rows.slice(0, 12)) {
       const glyph = statusGlyph(statusWord(row, this.pausedOf(row)));
       const last = row.toolCalls.at(-1);
-      const tail = last ? condenseArgs(last.argPreview || last.preview).slice(0, 60) : "";
+      const tail = last ? truncateToWidth(condenseArgs(last.argPreview || last.preview), 60) : "";
       lines.push(
         truncateToWidth(
           `${this.theme.fg(glyph.color, glyph.glyph)} ${this.theme.fg("text", `${row.label} ${row.taskId}`)} ${this.theme.fg("muted", ageOrDuration(row, now))} ${this.theme.fg("dim", tail)}`,

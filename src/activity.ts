@@ -533,7 +533,7 @@ export function createActivityStore(): ActivityStore {
     isError: boolean,
   ): void => {
     entry.toolCalls.push({ at, tool, preview, argPreview, inFlight, isError });
-    const removedEvents = trimEvents(entry.events);
+    const removedCalls = trimToolCalls(entry.toolCalls);
     entry.events.push({
       kind: "tool",
       at,
@@ -543,11 +543,18 @@ export function createActivityStore(): ActivityStore {
       inFlight,
       isError,
     });
-    shiftOpenTools(
-      entry.openTools,
-      trimToolCalls(entry.toolCalls),
-      removedEvents,
-    );
+    const removedEvents = trimEvents(entry.events);
+    shiftOpenTools(entry.openTools, removedCalls, removedEvents);
+  };
+
+  /** Push a text event, then trim and shift open indexes — text evictions
+   * slide surviving events down exactly like tool evictions do (review
+   * #128: skipping the shift stranded an in-flight tool's eventIndex and
+   * silently dropped its completion from the transcript). */
+  const appendTextEvent = (entry: MutableEntry, text: string): void => {
+    const at = Date.now();
+    entry.events.push({ kind: "text", at, text });
+    shiftOpenTools(entry.openTools, 0, trimEvents(entry.events));
   };
 
   /** The event-application half of observe/observeSync — shared verbatim. */
@@ -609,12 +616,7 @@ export function createActivityStore(): ActivityStore {
       if (parts.length > 0) {
         const text = parts.join("\n\n");
         entry.assistantTail = appendAssistantTail(entry.assistantTail, text);
-        entry.events.push({
-          kind: "text",
-          at: now,
-          text: truncateHead(text, TEXT_EVENT_LIMIT),
-        });
-        trimEvents(entry.events);
+        appendTextEvent(entry, truncateHead(text, TEXT_EVENT_LIMIT));
       }
     }
     // Every other event type only bumps lastEventAt, already done above.
@@ -704,12 +706,7 @@ export function createActivityStore(): ActivityStore {
             entry.assistantTail,
             summary,
           );
-          entry.events.push({
-            kind: "text",
-            at: Date.now(),
-            text: truncateHead(sanitizeText(summary), TEXT_EVENT_LIMIT),
-          });
-          trimEvents(entry.events);
+          appendTextEvent(entry, truncateHead(sanitizeText(summary), TEXT_EVENT_LIMIT));
         }
         pruneSettled("sync", RETAINED_SYNC_LIMIT);
       }
