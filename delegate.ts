@@ -210,9 +210,9 @@ const delegateSchema = Type.Object(
 
 const ticketSchema = Type.Object(
   {
-    action: stringEnum(["poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt", "tail"], {
+    action: stringEnum(["poll", "wait", "cancel", "answer", "steer", "interrupt", "tail"], {
       description:
-        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. pause/resume: hold and release queued work. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown. tail: read a task's clean assistant output incrementally — {text, nextOffset, done, taskState}; offset resumes the stream, waitMs bounds a park that resolves early on new output.",
+        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown. tail: read a task's clean assistant output incrementally — {text, nextOffset, done, taskState}; offset resumes the stream, waitMs bounds a park that resolves early on new output.",
     }),
     ticket: Type.Optional(
       Type.String({
@@ -457,7 +457,7 @@ function normalizeTools(value: string): unknown {
   return token !== "" && !/[\s,]/.test(token) ? [token] : value;
 }
 
-const TICKET_ACTIONS = ["poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt", "tail"];
+const TICKET_ACTIONS = ["poll", "wait", "cancel", "answer", "steer", "interrupt", "tail"];
 const SESSION_ACTIONS = ["list", "close"];
 
 /**
@@ -870,6 +870,14 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
   rejectTaskDeadline(args);
   rejectObsoleteContext(args);
   rejectFieldAliases(args, false);
+  // #130 verdict: pause/resume are dashboard-only now — the model-facing
+  // actions reject with teaching toward wait/cancel.
+  if (args.action === "pause" || args.action === "resume") {
+    throw new Error(
+      'The "' + String(args.action) + '" action has been removed from delegate_ticket — it is operator-dashboard-only (/subagents). ' +
+        'Blocked on this work? action "wait" parks until settlement; action "cancel" stops it.',
+    );
+  }
   stripNulls(args);
   // Blank `answer`/`message` survive: only validation may tell a
   // present-but-empty reply or steer from a missing one — a non-owning
@@ -1119,8 +1127,6 @@ pause/resume/tail, wait-any tickets, timeoutMs, steerId, offset and waitMs.
 - \`{ action: "cancel", ticket }\` — previews without \`force\`; with
   \`force: true\` the ticket is cancelled now and in-flight tasks are asked
   to stop (cooperative; no rollback).
-- \`{ action: "pause" | "resume", ticket }\` — hold and release queued work;
-  a paused ticket stays live and keeps its reservations.
 - \`{ action: "answer", ticket, taskId, questionId, answer }\` — answer a
   worker's pending \`ask_parent\` question (all four fields required).
   Poll to see outstanding questions. Only async workers can ask.
@@ -1182,7 +1188,7 @@ Three sibling tools share Delegate's machinery:
 - \`delegate_session\` lists and closes pooled subagent sessions.`;
 }
 
-const help = `${helpIntro("poll, wait, cancel, pause,\n  resume, answer, steer, interrupt, tail")}
+const help = `${helpIntro("poll, wait, cancel, answer, steer, interrupt, tail")}
 
 ${HELP_INTERFACES}
 

@@ -138,8 +138,10 @@ use any design that makes these properties true and testable.
   than the one it was dispatched from.
 - Delivery failure MUST NOT undo settlement or make results unpollable.
 - Wait timeout or caller abort MUST detach only that waiter.
-- Pause is orthogonal to lifecycle: a paused ticket remains running and retains
-  its sessions, workspace reservations, and protection against
+- Pause is orthogonal to lifecycle and operator-dashboard-only (#130 —
+  the model-facing actions are removed; the /subagents \`p\` binding
+  drives the store directly): a paused ticket remains running and
+  retains its sessions, workspace reservations, and protection against
   conflicting work.
 
 ## Dependencies and handoffs

@@ -127,71 +127,11 @@ test(
   },
 );
 
-test(
-  "a task cancelled while paused between model turns does not start another provider call",
-  async () => {
-    // v1 evidence: "forcing cancellation resolves paused listeners and does
-    // not start another model request".
-    //
-    // Deterministic placement:
-    //   1. Turn 1's stream is gated, so the pause lands while the turn cannot
-    //      complete — the task is guaranteed paused when its turn ends.
-    //   2. The tool call writes a marker file; once the marker exists the tool
-    //      is finishing and the next thing the task does is park in
-    //      `waitWhilePaused` between turns (a short barrier lets the microtask
-    //      cascade to the park complete before cancel lands).
-    //   3. Cancel resolves the park; the run must stop at the turn boundary
-    //      instead of invoking the provider again with a dead signal.
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-
-    const marker = join(session.cwd, "tooldone");
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const turnOne: FauxResponseFactory = async () => {
-      await gate;
-      return fauxAssistantMessage([
-        fauxToolCall("bash", {
-          command: `printf done > "${marker}"`,
-        }),
-      ]);
-    };
-    subagents.respond([turnOne]);
-
-    const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "park me",  tools: ["bash"] }],
-      async: true,
-    });
-    const ticket = ticketIdOf(dispatched.text);
-
-    await callDelegateTicket(session, { action: "pause", ticket });
-    release();
-
-    // Barrier: wait until the tool call has completed, then let the
-    // post-tool cascade reach the between-turns park.
-    const deadline = Date.now() + 5000;
-    while (!existsSync(marker) && Date.now() < deadline) {
-      await new Promise((r) => setImmediate(r));
-    }
-    expect(existsSync(marker)).toBe(true);
-    await new Promise((r) => setTimeout(r, 30));
-
-    const cancelled = await callDelegateTicket(session, {
-      action: "cancel",
-      ticket,
-      force: true,
-    });
-    expect(cancelled.text).toMatch(/cancel/i);
-
-    const waited = await callDelegateTicket(session, {
-      action: "wait",
-      ticket,
-      timeoutMs: 5000,
-    });
-    expect(waited.text).toMatch(/cancelled/i);
-    expect(subagents.state.callCount).toBe(1);
-  },
-);
+// NOTE (#130): the "cancelled while paused between model turns" scenario
+// was removed with the model-facing pause/resume actions — its public
+// trigger was the RPC. The park machinery itself survives (dashboard-
+// owned); a dashboard integration test is the follow-up path for that
+// scenario. All non-paused cancellation scenarios below are unchanged.
 
 test(
   "forced cancel settles while worker cleanup is blocked; the reservation releases only after confirmed quiescence",
@@ -679,118 +619,12 @@ test(
   },
 );
 
-test(
-  "parked time behind a paused ticket is not inactivity — the stall watchdog suspends",
-  async () => {
-    // v1 evidence: pause.ts — inactivity checks stop while parked.
-    // #118 removes task wall-clock deadlines. A worker parked between turns
-    // longer than the stall budget must survive to resume.
-    //
-    // Determinism: the pause lands while turn one's provider call is still
-    // gated, so the worker is provably mid-turn when it parks. The marker
-    // file plus a short barrier then confirm the between-turns park was
-    // actually reached before the over-budget wait begins.
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-    configureDelegate(session, { stallTimeoutMs: 150 });
-
-    const marker = join(session.cwd, "parked");
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const turnOne: FauxResponseFactory = async () => {
-      await gate;
-      return fauxAssistantMessage([
-        fauxToolCall("bash", { command: `printf parked > "${marker}"` }),
-      ]);
-    };
-    subagents.respond([turnOne, fauxAssistantMessage("PARKED-DONE")]);
-
-    const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "park me",  tools: ["bash"] }],
-      async: true,
-    });
-    const ticket = ticketIdOf(dispatched.text);
-
-    await callDelegateTicket(session, { action: "pause", ticket });
-    release();
-
-    // Wait until the tool call finished and the cascade reached the park.
-    const deadline = Date.now() + 5000;
-    while (!existsSync(marker) && Date.now() < deadline) {
-      await new Promise((r) => setImmediate(r));
-    }
-    expect(existsSync(marker)).toBe(true);
-    await new Promise((r) => setTimeout(r, 30));
-
-    // Parked far longer than the 150ms budget: a watchdog that counted
-    // parked time would already have fired.
-    await new Promise((r) => setTimeout(r, 500));
-
-    const resumed = await callDelegateTicket(session, {
-      action: "resume",
-      ticket,
-    });
-    expect(resumed.isError).toBe(false);
-
-    const settled = await callDelegateTicket(session, {
-      action: "wait",
-      ticket,
-      timeoutMs: 5000,
-    });
-    expect(settled.text).toContain("PARKED-DONE");
-    expect(settled.text).not.toMatch(/stall/i);
-    expect(subagents.state.callCount).toBe(2);
-  },
-);
-
-test(
-  "an in-flight silent turn still stalls while its ticket is paused",
-  async () => {
-    // Companion to the park test: suspension covers the between-turns park,
-    // not the whole paused state — pause is cooperative and does not shield
-    // a wedged in-flight provider call from the inactivity watchdog.
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-    configureDelegate(session, { stallTimeoutMs: 150 });
-
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const gated: FauxResponseFactory = async () => {
-      await gate;
-      return fauxAssistantMessage("TOO-LATE");
-    };
-    subagents.respond([gated]);
-
-    const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "hang",  tools: ["write"] }],
-      async: true,
-    });
-    const ticket = ticketIdOf(dispatched.text);
-
-    // Wait until the provider call is in flight, then pause the ticket.
-    const started = Date.now() + 5000;
-    while (subagents.state.callCount === 0 && Date.now() < started) {
-      await new Promise((r) => setImmediate(r));
-    }
-    expect(subagents.state.callCount).toBe(1);
-    const paused = await callDelegateTicket(session, {
-      action: "pause",
-      ticket,
-    });
-    expect(paused.isError).toBe(false);
-
-    // The gated call emits no events: the stall fires even though the
-    // ticket is paused, because the worker never reached the park.
-    const settled = await callDelegateTicket(session, {
-      action: "wait",
-      ticket,
-      timeoutMs: 5000,
-    });
-    expect(settled.text).toMatch(/stall/i);
-
-    release();
-  },
-);
+// NOTE (#130): the two pause/watchdog scenarios ("parked time behind a
+// paused ticket is not inactivity" and "an in-flight silent turn still
+// stalls while its ticket is paused") were removed with the model-facing
+// pause/resume actions — their public trigger was the RPC. The watchdog
+// and park machinery is unchanged and dashboard-owned; a dashboard
+// integration test is the follow-up path for both scenarios.
 
 function gitInitForShutdownRace(dir: string): void {
   // An initial commit is required: isolated baselines are built on HEAD.

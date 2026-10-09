@@ -105,7 +105,11 @@ describe("async worker questions (#17)", () => {
     expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("FINISHED");
   });
 
-  test("an answer while paused is recorded once; another answer cannot replace it", async () => {
+  test("an answered question cannot be re-answered; the worker continues once", async () => {
+    // #130 note: this case previously pinned identical-answer replay
+    // idempotency while pause held the worker parked; pause is
+    // dashboard-only now, so the pinned contract is the closed-question
+    // behavior — repeat answers reject, the worker is never re-prompted.
     session = await openDelegateBoundary();
     const model = await installSubagentModel(session);
     model.respond([
@@ -116,14 +120,13 @@ describe("async worker questions (#17)", () => {
       tasks: [{ id: "paused", prompt: "ask" }], async: true,
     })).text);
     const questionId = await untilQuestion(session, ticket);
-    await callDelegateTicket(session, { action: "pause", ticket });
     const reply = { action: "answer", ticket, taskId: "paused", questionId, answer: "original" };
     expect((await callDelegateTicket(session, reply)).isError).toBe(false);
-    expect((await callDelegateTicket(session, reply)).isError).toBe(false);
+    // The question is closed once answered: repeats reject, changed or not.
+    expect((await callDelegateTicket(session, reply)).isError).toBe(true);
     expect((await callDelegateTicket(session, { ...reply, answer: "changed" })).isError).toBe(true);
-    expect(model.state.callCount).toBe(1);
-    await callDelegateTicket(session, { action: "resume", ticket });
-    expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("ANSWERED");
+    expect(model.state.callCount).toBe(2); // ask turn + answered turn, nothing re-prompted
+    expect((await callDelegateTicket(session, { action: "wait", ticket })).text).toContain("ANSWERED");
   });
 
   test("answer RPC fields are ticket-only and validated before any worker starts", async () => {

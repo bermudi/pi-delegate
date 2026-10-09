@@ -110,8 +110,6 @@ describe("delegate ticket contract", () => {
         { action: "poll", ticket: "nope-1" },
         { action: "wait", ticket: "nope-1", timeoutMs: 50 },
         { action: "cancel", ticket: "nope-1", force: true },
-        { action: "pause", ticket: "nope-1" },
-        { action: "resume", ticket: "nope-1" },
       ]) {
         const result = await callDelegateTicket(session, arguments_);
         expect(result.isError).toBe(true);
@@ -283,59 +281,9 @@ describe("delegate ticket contract", () => {
     },
   );
 
-  test(
-    "pause holds queued work, resume continues the same ticket",
-    async () => {
-      // v1 evidence: pause.test.ts "queued work parks without becoming active
-      // and cancel unblocks it"; SPEC: pause cooperatively stops queued tasks
-      // and future model turns. INVARIANTS: a paused ticket remains running.
-      session = await openDelegateBoundary();
-      const subagents = await installSubagentModel(session);
-      const { release, step } = gate();
-      subagents.respond([step, fauxAssistantMessage("OUTPUT-QUEUED")]);
-
-      const dispatched = await callDelegate(session, {
-        // #126 vehicle: dependsOn ordering — first holds the gate active
-        // while second stays queued behind the edge, the parked shape
-        // under test.
-        tasks: [
-          { id: "first", prompt: "first" },
-          { id: "second", prompt: "second", dependsOn: ["first"] },
-        ],
-        async: true,
-      });
-      const ticket = ticketIdOf(dispatched.text);
-
-      const paused = await callDelegateTicket(session, {
-        action: "pause",
-        ticket,
-      });
-      expect(paused.isError).toBe(false);
-      expect(paused.text).toMatch(/paus/i);
-
-      // While paused the ticket is still live, not terminal.
-      const polled = await callDelegateTicket(session, {
-        action: "poll",
-        ticket,
-      });
-      expect(polled.text).toMatch(/running|paused/i);
-      expect(polled.text).not.toMatch(/done|cancelled|failed/i);
-
-      const resumed = await callDelegateTicket(session, {
-        action: "resume",
-        ticket,
-      });
-      expect(resumed.isError).toBe(false);
-      release();
-
-      const settled = await callDelegateTicket(session, {
-        action: "wait",
-        ticket,
-        timeoutMs: 5000,
-      });
-      expect(settled.text).toMatch(/done|complet/i);
-    },
-  );
+  // NOTE (#130): "pause holds queued work, resume continues the same
+  // ticket" was removed with the model-facing pause/resume actions — its
+  // public trigger was the RPC. Pause semantics are dashboard-owned now.
 
   test(
     "a mixed success and failure async batch settles partial with both outcomes visible",

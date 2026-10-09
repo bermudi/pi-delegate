@@ -1930,8 +1930,6 @@ export async function handleTicketRpc(
       | "poll"
       | "wait"
       | "cancel"
-      | "pause"
-      | "resume"
       | "answer"
       | "steer"
       | "interrupt"
@@ -2161,18 +2159,6 @@ export async function handleTicketRpc(
     }
     case "cancel":
       return { text: store.cancel(ticket, call.force), isError: false, ticket };
-    case "pause":
-      try {
-        return { text: store.pause(ticket), isError: false, ticket };
-      } catch (error) {
-        return { text: error instanceof Error ? error.message : String(error), isError: true, ticket };
-      }
-    case "resume":
-      try {
-        return { text: store.resume(ticket), isError: false, ticket };
-      } catch (error) {
-        return { text: error instanceof Error ? error.message : String(error), isError: true, ticket };
-      }
     case "answer":
       try {
         return { text: store.answer(ticket, taskId!, call.questionId!, call.answer!), isError: false, ticket };

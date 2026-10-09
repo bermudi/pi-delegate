@@ -42,7 +42,7 @@ describe("the single delegate surface", () => {
     expect(objectOf(delegateTool(session).parameters).additionalProperties).toBe(false);
     const ticket = properties(session, "delegate_ticket");
     expect(objectOf(ticket.action).enum).toEqual([
-      "poll", "wait", "cancel", "pause", "resume", "answer", "steer", "interrupt", "tail",
+      "poll", "wait", "cancel", "answer", "steer", "interrupt", "tail",
     ]);
     // No cross-harness synonym is ever declared.
     for (const key of ["agent_type", "subagent_type", "task_name", "message", "run_in_background"]) {

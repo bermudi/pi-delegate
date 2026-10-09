@@ -268,6 +268,13 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   starts. Identical requests execute independently; if a transport
   retry ever double-runs a writer batch, the remedy is an automatic
   derived key (the steer pattern), never a manual caller field.
+- **Removed — ticket `pause`/`resume` actions (#130, 2026-10-07).** The
+  model-facing actions are gone and reject with teaching toward
+  wait/cancel; the pause state machine survives as operator machinery
+  (the /subagents dashboard `p` keybinding calls the store directly).
+  Test coverage that drove the RPC (paused-watchdog scenarios, the
+  paused footer case, answer replay while parked) lost its public
+  trigger and is a noted gap pending a dashboard integration test.
 - Landed since: steering receipts (#37), `delegate_ticket interrupt`
   (#42 — abort one task's in-flight turn; it settles `interrupted`,
   resumable, distinct from `cancel`'s ticket teardown), recovery resume

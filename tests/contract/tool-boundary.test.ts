@@ -143,8 +143,6 @@ describe("delegate public tool contract", () => {
       "poll",
       "wait",
       "cancel",
-      "pause",
-      "resume",
       "answer",
       "steer",
       "interrupt",

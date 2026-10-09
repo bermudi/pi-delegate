@@ -186,40 +186,10 @@ describe("delegate visibility signals", () => {
     expect(after[after.length - 1]).toBeUndefined();
   });
 
-  test("footer reflects pause and resume of a live ticket", async () => {
-    session = await openDelegateBoundary();
-    const subagents = await installSubagentModel(session);
-    const { release, step } = gate();
-    subagents.respond([step]);
-
-    const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "bg" }],
-      async: true,
-    });
-    const ticket = ticketIdOf(dispatched.text);
-
-    const paused = await callDelegateTicket(session, {
-      action: "pause",
-      ticket,
-    });
-    expect(paused.isError).toBe(false);
-    const texts = statusTexts(session);
-    expect(
-      texts.some((t) => t?.includes("Ⅱ") && t.includes(ticket) && t.includes("paused")),
-    ).toBe(true);
-
-    const resumed = await callDelegateTicket(session, {
-      action: "resume",
-      ticket,
-    });
-    expect(resumed.isError).toBe(false);
-    expect(
-      statusTexts(session).some((t) => t === `⏳ 1 subagent(s) · ${ticket} · /subagents`),
-    ).toBe(true);
-
-    release();
-    await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
-  });
+  // NOTE (#130): the "footer reflects pause and resume" case was removed
+  // with the model-facing pause/resume actions — its public trigger was
+  // the RPC. Paused-state footer rendering survives (dashboard-owned
+  // pause); its driver is a dashboard integration test, not this suite.
 
   test("tree guard: dismissal stays on the branch and keeps work running", async () => {
     // Contract: v1 guardTreeNavigation's dismissal semantics — an

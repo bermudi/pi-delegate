@@ -465,34 +465,11 @@ describe("async result delivery", () => {
     expect(sends).toHaveBeenCalledTimes(1);
   });
 
-  test("pause holds delivery until the whole batch has finished", async () => {
-    // SPEC/INVARIANTS: pause is orthogonal to lifecycle, not completion.
-    session = await openDelegateBoundary();
-    const host = session.session as AgentSession;
-    const model = await installSubagentModel(session);
-    const blocked = gate();
-    model.respond([blocked.step, fauxAssistantMessage("SECOND-RESULT")]);
-    const sends = spyOn(host, "sendCustomMessage");
-    const dispatch = await callDelegate(session, {
-      // #126 vehicle: same-cwd writers serialize only with a dependsOn
-      // edge — the paused timeline pins one in flight, one still queued.
-      tasks: [
-        { id: "first", prompt: "first" },
-        { id: "second", prompt: "second", dependsOn: ["first"] },
-      ],
-      async: true,
-    });
-    const ticket = ticketIdOf(dispatch.text);
-    await callDelegateTicket(session, { action: "pause", ticket });
-    blocked.release();
-    await Bun.sleep(100);
-    expect(sends).not.toHaveBeenCalled();
-    expect(model.state.callCount).toBe(1);
-    await callDelegateTicket(session, { action: "resume", ticket });
-    await until(() => sends.mock.calls.length === 1);
-    await host.agent.waitForIdle();
-    expect(String(sends.mock.calls[0]![0].content)).toContain("SECOND-RESULT");
-  });
+  // NOTE (#130): "pause holds delivery until the whole batch has finished"
+  // was removed with the model-facing pause/resume actions — its public
+  // trigger was the RPC. The delivery-hold invariant it pinned (delivery
+  // waits for full batch settlement) is still exercised by the
+  // dependency-ordered and isolated-finalization cases in this suite.
 
   test("isolated result is delivered only with finalized integration and applied files", async () => {
     // SPEC isolated apply + auto-delivery; INVARIANTS disallow delivery

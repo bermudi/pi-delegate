@@ -283,8 +283,8 @@ mid-flight the parent can steer. The grammar:
   `workspace`, and `brief`; each task has `prompt`, `agent`, `cwd`,
   `workspace`, `id`, `description`, `tools`, `systemPrompt`,
   `sessionId`, `resumeFrom`, and `dependsOn`;
-  ticket actions are poll, wait, cancel, pause, resume,
-  answer, steer, interrupt, and tail, with wait-any `tickets`,
+  ticket actions are poll, wait, cancel, answer, steer, interrupt,
+  and tail, with wait-any `tickets`,
   `timeoutMs`, `steerId`, `offset`, and `waitMs`. (Field set as of the
   ADR 0002 unification; prune verdicts in #130 remove fields in their
   own changes — `tokenBudget` is already gone, #129.) Session list/close
@@ -518,6 +518,14 @@ contract:
   migration note (one user: bermudi).
 - The oracle for the engine layer is v2's SPEC as the engine-as-built
   contract.
+
+- **Pause is dashboard-only (#130).** The `pause`/`resume` ticket actions
+  are removed from the `delegate_ticket` surface — a model that wants work
+  held waits; one that wants it stopped cancels; removed actions reject
+  with that teaching. The pause state machine survives as operator
+  machinery: the /subagents dashboard's `p` keybinding drives
+  TicketStore pause/resume directly, with no tool schema involved, and
+  the paused-worker protections (INVARIANTS) continue to apply to it.
 
 ## Ratification record
 
