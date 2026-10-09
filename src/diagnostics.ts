@@ -95,7 +95,6 @@ const CONTEXT_KEYS = Object.freeze([
   "attempt",
   "maxAttempts",
   "budgetMs",
-  "surface",
   "reach",
   "status",
   "by",

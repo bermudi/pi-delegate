@@ -20,10 +20,11 @@ describe("delegate interaction grammar (SPEC v3, #61)", () => {
     session = undefined;
   });
 
-  for (const surface of ["full", "compact"] as const) {
-    for (const count of [1, 2, 3]) {
-      test(`${surface}: omitted async backgrounds ${count} task(s)`, async () => {
-        session = await openDelegateBoundary({ surface });
+  // One surface (ADR 0002): the background default is schema-independent —
+  // a single loop over task counts covers the only schema that exists.
+  for (const count of [1, 2, 3]) {
+    test(`omitted async backgrounds ${count} task(s)`, async () => {
+      session = await openDelegateBoundary();
         const subagents = await installSubagentModel(session);
         subagents.respond(Array.from({ length: count }, (_, i) =>
           fauxAssistantMessage(`BACKGROUND-${i}`),
@@ -46,7 +47,6 @@ describe("delegate interaction grammar (SPEC v3, #61)", () => {
         }
         expect(subagents.state.callCount).toBe(count);
       });
-    }
   }
 
   for (const count of [1, 2]) {

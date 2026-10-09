@@ -183,8 +183,8 @@ async function runChild(scenario: string, tty: boolean) {
   expect(
     records.some(
       (entry) =>
-        entry.event === "surface selected (fixed until /reload)" &&
-        entry.context.surface === "full",
+        entry.event === "delegate tools registered" &&
+        entry.context.count === 3,
     ),
   ).toBe(true);
   expect(

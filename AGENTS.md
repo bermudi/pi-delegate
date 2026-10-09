@@ -42,8 +42,9 @@ on the model-facing surface answers to this first:
 
 - User-approved #61 (2026-09-29) supersedes automatic harness compatibility:
   one canonical spelling per field and exact built-in/authored agent names.
-  Default compact schema; operator `"surface": "full"` plus `/reload` exposes
-  retained advanced controls. Omitted `async` always backgrounds nonempty work.
+  ADR 0002 (2026-10-07) removed #61's compact/full split: the advertised
+  schema is the single schema, pruned by the #130 field verdicts. Omitted
+  `async` always backgrounds nonempty work.
 - Converge where the idiom is arbitrary (names, argument shapes, defaults);
   differentiate only where the difference IS the product (admission,
   workspaces, tickets). Unjustified divergence is a permanent error-rate
@@ -90,8 +91,8 @@ here — pi hard-errors on duplicate tool names between project and user
 extensions, which bricks every normal session in the repo.
 
 Before calling any unit shipped, dogfood it: `bun run verify:dogfood`
-(scripts/dogfood.ts). It gates on the suite + typecheck, then drives fresh
-`pi -p -ne -e <repo>/delegate.ts` sessions on both surfaces, scoped by
+(scripts/dogfood.ts). It gates on the suite + typecheck, then drives a fresh
+`pi -p -ne -e <repo>/delegate.ts` session on the single surface, scoped by
 `DELEGATE_AGENT_DIR` to owner-only scratch dirs, and asserts on the marker
 file, session transcript, and telemetry — never the model's summary. The
 dogfood model is owner-pinned in docs/verification/dogfood.config.json
@@ -272,9 +273,10 @@ V1 is evidence for behavior, never a design source. When consulting it:
 - Contract tests whose subsystem isn't implemented use `pendingTest` and
   cite what they assert. Promote them to `test` when the behavior lands —
   or sooner if the assertions already hold.
-- Engine test boundaries explicitly select full mode via the startup fixture;
-  compact/default tests request compact. Inline tests pass `async:false`
-  explicitly—never hide the production default in the call helper.
+- One tool surface (ADR 0002): no mode fixture, no surface option —
+  `openDelegateBoundary()` is the only boundary. Inline tests pass
+  `async:false` explicitly—never hide the production default in the call
+  helper.
 - In tests, the session's `agentDir` is its temporary cwd, so
   `<cwd>/delegate.json` stands in for the user-global config.
 - Update `TEST-MIGRATION.md`'s coverage map when migrating or promoting

@@ -125,7 +125,8 @@ The trained loop is: dispatch returns immediately, the parent keeps
 working, results arrive as wake-up turns with payload in-context, and
 mid-flight the parent can steer. The grammar:
 
-- **Stable background default (#61, user-approved 2026-09-29).** Every
+- **Stable background default (#61, user-approved 2026-09-29; surface split
+  removed by ADR 0002).** Every
   nonempty dispatch runs async unless the caller passes `async: false`.
   Task count never changes execution mode. The explicit sync override returns
   inline results; async tickets still auto-deliver settled results.
@@ -268,28 +269,28 @@ mid-flight the parent can steer. The grammar:
   User-authored profiles named `general` or `scout` remain valid exact
   definitions. Unknown names list the available names.
 - **Profile defaults.** Markdown profile `tools` and body provide reusable
-  capability and base-instruction defaults. Full-mode task overrides remain
+  capability and base-instruction defaults; task-level overrides remain
   available and retain their existing precedence. Operator configuration,
   model inheritance, admission, and all safety invariants are unchanged.
-- **Compact/full exposure.** The operator chooses `surface: "compact"`
-  (default) or `surface: "full"` in user-global `delegate.json` and reloads
-  the extension. The choice is session-scoped, never model-family-specific.
-  Both modes use the same execution engine. The advertised schema AND the
-  accepted arguments match the selected mode; hidden advanced inputs must
-  reject with guidance, never silently execute.
-  Compact dispatch advertises `tasks`, `async`, `workspace`, and
-  `brief`; each task has `prompt`, `agent`, `cwd`, and `workspace`.
-  Full mode adds task `id`, `description`, `tools`, `systemPrompt`,
-  `sessionId`, `resumeFrom`, `dependsOn` and batch
-  `tokenBudget`, `operationId`. Compact ticket actions are poll, wait,
-  cancel, answer, steer, and interrupt, with their required addressing and
-  payload fields; full mode also exposes pause/resume/tail, wait-any
-  `tickets`, `timeoutMs`, `steerId`, `offset`, and `waitMs`.
-  Session list/close remain available in both modes. The manual itself
-  is scoped to the selected surface (#64): the compact edition documents
-  only controls the compact schema accepts — it must not teach a call
-  that rejects — and closes with a line naming what full adds and how
-  to enable it; the full edition carries the complete controls.
+- **One surface (ADR 0002, 2026-10-07).** There is one advertised schema.
+  The former operator `surface` split (compact default, full opt-in via
+  delegate.json and /reload) is removed: the mode wall made every
+  advanced field structurally unreachable (zero production dispatches
+  could express one; the session pool was write-only; #123/#124
+  recovery hints were muted behind a /reload that cancels active
+  workers). A supplied `"surface"` key in delegate.json rejects at
+  config load with that teaching. The advertised schema AND the
+  accepted arguments are the single schema; nothing hidden executes
+  through recovery normalization. Dispatch advertises `tasks`, `async`,
+  `workspace`, and `brief`; each task has `prompt`, `agent`, `cwd`,
+  `workspace`, `id`, `description`, `tools`, `systemPrompt`,
+  `sessionId`, `resumeFrom`, and `dependsOn`; batch `tokenBudget` and
+  `operationId`; ticket actions are poll, wait, cancel, pause, resume,
+  answer, steer, interrupt, and tail, with wait-any `tickets`,
+  `timeoutMs`, `steerId`, `offset`, and `waitMs`. (Field set as of the
+  ADR 0002 unification; prune verdicts in #130 remove fields in their
+  own changes.) Session list/close unchanged. The manual is
+  single-edition: it documents exactly what the schema accepts.
 - **Description is a feature, not an alias.** The optional task display label
   remains available in full mode; it is not a task correlation id.
 - **Conversation and model boundaries remain closed.** Parent history is

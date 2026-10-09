@@ -58,10 +58,12 @@ use any design that makes these properties true and testable.
 ## Surface selection
 
 - Removed aliases MUST reject the whole call before any work starts.
-- Advertised and validated schemas MUST match the operator-selected compact
-  or full surface. Hidden fields/actions MUST NOT execute through recovery
-  normalization; full mode MUST preserve all canonical advanced features.
-- Surface selection MUST NOT depend on model family or weaken any execution
+- There is one tool surface (ADR 0002): the advertised schema and the
+  accepted arguments are the single schema — nothing executes through
+  recovery normalization outside it. A supplied `"surface"` key in
+  delegate.json MUST reject at config load, never silently apply or be
+  ignored.
+- The surface MUST NOT depend on model family or weaken any execution
   invariant. A nonempty call with omitted async MUST run in background,
   independently of task count.
 

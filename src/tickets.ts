@@ -19,7 +19,6 @@ import {
   truncateLine,
 } from "./format.ts";
 import type { ActivityRow, ActivityStore } from "./activity.ts";
-import type { DelegateSurface } from "./config.ts";
 // The receipt details types derive from the TypeBox schemas in
 // details.ts — the emitted shape and the pinned contract share one
 // definition (SPEC v3 "Observability"; issue #51).
@@ -185,7 +184,6 @@ function taskSection(
   ticket: Ticket,
   outcome: TaskOutcome,
   whole: boolean,
-  surface: DelegateSurface,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
 ): string {
   const record = ticket.tasks[outcome.index];
@@ -250,7 +248,7 @@ function taskSection(
   const detail = outcome.error ?? "no output";
   const session =
     outcome.sessionFile !== undefined
-      ? `\n${recoveryLines(outcome.sessionFile, surface).join("\n")}`
+      ? `\n${recoveryLines(outcome.sessionFile).join("\n")}`
       : "";
   const partial = outcome.output ? `\n${render(outcome.output)}` : "";
   return `${head}${files}\n${detail}${session}${partial}${quarantined}${integration}`;
@@ -370,7 +368,6 @@ function liveCounts(ticket: Ticket, live: LiveState | undefined): string {
 function ticketView(
   diagnostics: DiagnosticSink,
   ticket: Ticket,
-  surface: DelegateSurface,
   whole = false,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
   live?: LiveState,
@@ -393,7 +390,7 @@ function ticketView(
   for (let index = 0; index < ticket.outcomes.length; index++) {
     const outcome = ticket.outcomes[index];
     if (outcome) {
-      lines.push("", taskSection(diagnostics, ticket, outcome, whole, surface, renderedOutputs));
+      lines.push("", taskSection(diagnostics, ticket, outcome, whole, renderedOutputs));
     } else if (!isTerminal(ticket.status)) {
       // A running ticket shows each unfinished task's live line — a
       // polling caller can tell a healthy worker from a spinning one.
@@ -485,14 +482,6 @@ export class TicketStore {
   private readonly tickets = new Map<string, TicketEntry>();
   private journal: TicketJournal | undefined;
   /**
-   * The session-fixed delegate surface (#61), restamped by
-   * `registerTools` on every (re)load. Views and not-applied receipts
-   * render through it so no recovery hint teaches a field the active
-   * boundary would reject.
-   */
-  private surfaceMode: DelegateSurface = "compact";
-
-  /**
    * Optional lifecycle observer (extension-owned): fired after every
    * caller-visible mutation so visibility signals can resync. The store
    * never reads it beyond the call.
@@ -509,16 +498,6 @@ export class TicketStore {
     private readonly pooledTranscript?: (sessionId: string) => string | undefined,
   ) {}
 
-  /** `registerTools` restamps the session-fixed surface on every (re)load. */
-  setSurface(surface: DelegateSurface): void {
-    this.surfaceMode = surface;
-  }
-
-  /** The active surface — renderers emit surface-valid resume hints through it. */
-  get surface(): DelegateSurface {
-    return this.surfaceMode;
-  }
-
   /**
    * #57 — the continuation pointer a not-applied steer/interrupt receipt
    * appends: "nothing was applied" is a dead end unless the caller can
@@ -526,11 +505,11 @@ export class TicketStore {
    * session still holds its conversation — the receipt teaches
    * re-dispatch with `sessionId`; a fresh task with a durable transcript
    * teaches `resumeFrom` (the same pointer failure views render); a task
-   * with neither gets today's text unchanged. Under the compact surface
-   * the `resumeFrom` pointer names the full-mode requirement first — the
-   * bare call would reject. A recovered record's pool never survives the
-   * restart, but a journaled transcript does (#123): the resumeFrom
-   * branch fires for a recovered outcome that carries a sessionFile.
+   * with neither gets today's text unchanged. One surface (ADR 0002):
+   * the pointer always renders — no mode-wall detour. A recovered
+   * record's pool never survives the restart, but a journaled transcript
+   * does (#123): the resumeFrom branch fires for a recovered outcome
+   * that carries a sessionFile.
    */
   private continuationFor(
     record: Ticket,
@@ -559,12 +538,10 @@ export class TicketStore {
     }
     const sessionFile = record.outcomes[index]?.sessionFile;
     if (sessionFile !== undefined && isResumableTranscript(sessionFile)) {
-      return this.surface === "full"
-        ? ` To continue it, re-dispatch a task with resumeFrom ` +
-          `${JSON.stringify(sessionFile)} — the transcript is durable.`
-        : ` To continue it, set "surface": "full" in user-global delegate.json ` +
-          `and /reload — resumeFrom is a full-surface field — then re-dispatch ` +
-          `a task with resumeFrom ${JSON.stringify(sessionFile)}.`;
+      return (
+        ` To continue it, re-dispatch a task with resumeFrom ` +
+        `${JSON.stringify(sessionFile)} — the transcript is durable.`
+      );
     }
     return "";
   }
@@ -788,10 +765,10 @@ export class TicketStore {
       rt.finishedGate.resolved &&
       rt.executions.size === 0
     ) {
-      rt.settledView ??= ticketView(this.diagnostics, record, this.surface, false, rt.renderedOutputs, live);
+      rt.settledView ??= ticketView(this.diagnostics, record, false, rt.renderedOutputs, live);
       return rt.settledView;
     }
-    return ticketView(this.diagnostics, record, this.surface, false, rt.renderedOutputs, live);
+    return ticketView(this.diagnostics, record, false, rt.renderedOutputs, live);
   }
 
   /**
@@ -802,7 +779,7 @@ export class TicketStore {
    */
   fullView(ticket: Ticket): string {
     const { record, rt } = this.entry(ticket);
-    return ticketView(this.diagnostics, record, this.surface, true, undefined, {
+    return ticketView(this.diagnostics, record, true, undefined, {
       activity: this.activity,
       executions: rt.executions,
     });

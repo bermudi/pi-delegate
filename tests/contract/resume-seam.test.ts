@@ -109,7 +109,7 @@ describe("resume over crash-shaped transcripts (issue #124)", () => {
 
   for (const variant of ["torn", "clean", "nonl"] as const) {
     test(`${variant} transcript: resume loads, continues, never re-executes the orphaned call`, async () => {
-      const session = await openDelegateBoundary(); // full surface: resumeFrom
+      const session = await openDelegateBoundary(); // resumeFrom
       sessions.push(session);
       const provider = await installSubagentModel(session);
       writeFileSync(join(session.cwd, "notes.txt"), "the seam holds\n");

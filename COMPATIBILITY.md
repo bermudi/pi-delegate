@@ -137,6 +137,23 @@ consciously NOT adopted either — provisioning degrades to a full copy
 on ext4/tmpfs instead of failing (in-repo precedent:
 `src/scratch.ts` `copyTree`).
 
+## One tool surface (ADR 0002, 2026-10-07)
+
+This section supersedes #61's compact/full exposure split; #61's other
+rules (canonical fields, exact names, background default) stand.
+
+- BREAKING: the `"surface"` key is removed from delegate.json and the
+  compact/full schema split no longer exists. There is one advertised and
+  accepted schema — the former full vocabulary, pruned per the #130 field
+  verdicts. A supplied `"surface"` key rejects at config load with
+  teaching; remove the key and /reload.
+- The rationale (owner ruling): the mode wall was crossed only by /reload,
+  which cancels active workers — so no full-only field ever executed in
+  production (0 of 2,001 dispatches), the session pool was write-only
+  (reuse needs the formerly full-only `sessionId`), and #123/#124
+  recovery hints were muted. One surface makes every surviving field
+  reachable mid-session. See `docs/decisions/0002-one-surface.md`.
+
 ## Simplified v3 surface (#61, user-approved 2026-09-29)
 
 This section supersedes the older alias and cardinality entries below.
@@ -148,10 +165,12 @@ This section supersedes the older alias and cardinality entries below.
   `timeoutMs`, plus exact built-in or authored profile names. Removed
   fields reject the entire call, including null values. Existing saved
   ticket metadata remains readable; it does not authorize new alias calls.
-- BREAKING: the default advertised and accepted surface is compact.
-  Set `"surface": "full"` in user-global `delegate.json` and reload to
-  retain all canonical advanced call controls. `"surface": "compact"`
-  is the default. Invalid surface values fail visibly; no per-model choice.
+- BREAKING (superseded by ADR 0002 above): the default advertised and
+  accepted surface is compact. Set `"surface": "full"` in user-global
+  `delegate.json` and reload to retain all canonical advanced call
+  controls. `"surface": "compact"` is the default. Invalid surface
+  values fail visibly; no per-model choice. (As of ADR 0002 the key
+  rejects — one surface carries every control.)
 - Malformed supplied non-array `tasks` reject instead of being discarded by
   flat recovery. Schema diagnostics exclude request-body dumps; pre-schema
   rejection telemetry stores those safe messages verbatim, never prompts or

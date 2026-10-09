@@ -5,9 +5,9 @@ import {
 
 // #118: user-approved removal supersedes SPEC-V2 task deadlines. Use the
 // registered boundary so prepare/schema recovery cannot swallow this field.
-for (const surface of ["compact", "full"] as const) {
-  test(`${surface}: removed deadlineMs rejects by presence across recovery shapes before execution`, async () => {
-    const session = await openDelegateBoundary({ surface });
+// One surface (ADR 0002): a single run covers the only schema that exists.
+test("removed deadlineMs rejects by presence across recovery shapes before execution", async () => {
+  const session = await openDelegateBoundary();
     try {
       const model = await installSubagentModel(session);
       const schema = delegateTool(session).parameters as {
@@ -36,5 +36,4 @@ for (const surface of ["compact", "full"] as const) {
     } finally {
       session.dispose();
     }
-  });
-}
+});

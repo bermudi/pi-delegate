@@ -124,7 +124,7 @@ try {
   mkdirSync(engine, { recursive: true, mode: 0o700 });
   writeFileSync(
     join(engine, "delegate.json"),
-    JSON.stringify({ surface: "full", telemetry: { enabled: true } }),
+    JSON.stringify({ telemetry: { enabled: true } }),
   );
   mkdirSync(join(engine, "delegate-usage.db")); // Operational error through registered dispatch.
   const host = session.session as AgentSession;

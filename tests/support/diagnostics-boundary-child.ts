@@ -55,7 +55,7 @@ const agentDir = process.env.DELEGATE_AGENT_DIR;
 if (!agentDir) throw new Error("Explicit scratch agent directory required");
 writeFileSync(
   join(agentDir, "delegate.json"),
-  JSON.stringify({ surface: "full", telemetry: { enabled: true } }),
+  JSON.stringify({ telemetry: { enabled: true } }),
   { mode: 0o600 },
 );
 mkdirSync(join(agentDir, "delegate-usage.db"));

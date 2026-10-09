@@ -38,8 +38,6 @@ export interface SessionsConfig {
 }
 
 export interface DelegateConfig {
-  /** Operator-selected model-facing schema, fixed until extension reload. */
-  readonly surface: DelegateSurface;
   /** Global bound on simultaneously executing tasks. */
   readonly maxConcurrent: number;
   readonly concurrency: ConcurrencyConfig;
@@ -86,7 +84,6 @@ export interface DelegateConfig {
 }
 
 export const DEFAULT_CONFIG: DelegateConfig = {
-  surface: "compact",
   // Default 8, not 3 (#41): the 2026-09-28 harness survey found
   // letta/grok/oh-my-pi default to 32 and minimax/deepseek/MiMo/fx ship
   // uncapped — 3 was conservative enough to tax ordinary fan-outs, while
@@ -233,31 +230,6 @@ export function modelConcurrencyLimit(
 
 const CONFIG_FILE = "delegate.json";
 
-export type DelegateSurface = "compact" | "full";
-
-function parseSurface(value: unknown, path: string): DelegateSurface {
-  if (value === undefined) return "compact";
-  if (value !== "compact" && value !== "full") {
-    throw new Error(`${path}: surface must be "compact" or "full".`);
-  }
-  return value;
-}
-
-/** Select presentation without validating unrelated model pins or limits. */
-export function loadDelegateSurface(agentDir: string): DelegateSurface {
-  const path = configPathOf(agentDir);
-  if (!existsSync(path)) return "compact";
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(path, "utf8"));
-  } catch (error) {
-    throw new Error(`Failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error(`${path}: expected a JSON object.`);
-  }
-  return parseSurface((raw as Record<string, unknown>).surface, path);
-}
 
 /** Where a resolved agent directory came from. */
 export type AgentDirSource = "env" | "session" | "cwd";
@@ -382,6 +354,15 @@ export function loadDelegateConfig(
     throw new Error(`${path}: expected a JSON object.`);
   }
   const config = raw as Record<string, unknown>;
+  // ADR 0002: one tool surface. The former mode knob rejects with
+  // teaching so a stale config fails loudly at load instead of being
+  // silently ignored (the #61 rule: no field is silently discarded).
+  if (Object.hasOwn(config, "surface")) {
+    throw new Error(
+      `${path}: the "surface" key has been removed — there is one tool surface. ` +
+        `Remove the key and /reload; every field is always advertised and accepted.`,
+    );
+  }
   const maxConcurrent = config.maxConcurrent;
   if (
     maxConcurrent !== undefined &&
@@ -401,7 +382,6 @@ export function loadDelegateConfig(
     );
   }
   return {
-    surface: parseSurface(config.surface, path),
     maxConcurrent: (maxConcurrent as number) ?? DEFAULT_CONFIG.maxConcurrent,
     concurrency: parseConcurrency(config.concurrency, path),
     models: parseModels(config.models, "models", path, additionalAgentNames),

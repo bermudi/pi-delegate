@@ -25,9 +25,7 @@ import {
   loadDelegateConfig,
   resolveAgentDir,
   telemetryConfigHint,
-  loadDelegateSurface,
   type DelegateConfig,
-  type DelegateSurface,
   type TelemetryConfig,
 } from "./src/config.ts";
 import type {
@@ -321,34 +319,8 @@ const sessionSchema = Type.Object(
   { additionalProperties: false },
 );
 
-// Compact schemas are actual declarations/validators, not documentation-only
-// hiding. Full schemas remain the single canonical normalization vocabulary.
-const compactTaskSchema = Type.Object({
-  ...Type.Pick(taskSchema, ["agent", "cwd", "workspace"]).properties,
-  prompt: Type.String({ description: `Self-contained task; children never see the parent conversation. At most ${PROMPT_CHAR_LIMIT} characters — reference files by path instead of inlining contents.` }),
-}, { additionalProperties: false });
-const compactDelegateSchema = Type.Object({
-  tasks: Type.Array(compactTaskSchema, {
-    minItems: 0,
-    description: "Self-contained tasks. Batch related work in one call; [] shows the manual.",
-  }),
-  async: delegateSchema.properties.async,
-  workspace: delegateSchema.properties.workspace,
-  brief: delegateSchema.properties.brief,
-}, { additionalProperties: false });
-const compactTicketActions = ["poll", "wait", "cancel", "answer", "steer", "interrupt"] as const;
-const compactTicketSchema = Type.Object({
-  ...Type.Pick(ticketSchema, ["force", "questionId", "answer", "message"]).properties,
-  ticket: Type.Optional(Type.String({
-    description: "Ticket id; omit on poll to list tickets, or when taskId is a '<ticket>#<task>' address.",
-  })),
-  taskId: Type.Optional(Type.String({
-    description: "Task to answer, steer or interrupt. A '<ticket>#<task>' address also supplies the ticket.",
-  })),
-  action: stringEnum(compactTicketActions, {
-    description: "poll: current status; wait: settlement or a new question/interruption; cancel: preview, or cancel with force:true; answer: reply to a worker; steer: send instructions; interrupt: stop a turn, retaining its transcript.",
-  }),
-}, { additionalProperties: false });
+// One tool surface (ADR 0002): these declarations are the only schema
+// vocabulary, and advertised = accepted without qualification.
 
 /**
  * Validate before Pi's fallback error can append the entire request body.
@@ -367,47 +339,6 @@ function validatePreparedArguments<T extends TSchema>(
   throw new Error(`Validation failed for tool "${name}":\n${errors
     .map((error) => `- ${error.instancePath || "/"}: ${error.message}`)
     .join("\n")}`);
-}
-
-function rejectCompactFields(
-  value: unknown,
-  surface: DelegateSurface,
-  tool: "delegate" | "delegate_ticket",
-): void {
-  if (surface === "full" || !isRecord(value)) return;
-  const reject = (record: Record<string, unknown>, fields: readonly string[]): void => {
-    for (const field of fields) {
-      if (Object.hasOwn(record, field)) {
-        throw new Error(`'${field}' requires the full delegate surface. Set "surface": "full" in user-global delegate.json and /reload, or use a named profile for reusable tools/base instructions.`);
-      }
-    }
-  };
-  if (tool === "delegate_ticket") {
-    reject(value, Object.keys(ticketSchema.properties).filter(
-      (key) => !Object.hasOwn(compactTicketSchema.properties, key),
-    ));
-    if (typeof value.action === "string" &&
-        TICKET_ACTIONS.includes(value.action) &&
-        !(compactTicketActions as readonly string[]).includes(value.action)) {
-      throw new Error(`Ticket action "${value.action}" requires "surface": "full" in user-global delegate.json and /reload.`);
-    }
-    return;
-  }
-  const advancedTaskFields = Object.keys(taskSchema.properties).filter(
-    (key) => !Object.hasOwn(compactTaskSchema.properties, key),
-  );
-  reject(value, [
-    ...advancedTaskFields,
-    ...Object.keys(delegateSchema.properties).filter(
-      (key) => !Object.hasOwn(compactDelegateSchema.properties, key),
-    ),
-  ]);
-  const tasks = typeof value.tasks === "string" ? parseArray(value.tasks) : value.tasks;
-  if (Array.isArray(tasks)) {
-    for (const task of tasks) {
-      if (isRecord(task)) reject(task, advancedTaskFields);
-    }
-  }
 }
 
 type DelegateArguments = Static<typeof delegateSchema>;
@@ -670,7 +601,7 @@ function rejectObsoleteContext(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "context")) {
     throw new Error(
       'The context field has been removed. Omit context and provide a self-contained prompt; use the top-level "brief" for shared batch context. ' +
-        'parent conversation history is never shared. Child-owned session history remains supported on the full "surface".',
+        'parent conversation history is never shared. Child-owned session history remains supported (sessionId/resumeFrom).',
     );
   }
 }
@@ -1083,22 +1014,16 @@ function prepareSessionArguments(value: unknown): SessionToolArguments {
   return args as SessionToolArguments;
 }
 
-// The manual is assembled per surface (#64): shared sections stay
-// single-sourced, while the compact edition documents only the controls
-// the compact schemas accept — naming a rejected field teaches a call
-// that fails. The full edition carries every section.
+// The manual is single-edition (ADR 0002): one surface, one schema —
+// the manual documents exactly the controls the schema accepts.
 
-const HELP_INTERFACES = `## Compact and full interfaces
-- Compact is the default. Set \`"surface": "full"\` in user-global
-  delegate.json and run /reload to enable advanced controls. Surface selection
-  never depends on model family, and changing the file does not change the
-  selected schema until reload. Hidden advanced fields reject; they do not
-  secretly execute. Full mode keeps the same engine and safety guarantees.
-  Choose the surface before launching work: /reload cancels active workers
-  and waits for safe cleanup.
+const HELP_INTERFACES = `## Interfaces
+- One tool surface: every field this manual names is always advertised
+  and always accepted. The former compact/full split and its
+  delegate.json "surface" key are removed — a supplied key rejects
+  with that teaching.
 - Named Markdown profiles provide reusable tools and base instructions.
-  Use the profile instead of repeating those settings in ordinary calls;
-  full mode still accepts explicit one-off overrides.
+  Use the profile instead of repeating those settings in ordinary calls.
 - Removed cross-harness aliases are not accepted. Use canonical fields and
   exact built-in or authored profile names.`;
 
@@ -1121,7 +1046,7 @@ const HELP_DISPATCH = `## delegate — ordinary dispatch
   (same-phase same-root writers reject) and use \`isolated\` for
   independent edits.`;
 
-const HELP_FULL_CONTROLS = `## delegate — full-mode controls
+const HELP_FULL_CONTROLS = `## delegate — task and batch controls
 - Task \`id\` correlates results; \`description\` is a display label only.
   \`tools\` and \`systemPrompt\` override profile defaults. Tool groups:
   \`*\` selects read/bash/edit/write; \`ro\` selects read/grep/find/ls.
@@ -1137,10 +1062,10 @@ const HELP_FULL_CONTROLS = `## delegate — full-mode controls
   the original execution/result, changed request conflicts. Unkeyed calls
   always execute independently; it is not exactly-once crash recovery.`;
 
-// #64: the compact edition must not teach fields its schema rejects —
-// pooled/resumed session history and the isolated/scratch session-field
-// exclusions are full-surface facts, dropped from the compact text.
-function helpSharedRules(full: boolean): string {
+// The manual documents exactly the controls the single schema accepts
+// (ADR 0002); the session-field exclusions are engine facts, not
+// surface-conditional text.
+function helpSharedRules(): string {
   return `## Models, profiles, and context
 - Models and effort: you never pick either — task \`model\`, \`thinking\`,
   and \`reasoning_effort\` fields are rejected. Tasks run on the parent's
@@ -1159,11 +1084,10 @@ function helpSharedRules(full: boolean): string {
   \`tools\`, profile frontmatter \`tools\`, and the mirrored parent
   set alike.
 - Children never inherit parent conversation history. Supply a self-contained
-  brief; project instructions still apply${full ? ", as does the child's own pooled/resumed session history" : ""}.`;
+  brief; project instructions still apply, as does the child's own pooled/resumed session history.`;
 }
 
-function helpWorkspaces(full: boolean): string {
-  const sessionFields = full ? " Cannot use \`sessionId\` or \`resumeFrom\`." : "";
+function helpWorkspaces(): string {
   return `## Workspaces
 - \`shared\` (default): the task edits the caller's tree directly. Writers
   whose scope overlaps in one call must be ordered with \`dependsOn\` —
@@ -1176,11 +1100,12 @@ function helpWorkspaces(full: boolean): string {
   same repository run in parallel — much faster than shared for
   independent work. Ignored files (e.g. \`node_modules\`) are copied
   into each worktree, reflink/Copy-on-Write when the filesystem
-  supports it.${sessionFields}
+  supports it. Cannot use \`sessionId\` or \`resumeFrom\`.
 - \`scratch\`: one task, one disposable copy of the tree (reflinked when
   the filesystem supports it); every change is discarded. Use it for
   tasks that may write or run commands but whose output is the answer,
-  not the edits. A read-only task cannot use it — it needs no copy.${sessionFields}
+  not the edits. A read-only task cannot use it — it needs no copy.
+  Cannot use \`sessionId\` or \`resumeFrom\`.
   During copying, the actual source root rejects overlapping active or
   quarantined shared/isolated writers, and new writers reject until copying
   settles. Scratch readers may copy concurrently; worker execution may overlap
@@ -1204,7 +1129,7 @@ const HELP_TICKET_SHARED = `- Canonical task addresses: anywhere \`taskId\` is t
 - The bare poll roster and unknown-ticket hints list only this session's
   tickets; a settled ticket from another session stays readable by id.`;
 
-const HELP_TICKETS_FULL = `## delegate_ticket — tickets
+const HELP_TICKETS = `## delegate_ticket — tickets
 Compact exposes poll/wait/cancel/answer/steer/interrupt. Full mode adds
 pause/resume/tail, wait-any tickets, timeoutMs, steerId, offset and waitMs.
 
@@ -1257,34 +1182,6 @@ pause/resume/tail, wait-any tickets, timeoutMs, steerId, offset and waitMs.
   text for scratch/isolated ones — raw transcripts are never exposed.
 ${HELP_TICKET_SHARED}`;
 
-const HELP_TICKETS_COMPACT = `## delegate_ticket — tickets
-Compact exposes poll/wait/cancel/answer/steer/interrupt.
-
-- \`{ action: "poll" }\` — this session's ticket roster, or one ticket's
-  status with \`ticket\`. Never blocks.
-- \`{ action: "wait", ticket }\` — block until the ticket settles; a new
-  worker question or a task interruption also ends the wait.
-- \`{ action: "cancel", ticket }\` — previews without \`force\`; with
-  \`force: true\` the ticket is cancelled now and in-flight tasks are asked
-  to stop (cooperative; no rollback).
-- \`{ action: "answer", ticket, taskId, questionId, answer }\` — answer a
-  worker's pending \`ask_parent\` question (all four fields required).
-  Poll to see outstanding questions. Only async workers can ask.
-- \`{ action: "steer", ticket, taskId, message }\` — send a message into a
-  running task: \`taskId\` defaults to the only still-running task; a
-  retry-safe key is derived from this call and the receipt names it. The
-  receipt says what happened: \`steered\` (merged at the child's next
-  turn boundary), \`activated\` (queued, opens the next turn),
-  \`duplicate\`, or \`not-applied\` (settled/unknown target).
-- \`{ action: "interrupt", ticket, taskId? }\` — abort one task's
-  in-flight turn, cooperatively. The task settles \`interrupted\` —
-  partial output kept and the worker's transcript retained (resuming is
-  a full-surface feature). Distinct from \`cancel\`, which tears the
-  whole ticket down. \`taskId\` defaults to the only still-running task;
-  interrupting a settled, already-interrupted, or not-yet-running task
-  receipts \`not-applied\`.
-${HELP_TICKET_SHARED}`;
-
 const HELP_SESSIONS = `## delegate_session — sessions
 - A task with \`sessionId\` keeps its session live after it finishes; a later
   task with the same id continues that conversation. The session's cwd,
@@ -1293,13 +1190,6 @@ const HELP_SESSIONS = `## delegate_session — sessions
 - \`{ action: "list" }\` lists live sessions; \`{ action: "close", sessionId }\`
   closes one.`;
 
-// #64: the compact edition documents only controls the compact schema
-// accepts — task `sessionId` pooling is a full-surface field, so the
-// compact sessions section describes list/close without teaching a call
-// that rejects.
-const HELP_SESSIONS_COMPACT = `## delegate_session — sessions
-- \`{ action: "list" }\` lists pooled sessions; \`{ action: "close", sessionId }\`
-  closes one. Creating pooled sessions requires the full surface.`;
 
 const HELP_TELEMETRY = `## Telemetry
 - Disabled by default; enable only via "telemetry" in delegate.json.
@@ -1324,35 +1214,17 @@ ${HELP_DISPATCH}
 
 ${HELP_FULL_CONTROLS}
 
-${helpSharedRules(true)}
+${helpSharedRules()}
 
-${helpWorkspaces(true)}
+${helpWorkspaces()}
 
-${HELP_TICKETS_FULL}
+${HELP_TICKETS}
 
 ${HELP_SESSIONS}
 
 ${HELP_TELEMETRY}
 `;
 
-const compactHelp = `${helpIntro("poll, wait, cancel, answer, steer, interrupt")}
-
-${HELP_INTERFACES}
-
-${HELP_DISPATCH}
-
-${helpSharedRules(false)}
-
-${helpWorkspaces(false)}
-
-${HELP_TICKETS_COMPACT}
-
-${HELP_SESSIONS_COMPACT}
-
-${HELP_TELEMETRY}
-
-Full surface adds: task id/description, tools/systemPrompt overrides, sessionId/resumeFrom, dependsOn, tokenBudget, operationId, pause/resume/tail (with offset/waitMs), wait on several tickets, timeoutMs, steerId — set "surface": "full" in user-global delegate.json and /reload.
-`;
 
 /**
  * A manual trailer listing the user's discovered Markdown profiles, or ""
@@ -1430,7 +1302,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       },
     };
   };
-  let surfaceError: Error | undefined;
+
   // Host-compat probes (issue #9): exercise the reaches into Pi internals
   // that dispatch depends on — the private model-runtime handle and the
   // agent-directory resolution — on the first event that carries a ctx, so
@@ -1452,15 +1324,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
     };
     probe("parent model runtime", () => parentModelRuntime(ctx));
     probe("agent directory resolution", () => resolveAgentDir(ctx));
-    try {
-      const surface = loadDelegateSurface(resolveAgentDir(ctx).dir);
-      surfaceError = undefined;
-      registerTools(surface);
-      diagnostic("info", "surface selected (fixed until /reload)", { surface });
-    } catch (error) {
-      surfaceError = error instanceof Error ? error : new Error(String(error));
-      diagnostic("error", "surface selection failed; fix delegate.json and /reload", {}, surfaceError);
-    }
+    // One surface (ADR 0002): there is no per-session surface selection —
+    // a stale "surface" key in delegate.json rejects at dispatch config
+    // load. Registration still logs a session marker: it correlates log
+    // files to sessions/reloads and gives routing tests a deterministic
+    // startup event (the former "surface selected" record's role).
+    registerTools();
+    diagnostic("info", "delegate tools registered", { count: 3 });
   });
 
   // TicketStore mutates first, visibility reads lazily — the observer arrow
@@ -2504,18 +2374,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
     telemetry.close();
   });
 
-  function registerTools(surface: DelegateSurface): void {
-    // The store outlives registration: restamp the surface so ticket
-    // views and receipts render hints valid for the active schema.
-    tickets.setSurface(surface);
+  function registerTools(): void {
     api.registerTool(
       managedTool(defineTool<TUnsafe<DelegateArguments>, DelegateDetails>({
         name: "delegate",
         label: "Delegate to Subagents",
         description:
-          "Run self-contained subagent tasks. Every nonempty call returns a background ticket; results arrive at your next step on their own — async: false returns inline results for any task count. Batch related work in one call: same-root shared writers need dependsOn ordering (same-phase unordered overlap rejects listing remedies); overlapping writers in separate calls reject. The explore role is read-only and admits concurrently; reviewer uses bash and counts as a writer. Use isolated for parallel edits — ignored files (e.g. node_modules) are copied into each worktree, reflink/Copy-on-Write when the filesystem supports it — or scratch to discard changes. Named Markdown profiles supply tools and base instructions. tasks: [] shows the manual." +
-          (surface === "compact" ? " Compact surface; enable advanced controls with \"surface\": \"full\" in user-global delegate.json and /reload." : " Full surface; advanced task and batch controls are enabled."),
-        parameters: Type.Unsafe<DelegateArguments>(surface === "full" ? delegateSchema : compactDelegateSchema),
+          "Run self-contained subagent tasks. Every nonempty call returns a background ticket; results arrive at your next step on their own — async: false returns inline results for any task count. Batch related work in one call: same-root shared writers need dependsOn ordering (same-phase unordered overlap rejects listing remedies); overlapping writers in separate calls reject. The explore role is read-only and admits concurrently; reviewer uses bash and counts as a writer. Use isolated for parallel edits — ignored files (e.g. node_modules) are copied into each worktree, reflink/Copy-on-Write when the filesystem supports it — or scratch to discard changes. Named Markdown profiles supply tools and base instructions. tasks: [] shows the manual.",
+        parameters: Type.Unsafe<DelegateArguments>(delegateSchema),
         promptSnippet:
           "Run self-contained tasks in background; async:false waits for inline results",
         promptGuidelines: [
@@ -2528,10 +2394,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
           "Split very large task batches across delegate calls. Keep every prompt and the brief under " + PROMPT_CHAR_LIMIT + " characters — reference files by path instead of inlining contents; oversized values reject.",
         ],
         prepareArguments: (args) => {
-          if (surfaceError) throw surfaceError;
-          rejectCompactFields(args, surface, "delegate");
           return validatePreparedArguments("delegate",
-            surface === "full" ? delegateSchema : compactDelegateSchema,
+            delegateSchema,
             prepareDispatchArguments(args));
         },
         // The call row is static by contract: `delegate N tasks` plus up
@@ -2590,10 +2454,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 {
                   type: "text" as const,
                   text:
-                    `Current surface: ${surface}.\n\n` +
-                    // #64: the manual documents only the controls the
-                    // selected surface's schemas accept.
-                    (surface === "full" ? help : compactHelp) +
+                    // One surface, one manual (ADR 0002): the manual
+                    // documents exactly the controls the schema accepts.
+                    help +
                     customProfileSection(ctx),
                 },
               ],
@@ -2847,7 +2710,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   type: "text" as const,
                   text:
                     (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
-                    formatDispatchResult(diagnostics, result.outcomes, tasks, outputBounds, surface, call.brief, result.tokenBudget),
+                    formatDispatchResult(diagnostics, result.outcomes, tasks, outputBounds, call.brief, result.tokenBudget),
                 },
               ],
               details: ({
@@ -2959,16 +2822,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
         name: "delegate_ticket",
         label: "Delegate Tickets",
         description:
-          "Inspect or control background delegate work. poll returns status immediately; wait returns on settlement or a new worker question/interruption. cancel previews unless force:true. answer replies to a worker question; steer sends instructions at turn boundaries; interrupt stops a turn while retaining its transcript. Results arrive at your next step on their own — wait only when blocked on one." +
-          (surface === "full" ? " Full mode also offers pause/resume, wait-any, timed waits, steering retry keys and incremental output tailing." : " Advanced controls require \"surface\": \"full\" in user-global delegate.json and /reload."),
-        parameters: Type.Unsafe<TicketToolArguments>(surface === "full" ? ticketSchema : compactTicketSchema),
+          "Inspect or control background delegate work. poll returns status immediately; wait returns on settlement or a new worker question/interruption. cancel previews unless force:true. answer replies to a worker question; steer sends instructions at turn boundaries; interrupt stops a turn while retaining its transcript. Results arrive at your next step on their own — wait only when blocked on one.",
+        parameters: Type.Unsafe<TicketToolArguments>(ticketSchema),
         promptSnippet:
-          surface === "full" ? "Inspect, wait, control and tail background delegate work" : "Inspect, wait, cancel, answer, steer or interrupt background delegate work",
+          "Inspect, wait, cancel, answer, steer or interrupt background delegate work",
         prepareArguments: (args) => {
-          if (surfaceError) throw surfaceError;
-          rejectCompactFields(args, surface, "delegate_ticket");
           return validatePreparedArguments("delegate_ticket",
-            surface === "full" ? ticketSchema : compactTicketSchema,
+            ticketSchema,
             prepareTicketArguments(args));
         },
         renderCall: renderTicketCall,
@@ -3069,12 +2929,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
       managedTool(defineTool<typeof sessionSchema, DelegateDetails>({
         name: "delegate_session",
         label: "Delegate Sessions",
-        // #64: the compact surface cannot create pooled sessions — its
-        // description must not name the full-only `sessionId` field.
         description:
-          surface === "full"
-            ? "List or close pooled delegate sessions created by task sessionId fields. Dispatch tasks with delegate; operate on async tickets with delegate_ticket."
-            : "List or close pooled delegate sessions. Dispatch tasks with delegate; operate on async tickets with delegate_ticket.",
+          "List or close pooled delegate sessions created by task sessionId fields. Dispatch tasks with delegate; operate on async tickets with delegate_ticket.",
         parameters: sessionSchema,
         promptSnippet: "List or close pooled delegate subagent sessions",
         prepareArguments: (args) => validatePreparedArguments("delegate_session",
@@ -3102,5 +2958,5 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
   // Pi supports replacing same-name definitions at session_start. This keeps
   // one schema/validator per name and preserves all stores and active tools.
-  registerTools("compact");
+  registerTools();
 }

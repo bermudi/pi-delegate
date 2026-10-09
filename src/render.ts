@@ -188,7 +188,6 @@ function expandedText(
     outcomes,
     [],
     UNBOUNDED_OUTPUT,
-    tickets.surface,
     typeof details.brief === "string" ? details.brief : undefined,
     isTokenBudgetReport(details.tokenBudget) ? details.tokenBudget : undefined,
   );
