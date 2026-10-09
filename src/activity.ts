@@ -5,8 +5,9 @@
  * ticket-less runs keyed by dispatch (`sync-run:<runId>:<taskId>`), feeds
  * session events via `observe`/`observeSync`, and retains finished sync
  * runs. Full transcripts never live here: tool previews are capped at
- * 512 chars, assistant text at a 32K tail, tool calls at 100, retained sync
- * runs at 20, settled ticket rows at 100.
+ * 512 chars, assistant text at a 32K tail, tool calls at 100, the
+ * interleaved event log at 250 events (#128), retained sync runs at 20,
+ * settled ticket rows at 100.
  *
  * Deviation from the assigned signature: `AgentSessionEvent` is not exported
  * by `@earendil-works/pi-agent-core` at the pinned 0.87.0 declarations — the
@@ -40,6 +41,31 @@ export interface ActivityToolCall {
   isError: boolean;
 }
 
+/** An assistant text block, in stream order (#128). */
+export interface ActivityTextEvent {
+  readonly kind: "text";
+  readonly at: number;
+  readonly text: string;
+}
+
+/** One tool call, in stream order; mutated when the call ends (#128). */
+export interface ActivityToolEvent {
+  readonly kind: "tool";
+  readonly at: number;
+  readonly tool: string;
+  readonly argPreview: string;
+  preview: string;
+  inFlight: boolean;
+  isError: boolean;
+}
+
+/**
+ * A row's chronological activity — the browser's interleaved transcript
+ * (#128). Tool and text events share one order so "what is this agent
+ * doing" reads as it happened, not as two disconnected columns.
+ */
+export type ActivityEvent = ActivityTextEvent | ActivityToolEvent;
+
 export interface ActivityRow {
   /**
    * Store-assigned unique key: `${ticketId}:${taskId}` for ticket rows,
@@ -62,6 +88,8 @@ export interface ActivityRow {
   toolCalls: readonly ActivityToolCall[];
   /** Last 32_768 chars of assistant text (no thinking blocks). */
   assistantTail: string;
+  /** Chronological text/tool events, newest last, capped at 250 (#128). */
+  events: readonly ActivityEvent[];
 }
 
 export interface ActivityStore {
@@ -128,6 +156,10 @@ const PROMPT_LIMIT = 200;
 const RETAINED_SYNC_LIMIT = 20;
 const RETAINED_TICKET_LIMIT = 100;
 const OMITTED_MARKER = "[Earlier text omitted]";
+const EVENT_LIMIT = 250;
+/** Per text event: the interleaved view scans, the 32K tail stays the
+ * full-text source (one Tab away in the browser). */
+const TEXT_EVENT_LIMIT = 2_000;
 
 /** Terminal statuses: they end a row's clock. */
 function isSettled(status: ActivityStatus): boolean {
@@ -339,6 +371,7 @@ function callPreview(argText: string, result: unknown): string {
 /** Open tool executions, by toolCallId. */
 interface OpenTool {
   index: number;
+  eventIndex: number;
   argPreview: string;
 }
 
@@ -357,6 +390,7 @@ interface MutableEntry {
   prompt: string;
   toolCalls: ActivityToolCall[];
   assistantTail: string;
+  events: ActivityEvent[];
   openTools: Map<string, OpenTool>;
 }
 
@@ -367,13 +401,24 @@ function trimToolCalls(calls: ActivityToolCall[]): number {
   return Math.max(0, excess);
 }
 
+/** Splice front-evicted events; returns how many were removed. */
+function trimEvents(events: ActivityEvent[]): number {
+  const excess = events.length - EVENT_LIMIT;
+  if (excess > 0) events.splice(0, excess);
+  return Math.max(0, excess);
+}
+
 /** Open indices shift when front entries are evicted; drop evicted ones. */
-function shiftOpenTools(openTools: Map<string, OpenTool>, removed: number): void {
-  if (removed <= 0) return;
+function shiftOpenTools(openTools: Map<string, OpenTool>, removedCalls: number, removedEvents: number): void {
+  if (removedCalls <= 0 && removedEvents <= 0) return;
   for (const [id, open] of openTools) {
-    const shifted = open.index - removed;
-    if (shifted < 0) openTools.delete(id);
-    else open.index = shifted;
+    const shiftedCall = open.index - removedCalls;
+    const shiftedEvent = open.eventIndex - removedEvents;
+    if (shiftedCall < 0 || shiftedEvent < 0) openTools.delete(id);
+    else {
+      open.index = shiftedCall;
+      open.eventIndex = shiftedEvent;
+    }
   }
 }
 
@@ -391,6 +436,7 @@ function rowOf(entry: MutableEntry): ActivityRow {
     prompt: entry.prompt,
     toolCalls: entry.toolCalls.map((call) => ({ ...call })),
     assistantTail: entry.assistantTail,
+    events: entry.events.map((event) => ({ ...event })),
   };
 }
 
@@ -440,6 +486,7 @@ export function createActivityStore(): ActivityStore {
       prompt: "",
       toolCalls: [],
       assistantTail: "",
+      events: [],
       openTools: new Map(),
     };
     entries.set(key, created);
@@ -469,6 +516,7 @@ export function createActivityStore(): ActivityStore {
       prompt: "",
       toolCalls: [],
       assistantTail: "",
+      events: [],
       openTools: new Map(),
     };
     entries.set(key, created);
@@ -485,7 +533,28 @@ export function createActivityStore(): ActivityStore {
     isError: boolean,
   ): void => {
     entry.toolCalls.push({ at, tool, preview, argPreview, inFlight, isError });
-    shiftOpenTools(entry.openTools, trimToolCalls(entry.toolCalls));
+    const removedCalls = trimToolCalls(entry.toolCalls);
+    entry.events.push({
+      kind: "tool",
+      at,
+      tool,
+      argPreview: preview,
+      preview,
+      inFlight,
+      isError,
+    });
+    const removedEvents = trimEvents(entry.events);
+    shiftOpenTools(entry.openTools, removedCalls, removedEvents);
+  };
+
+  /** Push a text event, then trim and shift open indexes — text evictions
+   * slide surviving events down exactly like tool evictions do (review
+   * #128: skipping the shift stranded an in-flight tool's eventIndex and
+   * silently dropped its completion from the transcript). */
+  const appendTextEvent = (entry: MutableEntry, text: string): void => {
+    const at = Date.now();
+    entry.events.push({ kind: "text", at, text });
+    shiftOpenTools(entry.openTools, 0, trimEvents(entry.events));
   };
 
   /** The event-application half of observe/observeSync — shared verbatim. */
@@ -498,6 +567,7 @@ export function createActivityStore(): ActivityStore {
       appendCall(entry, now, sanitizeLine(event.toolName) || "tool", preview, preview, true, false);
       entry.openTools.set(event.toolCallId, {
         index: entry.toolCalls.length - 1,
+        eventIndex: entry.events.length - 1,
         argPreview: preview,
       });
       return;
@@ -512,6 +582,12 @@ export function createActivityStore(): ActivityStore {
           call.preview = preview;
           call.inFlight = false;
           call.isError = event.isError;
+        }
+        const toolEvent = entry.events[open.eventIndex];
+        if (toolEvent !== undefined && toolEvent.kind === "tool") {
+          toolEvent.preview = preview;
+          toolEvent.inFlight = false;
+          toolEvent.isError = event.isError;
         }
       } else {
         // End without a surviving start (evicted or never seen): still
@@ -538,10 +614,9 @@ export function createActivityStore(): ActivityStore {
         }
       }
       if (parts.length > 0) {
-        entry.assistantTail = appendAssistantTail(
-          entry.assistantTail,
-          parts.join("\n\n"),
-        );
+        const text = parts.join("\n\n");
+        entry.assistantTail = appendAssistantTail(entry.assistantTail, text);
+        appendTextEvent(entry, truncateHead(text, TEXT_EVENT_LIMIT));
       }
     }
     // Every other event type only bumps lastEventAt, already done above.
@@ -587,6 +662,7 @@ export function createActivityStore(): ActivityStore {
         prompt: truncateHead(sanitizeText(info.prompt), PROMPT_LIMIT),
         toolCalls: [],
         assistantTail: "",
+        events: [],
         openTools: new Map(),
       });
     },
@@ -630,6 +706,7 @@ export function createActivityStore(): ActivityStore {
             entry.assistantTail,
             summary,
           );
+          appendTextEvent(entry, truncateHead(sanitizeText(summary), TEXT_EVENT_LIMIT));
         }
         pruneSettled("sync", RETAINED_SYNC_LIMIT);
       }
@@ -687,6 +764,7 @@ export function createActivityStore(): ActivityStore {
           prompt,
           toolCalls: [],
           assistantTail: summary,
+          events: [],
           openTools: new Map(),
         });
       }
