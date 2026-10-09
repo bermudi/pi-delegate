@@ -25,7 +25,6 @@ import type {
   InterruptDetails,
   SteerDetails,
   SteerStatus,
-  TailDetails,
 } from "./details.ts";
 import { TicketJournal } from "./ticket-journal.ts";
 import { DELEGATE_TREES } from "./fsx.ts";
@@ -1239,146 +1238,6 @@ export class TicketStore {
   }
 
   /**
-   * delegate_ticket "tail" (issue #52): a bounded, incremental read of
-   * one task's clean assistant output. `offset` is a char cursor into
-   * the accumulated text — an out-of-range value clamps; `text` is the
-   * chunk from that offset, capped per call at the ticket's spill tail
-   * bound, and `nextOffset` is the cursor for the following read.
-   *
-   * Source of truth: the run's durable transcript when the task is
-   * file-backed (fresh, shared, sessionId, resumeFrom) — the caller never
-   * parses raw `.jsonl`. The span's byte baseline excludes earlier
-   * conversations from pooled/resumed transcripts. In-memory tasks
-   * (scratch, isolated) tail from the activity store's captured text;
-   * a settled task whose activity row was pruned falls back to its
-   * recorded output. `waitMs` omitted or ≤0 is a pure snapshot; a
-   * positive bound parks the read until new output lands or the task
-   * settles — never longer than requested. Idempotent; no wake semantics
-   * (ticket events stay with `wait`).
-   */
-  async tail(
-    ticket: Ticket,
-    callTaskId: string | undefined,
-    offset: number | undefined,
-    waitMs: number | undefined,
-    signal: AbortSignal | undefined,
-  ): Promise<TicketRpcResult> {
-    const { record, rt } = this.entry(ticket);
-    const fail = (text: string): TicketRpcResult => ({
-      text,
-      isError: true,
-      ticket,
-    });
-    let taskIndex: number;
-    if (callTaskId !== undefined) {
-      taskIndex = record.tasks.findIndex((task) => task.id === callTaskId);
-      if (taskIndex < 0) {
-        return fail(
-          `Ticket "${record.id}" has no task "${taskAddress(record.id, callTaskId)}". Its tasks: ${record.tasks.map((task) => `"${taskAddress(record.id, task.id)}"`).join(", ")}.`,
-        );
-      }
-    } else {
-      const unsettled = record.tasks
-        .map((_, index) => index)
-        .filter((index) => record.outcomes[index] === undefined);
-      if (unsettled.length === 1) {
-        taskIndex = unsettled[0]!;
-      } else if (unsettled.length === 0 && record.tasks.length === 1) {
-        taskIndex = 0;
-      } else {
-        const candidates =
-          unsettled.length > 0 ? unsettled : record.tasks.map((_, i) => i);
-        return fail(
-          `action "tail" needs taskId on ticket "${record.id}" — ${candidates.length === 0 ? "it has no tasks" : `${candidates.length} tasks ${unsettled.length > 0 ? "are still running" : "ran"}: ${candidates.map((i) => `"${taskAddress(record.id, record.tasks[i]!.id)}"`).join(", ")}`}.`,
-        );
-      }
-    }
-    const taskId = record.tasks[taskIndex]!.id;
-    const cap = record.outputBounds.spillTailChars;
-
-    const read = (): {
-      source: string;
-      done: boolean;
-      taskState: TailDetails["taskState"];
-    } => {
-      const outcome = record.outcomes[taskIndex];
-      // File-backed runs read their transcript — the source of truth
-      // (spans exclude earlier pooled/resumed conversation). In-memory
-      // and pruned-row runs read the activity store's captured tail;
-      // a recorded output is the last fallback once both are gone.
-      const span =
-        rt.executions.get(taskIndex)?.transcript?.() ??
-        (outcome?.sessionFile !== undefined
-          ? { file: outcome.sessionFile, start: outcome.transcriptStart ?? 0 }
-          : undefined);
-      const source =
-        span !== undefined
-          ? assistantTextFromTranscript(span.file, span.start)
-          : (this.activity?.taskRow(record.id, taskId)?.assistantTail ??
-            outcome?.output ??
-            "");
-      // taskState is the RAW activity-row status, not the browser's
-      // annotated word: "running" here can mean pausing (pause requested,
-      // in-flight turn still streaming) — only "paused" is the parked
-      // truth. Consumers wanting the annotated form read the poll view.
-      const taskState =
-        outcome?.status ??
-        this.activity?.taskRow(record.id, taskId)?.status ??
-        (rt.executions.has(taskIndex) ? "running" : "queued");
-      return { source, done: outcome !== undefined, taskState };
-    };
-
-    const off = Number.isFinite(offset)
-      ? Math.max(0, Math.floor(offset!))
-      : 0;
-    const deadline =
-      waitMs !== undefined && Number.isFinite(waitMs) && waitMs > 0
-        ? Date.now() + waitMs
-        : undefined;
-    for (;;) {
-      const snap = read();
-      const clamped = Math.min(off, snap.source.length);
-      // A snapshot returns at once; an armed wait returns early on new
-      // output, on settlement, or on caller abort — never past the bound.
-      const grown = snap.source.length > clamped;
-      if (
-        deadline === undefined ||
-        grown ||
-        snap.done ||
-        signal?.aborted === true ||
-        Date.now() >= deadline
-      ) {
-        const text = snap.source.slice(clamped, clamped + cap);
-        const nextOffset = clamped + text.length;
-        const head =
-          `Tail of task "${taskAddress(record.id, taskId)}" — ` +
-          `${snap.done ? `settled (${snap.taskState})` : snap.taskState}: ` +
-          `${text.length} chars from offset ${clamped} → nextOffset ${nextOffset}` +
-          (snap.source.length > nextOffset
-            ? "; more output is already buffered beyond this read's bound"
-            : "") +
-          (snap.done ? "; complete" : "") +
-          ".";
-        return {
-          text: text === "" ? `${head}\n\n(no output in range)` : `${head}\n\n${text}`,
-          isError: false,
-          ticket,
-          tail: {
-            ticket: record.id,
-            taskId,
-            text,
-            offset: clamped,
-            nextOffset,
-            done: snap.done,
-            taskState: snap.taskState,
-          },
-        };
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, TAIL_POLL_MS));
-    }
-  }
-
-  /**
    * Drain the parked steers for one task — the run loop calls this just
    * before prompt() so each message merges at turn one. Records flip to
    * delivered; a task that settles with steers still parked voids them
@@ -1905,8 +1764,6 @@ export interface TicketRpcResult {
   readonly steer?: SteerDetails;
   /** The interrupt receipt's machine half (action "interrupt" only). */
   readonly interrupt?: InterruptDetails;
-  /** The tail read's machine half (action "tail" only). */
-  readonly tail?: TailDetails;
 }
 
 /** What ended a wait-any call (#58); `ticket` is the watched ticket the cause names. */
@@ -1932,8 +1789,7 @@ export async function handleTicketRpc(
       | "cancel"
       | "answer"
       | "steer"
-      | "interrupt"
-      | "tail";
+      | "interrupt";
     ticket: string | undefined;
     tickets: readonly string[] | undefined;
     force: boolean;
@@ -1943,8 +1799,6 @@ export async function handleTicketRpc(
     answer: string | undefined;
     message: string | undefined;
     steerId: string | undefined;
-    offset: number | undefined;
-    waitMs: number | undefined;
   },
   store: TicketStore,
   signal: AbortSignal | undefined,
@@ -2105,15 +1959,7 @@ export async function handleTicketRpc(
       isError: true,
     };
   }
-  // tail shares poll/wait's read-only reach into recovered records — it
-  // observes the recorded outcome or a surviving transcript; it never
-  // mutates.
-  if (
-    ticket.recovered &&
-    call.action !== "poll" &&
-    call.action !== "wait" &&
-    call.action !== "tail"
-  ) {
+  if (ticket.recovered && call.action !== "poll" && call.action !== "wait") {
     return {
       text: `Ticket '${ticket.id}' is a recovered ${ticket.status} result; ${call.action} cannot restart or change it.`,
       isError: true,
@@ -2165,7 +2011,5 @@ export async function handleTicketRpc(
       } catch (error) {
         return { text: error instanceof Error ? error.message : String(error), isError: true, ticket };
       }
-    case "tail":
-      return store.tail(ticket, taskId, call.offset, call.waitMs, signal);
   }
 }

@@ -55,7 +55,7 @@ describe("delegate validation contract", () => {
     }
     const ticketResult = await callTicket({ action: "explode" });
     expect(ticketResult.isError).toBe(true);
-    expect(ticketResult.text).toContain("Validation failed");
+    expect(ticketResult.text).toContain("Unknown delegate_ticket action");
     const sessionResult = await callSession({ action: "restart" });
     expect(sessionResult.isError).toBe(true);
     expect(sessionResult.text).toContain("Validation failed");

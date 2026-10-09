@@ -25,7 +25,7 @@ saved deadline failures remain readable, but cannot authorize new calls.
 
 Inactivity/stall detection, cooperative abort and confirmed quiescence,
 reservations and quarantine, paused/question-waiting worker safety, detachable
-bounded ticket waits/tails, and shutdown bounds remain unchanged. This removes
+bounded ticket waits, and shutdown bounds remain unchanged. This removes
 only task deadlines, not unrelated internal timer bounds or batch token budgets.
 
 ## Operational diagnostics (#122, user-authorized)

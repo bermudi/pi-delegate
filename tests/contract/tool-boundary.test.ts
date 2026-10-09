@@ -108,14 +108,12 @@ describe("delegate public tool contract", () => {
         "answer",
         "force",
         "message",
-        "offset",
         "questionId",
         "steerId",
         "taskId",
         "ticket",
         "tickets",
         "timeoutMs",
-        "waitMs",
       ].sort(),
     );
 
@@ -146,7 +144,6 @@ describe("delegate public tool contract", () => {
       "answer",
       "steer",
       "interrupt",
-      "tail",
     ]);
     const sessionSchema = objectOf(
       registeredTool(session, "delegate_session").parameters,

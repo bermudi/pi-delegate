@@ -275,6 +275,12 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   Test coverage that drove the RPC (paused-watchdog scenarios, the
   paused footer case, answer replay while parked) lost its public
   trigger and is a noted gap pending a dashboard integration test.
+- **Removed — ticket `tail` action and `offset`/`waitMs` fields (#130,
+  2026-10-07).** "What is it doing?" is answered by poll's live per-task
+  activity rows and the settled result; humans watching mid-flight have
+  the /subagents dashboard. Unknown ticket actions now enumerate the
+  available set (enumerate-or-inherit). The transcript-span read
+  machinery stays internal to poll views and spill.
 - Landed since: steering receipts (#37), `delegate_ticket interrupt`
   (#42 — abort one task's in-flight turn; it settles `interrupted`,
   resumable, distinct from `cancel`'s ticket teardown), recovery resume

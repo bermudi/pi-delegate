@@ -210,9 +210,9 @@ const delegateSchema = Type.Object(
 
 const ticketSchema = Type.Object(
   {
-    action: stringEnum(["poll", "wait", "cancel", "answer", "steer", "interrupt", "tail"], {
+    action: stringEnum(["poll", "wait", "cancel", "answer", "steer", "interrupt"], {
       description:
-        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown. tail: read a task's clean assistant output incrementally — {text, nextOffset, done, taskState}; offset resumes the stream, waitMs bounds a park that resolves early on new output.",
+        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown.",
     }),
     ticket: Type.Optional(
       Type.String({
@@ -241,7 +241,7 @@ const ticketSchema = Type.Object(
     taskId: Type.Optional(
       Type.String({
         description:
-          "Only with actions 'answer', 'steer', 'interrupt', and 'tail': the task to target. With 'steer'/'interrupt' it defaults to the ticket's only still-running task; with 'tail' it also defaults to the ticket's only task. Accepts the canonical '<ticket>#<task>' address — the ticket field is then optional.",
+          "Only with actions 'answer', 'steer', and 'interrupt': the task to target. With 'steer'/'interrupt' it defaults to the ticket's only still-running task. Accepts the canonical '<ticket>#<task>' address — the ticket field is then optional.",
       }),
     ),
     questionId: Type.Optional(
@@ -266,18 +266,6 @@ const ticketSchema = Type.Object(
       Type.String({
         description:
           "Only with action 'steer': idempotency key — same id + same message + same target replays the original receipt instead of injecting twice; same id + different content is an error. Optional: omitted, one is derived from this tool call and named in the receipt.",
-      }),
-    ),
-    offset: Type.Optional(
-      Type.Number({
-        description:
-          "Only with action 'tail': char offset into the task's accumulated assistant output — pass back a prior nextOffset to continue the stream. Out-of-range values clamp.",
-      }),
-    ),
-    waitMs: Type.Optional(
-      Type.Number({
-        description:
-          "Only with action 'tail': bound the read — the call resolves early when new output lands or the task settles, and never later than this. Omitted or 0 is a pure snapshot.",
       }),
     ),
   },
@@ -409,8 +397,6 @@ const ticketFieldNames = [
   "answer",
   "message",
   "steerId",
-  "offset",
-  "waitMs",
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -457,7 +443,7 @@ function normalizeTools(value: string): unknown {
   return token !== "" && !/[\s,]/.test(token) ? [token] : value;
 }
 
-const TICKET_ACTIONS = ["poll", "wait", "cancel", "answer", "steer", "interrupt", "tail"];
+const TICKET_ACTIONS = ["poll", "wait", "cancel", "answer", "steer", "interrupt"];
 const SESSION_ACTIONS = ["list", "close"];
 
 /**
@@ -479,10 +465,8 @@ function delegateTicketExample(args: Record<string, unknown>): string {
         ? args.action
         : isGiven(args.message) || isGiven(args.steerId)
           ? "steer"
-          : typeof args.offset === "number" || typeof args.waitMs === "number"
-            ? "tail"
-            : Array.isArray(args.tickets) && args.tickets.length > 0
-              ? "wait"
+          : Array.isArray(args.tickets) && args.tickets.length > 0
+            ? "wait"
             : isGiven(args.taskId) ||
                 isGiven(args.questionId) ||
                 isGiven(args.answer)
@@ -521,16 +505,6 @@ function delegateTicketExample(args: Record<string, unknown>): string {
   }
   if (action === "interrupt" && typeof args.taskId === "string" && !isBlank(args.taskId)) {
     fields.push(`taskId: ${JSON.stringify(args.taskId)}`);
-  }
-  if (action === "tail") {
-    if (typeof args.taskId === "string" && !isBlank(args.taskId)) {
-      fields.push(`taskId: ${JSON.stringify(args.taskId)}`);
-    }
-    for (const key of ["offset", "waitMs"] as const) {
-      if (typeof args[key] === "number") {
-        fields.push(`${key}: ${JSON.stringify(args[key])}`);
-      }
-    }
   }
   return `delegate_ticket({ ${fields.join(", ")} })`;
 }
@@ -750,8 +724,6 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     args.questionId !== undefined ||
     args.answer !== undefined ||
     args.steerId !== undefined ||
-    args.offset !== undefined ||
-    args.waitMs !== undefined ||
     args.message !== undefined
   ) {
     throw new Error(
@@ -766,8 +738,6 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
           "answer",
           "message",
           "steerId",
-          "offset",
-          "waitMs",
         ]),
     );
   }
@@ -876,6 +846,17 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
     throw new Error(
       'The "' + String(args.action) + '" action has been removed from delegate_ticket — it is operator-dashboard-only (/subagents). ' +
         'Blocked on this work? action "wait" parks until settlement; action "cancel" stops it.',
+    );
+  }
+  // Enumerate-or-inherit: an unknown action names the resolvable set
+  // (#130 removed tail; the schema enum alone says only "not allowed").
+  if (
+    typeof args.action === "string" &&
+    args.action !== "" &&
+    !TICKET_ACTIONS.includes(args.action)
+  ) {
+    throw new Error(
+      `Unknown delegate_ticket action "${args.action}". Available actions: ${TICKET_ACTIONS.join(", ")}.`,
     );
   }
   stripNulls(args);
@@ -1114,8 +1095,6 @@ const HELP_TICKET_SHARED = `- Canonical task addresses: anywhere \`taskId\` is t
   tickets; a settled ticket from another session stays readable by id.`;
 
 const HELP_TICKETS = `## delegate_ticket — tickets
-Compact exposes poll/wait/cancel/answer/steer/interrupt. Full mode adds
-pause/resume/tail, wait-any tickets, timeoutMs, steerId, offset and waitMs.
 
 - \`{ action: "poll" }\` — this session's ticket roster, or one ticket's
   status with \`ticket\`. Never blocks.
@@ -1149,19 +1128,6 @@ pause/resume/tail, wait-any tickets, timeoutMs, steerId, offset and waitMs.
   transcript in the settled view — \`session:\` line plus a retry recipe.
   Re-dispatch with \`resumeFrom\` when a continuation is deliberately
   wanted; recovery itself never resumes work.
-- \`{ action: "tail", ticket, taskId?, offset?, waitMs? }\` — read one
-  task's clean assistant output incrementally. Returns \`{text,
-  nextOffset, done, taskState}\` in details: \`text\` is the output-so-far
-  chunk from \`offset\` (bounded per call like spilled output), and
-  \`nextOffset\` is the cursor to pass back for the next chunk —
-  concatenating chunks reproduces the stream. \`done\` flips when the
-  task settles and \`taskState\` names its state (\`running\`,
-  \`queued\`, \`paused\`, or a settled status). \`waitMs\` parks the
-  read until new output lands or the task settles, never exceeding the
-  bound; omitted or 0 is a pure snapshot. \`taskId\` defaults to the
-  only still-running task (or the ticket's only task). Sources: the
-  task's durable transcript for file-backed runs, the captured activity
-  text for scratch/isolated ones — raw transcripts are never exposed.
 ${HELP_TICKET_SHARED}`;
 
 const HELP_SESSIONS = `## delegate_session — sessions
@@ -1188,7 +1154,7 @@ Three sibling tools share Delegate's machinery:
 - \`delegate_session\` lists and closes pooled subagent sessions.`;
 }
 
-const help = `${helpIntro("poll, wait, cancel, answer, steer, interrupt, tail")}
+const help = `${helpIntro("poll, wait, cancel, answer, steer, interrupt")}
 
 ${HELP_INTERFACES}
 
@@ -2841,7 +2807,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // details.tail (#52).
               ...(result.steer !== undefined ? { steer: result.steer } : {}),
               ...(result.interrupt !== undefined ? { interrupt: result.interrupt } : {}),
-              ...(result.tail !== undefined ? { tail: result.tail } : {}),
             } satisfies TicketDetails),
             isError: result.isError,
           };

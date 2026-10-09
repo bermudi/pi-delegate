@@ -38,8 +38,7 @@ export interface TicketArguments {
     | "cancel"
     | "answer"
     | "steer"
-    | "interrupt"
-    | "tail";
+    | "interrupt";
   readonly ticket?: string;
   /** Wait-any (#58): several ticket ids — the wait resolves on the first to settle. */
   readonly tickets?: readonly string[];
@@ -50,8 +49,6 @@ export interface TicketArguments {
   readonly answer?: string;
   readonly message?: string;
   readonly steerId?: string;
-  readonly offset?: number;
-  readonly waitMs?: number;
 }
 
 /** Post-schema delegate_session arguments. */
@@ -87,8 +84,7 @@ export interface TicketCall {
     | "cancel"
     | "answer"
     | "steer"
-    | "interrupt"
-    | "tail";
+    | "interrupt";
   readonly ticket: string | undefined;
   /**
    * Wait-any watch list (#58): present only when `tickets` carried two or
@@ -103,8 +99,6 @@ export interface TicketCall {
   readonly answer: string | undefined;
   readonly message: string | undefined;
   readonly steerId: string | undefined;
-  readonly offset: number | undefined;
-  readonly waitMs: number | undefined;
 }
 
 /** A validated delegate_session call. */
@@ -171,14 +165,12 @@ const oversizedPromptRemedy =
  * Within-tool rules for `delegate_ticket`: `ticket` is required for every
  * action except `poll` (bare poll is the roster), `force` only accompanies
  * `cancel`, `timeoutMs` only `wait`, `taskId` belongs to `answer`,
- * `steer`, `interrupt`, and `tail` — a `<ticket>#<task>` compound in it
+ * `steer`, and `interrupt` — a `<ticket>#<task>` compound in it
  * carries its own ticket, making the `ticket` field optional (#53) —
  * `questionId`/`answer` belong to
  * `answer` alone — which requires all three — and `message`/`steerId`
  * belong to `steer`, which requires the message (`steerId` is optional —
  * omitted, the ticket boundary derives an idempotency key from the
- * calling tool call). `offset`/`waitMs` belong to `tail` alone and must
- * be non-negative integers.
  * Conditional carries are reported before missing
  * requirements, matching the historical precedence; blank values count as
  * missing.
@@ -229,25 +221,9 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     taskId !== undefined &&
     args.action !== "answer" &&
     args.action !== "steer" &&
-    args.action !== "interrupt" &&
-    args.action !== "tail"
+    args.action !== "interrupt"
   ) {
-    fail(`taskId is valid only with actions "answer", "steer", "interrupt", and "tail".`);
-  }
-  for (const [name, value] of [
-    ["offset", args.offset],
-    ["waitMs", args.waitMs],
-  ] as const) {
-    if (value !== undefined && args.action !== "tail") {
-      fail(`${name} is valid only with action "tail".`);
-    }
-    if (
-      args.action === "tail" &&
-      value !== undefined &&
-      (!Number.isFinite(value) || !Number.isInteger(value) || value < 0)
-    ) {
-      fail(`'${name}' must be a non-negative integer; got ${JSON.stringify(value)}.`);
-    }
+    fail(`taskId is valid only with actions "answer", "steer", and "interrupt".`);
   }
   for (const [name, value] of [
     ["questionId", questionId],
@@ -321,8 +297,6 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     answer,
     message,
     steerId,
-    offset: args.offset,
-    waitMs: args.waitMs,
   };
 }
 

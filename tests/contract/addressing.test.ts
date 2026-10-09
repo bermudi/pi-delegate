@@ -9,7 +9,6 @@ import {
 import type {
   InterruptDetails,
   SteerDetails,
-  TailDetails,
 } from "../../src/details.ts";
 import {
   callDelegate,
@@ -54,10 +53,10 @@ describe("canonical ticket#task addressing (#53)", () => {
   });
 
   test(
-    "steer, interrupt, and tail resolve a compound taskId with the ticket field omitted",
+    "steer and interrupt resolve a compound taskId with the ticket field omitted",
     async () => {
-      // #53: the compound carries its own ticket. Steer a parked worker,
-      // interrupt another, and tail a third — all addressed as
+      // #53: the compound carries its own ticket. Steer a parked worker
+      // and interrupt it — all addressed as
       // "<ticket>#<task>" with no separate ticket field.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
@@ -86,7 +85,7 @@ describe("canonical ticket#task addressing (#53)", () => {
       const ticket = ticketIdOf(dispatched.text);
       // alpha parks on ask_parent; beta/gamma settle. A wait ends at once
       // on alpha's pending question, so poll until beta's completed
-      // outcome is on record before the tail assertions below.
+      // outcome is on record before the assertions below.
       await untilQuestion(session, ticket);
       const deadline = Date.now() + 4000;
       for (;;) {
@@ -114,22 +113,6 @@ describe("canonical ticket#task addressing (#53)", () => {
       expect(steerDetails.ticket).toBe(ticket);
       expect(steerDetails.taskId).toBe("alpha");
       expect(["steered", "activated"]).toContain(steerDetails.status);
-
-      // tail: the settled task's output through its compound address.
-      const tailed = await callDelegateTicket(session, {
-        action: "tail",
-        taskId: `${ticket}#beta`,
-      });
-      expect(tailed.isError).toBe(false);
-      const tail = objectOf(
-        objectOf(tailed.details).tail,
-        "details.tail",
-      ) as TailDetails;
-      expect(tail.ticket).toBe(ticket);
-      expect(tail.taskId).toBe("beta");
-      expect(tail.done).toBe(true);
-      expect(tail.text).toContain("BETA-OUT");
-      expect(tailed.text).toContain(`"${ticket}#beta"`);
 
       // interrupt on the still-running task via compound — the receipt and
       // its text both carry the compound address.
@@ -262,19 +245,22 @@ describe("canonical ticket#task addressing (#53)", () => {
       const ticket = ticketIdOf(dispatched.text);
       await untilQuestion(session, ticket);
 
+      // #130: steer is the vehicle (tail was removed); an unknown ticket
+      // or task lands in a not-applied receipt that names the known set.
       const ghostTicket = await callDelegateTicket(session, {
-        action: "tail",
+        action: "steer",
         taskId: "t-00000000-0000-0000-0000-000000000000#holder",
+        message: "x",
       });
-      expect(ghostTicket.isError).toBe(true);
       expect(ghostTicket.text).toContain("t-00000000-0000-0000-0000-000000000000");
-      expect(ghostTicket.text).toContain(`"${ticket}"`);
 
       const ghostTask = await callDelegateTicket(session, {
-        action: "tail",
+        action: "steer",
         taskId: `${ticket}#ghost`,
+        message: "x",
       });
-      expect(ghostTask.isError).toBe(true);
+      expect(ghostTask.isError).toBe(false);
+      expect(ghostTask.text).toContain("not-applied");
       expect(ghostTask.text).toContain(`"${ticket}#ghost"`);
       expect(ghostTask.text).toContain(`"${ticket}#holder"`);
 
@@ -310,9 +296,10 @@ describe("canonical ticket#task addressing (#53)", () => {
       await untilQuestion(session, ticket);
 
       const conflict = await callDelegateTicket(session, {
-        action: "tail",
+        action: "steer",
         ticket,
         taskId: "t-other#holder",
+        message: "x",
       });
       expect(conflict.isError).toBe(true);
       expect(conflict.text).toContain("t-other#holder");
@@ -321,8 +308,9 @@ describe("canonical ticket#task addressing (#53)", () => {
 
       for (const malformed of ["#holder", `${ticket}#`]) {
         const bad = await callDelegateTicket(session, {
-          action: "tail",
+          action: "steer",
           taskId: malformed,
+          message: "x",
         });
         expect(bad.isError).toBe(true);
         expect(bad.text).toContain("malformed");
@@ -353,33 +341,26 @@ describe("canonical ticket#task addressing (#53)", () => {
       const ticket = ticketIdOf(dispatched.text);
       await untilQuestion(session, ticket);
 
-      // Plain two-field form.
+      // Plain two-field form (steer is the vehicle — #130 removed tail;
+      // it exercises the same address resolution on a running task).
       const plain = await callDelegateTicket(session, {
-        action: "tail",
+        action: "steer",
         ticket,
         taskId: "holder",
+        message: "plain form",
       });
       expect(plain.isError).toBe(false);
-      const plainTail = objectOf(
-        objectOf(plain.details).tail,
-        "details.tail",
-      ) as TailDetails;
-      expect(plainTail.taskId).toBe("holder");
-      expect(plainTail.text).toContain("PARKED");
+      expect(plain.text).toContain(`"${ticket}#holder"`);
 
       // Compound + agreeing ticket field resolves to the same task.
       const agreeing = await callDelegateTicket(session, {
-        action: "tail",
+        action: "steer",
         ticket,
         taskId: `${ticket}#holder`,
+        message: "agreeing form",
       });
       expect(agreeing.isError).toBe(false);
-      const agreeingTail = objectOf(
-        objectOf(agreeing.details).tail,
-        "details.tail",
-      ) as TailDetails;
-      expect(agreeingTail.taskId).toBe("holder");
-      expect(agreeingTail.text).toContain("PARKED");
+      expect(agreeing.text).toContain(`"${ticket}#holder"`);
 
       await callDelegateTicket(session, { action: "cancel", ticket, force: true });
     },
