@@ -541,9 +541,9 @@ export class TelemetryStore {
             result.usage?.cost.total ?? null,
             null,
             null,
-            result.tokenBudget?.limit ?? null,
-            result.tokenBudget?.consumed ?? null,
-            result.tokenBudget?.exhaustedAt ?? null,
+            null,
+            null,
+            null,
           );
         });
       });

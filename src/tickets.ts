@@ -7,7 +7,6 @@ import {
   descriptionLabel,
   displayPath,
   briefNote,
-  budgetNote,
   fieldNotes,
   filesLine,
   verdictLine,
@@ -41,7 +40,6 @@ import type {
   Ticket,
   TicketOwner,
   TicketStatus,
-  TokenBudgetReport,
   WorkerQuestion,
 } from "./types.ts";
 import { Deferred } from "./types.ts";
@@ -374,14 +372,11 @@ function ticketView(
 ): string {
   const warning = recoveryWarning(ticket);
   const brief = briefNote(ticket.brief);
-  const budget = budgetNote(ticket.tokenBudget);
   const lines = [
     `Ticket "${ticket.id}": ${statusWord(ticket)} — ${completedCount(ticket)}/${ticket.totalTasks} tasks finished${isTerminal(ticket.status) ? "" : liveCounts(ticket, live)}.`,
     // The shared batch brief is mentioned once, at the head — never
-    // inside a task section (SPEC v3 "Batch brief"). The token-budget
-    // account rides the same header row (SPEC v3 "Batch token budget").
+    // inside a task section (SPEC v3 "Batch brief").
     ...(brief !== undefined ? [brief] : []),
-    ...(budget !== undefined ? [budget] : []),
     ...(warning ? [warning] : []),
     ...ticket.notices,
     ...ticket.questions.map((q) =>
@@ -623,11 +618,6 @@ export class TicketStore {
           : item.notices,
         // Optional in the journal — pre-brief records have none.
         ...(item.brief !== undefined ? { brief: item.brief } : {}),
-        // Optional in the journal — pre-budget records and budgetless
-        // dispatches have none.
-        ...(item.tokenBudget !== undefined
-          ? { tokenBudget: item.tokenBudget }
-          : {}),
       };
       // The interruption is journal-durable BEFORE the record becomes
       // visible — the journal state machine is what makes a repeat startup
@@ -858,18 +848,6 @@ export class TicketStore {
         ? [{ taskId: outcome.id, verdict: outcome.verdict }]
         : [],
     );
-  }
-
-  /**
-   * The dispatch's final token-budget account (SPEC v3 "Batch token
-   * budget"), recorded when its batch completes — the settled ticket's
-   * views and the journal both carry it.
-   */
-  noteTokenBudget(ticket: Ticket, report: TokenBudgetReport): void {
-    const writable = this.entry(ticket).record as Writable<Ticket>;
-    writable.tokenBudget = report;
-    this.save(writable);
-    this.changed();
   }
 
   /**
@@ -1920,7 +1898,7 @@ export interface TicketRpcResult {
    * delivery flush compares it against the view the wake would send
    * and suppresses the wake only on an exact match — identical content
    * is already-shown, while a record that changed since the render
-   * (late outcomes, budget account, notices) still delivers.
+   * (late outcomes, notices) still delivers.
    */
   readonly consumedView?: string;
   /** The steer receipt's machine-readable half (action "steer" only). */

@@ -29,7 +29,6 @@ import type {
   ResolvedTask,
   TaskOutcome,
   Ticket,
-  TokenBudgetReport,
 } from "./types.ts";
 
 function onAbort(signal: AbortSignal): Promise<void> {
@@ -72,12 +71,6 @@ function combineSignals(
 export interface DispatchOutcome {
   readonly outcomes: readonly TaskOutcome[];
   readonly usage: Usage | undefined;
-  /**
-   * Present when the call carried a `tokenBudget` (SPEC v3 "Batch token
-   * budget"): the final account — limit, tokens recorded by settled
-   * tasks, and when the ceiling was reached.
-   */
-  readonly tokenBudget?: TokenBudgetReport;
 }
 
 /**
@@ -211,14 +204,6 @@ export class DispatchCoordinator {
        */
       brief?: string;
       /**
-       * The call's shared token ceiling (SPEC v3 "Batch token budget").
-       * Consumption is summed from settled tasks' recorded usage; once it
-       * reaches the limit, queued tasks settle `budget-exhausted` instead
-       * of starting — running tasks are never hard-aborted and finish
-       * normally.
-       */
-      tokenBudget?: number;
-      /**
        * This batch's shutdown barrier, accepted as part of taking the
        * batch. `run` binds its resolver in the synchronous prefix of the
        * call — before the first await — so the moment the dispatcher
@@ -278,24 +263,6 @@ export class DispatchCoordinator {
     this.semaphore.setLimit(options.config.maxConcurrent);
     const grant = options.grant;
     const loaders = new Map<string, Promise<DefaultResourceLoader>>();
-    // SPEC v3 "Batch token budget": consumption is what settled tasks
-    // recorded — summed live over the outcomes array so a late
-    // worker-truth usage lands as soon as it is written. The latch stamps
-    // exhaustion the moment consumption crosses the limit, whether or not
-    // a queued task is waiting to observe it.
-    const budgetConsumed = () =>
-      outcomes.reduce(
-        (sum, outcome) => sum + (outcome?.usage?.totalTokens ?? 0),
-        0,
-      );
-    let exhaustedAt: number | undefined;
-    let budgetReport: TokenBudgetReport | undefined;
-    const budgetExhausted = (): boolean => {
-      if (options.tokenBudget === undefined) return false;
-      if (budgetConsumed() < options.tokenBudget) return false;
-      exhaustedAt ??= Date.now();
-      return true;
-    };
 
     try {
       // Dependency phases run in order: every task in a phase waits for
@@ -333,7 +300,6 @@ export class DispatchCoordinator {
               fullyQuiesced,
               tasks,
               prepError,
-              budgetExhausted,
             ),
           ),
         );
@@ -433,22 +399,6 @@ export class DispatchCoordinator {
         if (!fullyQuiesced.get(task.index)!.resolved) retained.add(task.index);
       }
       grant.release(retained);
-      // The budget account is final once every outcome has landed: the
-      // last latch check stamps a crossing whose last task was itself the
-      // one to consume the ceiling, and the report persists on the ticket
-      // before the settlement hold lifts so a racing `wait` never misses
-      // it (SPEC v3 "Batch token budget").
-      if (options.tokenBudget !== undefined) {
-        budgetExhausted();
-        budgetReport = {
-          limit: options.tokenBudget,
-          consumed: budgetConsumed(),
-          ...(exhaustedAt !== undefined ? { exhaustedAt } : {}),
-        };
-        if (options.ticket) {
-          this.tickets.noteTokenBudget(options.ticket, budgetReport);
-        }
-      }
       if (options.ticket) this.tickets.finishBatch(options.ticket);
       // Only now is the batch fully quiesced for a shutdown barrier:
       // finalization and every admission reservation release have run.
@@ -461,7 +411,6 @@ export class DispatchCoordinator {
         (total, outcome) => addUsage(total, outcome?.usage),
         undefined,
       ),
-      tokenBudget: budgetReport,
     };
   }
 
@@ -477,7 +426,6 @@ export class DispatchCoordinator {
       onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
       syncRunId?: string;
       brief?: string;
-      tokenBudget?: number;
       attribution?: AttributionWindows;
       attributionQuiescenceBoundMs?: number;
     },
@@ -488,7 +436,6 @@ export class DispatchCoordinator {
     fullyQuiesced: Map<number, Deferred>,
     tasks: readonly ResolvedTask[],
     prepError: unknown,
-    budgetExhausted: () => boolean,
   ): Promise<void> {
     const ticket = options.ticket;
     // The composed signal propagates the (long-lived) dispatch and ticket
@@ -597,10 +544,6 @@ export class DispatchCoordinator {
         // never un-settles it.
         this.tickets.recordOutcome(ticket, outcome);
       }
-      // Budget latch: this outcome's usage may have crossed the limit —
-      // stamp exhaustion now so the report is honest even when no queued
-      // task is left to observe it.
-      budgetExhausted();
       // Usage reporting (#60): the settled outcome's recorded usage is
       // what the event carries — emit at the settlement point itself,
       // not at batch end, so a long-running ticket reports as it goes.
@@ -665,9 +608,6 @@ export class DispatchCoordinator {
           // Diagnostics only; the outcome is already recorded.
         }
       }
-      // Worker truth can carry usage the provisional snapshot lacked —
-      // it may be the write that crosses the limit.
-      budgetExhausted();
       // Settled() resolving proves the worker stopped — no background
       // continuations remain — even when an earlier abort threw and marked
       // the outcome quarantined. A thrown abort must not poison quiescence
@@ -794,19 +734,6 @@ export class DispatchCoordinator {
           record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
           return;
         }
-        // SPEC v3 "Batch token budget": a task still queued when the
-        // ceiling is reached never starts — it settles budget-exhausted
-        // without consuming a slot, worker, or session.
-        if (budgetExhausted()) {
-          record({
-            index: task.index,
-            id: task.id,
-            status: "budget-exhausted",
-            error: `the batch tokenBudget of ${options.tokenBudget} tokens was exhausted before this task started`,
-            retries: 0,
-          });
-          return;
-        }
         const predecessor = grant.predecessors.get(task.index);
         if (predecessor !== undefined) {
           // Wait for confirmed quiescence, not caller-visible settlement: a
@@ -848,19 +775,6 @@ export class DispatchCoordinator {
           try {
             if (signal.aborted) {
               record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
-              return;
-            }
-            // The ceiling may have been crossed while this task waited
-            // on a slot — recheck at the start boundary so no worker is
-            // launched past the budget. Held slots release via finally.
-            if (budgetExhausted()) {
-              record({
-                index: task.index,
-                id: task.id,
-                status: "budget-exhausted",
-                error: `the batch tokenBudget of ${options.tokenBudget} tokens was exhausted before this task started`,
-                retries: 0,
-              });
               return;
             }
             const controls: RunControls = {

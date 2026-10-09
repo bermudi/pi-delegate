@@ -32,7 +32,7 @@ describe("the single delegate surface", () => {
   test("the declared and executable schema is the single full vocabulary", async () => {
     const session = await open();
     const top = properties(session);
-    expect(Object.keys(top).sort()).toEqual(["async", "brief", "operationId", "tasks", "tokenBudget", "workspace"]);
+    expect(Object.keys(top).sort()).toEqual(["async", "brief", "operationId", "tasks", "workspace"]);
     const task = objectOf(objectOf(top.tasks).items);
     expect(Object.keys(objectOf(task.properties)).sort()).toEqual([
       "agent", "cwd", "dependsOn", "description", "id", "prompt",

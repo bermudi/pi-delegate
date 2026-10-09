@@ -29,8 +29,6 @@ export type DispatchCall =
        */
       readonly brief: string | undefined;
       readonly operationId: string | undefined;
-      /** The batch's shared token ceiling (SPEC v3 "Batch token budget"). */
-      readonly tokenBudget: number | undefined;
     };
 
 /** Post-schema delegate_ticket arguments. */
@@ -367,9 +365,6 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
     if (args.operationId !== undefined) {
       fail(`operationId requires a non-empty dispatch task list.`);
     }
-    if (args.tokenBudget !== undefined) {
-      fail(`tokenBudget requires at least one task; it is a dispatch field.`);
-    }
     return { mode: "help" };
   }
 
@@ -392,14 +387,13 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
       `brief must be at most ${PROMPT_CHAR_LIMIT} characters; got ${brief.length}; it is prepended to every task. ${oversizedPromptRemedy}`,
     );
   }
-  // SPEC v3 "Batch token budget": the field is a positive integer — the
-  // schema constrains it, but callers that bypass schema validation get
-  // the same loud answer here rather than a silently-instant exhaustion.
-  if (
-    args.tokenBudget !== undefined &&
-    (!Number.isInteger(args.tokenBudget) || args.tokenBudget <= 0)
-  ) {
-    fail(`'tokenBudget' must be a positive integer; got ${JSON.stringify(args.tokenBudget)}.`);
+  // #129: the caller-controlled budget is gone — presence rejects with
+  // teaching, the same rule as removed deadlineMs.
+  if (Object.hasOwn(args, "tokenBudget")) {
+    fail(
+      "The tokenBudget field has been removed — batch budgets are not caller-set. " +
+        "Remove it; per-batch spend is bounded by task count and the concurrency config.",
+    );
   }
   return {
     mode: "dispatch",
@@ -408,7 +402,6 @@ export function validateDispatchCall(args: DispatchArguments): DispatchCall {
     // Background execution is the default independently of task count.
     async: args.async ?? true,
     operationId: args.operationId,
-    tokenBudget: args.tokenBudget,
   };
 }
 

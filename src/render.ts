@@ -44,7 +44,6 @@ import type {
   TaskStatus,
   Ticket,
   TicketStatus,
-  TokenBudgetReport,
   WorkerQuestion,
 } from "./types.ts";
 import type { SessionArguments, TicketArguments } from "./validation.ts";
@@ -72,14 +71,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function isTokenBudgetReport(value: unknown): value is TokenBudgetReport {
-  return (
-    isRecord(value) &&
-    typeof value.limit === "number" &&
-    typeof value.consumed === "number" &&
-    (value.exhaustedAt === undefined || typeof value.exhaustedAt === "number")
-  );
-}
 
 function isOutcome(value: unknown): value is TaskOutcome {
   return (
@@ -189,7 +180,6 @@ function expandedText(
     [],
     UNBOUNDED_OUTPUT,
     typeof details.brief === "string" ? details.brief : undefined,
-    isTokenBudgetReport(details.tokenBudget) ? details.tokenBudget : undefined,
   );
   const notices = Array.isArray(details.notices)
     ? details.notices.filter((n): n is string => typeof n === "string")
@@ -478,7 +468,6 @@ function collapsedGlyph(status: CollapsedStatus): { glyph: string; color: "succe
       return { glyph: "✗", color: "error" };
     case "cancelled":
     case "interrupted":
-    case "budget-exhausted":
       return { glyph: "⊘", color: "warning" };
     case "blocked":
       return { glyph: "⊘", color: "muted" };

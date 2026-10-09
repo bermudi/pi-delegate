@@ -78,7 +78,6 @@ describe("delegate public tool contract", () => {
         "brief",
         "operationId",
         "tasks",
-        "tokenBudget",
         "workspace",
       ].sort(),
     );

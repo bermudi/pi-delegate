@@ -75,12 +75,12 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
   });
 
   test(
-    "a sync dispatch's details satisfy syncDispatchDetailsSchema — brief, notices, tokenBudget, results, attributedFiles, verdict",
+    "a sync dispatch's details satisfy syncDispatchDetailsSchema — brief, notices, results, attributedFiles, verdict",
     async () => {
       // Issue #51: the whole sync result envelope is pinned — including
       // the completion-evidence fields: per-task outcomes (usage,
       // attribution, verdict), details.attributedFiles, details.verdict,
-      // details.brief, details.tokenBudget, and details.notices (the
+      // details.brief and details.notices (the
       // same-call shared-write serialization exercises that slot).
       session = await openDelegateBoundary();
       const model = await installSubagentModel(session);
@@ -105,7 +105,6 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
         // (#126: unordered same-root overlap rejects) so they serialize.
         async: false,
         brief: "SHARED-BRIEF",
-        tokenBudget: 10_000_000,
       });
       expect(result.isError).toBe(false);
       expect(Check(syncDispatchDetailsSchema, result.details)).toBe(true);
@@ -115,8 +114,6 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
       expect(details.brief).toBe("SHARED-BRIEF");
       expect(Array.isArray(details.notices)).toBe(true);
       expect((details.notices as string[]).join(" ")).toMatch(/serializ/i);
-      const budget = objectOf(details.tokenBudget, "details.tokenBudget");
-      expect(budget.limit).toBe(10_000_000);
       const verdict = details.verdict as { verdict: string; taskId: string }[];
       expect(verdict).toEqual([{ verdict: "PASS", taskId: "check" }]);
       const attributed = details.attributedFiles as {

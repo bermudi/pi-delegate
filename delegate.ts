@@ -45,7 +45,6 @@ import {
 import { AttributionWindows } from "./src/git-attribution.ts";
 import {
   briefNote,
-  budgetNote,
   formatDispatchResult,
   serializedNotices,
 } from "./src/format.ts";
@@ -207,13 +206,6 @@ const delegateSchema = Type.Object(
       Type.String({
         description:
           "Shared batch brief — context every task needs (spec, conventions, goal). Prepended to each task's prompt as a delimited preamble; the result header notes it once. Each task's 'prompt' stays required.",
-      }),
-    ),
-    tokenBudget: Type.Optional(
-      Type.Integer({
-        minimum: 1,
-        description:
-          "Shared token ceiling for the whole batch: once settled tasks' recorded usage reaches it, tasks still queued settle 'budget-exhausted' instead of starting — running tasks always finish.",
       }),
     ),
     operationId: Type.Optional(
@@ -411,7 +403,6 @@ const dispatchFieldNames = [
   "async",
   "workspace",
   "operationId",
-  "tokenBudget",
   ...taskFieldNames.filter(
     (field) => field !== "sessionId",
   ),
@@ -657,6 +648,16 @@ function rejectTaskDeadline(record: Record<string, unknown>): void {
   }
 }
 
+/** #129: the caller-controlled budget is gone; presence rejects with teaching. */
+function rejectTokenBudget(record: Record<string, unknown>): void {
+  if (Object.hasOwn(record, "tokenBudget")) {
+    throw new Error(
+      "The tokenBudget field has been removed — batch budgets are not caller-set. " +
+        "Remove it; per-batch spend is bounded by task count and the concurrency config.",
+    );
+  }
+}
+
 function normalizeTask(value: unknown, index: number): unknown {
   if (!isRecord(value)) return value;
   const task = { ...value };
@@ -708,21 +709,6 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
       "'async' must be a boolean, not a string.",
     );
   }
-  if (typeof args.tokenBudget === "string") {
-    throw new Error(
-      "'tokenBudget' must be a positive integer, not a string.",
-    );
-  }
-  // The TypeBox Integer schema silently floors a fractional value on
-  // coercion — a corrupted ceiling must reject, not narrow (#47).
-  if (
-    typeof args.tokenBudget === "number" &&
-    !Number.isInteger(args.tokenBudget)
-  ) {
-    throw new Error(
-      `'tokenBudget' must be a positive integer, not ${JSON.stringify(args.tokenBudget)}.`,
-    );
-  }
   if (!Array.isArray(args.tasks)) return;
   args.tasks.forEach((task, index) => {
     if (!isRecord(task)) return;
@@ -750,6 +736,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
 
   const args = { ...value };
   rejectTaskDeadline(args);
+  rejectTokenBudget(args);
   rejectObsoleteContext(args);
   rejectFieldAliases(args, false);
   if (Object.hasOwn(args, "message")) {
@@ -1056,8 +1043,6 @@ const HELP_FULL_CONTROLS = `## delegate — task and batch controls
   and stop safely before a dependent starts. Their bounded outputs are handed
   off and their applied changes are visible. Failure blocks dependents,
   not unrelated tasks.
-- Batch \`tokenBudget\` stops starting queued tasks once settled usage reaches
-  the positive-integer ceiling; running tasks finish normally.
 - \`operationId\` is a bounded host-lifetime retry key: same id/request reuses
   the original execution/result, changed request conflicts. Unkeyed calls
   always execute independently; it is not exactly-once crash recovery.`;
@@ -1859,8 +1844,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
     readonly signal?: AbortSignal;
     /** The shared batch brief (SPEC v3 "Batch brief"), if the call set one. */
     readonly brief?: string;
-    /** The shared batch token ceiling (SPEC v3 "Batch token budget"). */
-    readonly tokenBudget?: number;
     readonly onNotices?: (notices: readonly string[]) => void;
     /**
      * Inline batches (#119): the dispatch key live activity rows track
@@ -2097,7 +2080,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
             }
           },
           brief: options.brief,
-          tokenBudget: options.tokenBudget,
         })
         .then((outcome) => {
           telemetrySpan.finish(outcome, ticket?.status);
@@ -2564,7 +2546,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
               requestedTasks: call.tasks,
               ctx,
               brief: call.brief,
-              tokenBudget: call.tokenBudget,
               syncRunId,
               onTaskSettled:
                 syncRunId === undefined ? undefined : () => emitBoard(),
@@ -2598,9 +2579,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                         // reconciliation or a token budget — the final
                         // account must land on the record before any
                         // racing `wait` renders the settled view.
-                        holdSettlement:
-                          workspaceNeedsSettlementHold(tasks) ||
-                          call.tokenBudget !== undefined,
+                        holdSettlement: workspaceNeedsSettlementHold(tasks),
                         outputBounds: config.output,
                         // The shared batch brief — persisted on the ticket so
                         // views and post-restart recovery render the header
@@ -2658,9 +2637,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
                       (briefNote(call.brief) !== undefined
                         ? `${briefNote(call.brief)}\n`
                         : "") +
-                      (call.tokenBudget !== undefined
-                        ? `${budgetNote({ limit: call.tokenBudget, consumed: 0 })}\n`
-                        : "") +
                       `Results arrive on their own at your next step; wait only when blocked on them. ` +
                       `delegate_ticket can wait on or cancel it if needed (action "wait" / "cancel").` +
                       (ticket.notices.length > 0
@@ -2710,7 +2686,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   type: "text" as const,
                   text:
                     (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
-                    formatDispatchResult(diagnostics, result.outcomes, tasks, outputBounds, call.brief, result.tokenBudget),
+                    formatDispatchResult(diagnostics, result.outcomes, tasks, outputBounds, call.brief),
                 },
               ],
               details: ({
@@ -2731,11 +2707,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 // The batch brief as sent — the replayed/expanded render
                 // re-heads the result with it (SPEC v3 "Batch brief").
                 ...(call.brief !== undefined ? { brief: call.brief } : {}),
-                // SPEC v3 "Batch token budget": the final account —
-                // {limit, consumed, exhaustedAt} — when the call set one.
-                ...(result.tokenBudget !== undefined
-                  ? { tokenBudget: result.tokenBudget }
-                  : {}),
                 // The rendered content is spill-bounded; details keep the
                 // complete outcomes for the expanded view and recovery.
                 results: result.outcomes,
@@ -2791,8 +2762,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 // The brief is request content — a call differing only in
                 // its brief is a different dispatch, not a duplicate.
                 brief: call.brief,
-                // Same for the batch token ceiling (#47).
-                tokenBudget: call.tokenBudget,
                 tasks: call.tasks,
               }),
               executeDispatch,
@@ -2898,11 +2867,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
               ...(result.ticket !== undefined &&
               result.ticket.notices.length > 0
                 ? { notices: result.ticket.notices }
-                : {}),
-              // SPEC v3 "Batch token budget": the settled batch's final
-              // account rides the view (poll/wait), same as the sync result.
-              ...(result.ticket?.tokenBudget !== undefined
-                ? { tokenBudget: result.ticket.tokenBudget }
                 : {}),
               ...(call.action === "poll" || call.action === "wait"
                 ? { questions: result.ticket?.questions }

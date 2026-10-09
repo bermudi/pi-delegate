@@ -10,7 +10,6 @@ import type {
   TaskOutcome,
   TaskVerdict,
   Ticket,
-  TokenBudgetReport,
 } from "./types.ts";
 
 /**
@@ -192,14 +191,6 @@ export function briefNote(brief: string | undefined): string | undefined {
  * once at the head of a dispatch result or ticket view; per-task
  * `budget-exhausted` statuses carry the per-task story.
  */
-export function budgetNote(report: TokenBudgetReport | undefined): string | undefined {
-  if (report === undefined) return undefined;
-  return (
-    `token budget: ${report.consumed}/${report.limit} tokens` +
-    (report.exhaustedAt !== undefined ? " — exhausted" : "")
-  );
-}
-
 /**
  * The delimited preamble prepended to every task prompt when a dispatch
  * carries a batch brief (SPEC v3 "Batch brief") — the brief is a fenced
@@ -430,7 +421,6 @@ export function formatDispatchResult(
   tasks: Ticket["tasks"],
   bounds: OutputBounds,
   brief?: string,
-  tokenBudget?: TokenBudgetReport,
 ): string {
   const sections = outcomes.map((outcome) => {
     const task = tasks[outcome.index];
@@ -489,10 +479,7 @@ export function formatDispatchResult(
     overlap.length > 0 ? `\n\n${overlap.join("\n")}` : "";
   // The brief is batch context, not a task — it heads the result once
   // and never repeats inside a task section (SPEC v3 "Batch brief").
-  // The token-budget account rides the same header row (#47).
-  const head = [briefNote(brief), budgetNote(tokenBudget)]
-    .filter((line) => line !== undefined)
-    .join("\n");
+  const head = briefNote(brief) ?? "";
   return (head !== "" ? `${head}\n\n` : "") +
     sections.join("\n\n") + lowerBound + overlapNote;
 }

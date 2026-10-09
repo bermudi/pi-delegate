@@ -221,22 +221,19 @@ mid-flight the parent can steer. The grammar:
   persists on the ticket record so a recovered view still names
   it. A whitespace-only brief is absent; `prompt` stays required
   per task.
-- **Batch token budget.** A top-level `tokenBudget` (positive
-  integer, off by default) is a shared token ceiling for the
-  batch (#47): each settled task charges its recorded usage to
-  the account, and once the total reaches the limit the batch
-  stops starting new tasks — a task still queued settles
-  `budget-exhausted` with a visible reason naming the limit,
-  without consuming a slot, worker, or session. Tasks already
-  running always finish; the budget never hard-aborts a turn.
-  Dependents of a `budget-exhausted` task block with a reason
-  naming the exhausted budget, and unrelated branches still run.
-  `budget-exhausted` is a first-class terminal outcome in views,
-  telemetry, and the journal. The result and ticket headers
-  report the account (`token budget: consumed/limit`), and
-  `details.tokenBudget` carries `{limit, consumed, exhaustedAt?}`
-  on dispatch results, polls, and waits; it persists on the
-  ticket record so a recovered view still reports it.
+- **Batch token budget — removed (#129, owner ruling 2026-10-07).** The
+  caller-controlled `tokenBudget` field and its machinery are gone;
+  the concept dies entirely. A model-set spend ceiling is the party
+  being protected arming its own guard — 0 of 2,001 production
+  dispatches ever set one, and the field was unreachable on the
+  operator's install. Supplied `tokenBudget` rejects with teaching
+  before any task starts (deadlineMs/#118 pattern: every shape, even
+  null, flat, or stringified). Nothing generates `budget-exhausted`
+  anymore; the status literal and journal-record field remain readable
+  so pre-removal settled records keep their honest state (axiom 2),
+  and historical telemetry columns stay queryable. If a cost ceiling
+  is ever wanted again it is operator-side config, a fresh unit from
+  real requirements — never a caller field.
 - **Wake delivery.** Settled results inject as steering wakes,
   leaf-aware: a busy parent merges one at its next turn boundary
   (after the current turn's tool calls, before the next model call),
@@ -248,9 +245,10 @@ mid-flight the parent can steer. The grammar:
 ## Canonical surface (#61, user-approved 2026-09-29)
 
 - **One spelling per field.** Canonical dispatch fields are `tasks`,
-  `async`, `workspace`, `brief`, `tokenBudget`, and `operationId`.
-  Task fields retain their canonical names. Cross-harness synonyms
-  (`subagent_type`, `agent_type`, `task_name`, task `message`,
+  `async`, `workspace`, `brief`, and `operationId` (`tokenBudget` was
+  canonical until #129 removed it — its rejection is taught at the
+  boundary). Task fields retain their canonical names. Cross-harness
+  synonyms (`subagent_type`, `agent_type`, `task_name`, task `message`,
   `run_in_background`, top-level `context`, `timeout_ms`) reject
   before any execution, even when null or supplied beside a canonical field.
   Errors name the canonical replacement; no synonym is silently ignored.
@@ -284,12 +282,13 @@ mid-flight the parent can steer. The grammar:
   through recovery normalization. Dispatch advertises `tasks`, `async`,
   `workspace`, and `brief`; each task has `prompt`, `agent`, `cwd`,
   `workspace`, `id`, `description`, `tools`, `systemPrompt`,
-  `sessionId`, `resumeFrom`, and `dependsOn`; batch `tokenBudget` and
-  `operationId`; ticket actions are poll, wait, cancel, pause, resume,
+  `sessionId`, `resumeFrom`, and `dependsOn`; batch `operationId`;
+  ticket actions are poll, wait, cancel, pause, resume,
   answer, steer, interrupt, and tail, with wait-any `tickets`,
   `timeoutMs`, `steerId`, `offset`, and `waitMs`. (Field set as of the
   ADR 0002 unification; prune verdicts in #130 remove fields in their
-  own changes.) Session list/close unchanged. The manual is
+  own changes — `tokenBudget` is already gone, #129.) Session list/close
+  unchanged. The manual is
   single-edition: it documents exactly what the schema accepts.
 - **Description is a feature, not an alias.** The optional task display label
   remains available in full mode; it is not a task correlation id.

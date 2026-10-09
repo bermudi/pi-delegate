@@ -253,13 +253,14 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   no difference; memory footprint drops. Checked-out sessions are
   never evicted, `maxIdle: 0` unloads everything settled, and
   `delegate_session` `list`/`close` cover unloaded records.
-- **Additive — batch `tokenBudget` (#47).** Optional positive-integer
-  ceiling on a dispatch's recorded token usage: once settled tasks
-  charge the account past the limit, queued tasks settle
-  `budget-exhausted` (running tasks always finish), dependents block
-  naming the budget, and `details.tokenBudget` plus the telemetry row
-  carry `{limit, consumed, exhaustedAt}`. Absent by default — nothing
-  changes for budgetless calls.
+- **Removed — batch `tokenBudget` (#129, 2026-10-07; formerly additive
+  #47).** The caller-controlled ceiling is gone and the concept dies
+  entirely: supplied `tokenBudget` rejects with teaching before any
+  task starts (every shape). The account, `budget-exhausted`
+  settlement, dependent blocking, and `details.tokenBudget` are
+  removed; historical telemetry columns and journal fields stay
+  readable for pre-removal records. The former #47 entry survives
+  only in this note.
 - Landed since: steering receipts (#37), `delegate_ticket interrupt`
   (#42 — abort one task's in-flight turn; it settles `interrupted`,
   resumable, distinct from `cancel`'s ticket teardown), recovery resume

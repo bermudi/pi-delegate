@@ -105,9 +105,10 @@ const savedTicket = Type.Object({
   // The shared batch brief (SPEC v3 "Batch brief"); optional — records
   // written before it existed carry none.
   brief: Type.Optional(Type.String()),
-  // The batch's token-budget account (SPEC v3 "Batch token budget");
-  // optional — records written before it existed, and budgetless
-  // dispatches, carry none.
+  // Historical read-compat only (#129): `tokenBudget` fields exist in
+  // records written before the budget concept was removed — nothing
+  // writes them anymore, but settled records must stay readable
+  // (axiom 2).
   tokenBudget: Type.Optional(Type.Object({
     limit: Type.Integer({ minimum: 1 }),
     consumed: Type.Integer({ minimum: 0 }),
@@ -187,7 +188,6 @@ export class TicketJournal {
       tasks: ticket.tasks.map(({ id, agent, sessionId, resumeTag, aliasedFrom, description, normalizedFrom, cwd, sessionFile, transcriptStart }) => ({ id, agent, sessionId, resumeTag, aliasedFrom, description, normalizedFrom, cwd, sessionFile, transcriptStart })),
       outcomes: ticket.outcomes.map((item) => item ?? null),
       brief: ticket.brief,
-      tokenBudget: ticket.tokenBudget,
       outputBounds: ticket.outputBounds,
       owner: ticket.owner,
       createdAt: ticket.createdAt,

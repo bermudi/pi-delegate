@@ -176,16 +176,6 @@ export const usageLowerBoundDetailsSchema = Type.Literal(true);
 /** `details.brief` — the batch brief as sent (SPEC "Batch brief"). */
 export const briefDetailsSchema = Type.String();
 
-/** `details.tokenBudget` — SPEC "Batch token budget" final account. */
-export const tokenBudgetDetailsSchema = Type.Object(
-  {
-    limit: Type.Number(),
-    consumed: Type.Number(),
-    exhaustedAt: Type.Optional(Type.Number()),
-  },
-  { additionalProperties: false },
-);
-
 /** `details.notices` — admission/normalization advisory lines. */
 export const noticesDetailsSchema = readonlyArray(Type.String());
 
@@ -322,7 +312,6 @@ export const syncDispatchDetailsSchema = Type.Object(
       ),
     ),
     brief: Type.Optional(briefDetailsSchema),
-    tokenBudget: Type.Optional(tokenBudgetDetailsSchema),
     results: readonlyArray(taskOutcomeDetailsSchema),
     attributedFiles: attributedFilesDetailsSchema,
     verdict: Type.Optional(verdictDetailsSchema),
@@ -404,7 +393,7 @@ const ticketActionSchema = literalUnion([
  * `delegate_ticket` result details. The store-facing keys (`ticket`,
  * `results`, `attributedFiles`, `verdict`, `questions`) are written on
  * every call — `undefined` when the action does not carry them — while
- * `notices`, `tokenBudget`, `steer`, and `interrupt` appear only when
+ * `notices`, `steer`, and `interrupt` appear only when
  * they apply.
  */
 export const ticketDetailsSchema = Type.Object(
@@ -419,7 +408,6 @@ export const ticketDetailsSchema = Type.Object(
     ]),
     verdict: Type.Union([verdictDetailsSchema, Type.Undefined()]),
     notices: Type.Optional(noticesDetailsSchema),
-    tokenBudget: Type.Optional(tokenBudgetDetailsSchema),
     questions: Type.Optional(
       Type.Union([workerQuestionDetailsSchema, Type.Undefined()]),
     ),

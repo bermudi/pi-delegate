@@ -114,9 +114,10 @@ export type TaskStatus =
    */
   | "interrupted"
   /**
-   * SPEC v3 "Batch token budget": the task never started — settled
-   * siblings had already consumed the call's `tokenBudget` when it left
-   * the queue. No worker, session, or tokens belong to it.
+   * Historical only (#129): `budget-exhausted` was produced while the
+   * caller-controlled batch tokenBudget existed. Nothing generates it
+   * anymore; the literal remains so journal-recovered settled records
+   * keep their honest status (axiom 2 — records survive supervisors).
    */
   | "budget-exhausted";
 
@@ -244,18 +245,6 @@ export interface TaskOutcome {
   readonly verdict?: TaskVerdict;
 }
 
-/**
- * SPEC v3 "Batch token budget" — the dispatch's final account of its
- * `tokenBudget` ceiling: the configured limit, the total tokens recorded
- * by settled tasks, and when consumption crossed the limit (absent when
- * the batch finished inside budget).
- */
-export interface TokenBudgetReport {
-  readonly limit: number;
-  readonly consumed: number;
-  readonly exhaustedAt?: number;
-}
-
 export type TicketStatus =
   | "running"
   | "completed"
@@ -317,12 +306,6 @@ export interface Ticket {
    * header note. Undefined on pre-brief records and briefless dispatches.
    */
   readonly brief?: string;
-  /**
-   * The batch's token-budget account (SPEC v3 "Batch token budget"),
-   * recorded when the dispatch completes — persisted so a recovered
-   * ticket still renders the same `{limit, consumed, exhaustedAt}`.
-   */
-  readonly tokenBudget?: TokenBudgetReport;
   /**
    * Dispatch-scoped output-bounds snapshot captured at creation, so a
    * settled ticket's poll/wait renders under the bounds it ran with even
