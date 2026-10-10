@@ -9,8 +9,56 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 
 ## Correction log
 
-## Correction log
-
+- 2026-10-04 — put this repo's practice notes in the personal wiki
+  (`~/Documents/AgenticWiki`) instead of the repo itself; operational state
+  belongs where the operators read (bermudi).
+- 2026-10-04 — #46 close comment claimed the pausing/paused distinction
+  "carried through the v3 merge"; it had collapsed to a boolean (fresh
+  review M1). Verify survived-behavior, not intent, before asserting
+  carry-through — and close comments state gates honestly (found by the
+  same review: the dogfood gate was never run).
+- 2026-10-04 — `/subagents` had no visual boundary and wrapped shell previews
+  overwhelmed the view (bermudi's screenshot). Use a full-width frame,
+  compact tool rows and explicit preview expansion; public-command layout
+  regressions cover occlusion, physical rows, resize and navigation.
+- 2026-10-04 — fresh UI review found multiline prompts could break the frame
+  and a test's forced completion hid broken Escape handling. Normalize row
+  whitespace at the frame boundary and require the real close callback
+  (`tests/regression/browser-layout.test.ts`).
+- 2026-10-06 — README's Configuration section and the #49 public reply
+  documented `PI_AGENT_DIR`, an env var nothing reads; the real variables
+  are `DELEGATE_AGENT_DIR` and Pi's `PI_CODING_AGENT_DIR`. Verify env var
+  names against the host package source before publishing them.
+- 2026-10-06 — attributed a stale native Working border to Pi merely because
+  Pi owns the border; fresh investigation found Delegate's post-wait stderr
+  logging reproduces the artifact. UI ownership is not causal attribution;
+  verify the triggering boundary (`docs/verification/ui-working-stderr-2026-10-06.md`).
+- 2026-10-06 — #122 final review: diagnostic roots are not engine agentDir, and content-only warnings vanish in metadata renderers. Reserve runtime namespaces across copying/snapshots/evidence; clone per-return warning details and render them in live/replay views (public Git/PTY and registered-renderer regressions).
+- 2026-10-06 — #122 first review reproduced diagnostic throws stranding answered workers and bypassing shutdown. Logging is an owned, nonthrowing observation; real-PTY dual-destination failures enforce lifecycle independence.
+- 2026-10-06 — #122 namespace review reproduced ordinary POSIX backslash filenames being omitted. Use platform path separators; public copy and attribution regressions retain the exact filename.
+- 2026-10-06 — delegated edit scripts used bare `python3` despite the standing uv rule. Corrected the worker: Python edits also require `uv run`; Bun remains preferred here.
+- 2026-10-07 — operator asked to go over a review list "one by one"; agent
+  dumped all twelve items plus a summary table in one turn. "One by one" is
+  a stepwise discussion: present one item, get agreement, move to the next —
+  the walkthrough cadence is the operator's, not the agent's (CC-docs
+  §3 defense review session).
+- 2026-10-07 — #125 automated review caught inherited Git redirects in new
+  fixture setup; hostile-environment verification also exposed two status queries.
+  All new fixture Git commands now scrub `GIT_*`; both regression files pass
+  with three inherited redirects, and the redirected destination stays untouched.
+- 2026-10-07 — #50 P1 review reproduced late worker truth enabling a scratch copy
+  while deferred isolated cleanup still changed source Git metadata. Earlier-phase
+  exemptions require the full worker-and-cleanup barrier, not an outcome flag
+  (`src/coordinator.ts`, scratch-copy admission regression).
+- 2026-10-07 — follow-up #50 review reproduced late settlement before proposal
+  collection bypassing cleanup's retention guard and releasing source admission.
+  Reconciliation must finish before checking whether cleanup is owed
+  (`src/isolated.ts`, multi-repository scratch-copy regression).
+- 2026-10-07 — #50/#51 review: replaced invented Git permission-denied stderr
+  with a real malformed-config failure and observed Git output; explicitly
+  labeled synthetic faults and registered-execute tests' bypassed host layers
+  (`scope-error-advice.test.ts`, `scratch-copy-admission.test.ts`).
+- 2026-10-07 — #50/#51 implementation repeated bare `python3` edit scripts despite the uv rule; corrected to Bun edits in the shared implementation session.
 - 2026-10-08 — Executed "merge please" as merge + version bump + release
   tag + npm publish + host update + issue closes. The word authorized the
   merge only; PUBLISH.md's explicit-yes gate was satisfied for a subset of
@@ -30,6 +78,13 @@ move. This file is the ledger; the reasoning behind the ladder lives in
   working" means verified work lands before the report, not after a
   reminder (tests/regression/scope-error-advice.test.ts, committed on
   demand as 711a9f5).
+- 2026-10-08 — #128 review: the shipped roster windowing pinned `maxStart` against the raw pane height while rendering `height - 2` items under both `↑/↓ more` indicators — the list tail was permanently unreachable, reintroducing the fleet-scale failure the redesign targeted, and no test drove a roster longer than its pane. Compute the window against the indicator-adjusted fit and pin the windowed regime (last item reachable, no residual `↓ more` at the tail) with an over-pane test.
+- 2026-10-10 — #130 prune commits shipped tracked one-shot scripts (`scripts/.tmp-*`) into the tree, and the fixup's own `git add -A` re-committed two fresh ones mid-sweep. Ignore the pattern (`scripts/.tmp-*` in .gitignore), trash after use, never `add -A` while a tmp script exists.
+- 2026-10-10 — #130 operator review found stale live-text behind shipped removals the per-verdict sweeps missed: the manual's `operationId` bullet, `'tail'` in a schema description, a dead `DispatchArguments.tokenBudget` field, and stale claims across SPEC/COMPATIBILITY/INVARIANTS/TEST-MIGRATION. After a field dies, grep the whole repo for the name — model-facing text included — not just the files the verdict touched.
+- 2026-10-10 — the verdict-5 COMPATIBILITY edit garbled the #33 block (duplicated fragment, eaten clause) while the edit script exited clean; the fixup's first pass then created column-0 continuations inside markdown lists and a newline inside a table row. Verify what an edit WROTE — read back each edited region and check line shapes — an exit code only proves the matcher hit.
+- 2026-10-10 — #131 model-comparison review found both lifetime patches claiming placement-independent safety while coordinator setup still preceded its `try`; arbitrary adopted promises also left unhandled rejection paths. Guard setup/finalization, accept resolve-only proof gates, and enforce failed-start admission/shutdown through public-tool platform-fault regressions (`dispatch-lifetime.test.ts`).
+- 2026-10-10 — #132 inspection found abort acknowledgement documented as stop proof and per-worker `fullyQuiesced` sounding dispatch-wide despite pending phase reconciliation. Name scoped outcome/worker/tail/body signals, clarify abort custody, and pin cancellation-before-stop plus shutdown-through-real-Git-cleanup at public boundaries.
+- 2026-10-10 — #133/#134 preservation coverage exposed pre-existing #135: an early terminal poll froze text before deferred Git evidence, despite enriched journal/details. Invalidate the document on every outcome publication, retain per-outcome spill caches, and enforce with a held native Git probe plus text/details agreement.
 
 ## Enforcement map (surveyed 2026-10-04 @ d030bfd, v0.3.3)
 
@@ -97,64 +152,3 @@ map:
 Gap: the checklist is manual memory and the dogfood is a described ritual,
 not a command. First build target: one verification skill with a script that
 runs both.
-
-## Correction log
-
-- 2026-10-07 — operator asked to go over a review list "one by one"; agent
-  dumped all twelve items plus a summary table in one turn. "One by one" is
-  a stepwise discussion: present one item, get agreement, move to the next —
-  the walkthrough cadence is the operator's, not the agent's (CC-docs
-  §3 defense review session).
-- 2026-10-07 — #125 automated review caught inherited Git redirects in new
-  fixture setup; hostile-environment verification also exposed two status queries.
-  All new fixture Git commands now scrub `GIT_*`; both regression files pass
-  with three inherited redirects, and the redirected destination stays untouched.
-- 2026-10-07 — #50 P1 review reproduced late worker truth enabling a scratch copy
-  while deferred isolated cleanup still changed source Git metadata. Earlier-phase
-  exemptions require the full worker-and-cleanup barrier, not an outcome flag
-  (`src/coordinator.ts`, scratch-copy admission regression).
-- 2026-10-07 — follow-up #50 review reproduced late settlement before proposal
-  collection bypassing cleanup's retention guard and releasing source admission.
-  Reconciliation must finish before checking whether cleanup is owed
-  (`src/isolated.ts`, multi-repository scratch-copy regression).
-- 2026-10-07 — #50/#51 review: replaced invented Git permission-denied stderr
-  with a real malformed-config failure and observed Git output; explicitly
-  labeled synthetic faults and registered-execute tests' bypassed host layers
-  (`scope-error-advice.test.ts`, `scratch-copy-admission.test.ts`).
-
-- 2026-10-06 — README's Configuration section and the #49 public reply
-  documented `PI_AGENT_DIR`, an env var nothing reads; the real variables
-  are `DELEGATE_AGENT_DIR` and Pi's `PI_CODING_AGENT_DIR`. Verify env var
-  names against the host package source before publishing them.
-- 2026-10-06 — attributed a stale native Working border to Pi merely because
-  Pi owns the border; fresh investigation found Delegate's post-wait stderr
-  logging reproduces the artifact. UI ownership is not causal attribution;
-  verify the triggering boundary (`docs/verification/ui-working-stderr-2026-10-06.md`).
-- 2026-10-04 — put this repo's practice notes in the personal wiki
-  (`~/Documents/AgenticWiki`) instead of the repo itself; operational state
-  belongs where the operators read (bermudi).
-- 2026-10-04 — #46 close comment claimed the pausing/paused distinction
-  "carried through the v3 merge"; it had collapsed to a boolean (fresh
-  review M1). Verify survived-behavior, not intent, before asserting
-  carry-through — and close comments state gates honestly (found by the
-  same review: the dogfood gate was never run).
-- 2026-10-04 — `/subagents` had no visual boundary and wrapped shell previews
-  overwhelmed the view (bermudi's screenshot). Use a full-width frame,
-  compact tool rows and explicit preview expansion; public-command layout
-  regressions cover occlusion, physical rows, resize and navigation.
-- 2026-10-04 — fresh UI review found multiline prompts could break the frame
-  and a test's forced completion hid broken Escape handling. Normalize row
-  whitespace at the frame boundary and require the real close callback
-  (`tests/regression/browser-layout.test.ts`).
-- 2026-10-06 — #122 final review: diagnostic roots are not engine agentDir, and content-only warnings vanish in metadata renderers. Reserve runtime namespaces across copying/snapshots/evidence; clone per-return warning details and render them in live/replay views (public Git/PTY and registered-renderer regressions).
-- 2026-10-06 — #122 first review reproduced diagnostic throws stranding answered workers and bypassing shutdown. Logging is an owned, nonthrowing observation; real-PTY dual-destination failures enforce lifecycle independence.
-- 2026-10-06 — #122 namespace review reproduced ordinary POSIX backslash filenames being omitted. Use platform path separators; public copy and attribution regressions retain the exact filename.
-- 2026-10-06 — delegated edit scripts used bare `python3` despite the standing uv rule. Corrected the worker: Python edits also require `uv run`; Bun remains preferred here.
-- 2026-10-07 — #50/#51 implementation repeated bare `python3` edit scripts despite the uv rule; corrected to Bun edits in the shared implementation session.
-- 2026-10-08 — #128 review: the shipped roster windowing pinned `maxStart` against the raw pane height while rendering `height - 2` items under both `↑/↓ more` indicators — the list tail was permanently unreachable, reintroducing the fleet-scale failure the redesign targeted, and no test drove a roster longer than its pane. Compute the window against the indicator-adjusted fit and pin the windowed regime (last item reachable, no residual `↓ more` at the tail) with an over-pane test.
-- 2026-10-10 — #130 prune commits shipped tracked one-shot scripts (`scripts/.tmp-*`) into the tree, and the fixup's own `git add -A` re-committed two fresh ones mid-sweep. Ignore the pattern (`scripts/.tmp-*` in .gitignore), trash after use, never `add -A` while a tmp script exists.
-- 2026-10-10 — #130 operator review found stale live-text behind shipped removals the per-verdict sweeps missed: the manual's `operationId` bullet, `'tail'` in a schema description, a dead `DispatchArguments.tokenBudget` field, and stale claims across SPEC/COMPATIBILITY/INVARIANTS/TEST-MIGRATION. After a field dies, grep the whole repo for the name — model-facing text included — not just the files the verdict touched.
-- 2026-10-10 — the verdict-5 COMPATIBILITY edit garbled the #33 block (duplicated fragment, eaten clause) while the edit script exited clean; the fixup's first pass then created column-0 continuations inside markdown lists and a newline inside a table row. Verify what an edit WROTE — read back each edited region and check line shapes — an exit code only proves the matcher hit.
-- 2026-10-10 — #131 model-comparison review found both lifetime patches claiming placement-independent safety while coordinator setup still preceded its `try`; arbitrary adopted promises also left unhandled rejection paths. Guard setup/finalization, accept resolve-only proof gates, and enforce failed-start admission/shutdown through public-tool platform-fault regressions (`dispatch-lifetime.test.ts`).
-- 2026-10-10 — #132 inspection found abort acknowledgement documented as stop proof and per-worker `fullyQuiesced` sounding dispatch-wide despite pending phase reconciliation. Name scoped outcome/worker/tail/body signals, clarify abort custody, and pin cancellation-before-stop plus shutdown-through-real-Git-cleanup at public boundaries.
-- 2026-10-10 — #133/#134 preservation coverage exposed pre-existing #135: an early terminal poll froze text before deferred Git evidence, despite enriched journal/details. Invalidate the document on every outcome publication, retain per-outcome spill caches, and enforce with a held native Git probe plus text/details agreement.
