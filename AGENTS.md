@@ -63,13 +63,8 @@ on the model-facing surface answers to this first:
 - Watch for collisions: where a trained reflex hits our walls, prefer
   bending the surface over blaming the model.
 
-Origin: 2026-09-27, the `general` first-call error in a v1 dispatch — a
-trained Claude-Code reflex colliding with our registry — and the
-17-repo comparison in `~/build/testing/subagents` (no other surface pays
-this tax; the pros ARE the training distribution). Candidate applications
-on record: agent-name aliases (removed by #61), batch-in-one-call description
-teaching (landed), misfire telemetry for rejected calls (landed — `misfires`
-table, schema v5+).
+Origin story (2026-09-27, a `general` first-call error colliding with our
+registry) and the candidate-application ledger: docs/history/guiding-principle-origin.md.
 
 ## Deployment reality (learned 2026-09-27, the hard way)
 
@@ -79,7 +74,7 @@ the installed artifact. Publishing is CI-driven: push a
 `pi-delegate-v<version>` tag and `publish-npm.yml` gates
 typecheck/test/build then `npm publish`es via OIDC (no local npm auth);
 the tag must equal `package.json`'s version. `pi-delegate-v0.3.0` was the
-v3 cutover tag (see PUBLISH.md). The installed host is Pi 1.0.0; 0.3.3
+v3 cutover tag (see PUBLISH.md). The installed host is Pi 1.0.x; 0.3.3
 widened the host peer range to `>=0.87.0 <2.0.0` (`^0.87.0` excluded it),
 and steer delivery was verified in it. The installed entry in
 `~/.pi/agent/settings.json` is the unversioned `npm:@bermudi/pi-delegate`
@@ -118,34 +113,20 @@ Render checks need no model: replay a copied session jsonl in tmux —
 with `DELEGATE_AGENT_DIR` pointed at scratch — then `tmux capture-pane -p`
 (add `-e` for colors). Loading bermudis-pi-goodies puts clean-tui next to
 our rows, which is how bermudi actually sees them. Replay has no live ticket
-store, so it exercises the recorded-details fallbacks only. Diagnosed
-2026-09-30: the duplicate header-only pending `delegate N tasks` box seen on
-live zai streams is a Pi host bug, not ours — pi-ai's openai-completions
-stream creates the toolCall block with `id: ""` when the first delta chunk
-lacks `id` and backfills the real `call_*` id into the same block later
-(`id: toolCall.id || ""`, `if (!block.id) block.id = ...`); interactive-mode
-keys `pendingTools` by `content.id`, so the id flip orphans the first
-component (pending forever, above the real row) and creates a second. Replay
-can't reproduce it because the session-load path renders final messages only.
-Verified in installed 0.99.1 with a synthetic SSE stream (first tool_calls
-chunk without `id`). Affects every tool, not just delegate. Upstream fix:
-key pending components by content-block identity, or rekey on id change.
+store, so it exercises the recorded-details fallbacks only. Replay cannot
+reproduce host render bugs. One we diagnosed (2026-09-30): a duplicate pending
+`delegate N tasks` box on live zai streams is a pi-ai / interactive-mode
+tool-id flip, not delegate — the first component is orphaned. Details and the
+upstream fix: docs/diagnostics/pi-host-incidents.md.
 
-Diagnosed 2026-10-04 (session 01a107af, pi 1.0.2, live zai): pi wedged at
-~100% of one core, ~45% GC, main thread (TUI frozen). Live CDP CPU profile
-(`kill -USR1 <pid>` → node inspector → Profiler.start/stop via a bun ws
-script; sampling runs off-thread so it works on a livelocked main thread —
-`Runtime.evaluate` does not) pinned it to pi-ai `parseStreamingJson`/
-`parseJsonWithRepair` (openai-completions chunk) livelocking on a truncated
-tool-call args stream — socket already closed, repair loop never converges.
-NOT delegate: no `calls` telemetry row, no worker transcript, tool never
-executed — delegate was merely the in-flight call when the stream broke.
-Distinct from upstream #9265 (quadratic reparse while deltas arrive) and
-#8331 (passive hang on open socket). SIGTERM cannot run on a wedged main
-thread — SIGKILL, and the unflushed turn is lost (pi persists session jsonl
-at turn boundaries, not per event). Balance-poll cache mtimes under
-`~/.pi/agent/cache/provider-balances/` are a cheap liveness signal for
-otherwise-silent pi sessions.
+Host livelock (2026-10-04, pi 1.0.2): pi pinned one core and froze its TUI in
+pi-ai's partial-JSON repair loop on a truncated tool-call stream — not delegate
+(no `calls` row; the tool never ran). To profile a wedged main thread, use
+`kill -USR1` plus the CDP Profiler: it samples off-thread, so it works where
+`Runtime.evaluate` does not. SIGTERM cannot run there either — use SIGKILL; the
+unflushed turn is lost. Balance-poll cache mtimes under
+`~/.pi/agent/cache/provider-balances/` are a cheap liveness signal. The full
+post-mortem and repro: docs/diagnostics/pi-host-incidents.md.
 
 ## Stack
 
@@ -214,7 +195,7 @@ DELEGATE_RUN_PENDING=1 bun test # run pending tests for real — they should
                                 # fail meaningfully on unimplemented ops
 ```
 
-### Workflow
+### Issues & planning
 
 Substantial work is planned in GitHub issues: reconcile existing issues before
 creating more, plan a bounded unit, build it with meaningful verification, then
@@ -238,14 +219,11 @@ background delivery/reliability → worker questions → automatic handoffs →
 restart recovery/live browser → later steering/team messages. This is planning
 order, not a claim of implemented or newly promised behavior.
 
-Post-ratification rulings that bound the sequencing (2026-10-06, owner):
-in-process worker execution is permanent — subprocess workers (#96) closed
-wontfix, restart reconnect/rematerialization (#44) declined; running work is
-lost by design across host death, and the "restart recovery" phase reduces
-to its record-level half (landed: #79, #107, #123, #124) plus the #48
-browser. Full record with rationale and revisit trigger:
-docs/decisions/0001-in-process-execution-permanent.md. Decisions of this
-weight get an ADR there at ruling time — not issue comments alone.
+Post-ratification rulings (2026-10-06, owner): in-process worker execution is
+permanent (#96 subprocess workers and #44 restart reconnect are closed), so the
+restart phase is its record-level half plus the #48 browser. Rationale and
+revisit trigger: docs/decisions/0001-in-process-execution-permanent.md. Decisions
+of this weight get an ADR at ruling time — not issue comments alone.
 
 ## Consulting v1
 
