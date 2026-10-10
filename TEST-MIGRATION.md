@@ -26,6 +26,28 @@ registered `delegate` tool; they do not import implementation helpers.
   execution promises: rejected work cannot enter the proof API. No internal
   unit test or production export is added for the lifetime abstraction.
 
+## Scoped completion signals (#132)
+
+- **Behavior-preserving refactor:** attempt `outcomeAvailable()` is distinct
+  from `workerStopped()`, while `DispatchLifetime.resourcesStopped` joins
+  closed preparation, worker tails, and the batch body. Ticket terminal
+  status and batch finalization remain separate caller/delivery signals.
+- **Public coverage:** the forced-cancellation regression in
+  `cancellation.test.ts` now requires ticket `wait` to return cancelled
+  before the abort-ignoring provider gate opens, while conflict rejection
+  and provider counts prove its reservation remains held.
+- The Linux late-isolated-cleanup fixture in `scratch-copy-admission.test.ts`
+  exercises both readmission and shutdown. It observes a returned outcome
+  and non-quarantined worker truth while a real `/proc` scan before Git
+  worktree removal is gated. Shutdown must remain pending until cleanup
+  ends, source worktree metadata must disappear, and the actual UI warning
+  must show no budget expiry. No lifecycle helper imports or test-only
+  exports are used.
+- These guards pass before and after the rename. No await, race, callback
+  order, proof-resolution site, retention decision, or public payload changes.
+  Per-worker tail completion is intentionally not named global resource
+  safety: ordinary outcomes can precede phase reconciliation.
+
 ## Terminal-safe diagnostic routing (#122)
 
 - **Regression:** raw Delegate console diagnostics moved Pi's shared terminal

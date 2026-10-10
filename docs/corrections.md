@@ -57,6 +57,8 @@ move. This file is the ledger; the reasoning behind the ladder lives in
   public Git/copy tests prevent private records entering worker state.
 - `dispatch-lifetime.test.ts`: public failed-start faults require immediate
   admission release and confirmed shutdown, never a budget-expiry fallback.
+- The late-isolated-cleanup shutdown fixture keeps a stopped worker distinct
+  from source-mutation completion; cancellation `wait` precedes worker stop.
 - `.github/workflows/ci.yml`: install + typecheck + test + build on every
   push/PR to main. Publishing separately gated (`publish-npm.yml`): tag must
   equal `package.json` version, OIDC, no local npm auth.
@@ -152,3 +154,4 @@ runs both.
 - 2026-10-10 — #130 operator review found stale live-text behind shipped removals the per-verdict sweeps missed: the manual's `operationId` bullet, `'tail'` in a schema description, a dead `DispatchArguments.tokenBudget` field, and stale claims across SPEC/COMPATIBILITY/INVARIANTS/TEST-MIGRATION. After a field dies, grep the whole repo for the name — model-facing text included — not just the files the verdict touched.
 - 2026-10-10 — the verdict-5 COMPATIBILITY edit garbled the #33 block (duplicated fragment, eaten clause) while the edit script exited clean; the fixup's first pass then created column-0 continuations inside markdown lists and a newline inside a table row. Verify what an edit WROTE — read back each edited region and check line shapes — an exit code only proves the matcher hit.
 - 2026-10-10 — #131 model-comparison review found both lifetime patches claiming placement-independent safety while coordinator setup still preceded its `try`; arbitrary adopted promises also left unhandled rejection paths. Guard setup/finalization, accept resolve-only proof gates, and enforce failed-start admission/shutdown through public-tool platform-fault regressions (`dispatch-lifetime.test.ts`).
+- 2026-10-10 — #132 inspection found abort acknowledgement documented as stop proof and per-worker `fullyQuiesced` sounding dispatch-wide despite pending phase reconciliation. Name scoped outcome/worker/tail/body signals, clarify abort custody, and pin cancellation-before-stop plus shutdown-through-real-Git-cleanup at public boundaries.
