@@ -5,6 +5,12 @@ This document describes the user-visible contract to carry forward from
 modules, algorithms, state machines, timers, storage layouts, and cleanup
 mechanisms are explicitly not requirements.
 
+> **Status (2026-10-10): inherited engine contract, partly overridden.** SPEC.md
+> (v3, ratified 2026-09-27) is the sole behavioral authority, and this file is the
+> engine-as-built contract it inherits. Where SPEC.md states a different rule,
+> SPEC.md wins. Text this file no longer describes is marked **Overridden** in
+> place, with its source. Unmarked text still binds unless SPEC.md overrides it.
+
 ## Operations
 
 Delegate registers three sibling tools. Each owns one concern, so dispatch,
@@ -21,10 +27,10 @@ right tool. Validation happens before any task starts.
 ### Dispatch
 
 ```ts
-delegate({ tasks: [task, ...], async?: boolean, workspace?: "shared" | "scratch" | "isolated", operationId?: string })
+delegate({ tasks: [task, ...], async?: boolean, workspace?: "shared" | "scratch" | "isolated", operationId?: string }) // operationId removed by #130
 ```
 
-Dispatch is synchronous by default. `async: true` applies to the whole batch,
+Dispatch is synchronous by default. **Overridden (SPEC.md, #61):** an omitted `async` now backgrounds nonempty work for one task as well as many; add `async: false` for inline results. `async: true` applies to the whole batch,
 returns a ticket immediately, and later auto-delivers the batch result.
 Synchronous results preserve task input order and include aggregate usage when
 the Pi host supports it. When a task's worker could not be confirmed stopped
@@ -53,12 +59,14 @@ A task accepts:
 | `workspace` | `shared`, `scratch`, or `isolated` |
 | `dependsOn` | Ids of tasks in this batch that must succeed first; their outputs are handed off |
 
+**Overridden (SPEC.md, #118 and #130):** the `deadlineMs`, `systemPrompt`, and `tools` rows are removed. Capability and base-prompt selection now belong to Markdown profiles (frontmatter `tools`, body).
+
 Omitting `agent` creates an `inline` task with `*` by default. The built-ins are:
 
 - `default`: mirrors the live parent's model, thinking level, and delegatable
   native tools.
 - `scout`: read-only investigation (`ro` tools — never serializes with
-  writers).
+  writers). **Overridden (SPEC.md, #40):** this built-in is now `explore`; `scout` is rejected at config load (`models`) and at dispatch.
 - `coder`: shared-tree implementation (writer tools).
 - `reviewer`: shared-tree review with `read` + `bash` — it can run focused
   checks, and admission treats it as a writer: it serializes with other
@@ -82,7 +90,7 @@ the fixed subagent framing:
 > task in your brief, then stop. Use only the tools provided.
 
 The framing carries no parent identity — never a model name. An explicit
-task `systemPrompt` or a Markdown profile body is authored prompt text and
+task `systemPrompt` (removed by #130) or a Markdown profile body is authored prompt text and
 is used verbatim: no inheritance, no framing appended. When an extension
 has force-replaced the parent's prompt wholesale, inheritance is skipped —
 the child runs on the stock base prompt plus role line and framing — and
@@ -91,8 +99,8 @@ the skip is logged.
 If reading the parent's active tools throws and any `default`-profile task
 omits `tools`, the whole sync or async dispatch fails before any child starts.
 The failure is logged and returned with its cause and guidance to restore the
-parent inventory or supply explicit tools. Explicit `tools` (including `[]`),
-`scout`, `coder`, `reviewer`, and inline tasks do not require that probe;
+parent inventory or use a named profile that carries its own tools. Profile-selected tools (task `tools` was removed by #130),
+`explore` (formerly `scout`, #40), `coder`, `reviewer`, and inline tasks do not require that probe;
 inline tasks retain their writer default.
 
 Children never inherit the parent conversation: no parent transcript is extracted
@@ -135,7 +143,7 @@ reflood), and the manual's profile listing is silent — asking for help never
 scolds. Within one directory, files are considered in name order, so the
 first-definition-wins winner between same-named files is deterministic.
 Built-ins always win name collisions: a `scout.md` is ignored with a warning
-rather than reshaping the built-in. Claude Code's `.claude/agents` is not
+rather than reshaping the built-in. **Overridden (SPEC.md, #61):** `scout` is no longer a built-in, so `scout.md` is an ordinary profile. Claude Code's `.claude/agents` is not
 imported.
 
 Only globally defined profile names are valid `models`/`modelsByParent` keys:
@@ -150,7 +158,7 @@ way to redirect inline or `default`-profile tasks: they mirror the parent's
 model unconditionally. A second map, `"modelsByParent"`, scopes those pins to
 the parent's exact `provider/model-id` (case-insensitive):
 `{"modelsByParent": {"<parent provider/model-id>": {"scout": "..."}}}` — a
-scoped entry wins over the unscoped `"models"` entry for the same agent.
+scoped entry wins over the unscoped `"models"` entry for the same agent. **Overridden (SPEC.md, #40):** the example key `scout` is now `explore`, and `models.scout` is rejected at load.
 A `modelsByParent` key names the parent's exact `provider/model-id`
 (provider before the first slash, then the full model id — which may itself
 contain slashes, e.g. OpenRouter's `openrouter/anthropic/claude-sonnet-4`). A key that could never match — empty, missing the slash, an empty provider or model id, doubled slashes, or internal whitespace — fails at config load rather than
@@ -198,17 +206,14 @@ does not proceed on a partially valid `delegate.json` (deliberate — see
 `COMPATIBILITY.md`).
 
 Tasks run concurrently subject to a global bound and per-model bounds.
-`maxConcurrent` (positive integer, default 3) caps the total number of
+`maxConcurrent` (positive integer, default 8; it was 3 before #41) caps the total number of
 tasks executing at once. The `concurrency` block holds the per-model
 bounds: `concurrency.models` maps an exact `provider/model-id` to a
 positive integer, `concurrency.providers` maps a provider name to one,
 and `concurrency.default` is the per-model fallback. A task's per-model
 bound resolves `models` → `providers` → `default` → `maxConcurrent`; the
 global cap always applies on top. Each call applies the bounds from its
-own loaded config. Overlapping
-same-call shared writers serialize in task order, and the result names the
-serialized tasks and scope with the `isolated` remedy — independent same-repo
-edits are meant to run in parallel worktrees. Overlap with active work, or
+own loaded config. **Overridden (SPEC.md, #126):** same-phase overlapping shared writers in one call now reject before execution, with enumerated remedies. Cross-phase overlap still serializes in phase order; the `isolated` workspace is the parallel path. Overlap with active work, or
 between shared and isolated work, rejects the whole call before execution —
 except as ordered by explicit dependencies below.
 
@@ -262,38 +267,14 @@ or was blocked.
 
 ### Explicit operation identity
 
-`operationId` is an optional top-level dispatch key of 1–64 ASCII letters,
-digits, `.`, `_`, or `-`. It is dispatch-only; ticket, session, and help calls
-reject it.
+**Overridden (SPEC.md, #130):** `operationId` is removed. Dispatches are not
+caller-deduplicated: a supplied `operationId` rejects with teaching before any work starts.
+The keyed-reuse contract this section described (same id and same request reuses an in-flight
+or settled result; a changed request conflicts; 256-record and one-hour retention) is
+superseded and survives only in git history.
 
-Its scope is one extension/session lifetime: it is never persisted across
-reload, replacement, or restart. Two requests are equivalent when their
-normalized validated `{async, tasks}` structures are identical after
-supported boundary repairs and batch workspace-default application, before
-config/profile/model/cwd resolution; `operationId` itself is excluded.
-
-The same id plus the same normalized request reuses the exact original
-in-flight promise or settled result — the sync result or the async ticket —
-and only one execution ever runs. The same id plus a changed request
-conflicts before config resolution, admission, or work starts.
-
-The first caller owns the dispatch invocation's signal, host context,
-progress callback, and delivery origin. A duplicate dispatch call cannot
-contribute its own signal, recontextualize, or replay progress. For async
-results, the reused ticket remains cancelable through the ordinary ticket
-RPC by any caller holding its id. Cancellation or failure is itself a
-result and is reused; an operation is never restarted inside its
-retention.
-
-Settled records expire one hour after settlement and at most 256 settled
-records are retained, evicting the oldest-settled first; in-flight records
-are never evicted. An async operation's record counts as in-flight — and
-its retention clock has not started — until its ticket's batch finishes,
-so it survives capacity and expiry pressure while the ticket runs. After
-expiry or eviction, reuse may start a new operation.
-
-Unkeyed identical dispatches always execute independently: there is no
-content deduplication and no exactly-once crash guarantee.
+Unkeyed identical dispatches always execute independently: there is no content deduplication
+and no exactly-once crash guarantee.
 
 ### Workspaces
 
@@ -313,20 +294,20 @@ are not security sandboxes.
 
 ```ts
 delegate_ticket({ action: "poll", ticket? })
-delegate_ticket({ action: "wait", ticket, timeoutMs? })
-delegate_ticket({ action: "pause" | "resume", ticket })
+delegate_ticket({ action: "wait", ticket, timeoutMs? }) // timeoutMs removed by #130; waits park
+delegate_ticket({ action: "pause" | "resume", ticket }) // removed from the model surface by #130; dashboard only
 delegate_ticket({ action: "cancel", ticket, force? })
 delegate_ticket({ action: "answer", ticket, taskId, questionId, answer })
 ```
 
 - `poll` returns one ticket or the ticket roster.
-- `wait` blocks until settlement or timeout. Timeout/parent abort detaches the
+- `wait` blocks until settlement (`timeoutMs` was removed by #130). Parent abort detaches the
   waiter; it does not cancel background work. A pending worker question also
   detaches the waiter immediately with the question visible, rather than
   deadlocking the parent who needs to answer it.
-- `pause` cooperatively stops queued tasks and future model turns, not current
+- `pause` (model-facing removal by #130; the /subagents `p` key still drives it) cooperatively stops queued tasks and future model turns, not current
   model/tool work or subprocesses.
-- `resume` continues the same ticket.
+- `resume` (model-facing removal by #130; dashboard only) continues the same ticket.
 - `cancel` previews unless `force: true`; forced cancellation is cooperative
   and does not undo completed writes or commands.
 
@@ -348,7 +329,7 @@ storage. On a new extension instance, poll, wait, and the roster expose saved
 tickets without starting children or replaying delivery. A ticket last recorded
 as running becomes terminal `interrupted`: its saved outcomes remain visible,
 but unfinished tasks have unknown effects and are never restarted by polling,
-waiting, or redispatching an `operationId`. Since #123 the interrupted outcome
+waiting, or a new dispatch (`operationId` was removed by #130). Since #123 the interrupted outcome
 carries the worker's transcript when it was journaled at claim time — recovery
 renders the `session:` line and the same `resumeFrom` retry recipe a failed
 outcome offers — but naming the file is a continuation affordance, never an
@@ -398,8 +379,7 @@ when answered, cancelled, or its worker ends; cancellation/shutdown prevents
 an answer from restarting it. Pausing a ticket does not erase questions:
 an answer may be recorded during pause, but the worker may not continue its
 next model turn until resumed. The question wait suspends the inactivity
-watchdog; explicit task deadlines continue to count wall time. Deadline,
-cancellation, and shutdown interrupt unanswered questions without resurrecting
+watchdog; **Overridden (#118):** task deadlines were removed, so no wall-clock timer applies here. Cancellation and shutdown interrupt unanswered questions without resurrecting
 terminal work.
 
 An exclusively question-waiting worker yields its global and per-model
@@ -415,7 +395,7 @@ A naturally settled batch is `completed` only when every task succeeded. It is
 and at least one failed. Forced ticket cancellation remains authoritative and
 settles the ticket as `cancelled` regardless of late worker outcomes.
 
-A singular ticket RPC (poll with a ticket id, wait, cancel, pause, or resume)
+A singular ticket RPC (poll with a ticket id, wait, cancel; pause and resume are dashboard-only since #130)
 for an unknown id returns a tool error naming the missing ticket. Roster
 polling without a ticket id remains a successful empty/list response.
 
@@ -557,17 +537,17 @@ unambiguous shapes:
 
 - a JSON-stringified task array;
 - flat task fields wrapped into one task;
-- `tools` supplied as a JSON array string or one bare token;
+- `tools` supplied as a JSON array string or one bare token (**Overridden:** `tools` is removed by #130, so this repair went with it);
 - `agent: ""`, treated as omitted;
 - `null` on any field, treated as absent — top-level and inside tasks alike;
 - a blank (`""` or whitespace-only) optional identifier, treated as absent:
-  `operationId`, `ticket`, `sessionId`, `taskId`, `questionId`, and a task's
+  `operationId` (removed by #130), `ticket`, `sessionId`, `taskId`, `questionId`, and a task's
   `sessionId`, `cwd`, `resumeFrom`, or `agent`.
 
 It does not merge flat fields into an existing non-empty task array. A `tasks`
 field that stays absent becomes `[]`, so `{}` still returns the manual. Blank
 values that are not optional identifiers — task `id`, `prompt`,
-`systemPrompt`, `dependsOn` entries, and ticket `answer` — remain present and
+`systemPrompt` (removed by #130), `dependsOn` entries, and ticket `answer` — remain present and
 fail their normal validation. Unknown task keys, task-level `async`/`sessionAction`,
 duplicate IDs or session IDs, busy sessions, unresolved agents/tools, a task
 `model` field, and fields belonging to a sibling tool fail the whole call with
@@ -625,7 +605,7 @@ cannot select a different model.
 Stall timeouts measure inactivity; deadlines measure wall-clock time.
 The inactivity watchdog reads `stallTimeoutMs` from `delegate.json` — a
 non-negative integer of milliseconds, default 900000 (15 minutes); `0`
-disables detection. Deadlines exist only when the caller passes
+disables detection. [Overridden by #118: no task deadline exists and `deadlineMs` rejects.] Deadlines exist only when the caller passes
 `deadlineMs`. Omission means no
 deadline: no configuration key, host default, or implicit budget may
 introduce a wall-clock time limit.
