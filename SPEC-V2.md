@@ -69,7 +69,8 @@ any built-in profile — composes its base prompt from the parent's
 user-authored prompt inputs: the parent's custom base prompt (when one
 replaces the stock prefix) and the text the user appended to it.
 Extension-contributed prompt sections and guidelines are never inherited:
-children run extension-free, and inherited extension prose would reference
+children run extension-free (superseded by #59 for allowlisted providers, see
+SPEC.md's provider-scoped extensions bullet), and inherited extension prose would reference
 tools they do not have. Tool documentation is never inherited either; the
 child's session builds it from the child's own inventory. The composition
 appends the profile's role line (each built-in carries one) and closes with
@@ -105,7 +106,10 @@ harness instructions are not inherited. Children run with all extensions
 disabled and resolve provider registrations and auth through the parent's
 shared model runtime; a model the runtime cannot resolve or authenticate
 fails the task with that cause — there is no provider-extension fallback.
-Verified live against real providers 2026-09-26 (issue #5).
+Verified live against real providers 2026-09-26 (issue #5). **Superseded by
+#59:** an allowlisted provider's children load its listed user-scope extensions,
+and the shipped default allowlists `openai-codex` (SPEC.md, provider-scoped
+extensions); the two sentences above describe the 2026-09-26 state.
 
 Named agents also come from user-authored Markdown profiles, discovered per
 dispatch — edits take effect without a reload — in first-definition-wins
