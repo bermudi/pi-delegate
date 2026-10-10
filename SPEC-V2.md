@@ -8,8 +8,9 @@ mechanisms are explicitly not requirements.
 > **Status (2026-10-10): inherited engine contract, partly overridden.** SPEC.md
 > (v3, ratified 2026-09-27) is the sole behavioral authority, and this file is the
 > engine-as-built contract it inherits. Where SPEC.md states a different rule,
-> SPEC.md wins. Text this file no longer describes is marked **Overridden** in
-> place, with its source. Unmarked text still binds unless SPEC.md overrides it.
+> SPEC.md wins. Known overrides are marked **Overridden** in place, with their
+> source. The marks are not exhaustive: where this file and SPEC.md disagree,
+> SPEC.md controls.
 
 ## Operations
 
@@ -66,7 +67,7 @@ Omitting `agent` creates an `inline` task with `*` by default. The built-ins are
 - `default`: mirrors the live parent's model, thinking level, and delegatable
   native tools.
 - `scout`: read-only investigation (`ro` tools — never serializes with
-  writers). **Overridden (SPEC.md, #40):** this built-in is now `explore`; `scout` is rejected at config load (`models`) and at dispatch.
+  writers). **Overridden (#40, #61):** this built-in is now `explore`. An unauthored `scout` is rejected at dispatch and in `models` config; an authored global `scout.md` is an ordinary profile (see COMPATIBILITY.md, v2 → v3 changes).
 - `coder`: shared-tree implementation (writer tools).
 - `reviewer`: shared-tree review with `read` + `bash` — it can run focused
   checks, and admission treats it as a writer: it serializes with other
@@ -158,7 +159,7 @@ way to redirect inline or `default`-profile tasks: they mirror the parent's
 model unconditionally. A second map, `"modelsByParent"`, scopes those pins to
 the parent's exact `provider/model-id` (case-insensitive):
 `{"modelsByParent": {"<parent provider/model-id>": {"scout": "..."}}}` — a
-scoped entry wins over the unscoped `"models"` entry for the same agent. **Overridden (SPEC.md, #40):** the example key `scout` is now `explore`, and `models.scout` is rejected at load.
+scoped entry wins over the unscoped `"models"` entry for the same agent. **Overridden (#40):** the example key `scout` is now `explore`; `models.scout` is rejected at load unless an authored global scout profile exists.
 A `modelsByParent` key names the parent's exact `provider/model-id`
 (provider before the first slash, then the full model id — which may itself
 contain slashes, e.g. OpenRouter's `openrouter/anthropic/claude-sonnet-4`). A key that could never match — empty, missing the slash, an empty provider or model id, doubled slashes, or internal whitespace — fails at config load rather than
@@ -195,7 +196,8 @@ Delegate-owned trees (`delegate-sessions/`, `delegate-scratch/`,
 Project files never become delegate configuration.
 
 The recognized top-level keys are `maxConcurrent`, `concurrency`,
-`stallTimeoutMs`, `models`, `modelsByParent`, `telemetry`, and `output`;
+`stallTimeoutMs`, `models`, `modelsByParent`, `telemetry`, and `output` (also
+`providerExtensions`, #59, and `sessions`, #46; a supplied `surface` key rejects, ADR 0002);
 unknown keys are silently ignored. The file is re-read on every call, and
 a malformed value — a non-integer or non-positive `maxConcurrent`, a
 negative or non-integer `stallTimeoutMs`, a `concurrency` block or bound
@@ -367,7 +369,7 @@ parallel tool calls alongside a question fail the question rather than
 releasing capacity while other tools may still run. At most one unanswered
 question is allowed per task. The question is correlated to its ticket, task
 id, and opaque question id, visible in single-ticket polls, roster polls,
-timed-out waits, and a parent notification. The worker's tool call waits for
+waits, and a parent notification (waits no longer time out, #130). The worker's tool call waits for
 the answer; the parent sends a nonempty answer through the ticket RPC above.
 There is no automatic human escalation or guessed answer; the parent may ask
 the human explicitly. A parent must not wait on the ticket it needs to answer.
@@ -413,7 +415,7 @@ LLM-facing projection:
   full size, and that retention follows OS temp policy. A failed task's
   partial output is bounded the same way. The tail never begins with a
   lone half of a surrogate pair.
-- **Running-ticket views**: a poll or timed-out/aborted wait on a running
+- **Running-ticket views**: a poll or aborted wait (waits no longer time out, #130) on a running
   ticket bounds every recorded outcome to the tail budget only and never
   writes a spill file or names one — the note states whether completion
   will spill or include the full output.
@@ -451,8 +453,8 @@ still waits for the safe outcome.
 A `wait` or `poll` that already returned the ticket's terminal view consumes
 its pending delivery: the flush compares the exact view text the caller saw
 with the view the wake would send and skips the ticket only on an identical
-match, logging the skip to stderr (a record that gained content since the
-render — late outcomes, budget account, notices — still delivers). A group
+match, logging the skip to stderr (or to the diagnostics file when stderr is a terminal, #122; a record that gained content since the
+render — late outcomes, notices (the budget account was removed by #129) — still delivers). A group
 mixing consumed and unconsumed tickets delivers only the unconsumed ones.
 
 - **Same leaf, no transition:** if the parent is still on the session-tree
@@ -473,7 +475,7 @@ mixing consumed and unconsumed tickets delivers only the unconsumed ones.
 
 Session shutdown — quit, `/reload`, `/new`, `/resume`, `/fork` — rejects new
 dispatches, force-cancels every running ticket with no delivered wake,
-and then holds the shutdown until every worker's quiescence is confirmed,
+and then holds the shutdown until every worker's quiescence is confirmed (**Overridden by #52:** bounded to about 30s; see COMPATIBILITY.md, Known host limitations),
 showing a visible waiting status. Replacement sessions never inherit live
 workers or workspace reservations. They may poll saved ticket results from
 the same agent directory, but do not auto-deliver them.
@@ -500,7 +502,7 @@ first finishes, the unfinished span is dropped rather than reopening or
 writing the obsolete destination.
 
 Rows are written only for dispatches that reach a completed batch outcome;
-rejected calls and failed admission or preparation record nothing. For each
+rejected calls and failed admission or preparation record nothing. **Overridden by #61:** a call rejected before execution writes a misfire row (see SPEC.md, misfire telemetry). For each
 such dispatch it records the batch start timestamp and wall duration,
 sync/async mode, task count, terminal call status, caller-visible task status,
 agent/model/thinking/tools/workspace selections, integration status, retry
@@ -509,7 +511,7 @@ at batch finish; v2 leaves the legacy per-task duration field NULL. A task row
 whose worker could not be confirmed stopped is marked provisional and may later
 be superseded in the live ticket.
 
-It never stores prompt, system-prompt, output, or error text; cwd or session
+It never stores prompt, system-prompt, output, or error text (**Overridden by #61:** misfire rows keep the caller-visible rejection message verbatim, by design); cwd or session
 paths; caller task IDs; operation IDs; or parent transcript content. Legacy v1
 rows may retain older values; v2 does not rewrite or delete them.
 
@@ -602,7 +604,7 @@ account/configuration problems and preserves any provider-supplied
 reset hint. It does not promise an exact reset time or auto-resume. Callers
 cannot select a different model.
 
-Stall timeouts measure inactivity; deadlines measure wall-clock time.
+Stall timeouts measure inactivity; deadlines measure wall-clock time. **Overridden by #118:** no deadlines remain; the sentence below describes the removed rule.
 The inactivity watchdog reads `stallTimeoutMs` from `delegate.json` — a
 non-negative integer of milliseconds, default 900000 (15 minutes); `0`
 disables detection. [Overridden by #118: no task deadline exists and `deadlineMs` rejects.] Deadlines exist only when the caller passes

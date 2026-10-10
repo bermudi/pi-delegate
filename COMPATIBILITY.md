@@ -24,7 +24,7 @@ SPEC.md has no call-row preview language, so it stays as is.
 ## Terminal-safe operational diagnostics (#122)
 
 This supersedes the inherited stderr-only logging, including delivery-skip logs.
-Normative text: SPEC.md, "Operational diagnostics (#122)". Residual points that
+Normative text: SPEC.md, "Operational diagnostics (#122, user-authorized)". Residual points that
 SPEC.md does not state: no log rotation or automatic deletion is introduced (operators
 remove old process logs); diagnostic-destination failures never interfere with
 telemetry; caller-visible tool errors, task lifecycle, models, and settings are unchanged.
@@ -158,7 +158,7 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   with two or more tasks now returns a ticket immediately and
   auto-delivers the settled result, instead of blocking. Callers that
   relied on the v2 blanket sync default must pass `async: false`.
-  Single-task calls still block inline by default; `async: true`
+  Single-task calls still block inline by default (**superseded by #61:** omitted `async` now backgrounds single tasks too); `async: true`
   overrides either way.
 - **Superseded — agent-name aliases (retired by #61).** The alias table (`general`,
   `general-purpose`, `worker`, `explorer`, `plan`, `scout`, `implement`) is gone. Names match
@@ -169,29 +169,29 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   resolves to `explore`, and an unauthored `scout` rejects as an unknown agent
   (`tests/contract/grammar.test.ts`).
   **Breaking for config:** `models.scout` and `modelsByParent` `scout`
-  keys are rejected at load with a migration message — rename them to
+  keys are rejected at load with a migration message (unless an authored global scout profile exists, #61) — rename them to
   `models.explore`. Built-in semantics (toolset, role, read-only
   concurrency) are unchanged.
 - **Additive — misfire telemetry.** Dispatches rejected before
   execution record a telemetry row. No behavior change.
 - **Superseded — cross-harness task-field spellings (#41, retired by #61).**
   `subagent_type`, `agent_type`, `task_name`, `run_in_background`, `timeout_ms`, and a
-  task-level `message` now reject with teaching that names the replacement
-  (`delegate.ts`, `rejectFieldAliases`). The folding and conflict rules are gone.
+  task-level `message` now reject with teaching
+  (`delegate.ts`, `rejectFieldAliases`). `timeout_ms` names `timeoutMs`, which #130 also removed, so its teaching ends at the removal. The folding and conflict rules are gone.
 - **Additive — shared batch `brief` (#43).** Top-level `brief` prepends a
   `--- batch brief ---` preamble to every task's prompt; the result and ticket headers name it
   once. The `context` spelling no longer normalizes to `brief`: `context` is removed and
-  rejects with teaching (see the #14 entry below).
+  rejects with teaching (see the #14 entry below). The old `brief`+`context` conflict rule went with it.
 - **Changed — default `maxConcurrent` is 8, not 3 (#41).** Field
   survey: letta/grok/oh-my-pi default 32; minimax/deepseek/MiMo/fx
   uncapped. The `concurrency` maps remain the rate-limit guard.
 - **Superseded — trained-reflex long tail (#44; folds retired by #61).** The name-folding
   described before is gone; the spellings now reject with teaching (see #41 above). What stays
-  from #44: `reasoning_effort` rejects with the `thinking` teaching at every level, and model
+  from #44: a bare top-level `message` gets the `delegate_ticket` steer teaching, `reasoning_effort` rejects with the `thinking` teaching at every level, and model
   and effort selection is user-configured only (#32).
 - **Changed — no nested dispatch (#45).** The alias-precedence half of this bullet is
   superseded by #61 (names match exactly). The delegate family is stripped silently from
-  every child toolset — explicit `tools`, profile frontmatter, and the mirrored parent set
+  every child toolset — profile frontmatter, and the mirrored parent set (task-level `tools` is removed by #130)
   alike — so subagents never nest.
 - **Changed — pooled-session idle residency is bounded (#46).** Idle
   sessions beyond `sessions.maxIdle` (default 4) unload to their
@@ -432,9 +432,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 ## v2 deliberate breaking changes
 
 - **Touched-file attribution: removed 2026-09-27, restored under v3 the same day, then extended
-  2026-10-02.** The current contract is SPEC.md, "Observability — Completion evidence" (#38):
+  2026-10-02.** The current contract is SPEC.md, "Observability" (bullet "Completion evidence", #38):
   paths from write/edit calls, plus a Git evidence window for changes made from the shell, with
-  concurrent writers named rather than hidden. V1's physical-identity tracking and its
+  concurrent writers named rather than hidden. Paths are resolved against the task cwd, ordered, and deduplicated, with no symlink canonicalization. Same-call graph-ordered writers still serialize, and their completion notices name the serialized tasks. V1's physical-identity tracking and its
   `details.overlapWarning` shape were not restored. Decision record: docs/history/V1-V2-MAP.md §3d item 1.
 
 - **Child base prompt is composed, not precedence-chosen (#33, user decision
@@ -763,5 +763,5 @@ would be intentional public API changes, not implementation freedom.
 
 ## Test migration policy
 
-Moved verbatim to TEST-MIGRATION.md, section "Migration policy". This contract
+Moved verbatim to TEST-MIGRATION.md, section "Migration policy (moved from COMPATIBILITY.md, 2026-10-10)". This contract
 does not govern how v1 tests are migrated.

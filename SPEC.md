@@ -251,7 +251,7 @@ mid-flight the parent can steer. The grammar:
 - **Prompt size bound (#121).** Each task `prompt` and the shared
   `brief` accept at most 32,768 characters. Oversized values reject
   at validation — before any task starts, identically for async and
-  inline calls (one surface since ADR 0002) — with a teaching error naming
+  inline calls — with a teaching error naming
   the field, the offending task, the limit, and the supplied count,
   pointing at the remedy: reference files by path instead of inlining
   contents. The bound is a constant, not a knob, and its diagnostics
@@ -448,7 +448,7 @@ contract:
   and the isolated worktree dependency provisioning (#120) below.
 - **Scratch-copy admission (this repository's #50, owner-approved 2026-10-07).** Normative
   rules: INVARIANTS.md, "Scratch source copying" (copy reservation, rejection while copying,
-  release before the scratch worker runs). Residual limit, not restated there: this is
+  release before the scratch worker runs). Rejection, not queuing or a race warning, is the policy (INVARIANTS.md, overlap rule). Residual limit, not restated there: this is
   same-host Delegate admission, not protection against external processes or an atomic
   filesystem snapshot.
 - **Actionable scope failures (this repository's #51).** Normative rule: INVARIANTS.md,
