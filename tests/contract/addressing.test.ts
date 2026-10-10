@@ -76,9 +76,9 @@ describe("canonical ticket#task addressing (#53)", () => {
       subagents.respond([byPrompt, byPrompt, byPrompt]);
       const dispatched = await callDelegate(session, {
         tasks: [
-          { id: "alpha", prompt: "one", tools: ["read"] },
-          { id: "beta", prompt: "two", tools: ["read"] },
-          { id: "gamma", prompt: "three", tools: ["read"] },
+          { id: "alpha", prompt: "one", agent: "explore" },
+          { id: "beta", prompt: "two", agent: "explore" },
+          { id: "gamma", prompt: "three", agent: "explore" },
         ],
         async: true,
       });
@@ -149,7 +149,7 @@ describe("canonical ticket#task addressing (#53)", () => {
         fauxAssistantMessage("ANSWER-USED"),
       ]);
       const dispatched = await callDelegate(session, {
-        tasks: [{ id: "asker", prompt: "ask", tools: ["read"] }],
+        tasks: [{ id: "asker", prompt: "ask", agent: "explore" }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -207,8 +207,8 @@ describe("canonical ticket#task addressing (#53)", () => {
       ]);
       const dispatched = await callDelegate(session, {
         tasks: [
-          { id: "one", prompt: "a", tools: ["read"] },
-          { id: "two", prompt: "b", tools: ["read"] },
+          { id: "one", prompt: "a", agent: "explore" },
+          { id: "two", prompt: "b", agent: "explore" },
         ],
         async: true,
       });
@@ -237,7 +237,7 @@ describe("canonical ticket#task addressing (#53)", () => {
         ]),
       ]);
       const dispatched = await callDelegate(session, {
-        tasks: [{ id: "holder", prompt: "wait", tools: ["read"] }],
+        tasks: [{ id: "holder", prompt: "wait", agent: "explore" }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -287,7 +287,7 @@ describe("canonical ticket#task addressing (#53)", () => {
         ]),
       ]);
       const dispatched = await callDelegate(session, {
-        tasks: [{ id: "holder", prompt: "wait", tools: ["read"] }],
+        tasks: [{ id: "holder", prompt: "wait", agent: "explore" }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -333,7 +333,7 @@ describe("canonical ticket#task addressing (#53)", () => {
         ]),
       ]);
       const dispatched = await callDelegate(session, {
-        tasks: [{ id: "holder", prompt: "wait", tools: ["read"] }],
+        tasks: [{ id: "holder", prompt: "wait", agent: "explore" }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);

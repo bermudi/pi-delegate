@@ -135,8 +135,8 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         // #126 vehicle: read-only tasks admit; maxConcurrent 1 still
         // queues task-2 behind the slot — the activated shape under test.
         tasks: [
-          { prompt: "holds the slot", tools: ["read"] },
-          { prompt: "waits behind", tools: ["read"] },
+          { prompt: "holds the slot", agent: "explore" },
+          { prompt: "waits behind", agent: "explore" },
         ],
         async: true,
       });
@@ -243,8 +243,8 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       const dispatched = await callDelegate(session, {
         // Read-only tasks hold no write claims — both run in parallel.
         tasks: [
-          { prompt: "one", tools: ["read"] },
-          { prompt: "two", tools: ["read"] },
+          { prompt: "one", agent: "explore" },
+          { prompt: "two", agent: "explore" },
         ],
         async: true,
       });
@@ -302,8 +302,8 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         // #126 vehicle: read-only tasks admit; maxConcurrent 1 still
         // queues task-2 — cancel must catch it queued, never started.
         tasks: [
-          { prompt: "one", tools: ["read"] },
-          { prompt: "two", tools: ["read"] },
+          { prompt: "one", agent: "explore" },
+          { prompt: "two", agent: "explore" },
         ],
         async: true,
       });
@@ -439,8 +439,8 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         // #126 vehicle: read-only tasks admit; maxConcurrent 1 still
         // queues task-2 behind the slot — the parked-drain shape under test.
         tasks: [
-          { prompt: "holds the slot", tools: ["read"] },
-          { prompt: "waits behind", tools: ["read"] },
+          { prompt: "holds the slot", agent: "explore" },
+          { prompt: "waits behind", agent: "explore" },
         ],
         async: true,
       });
@@ -552,7 +552,7 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       const dispatched = await callDelegate(session, {
         tasks: [
           { id: "pooled", prompt: "pooled work", sessionId: "conv" },
-          { id: "holder", prompt: "stays gated", tools: ["read"] },
+          { id: "holder", prompt: "stays gated", agent: "explore" },
         ],
         async: true,
       });

@@ -171,8 +171,8 @@ describe("inline dispatch live board (#119)", () => {
     const dispatched = callDelegate(session, {
       async: false,
       tasks: [
-        { id: "fast", prompt: "quick", tools: "ro" },
-        { id: "held", prompt: "HELD-SECOND", tools: "ro" },
+        { id: "fast", prompt: "quick", agent: "explore" },
+        { id: "held", prompt: "HELD-SECOND", agent: "explore" },
       ],
     });
     try {

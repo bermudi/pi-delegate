@@ -91,8 +91,6 @@ describe("delegate public tool contract", () => {
         "prompt",
         "resumeFrom",
         "sessionId",
-        "systemPrompt",
-        "tools",
         "workspace",
       ].sort(),
     );

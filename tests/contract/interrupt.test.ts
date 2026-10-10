@@ -280,8 +280,8 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
         // #126 vehicle: read-only tasks admit; maxConcurrent 1 still
         // parks task-2, which is the not-applied shape under test.
         tasks: [
-          { prompt: "one", tools: ["read"] },
-          { id: "second", prompt: "two", tools: ["read"] },
+          { prompt: "one", agent: "explore" },
+          { id: "second", prompt: "two", agent: "explore" },
         ],
       });
       const ticket = ticketIdOf(dispatched.text);

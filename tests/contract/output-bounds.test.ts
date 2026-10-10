@@ -216,8 +216,8 @@ describe("delegate output bounding", () => {
         // #126 vehicle: read-only tasks — the subject is poll bounding of a
         // finished task beside a blocked one.
         tasks: [
-          { prompt: "done-fast", tools: ["read"] },
-          { prompt: "blocked", tools: ["read"] },
+          { prompt: "done-fast", agent: "explore" },
+          { prompt: "blocked", agent: "explore" },
         ],
         async: true,
       });

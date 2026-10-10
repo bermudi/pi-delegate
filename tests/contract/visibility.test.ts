@@ -135,7 +135,7 @@ describe("delegate visibility signals", () => {
     const second = await callDelegate(session, {
       // Read-only: an inline writer in the same cwd would correctly be
       // rejected by shared-write admission against ticket one.
-      tasks: [{ prompt: "SECOND-TASK", tools: "ro" }],
+      tasks: [{ prompt: "SECOND-TASK", agent: "explore" }],
       async: true,
     });
     const t2 = ticketIdOf(second.text);

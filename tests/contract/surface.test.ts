@@ -36,7 +36,7 @@ describe("the single delegate surface", () => {
     const task = objectOf(objectOf(top.tasks).items);
     expect(Object.keys(objectOf(task.properties)).sort()).toEqual([
       "agent", "cwd", "dependsOn", "id", "prompt",
-      "resumeFrom", "sessionId", "systemPrompt", "tools", "workspace",
+      "resumeFrom", "sessionId", "workspace",
     ]);
     expect(task.additionalProperties).toBe(false);
     expect(objectOf(delegateTool(session).parameters).additionalProperties).toBe(false);
@@ -106,15 +106,23 @@ describe("the single delegate surface", () => {
     // own suites.
     const session = await open();
     const task = objectOf(objectOf(objectOf(properties(session).tasks).items).properties);
-    for (const key of ["id", "tools", "systemPrompt", "dependsOn", "sessionId", "resumeFrom"]) {
+    for (const key of ["id", "dependsOn", "sessionId", "resumeFrom"]) {
       expect(task[key]).toBeDefined();
     }
     const subagents = await installSubagentModel(session);
     subagents.respond([fauxAssistantMessage("FULL-OVERRIDE")]);
     const result = await callDelegate(session, {
-      async: false, tasks: [{ prompt: "custom", tools: [], systemPrompt: "one-off base" }],
+      async: false, tasks: [{ prompt: "custom", id: "one-off" }],
     });
     expect(result.text).toContain("FULL-OVERRIDE");
+    // #130 verdict 5: tools/systemPrompt presence rejects with teaching.
+    for (const extra of [{ tools: ["read"] }, { systemPrompt: "base" }] as const) {
+      const rejected = await callDelegate(session, {
+        async: false, tasks: [{ prompt: "custom", ...extra }],
+      });
+      expect(rejected.isError).toBe(true);
+      expect(rejected.text).toContain("has been removed");
+    }
   });
 
   test("malformed supplied tasks cannot hide aliases behind flat recovery", async () => {

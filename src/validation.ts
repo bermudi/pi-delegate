@@ -8,8 +8,6 @@ export interface TaskInput {
   readonly prompt?: string;
   readonly agent?: string;
   readonly cwd?: string;
-  readonly systemPrompt?: string;
-  readonly tools?: string[];
   readonly sessionId?: string;
   readonly resumeFrom?: string;
   readonly workspace?: "shared" | "scratch" | "isolated";
@@ -351,12 +349,6 @@ function validateTasks(tasks: readonly TaskInput[]): void {
         `${where}: prompt must be at most ${PROMPT_CHAR_LIMIT} characters; got ${task.prompt.length}. ${oversizedPromptRemedy}`,
       );
     }
-    if (task.systemPrompt !== undefined && task.systemPrompt.trim() === "") {
-      // Blank stays invalid for non-identifier fields (SPEC "Input
-      // recovery"): a blank systemPrompt would otherwise override — and
-      // silently erase — the profile's base prompt.
-      fail(`${where}: systemPrompt must be a non-empty string.`);
-    }
     if (task.prompt === undefined && task.resumeFrom === undefined) {
       fail(`${where}: a task needs a prompt (prompt is optional only with resumeFrom).`);
     }
@@ -385,20 +377,6 @@ function validateTasks(tasks: readonly TaskInput[]): void {
     // built-ins alone here would reject legitimate custom profiles.
     if (task.agent !== undefined && task.agent.trim() === "") {
       fail(`${where}: agent must be a non-empty name.`);
-    }
-    if (task.tools !== undefined) {
-      // Syntax check only: `web_search` is a valid name whose
-      // availability is provider-scoped (#59) — unknown until the
-      // task's model resolves at dispatch. Passing providerExtensions:
-      // true defers the availability check to resolveTasks, which
-      // re-expands with the resolved provider's real allowlist and
-      // reports the same error there.
-      const expanded = expandTools(task.tools, {
-        providerExtensions: true,
-      });
-      if (typeof expanded === "string") {
-        fail(`${where}: ${expanded}`);
-      }
     }
   });
   // The whole graph must validate before any task starts: unknown

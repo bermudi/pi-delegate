@@ -298,8 +298,8 @@ describe("delegate ticket contract", () => {
         // #126 vehicle: read-only tasks admit concurrently — the subject
         // is failure independence in a partial settlement.
         tasks: [
-          { prompt: "succeed-task", tools: ["read"] },
-          { prompt: "fail-task", tools: ["read"] },
+          { prompt: "succeed-task", agent: "explore" },
+          { prompt: "fail-task", agent: "explore" },
         ],
         async: true,
       });
@@ -366,8 +366,8 @@ describe("delegate ticket contract", () => {
 
       const dispatched = await callDelegate(session, {
         tasks: [
-          { prompt: "read then wait", tools: ["read"] },
-          { prompt: "queued behind the gate", tools: ["read"] },
+          { prompt: "read then wait", agent: "explore" },
+          { prompt: "queued behind the gate", agent: "explore" },
         ],
         async: true,
       });
@@ -470,8 +470,8 @@ describe("delegate ticket contract", () => {
       const dispatched = await callDelegate(session, {
         // Read-only tasks hold no write claims — both run in parallel.
         tasks: [
-          { prompt: "first", tools: ["read"] },
-          { prompt: "second", tools: ["read"] },
+          { prompt: "first", agent: "explore" },
+          { prompt: "second", agent: "explore" },
         ],
         async: true,
       });
@@ -532,8 +532,8 @@ describe("delegate ticket contract", () => {
       const dispatched = await callDelegate(session, {
         // Read-only tasks hold no write claims — both run in parallel.
         tasks: [
-          { prompt: "first", tools: ["read"] },
-          { prompt: "second", tools: ["read"] },
+          { prompt: "first", agent: "explore" },
+          { prompt: "second", agent: "explore" },
         ],
         async: true,
       });
@@ -576,7 +576,7 @@ describe("delegate ticket contract", () => {
       ]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "ask then finish", tools: ["read"] }],
+        tasks: [{ prompt: "ask then finish", agent: "explore" }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);

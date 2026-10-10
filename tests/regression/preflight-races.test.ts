@@ -35,7 +35,7 @@ test("slow resource loading has no task wall-clock budget", async () => {
     model.respond([fauxAssistantMessage("late worker")]);
     const result = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "do nothing", tools: [] }],
+      tasks: [{ prompt: "do nothing" }],
     });
     expect(result.isError).toBe(false);
     expect(result.text).toContain("late worker");
@@ -75,7 +75,7 @@ test("parent cancellation returns even when the resource loader stays blocked", 
     model.respond([fauxAssistantMessage("late worker")]);
     const dispatch = callDelegateDetached(session, {
       async: false,
-      tasks: [{ prompt: "do nothing", tools: [] }],
+      tasks: [{ prompt: "do nothing" }],
     });
     await loading;
     await (session.session as AgentSession).abort();
@@ -108,7 +108,7 @@ test("shutdown during async task resolution cannot start a late worker", async (
     const tool = delegateTool(session) as unknown as DirectTool;
     const dispatch = tool.execute(
       "shutdown-preflight",
-      { async: true, tasks: [{ prompt: "do nothing", tools: ["bash"] }] },
+      { async: true, tasks: [{ prompt: "do nothing" }] },
       new AbortController().signal,
       () => {},
       host.extensionRunner.createContext(),
@@ -134,7 +134,7 @@ test("shutdown during sync task resolution cannot start a late worker", async ()
     const tool = delegateTool(session) as unknown as DirectTool;
     const dispatch = tool.execute(
       "shutdown-sync-preflight",
-      { async: false, tasks: [{ prompt: "do nothing", tools: ["bash"] }] },
+      { async: false, tasks: [{ prompt: "do nothing" }] },
       new AbortController().signal,
       () => {},
       host.extensionRunner.createContext(),

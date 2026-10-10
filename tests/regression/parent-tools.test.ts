@@ -69,19 +69,18 @@ describe("regression: parent tool mirroring", () => {
     });
   }
 
-  test("independent tool choices bypass unavailable parent tools", async () => {
+  test("profile tool choices bypass unavailable parent tools", async () => {
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
     const probe = unavailableTools();
+    // #130 removed task-level tools: independence now means a profile
+    // with its own toolset. The default profile mirrors the parent and
+    // needs the inventory (the mixed-batch test above pins its failure).
     const cases = [
-      { task: { agent: "default", tools: ["read"] }, tools: ["read"] },
-      { task: { agent: "default", tools: [] }, tools: [] },
-      { task: { agent: "explore", tools: [] }, tools: [] },
-      { task: { tools: [] }, tools: [] },
       { task: { agent: "explore" }, tools: ["read", "grep", "find", "ls"] },
       { task: { agent: "coder" }, tools: ["read", "bash", "edit", "write"] },
       { task: { agent: "reviewer" }, tools: ["read", "bash"] },
-      { task: {}, tools: ["read", "bash", "edit", "write"] },
+      { task: { agent: "verifier" }, tools: ["read", "bash"] },
     ];
     for (const { task, tools } of cases) {
       let observed: string[] | undefined;

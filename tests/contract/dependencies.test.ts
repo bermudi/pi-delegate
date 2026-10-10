@@ -174,9 +174,9 @@ describe("delegate dependency graph and handoffs", () => {
         // #126 vehicle: read-only tasks so the free branch and the failer
         // stay unordered siblings that admit concurrently.
         tasks: [
-          { id: "failer", prompt: "FAILER task", tools: ["read"] },
-          { id: "dependent", prompt: "depends", dependsOn: ["failer"], tools: ["read"] },
-          { id: "free", prompt: "FREE independent", tools: ["read"] },
+          { id: "failer", prompt: "FAILER task", agent: "explore" },
+          { id: "dependent", prompt: "depends", dependsOn: ["failer"], agent: "explore" },
+          { id: "free", prompt: "FREE independent", agent: "explore" },
         ],
       });
       // Two non-successes and one success → a normal (partial) result.
@@ -279,9 +279,9 @@ describe("delegate dependency graph and handoffs", () => {
         // #126 vehicle: read-only tasks so the free branch and the failer
         // stay unordered siblings that admit concurrently.
         tasks: [
-          { id: "free", prompt: "FREE independent", tools: ["read"] },
-          { id: "failer", prompt: "FAILER task", tools: ["read"] },
-          { id: "dependent", prompt: "depends", dependsOn: ["failer"], tools: ["read"] },
+          { id: "free", prompt: "FREE independent", agent: "explore" },
+          { id: "failer", prompt: "FAILER task", agent: "explore" },
+          { id: "dependent", prompt: "depends", dependsOn: ["failer"], agent: "explore" },
         ],
         async: true,
       });
@@ -384,13 +384,12 @@ describe("delegate dependency graph and handoffs", () => {
             id: "probe",
             prompt: "PROBE scratch",
             cwd: dir,
-            tools: ["write"],
             workspace: "scratch",
           },
           {
             prompt: "DEPENDENT consume",
             cwd: dir,
-            tools: ["read"],
+            agent: "explore",
             dependsOn: ["probe"],
           },
         ],
@@ -442,13 +441,12 @@ describe("delegate dependency graph and handoffs", () => {
             id: "build",
             prompt: "BUILD the artifact",
             cwd: dir,
-            tools: ["write"],
             workspace: "isolated",
           },
           {
             prompt: "REVIEW the applied work",
             cwd: dir,
-            tools: ["read"],
+            agent: "explore",
             dependsOn: ["build"],
           },
         ],
@@ -497,13 +495,11 @@ describe("delegate dependency graph and handoffs", () => {
             id: "first",
             prompt: "FIRST write",
             cwd: dir,
-            tools: ["write"],
             workspace: "shared",
           },
           {
             prompt: "SECOND write",
             cwd: dir,
-            tools: ["write"],
             workspace: "isolated",
             dependsOn: ["first"],
           },
@@ -591,8 +587,8 @@ describe("delegate dependency graph and handoffs", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { id: "w1", prompt: "write one", cwd: dir, tools: ["write"] },
-          { id: "w2", prompt: "write two", cwd: dir, tools: ["write"], dependsOn: ["w1"] },
+          { id: "w1", prompt: "write one", cwd: dir },
+          { id: "w2", prompt: "write two", cwd: dir, dependsOn: ["w1"] },
         ],
       });
       expect(result.isError).toBe(false);

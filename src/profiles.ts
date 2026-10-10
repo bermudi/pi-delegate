@@ -18,7 +18,7 @@ export const CHILD_TOOLS = [
 /**
  * The delegate-family tool names. Children never nest dispatch (#45):
  * these are stripped — silently — from every inventory a subagent can be
- * given: explicit task `tools`, profile `tools`, and the parent's mirrored
+ * given: profile `tools` and the parent's mirrored
  * active set (which already excludes them by construction, via CHILD_TOOLS).
  */
 export const DELEGATE_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -139,7 +139,8 @@ export function getBuiltinProfile(name: string): AgentProfile | undefined {
 }
 
 /**
- * Expand the task `tools` field into concrete child tool names.
+ * Expand a tools list (profile frontmatter or the default set) into
+ * concrete child tool names.
  * `*` and `ro` are groups; every other entry must name a known tool.
  * Returns an error string instead of throwing so callers can compose it.
  *

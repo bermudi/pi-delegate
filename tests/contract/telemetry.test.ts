@@ -149,7 +149,7 @@ describe("delegate telemetry contract", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { id: "corr-alpha", prompt: "first", tools: ["read"] },
+          { id: "corr-alpha", prompt: "first", agent: "explore" },
           { prompt: "second" },
         ],
       });
@@ -192,7 +192,9 @@ describe("delegate telemetry contract", () => {
           expect(task.call_id).toBe(call.id);
           expect(task.ts).toBe(call.ts);
           expect(task.idx).toBe(index);
-          expect(task.agent).toBe("inline");
+          // The agent column mirrors the task's agent (explore /
+          // inline here) — content-free either way.
+          expect(task.agent).toBe(index === 0 ? "explore" : "inline");
           expect(task.model).toBe("delegate-faux/faux-1");
           expect(task.outcome).toBe("ok");
           expect(task.workspace).toBe("shared");
@@ -206,7 +208,7 @@ describe("delegate telemetry contract", () => {
             expect(task[column]).toBeNull();
           }
         }
-        expect(JSON.parse(String(firstTask.tools))).toEqual(["read"]);
+        expect(JSON.parse(String(firstTask.tools))).toEqual(["read", "grep", "find", "ls"]);
       } finally {
         db.close();
       }
@@ -640,8 +642,8 @@ describe("delegate telemetry contract", () => {
         // #126 vehicle: read-only tasks — one settles early, one stays
         // gated for the force-cancel; the subject is the call status row.
         tasks: [
-          { prompt: "quick", tools: ["read"] },
-          { prompt: "slow", tools: ["read"] },
+          { prompt: "quick", agent: "explore" },
+          { prompt: "slow", agent: "explore" },
         ],
         async: true,
       });
@@ -804,7 +806,7 @@ describe("delegate telemetry contract", () => {
       subagents.respond([fauxAssistantMessage("SECOND-BATCH")]);
       const second = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "fast", tools: ["read"] }],
+        tasks: [{ prompt: "fast", agent: "explore" }],
       });
       expect(second.isError).toBe(false);
 
@@ -862,7 +864,6 @@ describe("delegate telemetry contract", () => {
           {
             prompt: "make a change",
             cwd: repo,
-            tools: ["write"],
             workspace: "isolated",
           },
         ],
@@ -902,7 +903,7 @@ describe("delegate telemetry contract", () => {
 
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "hang", tools: ["write"] }],
+        tasks: [{ prompt: "hang" }],
       });
       expect(result.text).toMatch(/stall|cancel/i);
       expect(subagents.state.callCount).toBe(1);
@@ -946,7 +947,6 @@ describe("delegate telemetry contract", () => {
           {
             prompt: "check telemetry files",
             cwd: repo,
-            tools: ["bash"],
             workspace: "isolated",
           },
         ],
@@ -984,7 +984,7 @@ describe("delegate telemetry contract", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { prompt: "x", agent: "scout", tools: ["read"] },
+          { prompt: "x", agent: "scout" },
           { prompt: "y", agent: "bogus-agent" },
         ],
       });
@@ -1124,7 +1124,6 @@ describe("delegate telemetry contract", () => {
     const result = await callDelegate(session, {
       tasks: [{
         prompt: "PRIVATE-PROMPT-SENTINEL",
-        systemPrompt: "PRIVATE-BASE-SENTINEL",
         unknownField: "PRIVATE-UNKNOWN-SENTINEL",
       }],
     });
@@ -1242,8 +1241,8 @@ describe("delegate telemetry contract", () => {
 
       const result = await callDelegate(session, {
         tasks: [
-          { id: "w1", prompt: "first writer", tools: ["write"] },
-          { id: "w2", prompt: "second writer", tools: ["write"] },
+          { id: "w1", prompt: "first writer" },
+          { id: "w2", prompt: "second writer" },
         ],
         async: true,
       });
@@ -1289,13 +1288,11 @@ describe("delegate telemetry contract", () => {
           {
             prompt: "shared writer",
             cwd: repo,
-            tools: ["write"],
             workspace: "shared",
           },
           {
             prompt: "isolated writer",
             cwd: repo,
-            tools: ["write"],
             workspace: "isolated",
           },
         ],

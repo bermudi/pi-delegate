@@ -92,7 +92,7 @@ test(
     const dispatched = await callDelegate(session, {
       tasks: [0, 1].map((n) => ({
         prompt: `queued ${n}`,
-        tools: ["read"],
+        agent: "explore",
       })),
       async: true,
     });
@@ -153,7 +153,7 @@ test(
     subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "hold",  tools: ["write"] }],
+      tasks: [{ prompt: "hold" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -177,7 +177,7 @@ test(
     // While the worker may still mutate, conflicting work rejects.
     const rejected = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "conflict",  tools: ["write"] }],
+      tasks: [{ prompt: "conflict" }],
     });
     expect(rejected.isError).toBe(true);
     expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
@@ -197,7 +197,7 @@ test(
 
     const admitted = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "after",  tools: ["write"] }],
+      tasks: [{ prompt: "after" }],
     });
     expect(admitted.isError).toBe(false);
     expect(admitted.text).toContain("AFTER-QUARANTINE");
@@ -235,7 +235,6 @@ test(
       tasks: [
         {
           prompt: "hang",
-          tools: ["write"],
         },
       ],
     });
@@ -248,7 +247,7 @@ test(
     // The abandoned worker may still mutate: conflicting work rejects.
     const rejected = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "conflict",  tools: ["write"] }],
+      tasks: [{ prompt: "conflict" }],
     });
     expect(rejected.isError).toBe(true);
     expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
@@ -260,7 +259,7 @@ test(
     release();
     const admitted = await dispatchUntilAdmitted(session, {
       async: false,
-      tasks: [{ prompt: "after",  tools: ["write"] }],
+      tasks: [{ prompt: "after" }],
     });
     expect(admitted.isError).toBe(false);
     expect(admitted.text).toContain("AFTER-QUARANTINE");
@@ -294,11 +293,11 @@ test(
     const result = await callDelegate(session, {
       async: false,
       tasks: [
-        { id: "stuck", prompt: "hang", tools: ["write"] },
+        { id: "stuck", prompt: "hang" },
         {
           id: "dependent",
           prompt: "never runs",
-          tools: ["read"],
+          agent: "explore",
           dependsOn: ["stuck"],
         },
       ],
@@ -314,14 +313,14 @@ test(
     // not make its quarantined resources eligible for reuse.
     const rejected = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "conflict", tools: ["write"] }],
+      tasks: [{ prompt: "conflict" }],
     });
     expect(rejected.isError).toBe(true);
 
     release();
     const admitted = await dispatchUntilAdmitted(session, {
       async: false,
-      tasks: [{ prompt: "after", tools: ["write"] }],
+      tasks: [{ prompt: "after" }],
     });
     expect(admitted.isError).toBe(false);
     expect(admitted.text).toContain("AFTER-QUARANTINE");
@@ -361,13 +360,11 @@ test(
         {
           id: "stuck",
           prompt: "stuck writer",
-          tools: ["write"],
         },
-        { id: "prereq", prompt: "quick read", tools: ["read"] },
+        { id: "prereq", prompt: "quick read", agent: "explore" },
         {
           id: "second",
           prompt: "second writer",
-          tools: ["write"],
           dependsOn: ["prereq"],
         },
       ],
@@ -430,7 +427,6 @@ test(
       tasks: [
         {
           prompt: "hang",
-          tools: ["write"],
         },
       ],
     });
@@ -454,7 +450,7 @@ test(
     // reserved until the gate releases and quiescence is proven.
     const rejected = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "conflict",  tools: ["write"] }],
+      tasks: [{ prompt: "conflict" }],
     });
     expect(rejected.isError).toBe(true);
     expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
@@ -462,7 +458,7 @@ test(
     release();
     const admitted = await dispatchUntilAdmitted(session, {
       async: false,
-      tasks: [{ prompt: "after",  tools: ["write"] }],
+      tasks: [{ prompt: "after" }],
     });
     expect(admitted.isError).toBe(false);
     expect(admitted.text).toContain("AFTER-QUARANTINE");
@@ -490,8 +486,8 @@ test(
     const pending = callDelegateDetached(session, {
       async: false,
       tasks: [
-        { prompt: "hang one", tools: ["read"] },
-        { prompt: "hang two", tools: ["read"] },
+        { prompt: "hang one", agent: "explore" },
+        { prompt: "hang two", agent: "explore" },
       ],
     });
 
@@ -531,7 +527,7 @@ test(
     subagents.respond([gated]);
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "streaming",  tools: ["read"] }],
+      tasks: [{ prompt: "streaming",  agent: "explore" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -588,7 +584,7 @@ test(
 
     const result = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "hang",  tools: ["write"] }],
+      tasks: [{ prompt: "hang" }],
     });
     // The call returned at all: settlement did not wait on the still-gated
     // worker. The cause is the inactivity watchdog — not a deadline, not an
@@ -601,14 +597,14 @@ test(
     // stays reserved, same as any quarantined cancellation.
     const rejected = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "conflict",  tools: ["write"] }],
+      tasks: [{ prompt: "conflict" }],
     });
     expect(rejected.isError).toBe(true);
 
     release();
     const admitted = await dispatchUntilAdmitted(session, {
       async: false,
-      tasks: [{ prompt: "after",  tools: ["write"] }],
+      tasks: [{ prompt: "after" }],
     });
     expect(admitted.isError).toBe(false);
     expect(admitted.text).toContain("AFTER-QUARANTINE");
@@ -724,7 +720,7 @@ test(
       const pending = callDelegateDetached(session, {
         async: false,
         workspace: "isolated",
-        tasks: [{ prompt: "hold at preparation", cwd: repo, tools: ["write"] }],
+        tasks: [{ prompt: "hold at preparation", cwd: repo }],
       });
       // Call 1 (write-scope probe) ran through; call 2 is parked inside
       // prepareIsolated.
@@ -780,7 +776,7 @@ test(
       const pending = callDelegateDetached(session, {
         async: true,
         workspace: "isolated",
-        tasks: [{ prompt: "hold at preparation", cwd: repo, tools: ["write"] }],
+        tasks: [{ prompt: "hold at preparation", cwd: repo }],
       });
       // Call 1 (write-scope probe) ran through; call 2 is parked inside
       // prepareIsolated.
@@ -893,7 +889,7 @@ test(
       const dispatched = call({
         async: true,
         workspace: "isolated",
-        tasks: [{ prompt: "cancel during prep", cwd: repo, tools: ["write"] }],
+        tasks: [{ prompt: "cancel during prep", cwd: repo }],
       });
       // Call 1 (write-scope probe) ran through; call 2 is parked inside
       // prepareIsolated.
@@ -1011,7 +1007,7 @@ test(
         async: true,
         workspace: "isolated",
         tasks: [
-          { prompt: "fail at preparation", cwd: repo, tools: ["write"] },
+          { prompt: "fail at preparation", cwd: repo },
         ],
       });
       expect(result.isError).toBe(true);
@@ -1049,7 +1045,7 @@ test(
         async: false,
         workspace: "isolated",
         tasks: [
-          { prompt: "fail at preparation", cwd: repo, tools: ["write"] },
+          { prompt: "fail at preparation", cwd: repo },
         ],
       });
       expect(result.isError).toBe(true);
@@ -1088,7 +1084,7 @@ test(
     subagents.respond([hanging]);
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "hang indefinitely", tools: ["read"] }],
+      tasks: [{ prompt: "hang indefinitely", agent: "explore" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);

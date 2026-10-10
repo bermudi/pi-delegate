@@ -263,7 +263,7 @@ export async function resolveTasks(
   // that has it (through its own provider extension) can hand it to a
   // child whose provider resolved an extension allowlist — tasks without
   // one strip it per-task below.
-  if (tasks.some((task) => task.agent === "default" && task.tools === undefined)) {
+  if (tasks.some((task) => task.agent === "default")) {
     try {
       parentActive = env
         .getActiveTools()
@@ -272,7 +272,7 @@ export async function resolveTasks(
       const detail = error instanceof Error ? error.message : String(error);
       const message =
         `Cannot resolve default-profile parent tools: ${detail}. ` +
-        `Restore the parent tool inventory or supply explicit tools for every default-profile task.`;
+        `Restore the parent tool inventory or use a named agent whose profile carries its own tools.`;
       env.diagnostics.log("error", "Cannot resolve default-profile parent tools", {}, error);
       throw new Error(message, { cause: error });
     }
@@ -375,11 +375,7 @@ export async function resolveTasks(
     const hasProviderExtensions =
       providerExtensions !== undefined && providerExtensions.paths.size > 0;
     let tools: string[] | string;
-    if (task.tools !== undefined) {
-      tools = expandTools(task.tools, {
-        providerExtensions: hasProviderExtensions,
-      });
-    } else if (agent === "default") {
+    if (agent === "default") {
       tools = parentActive;
     } else if (profile?.tools) {
       tools = [...profile.tools];
@@ -421,7 +417,7 @@ export async function resolveTasks(
     // inherited — the structured prompt inputs expose only the user-authored
     // fields here, and the child session builds tool docs from its own
     // inventory. A force-replaced parent prompt disables inheritance.
-    const authoredPrompt = task.systemPrompt ?? profile?.systemPrompt;
+    const authoredPrompt = profile?.systemPrompt;
     let systemPrompt: string | undefined;
     const promptAppend: string[] = [];
     if (authoredPrompt !== undefined) {

@@ -61,7 +61,7 @@ describe("delegate interaction grammar (SPEC v3, #61)", () => {
         // #126 vehicle: read-only tasks admit concurrently — subject is
         // the inline/background grammar, not write admission.
         tasks: Array.from({ length: count }, (_, i) => ({
-          prompt: `task ${i}`, tools: ["read"],
+          prompt: `task ${i}`, agent: "explore",
         })),
       });
       expect(result.isError).toBe(false);
@@ -227,18 +227,32 @@ describe("canonical task fields (SPEC v3, #61)", () => {
     expect(results[0]!.id).toBe("correlation");
   });
 
-  test("canonical flat, stringified, string-tools and null recovery still dispatch", async () => {
+  test("canonical flat, stringified and null recovery still dispatch; task tools reject", async () => {
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
     for (const args of [
-      { async: false, prompt: "flat", tools: "read", agent: null },
-      { async: false, tasks: JSON.stringify([{ prompt: "encoded", tools: "read", id: null }]), brief: null },
+      { async: false, prompt: "flat", agent: null },
+      { async: false, tasks: JSON.stringify([{ prompt: "encoded", id: null }]), brief: null },
     ]) {
       subagents.respond([fauxAssistantMessage("RECOVERED")]);
       const result = await callDelegate(session, args);
       expect(result.isError).toBe(false);
       expect(result.text).toContain("RECOVERED");
     }
+    expect(subagents.state.callCount).toBe(2);
+    // #130: the string-tools repair died with the field — a task-level
+    // tools shape hits the removal teaching; a flat top-level tools
+    // name fails the schema wall (presence still rejects pre-dispatch).
+    for (const args of [
+      { async: false, tasks: [{ prompt: "x", tools: ["read"] }] },
+      { async: false, tasks: [{ prompt: "x", tools: "read" }] },
+    ]) {
+      const rejected = await callDelegate(session, args);
+      expect(rejected.isError).toBe(true);
+      expect(rejected.text).toContain("tools field has been removed");
+    }
+    const flat = await callDelegate(session, { async: false, prompt: "x", tools: "read" });
+    expect(flat.isError).toBe(true);
     expect(subagents.state.callCount).toBe(2);
   });
 

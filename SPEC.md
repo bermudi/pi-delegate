@@ -259,10 +259,13 @@ mid-flight the parent can steer. The grammar:
   their exact, case-sensitive names. No automatic agent-name translations.
   User-authored profiles named `general` or `scout` remain valid exact
   definitions. Unknown names list the available names.
-- **Profile defaults.** Markdown profile `tools` and body provide reusable
-  capability and base-instruction defaults; task-level overrides remain
-  available and retain their existing precedence. Operator configuration,
-  model inheritance, admission, and all safety invariants are unchanged.
+- **Profiles own capability and base prompts (#130 verdict 5).** Markdown
+  profile `tools` frontmatter and body are the only per-task capability
+  and base-instruction selectors; the task-level `tools` and
+  `systemPrompt` overrides are removed (presence rejects with
+  teaching). The default profile mirrors the parent's active tools;
+  built-in profiles carry fixed toolsets. Operator configuration, model
+  inheritance, admission, and all safety invariants are unchanged.
 - **One surface (ADR 0002, 2026-10-07).** There is one advertised schema.
   The former operator `surface` split (compact default, full opt-in via
   delegate.json and /reload) is removed: the mode wall made every
@@ -274,15 +277,16 @@ mid-flight the parent can steer. The grammar:
   accepted arguments are the single schema; nothing hidden executes
   through recovery normalization. Dispatch advertises `tasks`, `async`,
   `workspace`, and `brief`; each task has `prompt`, `agent`, `cwd`,
-  `workspace`, `id`, `description`, `tools`, `systemPrompt`,
+  `workspace`, `id`,
   `sessionId`, `resumeFrom`, and `dependsOn`;
   ticket actions are poll, wait, cancel, answer, steer, and
   interrupt. (Field set as of the ADR 0002 unification; prune
   verdicts in #130 remove fields in their own changes — `tokenBudget`
   (#129), `operationId`, `pause`/`resume`, `tail` with `offset`/
   `waitMs`, the wait bound `timeoutMs` with wait-any `tickets`, the
-  caller steer key `steerId`, and the task display label
-  `description` are already gone.) Session
+  caller steer key `steerId`, the task display label
+  `description`, and the task `tools`/`systemPrompt` overrides
+  are already gone.) Session
   list/close unchanged. The manual is
   single-edition: it documents exactly what the schema accepts.
 - **Labels are derived, not supplied.** Call rows and result headers
@@ -309,9 +313,9 @@ mid-flight the parent can steer. The grammar:
   for providers that need one.
 - **No nesting.** Children never receive the delegate family —
   `delegate`, `delegate_ticket`, and `delegate_session` are stripped,
-  silently, from every toolset a subagent can be given (#45): explicit
-  task `tools`, a profile's frontmatter `tools`, and the mirrored
-  parent inventory alike (the mirror excludes them by construction).
+  silently, from every toolset a subagent can be given (#45): a
+  profile's frontmatter `tools` and the mirrored parent inventory
+  alike (the mirror excludes them by construction).
   This matches the largest training surface (Claude Code subagents
   lack Task) and avoids recursion admission and depth accounting
   entirely. `ask_parent` is unaffected.
@@ -472,7 +476,7 @@ contract:
   copy-confusion, it is not a sandbox, and reads are never blocked. A
   guard that fails to load fails the task — workers never run
   unguarded. The child prompt carries a workspace note mapping source
-  paths to copy paths (appended under authored `systemPrompt`s too).
+  paths to copy paths (appended over authored base prompts too).
   Shell commands remain unconfined: when source drift is observed
   during an isolated run — or a scratch run on a usable Git repository —
   in which a worker used a shell, that worker's `integration.sourceDrift`

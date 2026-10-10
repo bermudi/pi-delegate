@@ -109,7 +109,7 @@ describe("pooled-session residency — idle sessions unload to disk (SPEC v3, is
       subagents.respond([fauxAssistantMessage("hi"), fauxAssistantMessage("hi")]);
       await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "x", sessionId: "conv", tools: ["read"] }],
+        tasks: [{ prompt: "x", sessionId: "conv", agent: "explore" }],
       });
       await callDelegate(session, {
         async: false,
@@ -119,7 +119,7 @@ describe("pooled-session residency — idle sessions unload to disk (SPEC v3, is
       const mismatched = await callDelegate(session, {
         async: false,
         tasks: [
-          { prompt: "x", sessionId: "conv", tools: ["read", "bash"] },
+          { prompt: "x", sessionId: "conv" },
         ],
       });
       expect(mismatched.text).toMatch(/conv|session/i);
@@ -168,7 +168,7 @@ describe("pooled-session residency — idle sessions unload to disk (SPEC v3, is
       // shared write reservation.
       const third = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "x", sessionId: "s3", tools: ["read"] }],
+        tasks: [{ prompt: "x", sessionId: "s3", agent: "explore" }],
       });
       expect(third.isError).toBe(false);
       const during = await callDelegateSession(session, { action: "list" });

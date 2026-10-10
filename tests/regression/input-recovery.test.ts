@@ -52,7 +52,7 @@ describe("regression: malformed provider calls recover at the public boundary", 
   test("accepts flat task fields after boundary recovery", async () => {
     const result = await call({
       prompt: "inspect",
-      tools: '["read","grep"]',
+      agent: "explore",
       async: true,
     });
     expect(result.text).not.toContain("Validation failed");
@@ -60,7 +60,7 @@ describe("regression: malformed provider calls recover at the public boundary", 
 
   test("accepts a bare tool group after boundary recovery", async () => {
     const result = await call({
-      tasks: [{ prompt: "inspect", tools: "ro" }],
+      tasks: [{ prompt: "inspect", agent: "explore" }],
     });
     expect(result.text).not.toContain("Validation failed");
   });
@@ -100,16 +100,15 @@ describe("regression: malformed provider calls recover at the public boundary", 
     expect(invalidTasks.text).toContain("Validation failed");
     expect(invalidTasks.text).not.toContain("dispatch is not implemented");
 
-    // v1: the schema rejected the ambiguous tools string outright. pi-ai's
-    // typebox 1.x validator now coerces it to ["read, write"] before our
-    // semantics run, so prepareArguments rejects it pre-coercion instead
-    // (found in the #10 review): still a whole-call failure with actionable
-    // guidance, never a degraded "unknown tool" error.
+    // v1: the schema rejected the ambiguous tools string outright. #130
+    // removed task tools entirely, so every ambiguous shape now hits the
+    // removal teaching pre-schema — still a whole-call failure with
+    // actionable guidance, never a degraded "unknown tool" error.
     const invalidTools = await call({
       tasks: [{ prompt: "inspect", tools: "read, write" }],
     });
     expect(invalidTools.isError).toBe(true);
-    expect(invalidTools.text).toContain("tools");
+    expect(invalidTools.text).toContain("tools field has been removed");
     expect(invalidTools.text).not.toContain("unknown tool");
     expect(invalidTools.text).not.toContain("dispatch is not implemented");
   });

@@ -809,8 +809,8 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
     model.respond([routed, routed, routed]);
     const dispatched = await callDelegate(session, {
       tasks: [
-        { prompt: "inspect the tree", cwd: repo, tools: ["read"] },
-        { prompt: "write a file", cwd: repo, tools: ["bash"] },
+        { prompt: "inspect the tree", cwd: repo, agent: "explore" },
+        { prompt: "write a file", cwd: repo },
       ],
       async: true,
     });

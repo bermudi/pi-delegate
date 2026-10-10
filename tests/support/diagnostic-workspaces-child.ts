@@ -192,7 +192,6 @@ try {
           prompt: "synthetic copy probe",
           cwd: source,
           workspace,
-          tools: ["bash"],
         },
       ],
     });
@@ -259,7 +258,7 @@ try {
   const shared = await callDelegate(session, {
     async: false,
     tasks: [
-      { prompt: "synthetic shared evidence", cwd: source, tools: ["bash"] },
+      { prompt: "synthetic shared evidence", cwd: source },
     ],
   });
   assert(!shared.isError, "Shared evidence failed");

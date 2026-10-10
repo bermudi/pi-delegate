@@ -100,8 +100,8 @@ describe("delegate workspace and shared-write contract", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { id: "w1", prompt: "w1", cwd: dir,  tools: ["write"] },
-          { id: "w2", prompt: "w2", cwd: dir,  tools: ["write"], dependsOn: ["w1"] },
+          { id: "w1", prompt: "w1", cwd: dir },
+          { id: "w2", prompt: "w2", cwd: dir, dependsOn: ["w1"] },
         ],
       });
       expect(result.isError).toBe(false);
@@ -143,8 +143,8 @@ describe("delegate workspace and shared-write contract", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { id: "w1", prompt: "w1", cwd: dir,  tools: ["write"] },
-          { id: "w2", prompt: "w2", cwd: dir,  tools: ["write"] },
+          { id: "w1", prompt: "w1", cwd: dir },
+          { id: "w2", prompt: "w2", cwd: dir },
         ],
       });
       expect(result.isError).toBe(true);
@@ -178,9 +178,9 @@ describe("delegate workspace and shared-write contract", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { id: "a", prompt: "a", cwd: dir,  tools: ["write"] },
-          { id: "b", prompt: "b", cwd: dir,  tools: ["write"], dependsOn: ["a"] },
-          { id: "c", prompt: "c", cwd: dir,  tools: ["write"] },
+          { id: "a", prompt: "a", cwd: dir },
+          { id: "b", prompt: "b", cwd: dir, dependsOn: ["a"] },
+          { id: "c", prompt: "c", cwd: dir },
         ],
       });
       expect(result.isError).toBe(true);
@@ -243,12 +243,10 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "write x.txt",
             cwd: dir,
-            tools: ["write"],
           },
           {
             prompt: "write y.txt",
             cwd: dir,
-            tools: ["write"],
           },
         ],
       });
@@ -278,13 +276,11 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "shared task",
             cwd: dir,
-            tools: ["write"],
             workspace: "shared",
           },
           {
             prompt: "defaulted task",
             cwd: dir,
-            tools: ["write"],
           },
         ],
       });
@@ -314,7 +310,7 @@ describe("delegate workspace and shared-write contract", () => {
 
       const dispatched = await callDelegate(session, {
         tasks: [
-          { prompt: "bg", cwd: dir,  tools: ["write"] },
+          { prompt: "bg", cwd: dir },
         ],
         async: true,
       });
@@ -332,7 +328,7 @@ describe("delegate workspace and shared-write contract", () => {
       const rejected = await callDelegate(session, {
         async: false,
         tasks: [
-          { prompt: "now", cwd: dir,  tools: ["write"] },
+          { prompt: "now", cwd: dir },
         ],
       });
       expect(rejected.isError).toBe(true);
@@ -365,7 +361,7 @@ describe("delegate workspace and shared-write contract", () => {
       subagents.respond([hanging]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ id: "holder", prompt: "bg", cwd: dir, tools: ["write"] }],
+        tasks: [{ id: "holder", prompt: "bg", cwd: dir }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -379,7 +375,7 @@ describe("delegate workspace and shared-write contract", () => {
 
       const rejected = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "now", cwd: dir, tools: ["write"] }],
+        tasks: [{ prompt: "now", cwd: dir }],
       });
       expect(rejected.isError).toBe(true);
       expect(rejected.text).toContain("1/4 tasks are running");
@@ -410,13 +406,11 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "shared",
             cwd: dir,
-            tools: ["write"],
             workspace: "shared",
           },
           {
             prompt: "isolated",
             cwd: dir,
-            tools: ["write"],
             workspace: "isolated",
           },
         ],
@@ -442,7 +436,7 @@ describe("delegate workspace and shared-write contract", () => {
         {
           prompt: "look around",
           cwd: dir,
-          tools: ["read"],
+          agent: "explore",
           workspace: "scratch",
         },
         {
@@ -481,7 +475,6 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "write a file",
             cwd: linked,
-            tools: ["write"],
             workspace: "scratch",
           },
         ],
@@ -513,12 +506,10 @@ describe("delegate workspace and shared-write contract", () => {
             {
               prompt: "first",
               cwd: dir,
-              tools: ["write", "bash"],
             },
             {
               prompt: "second",
               cwd: dir,
-              tools: ["write"],
             },
           ],
         });
@@ -547,6 +538,14 @@ describe("delegate workspace and shared-write contract", () => {
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const dir = tempDir();
+      // #130 removed task-level tools: a non-bash writer toolset comes
+      // from an authored profile now (write/edit without bash — the
+      // case where a shrunken scope would slip an overlap through).
+      mkdirSync(join(session.cwd, "agents"), { recursive: true });
+      writeFileSync(
+        join(session.cwd, "agents", "nonbash-writer.md"),
+        "---\nname: nonbash-writer\ndescription: writes without bash\ntools: read, edit, write\n---\nEdits files directly.\n",
+      );
       gitInit(dir);
       const left = join(dir, "left");
       const right = join(dir, "right");
@@ -573,13 +572,13 @@ describe("delegate workspace and shared-write contract", () => {
           tasks: [
             {
               prompt: "write left",
+              agent: "nonbash-writer",
               cwd: left,
-              tools: ["write"],
             },
             {
               prompt: "write right",
+              agent: "nonbash-writer",
               cwd: right,
-              tools: ["write"],
             },
           ],
         });
@@ -640,13 +639,11 @@ describe("delegate workspace and shared-write contract", () => {
             prompt: "write scratch-marker.txt",
             cwd: dir,
             workspace: "scratch",
-            tools: ["write"],
           },
           {
             prompt: "write nested-marker.txt",
             cwd: join(dir, "sub"),
             workspace: "scratch",
-            tools: ["write"],
           },
         ],
       });
@@ -694,12 +691,10 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "write shared-file.txt",
             cwd: dir,
-            tools: ["write"],
           },
           {
             prompt: "write scratch-file.txt",
             cwd: dir,
-            tools: ["write"],
             workspace: "scratch",
           },
         ],
@@ -742,7 +737,6 @@ describe("delegate workspace and shared-write contract", () => {
           {
             prompt: "hi",
             cwd: dir,
-            tools: ["write"],
             workspace: "scratch",
           },
         ],
@@ -804,13 +798,11 @@ describe("delegate workspace and shared-write contract", () => {
             prompt: "write a.txt",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
           {
             prompt: "write b.txt",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
         ],
       });
@@ -885,7 +877,6 @@ describe("delegate workspace and shared-write contract", () => {
             prompt: "change victim.txt first line",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
         ],
       });
@@ -949,13 +940,11 @@ describe("delegate workspace and shared-write contract", () => {
             prompt: "append SAME to same.txt (worker one)",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
           {
             prompt: "append SAME to same.txt (worker two)",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
         ],
       });
@@ -1004,7 +993,7 @@ exec '${realGit}' "$@"
               fauxToolCall("write", { path: "b.txt", content: "worker\n" }),
             ]);
       subagents.respond([write, write, write]);
-      const result = await callDelegate(session, { async: false, tasks: [{ prompt: "edit both", cwd: dir, workspace: "isolated", tools: ["write"] }] });
+      const result = await callDelegate(session, { async: false, tasks: [{ prompt: "edit both", cwd: dir, workspace: "isolated" }] });
       expect(result.text).toMatch(/apply_failed/);
       expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("base\n");
       expect(statSync(join(dir, "a.txt")).mode & 0o777).toBe(0o600);
@@ -1047,7 +1036,7 @@ exec '${realGit}' "$@"
       subagents.respond([write, write]);
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "delete and edit", cwd: dir, workspace: "isolated", tools: ["bash", "write"] }],
+        tasks: [{ prompt: "delete and edit", cwd: dir, workspace: "isolated" }],
       });
       expect(result.text).toMatch(/apply_failed/);
       expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("original\n");
@@ -1084,9 +1073,9 @@ exec '${realGit}' "$@"
     subagents.respond(Array(6).fill(write));
     const otherDir = tempDir();
     const dispatched = callDelegate(session, { async: false, tasks: [
-      { id: "first", prompt: "edit same", cwd: dir, workspace: "isolated", tools: ["write"] },
-      { id: "second", prompt: "edit same again", cwd: dir, workspace: "isolated", tools: ["write"] },
-      { id: "after", prompt: "dependent marker", cwd: otherDir, dependsOn: ["second"], tools: ["write"] },
+      { id: "first", prompt: "edit same", cwd: dir, workspace: "isolated" },
+      { id: "second", prompt: "edit same again", cwd: dir, workspace: "isolated" },
+      { id: "after", prompt: "dependent marker", cwd: otherDir, dependsOn: ["second"] },
     ] });
     await ready;
     writeFileSync(join(dir, "same.txt"), "human\n");
@@ -1125,8 +1114,8 @@ exec '${realGit}' "$@"
     };
     subagents.respond(Array(6).fill(respond));
     const dispatched = callDelegate(session, { async: false, tasks: [
-      { prompt: "first proposal", cwd: dir, workspace: "isolated", tools: ["write"] },
-      { prompt: "second proposal", cwd: dir, workspace: "isolated", tools: ["write"] },
+      { prompt: "first proposal", cwd: dir, workspace: "isolated" },
+      { prompt: "second proposal", cwd: dir, workspace: "isolated" },
     ] });
     await ready;
     writeFileSync(join(dir, "a.txt"), "human\n");
@@ -1153,7 +1142,7 @@ exec '${realGit}' "$@"
         ? fauxAssistantMessage("DONE")
         : fauxAssistantMessage([fauxToolCall("bash", { command: "ln -sfn next.txt link.txt" })]);
     subagents.respond([write, write]);
-    const result = await callDelegate(session, { async: false, tasks: [{ prompt: "update symlink", cwd: dir, workspace: "isolated", tools: ["bash"] }] });
+    const result = await callDelegate(session, { async: false, tasks: [{ prompt: "update symlink", cwd: dir, workspace: "isolated" }] });
     expect(result.text).toMatch(/applied_unverified/);
     expect(readlinkSync(join(dir, "link.txt"))).toBe("next.txt");
   });
@@ -1174,7 +1163,7 @@ exec '${realGit}' "$@"
     subagents.respond([step, step]);
     const result = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "replace file with directory", cwd: dir, workspace: "isolated", tools: ["bash"] }],
+      tasks: [{ prompt: "replace file with directory", cwd: dir, workspace: "isolated" }],
     });
     expect(result.text).toContain("applied_unverified");
     expect(readFileSync(join(dir, "a/new"), "utf8")).toBe("new file\n");
@@ -1197,7 +1186,7 @@ exec '${realGit}' "$@"
     subagents.respond([step, step]);
     const result = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "replace directory with file", cwd: dir, workspace: "isolated", tools: ["bash"] }],
+      tasks: [{ prompt: "replace directory with file", cwd: dir, workspace: "isolated" }],
     });
     expect(result.text).toContain("applied_unverified");
     expect(readFileSync(join(dir, "a"), "utf8")).toBe("new file\n");
@@ -1233,7 +1222,7 @@ exec '${realGit}' "$@"
       subagents.respond([step, step]);
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "replace file with directory", cwd: dir, workspace: "isolated", tools: ["bash"] }],
+        tasks: [{ prompt: "replace file with directory", cwd: dir, workspace: "isolated" }],
       });
       expect(result.text).toContain("apply_failed");
       expect(readFileSync(join(dir, "a"), "utf8")).toBe("original\n");
@@ -1258,7 +1247,7 @@ exec '${realGit}' "$@"
     subagents.respond([step, step]);
     const result = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "retarget link", cwd: dir, workspace: "isolated", tools: ["bash"] }],
+      tasks: [{ prompt: "retarget link", cwd: dir, workspace: "isolated" }],
     });
     expect(result.text).toContain("applied_unverified");
     expect(readlinkSync(join(dir, "link"))).toBe("new.txt");
@@ -1316,13 +1305,11 @@ exec '${realGit}' "$@"
             prompt: "change conflict.txt",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
           {
             prompt: "write ok.txt",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
         ],
       });
@@ -1383,13 +1370,11 @@ exec '${realGit}' "$@"
             {
               prompt: "scratch work",
               cwd: scratchSource,
-              tools: ["write"],
               workspace: "scratch",
             },
             {
               prompt: "probe owned roots",
               cwd: session.cwd,
-              tools: ["bash"],
               workspace: "isolated",
             },
           ],
@@ -1448,13 +1433,11 @@ exec '${realGit}' "$@"
             id: "finisher",
             prompt: "FINISHER writes finished.txt",
             cwd: dir,
-            tools: ["write"],
           },
           {
             id: "hold",
             prompt: "HOLD-SIBLING never finishes on its own",
             cwd: dir,
-            tools: ["write"],
           },
         ],
         async: true,
@@ -1600,13 +1583,11 @@ exec '${realGit}' "$@"
             id: "x",
             prompt: "WRITES-X writes x.txt",
             cwd: dir,
-            tools: ["write"],
           },
           {
             id: "y",
             prompt: "WRITES-Y checks for x.txt then writes y.txt",
             cwd: dir,
-            tools: ["write", "bash"],
           },
         ],
       });
@@ -1657,7 +1638,6 @@ exec '${realGit}' "$@"
             id: "ghost",
             prompt: "write ghost.txt then go silent",
             cwd: dir,
-            tools: ["write"],
           },
         ],
         async: true,
@@ -1715,7 +1695,7 @@ exec '${realGit}' "$@"
 
       subagents.respond([fauxAssistantMessage("FIRST-WRITER-DONE")]);
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "bg write", cwd: dir, tools: ["write"] }],
+        tasks: [{ prompt: "bg write", cwd: dir }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -1732,13 +1712,13 @@ exec '${realGit}' "$@"
       const budget = Date.now() + 3000;
       let next = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "write again", cwd: dir, tools: ["write"] }],
+        tasks: [{ prompt: "write again", cwd: dir }],
       });
       while (next.isError && Date.now() < budget) {
         await new Promise((r) => setTimeout(r, 25));
         next = await callDelegate(session, {
           async: false,
-          tasks: [{ prompt: "write again", cwd: dir, tools: ["write"] }],
+          tasks: [{ prompt: "write again", cwd: dir }],
         });
       }
       expect(next.isError).toBe(false);
@@ -1790,7 +1770,6 @@ exec '${realGit}' "$@"
             prompt: "edit guarded.txt",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
         ],
       });
@@ -1851,7 +1830,6 @@ exec '${realGit}' "$@"
             prompt: "edit guarded.txt",
             cwd: dir,
             workspace: "scratch",
-            tools: ["edit"],
           },
         ],
       });
@@ -1867,12 +1845,18 @@ exec '${realGit}' "$@"
     "isolated and scratch children get the workspace note with real roots",
     async () => {
       // The note teaches the copy mapping; it must reach the child even on
-      // an authored systemPrompt (appendSystemPrompt composes over both).
+      // an authored base prompt (appendSystemPrompt composes over both).
+      // #130: authored bases come from profile bodies now.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const dir = tempDir();
       gitInit(dir);
       const sourceRoot = realpathSync(dir);
+      mkdirSync(join(session.cwd, "agents"), { recursive: true });
+      writeFileSync(
+        join(session.cwd, "agents", "authored-isolated.md"),
+        "---\nname: authored-isolated\ndescription: authored base\n---\nAUTHORED-BASE: verbatim.\n",
+      );
 
       const prompts = new Map<string, string>();
       const capture: FauxResponseFactory = async (context) => {
@@ -1895,20 +1879,17 @@ exec '${realGit}' "$@"
             prompt: "isolated task",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
           {
             prompt: "scratch task",
             cwd: dir,
             workspace: "scratch",
-            tools: ["write"],
           },
           {
             prompt: "authored isolated task",
+            agent: "authored-isolated",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
-            systemPrompt: "AUTHORED-BASE: verbatim.",
           },
         ],
       });
@@ -1962,7 +1943,6 @@ exec '${realGit}' "$@"
             prompt: "run a command",
             cwd: dir,
             workspace: "isolated",
-            tools: ["bash"],
           },
         ],
       });
@@ -2015,7 +1995,6 @@ exec '${realGit}' "$@"
             prompt: "observe only",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
         ],
       });
@@ -2063,7 +2042,6 @@ exec '${realGit}' "$@"
             prompt: "run a command",
             cwd: session.cwd,
             workspace: "isolated",
-            tools: ["bash"],
           },
         ],
       });
@@ -2114,7 +2092,6 @@ exec '${realGit}' "$@"
             prompt: "run a command",
             cwd: dir,
             workspace: "scratch",
-            tools: ["bash"],
           },
         ],
       });
@@ -2169,7 +2146,6 @@ exec '${realGit}' "$@"
             prompt: "run a command",
             cwd: dir,
             workspace: "scratch",
-            tools: ["bash"],
           },
         ],
       });
@@ -2220,7 +2196,6 @@ exec '${realGit}' "$@"
             prompt: "observe only",
             cwd: dir,
             workspace: "scratch",
-            tools: ["write"],
           },
         ],
       });
@@ -2286,13 +2261,11 @@ exec '${realGit}' "$@"
             prompt: "SCRATCH-MARKER observe only",
             cwd: dir,
             workspace: "scratch",
-            tools: ["bash"],
           },
           {
             prompt: "write worked.txt",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
         ],
       });
@@ -2348,13 +2321,11 @@ exec '${realGit}' "$@"
           {
             prompt: "SHARED-MARKER write shared-file.txt",
             cwd: dir,
-            tools: ["write"],
           },
           {
             prompt: "run a command",
             cwd: dir,
             workspace: "scratch",
-            tools: ["bash"],
           },
         ],
       });
@@ -2409,13 +2380,11 @@ exec '${realGit}' "$@"
           {
             prompt: "SHARED-MARKER run a command",
             cwd: dir,
-            tools: ["bash"],
           },
           {
             prompt: "run a command",
             cwd: dir,
             workspace: "scratch",
-            tools: ["bash"],
           },
         ],
       });
@@ -2476,7 +2445,6 @@ exec '${realGit}' "$@"
             prompt: "write files",
             cwd: dir,
             workspace: "scratch",
-            tools: ["write"],
           },
         ],
       });
@@ -2528,7 +2496,6 @@ exec '${realGit}' "$@"
             prompt: "write through the link",
             cwd: dir,
             workspace: "scratch",
-            tools: ["write"],
           },
         ],
       });
@@ -2584,7 +2551,6 @@ exec '${realGit}' "$@"
             prompt: "write, retarget, rewrite",
             cwd: dir,
             workspace: "scratch",
-            tools: ["write", "bash"],
           },
         ],
       });
@@ -2640,7 +2606,6 @@ exec '${realGit}' "$@"
             prompt: "run a command",
             cwd: dir,
             workspace: "isolated",
-            tools: ["bash"],
           },
         ],
       });

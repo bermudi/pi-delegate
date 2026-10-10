@@ -86,8 +86,8 @@ describe("transcript exclusivity contract", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { id: "a", prompt: "continue", tools: ["read"], resumeFrom: transcript },
-          { id: "b", prompt: "continue too", tools: ["read"], resumeFrom: transcript },
+          { id: "a", prompt: "continue", agent: "explore", resumeFrom: transcript },
+          { id: "b", prompt: "continue too", agent: "explore", resumeFrom: transcript },
         ],
       });
 
@@ -120,7 +120,7 @@ describe("transcript exclusivity contract", () => {
       subagents.respond([gated, fauxAssistantMessage("RESUMED-AFTER")]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "hold the transcript", tools: ["read"], resumeFrom: transcript }],
+        tasks: [{ prompt: "hold the transcript", agent: "explore", resumeFrom: transcript }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -133,7 +133,7 @@ describe("transcript exclusivity contract", () => {
       // names the owning work — before any second child starts.
       const busy = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "resume mid-flight", tools: ["read"], resumeFrom: transcript }],
+        tasks: [{ prompt: "resume mid-flight", agent: "explore", resumeFrom: transcript }],
       });
       expect(busy.isError).toBe(true);
       expect(busy.text).toContain("still in use");
@@ -146,7 +146,7 @@ describe("transcript exclusivity contract", () => {
       // Settled and quiesced: the transcript is resumable again.
       const after = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "resume now", tools: ["read"], resumeFrom: transcript }],
+        tasks: [{ prompt: "resume now", agent: "explore", resumeFrom: transcript }],
       });
       expect(after.isError).toBe(false);
       expect(after.text).toContain("RESUMED-AFTER");
@@ -174,7 +174,7 @@ describe("transcript exclusivity contract", () => {
       subagents.respond([gated]);
 
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "hold via the real path", tools: ["read"], resumeFrom: transcript }],
+        tasks: [{ prompt: "hold via the real path", agent: "explore", resumeFrom: transcript }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -185,7 +185,7 @@ describe("transcript exclusivity contract", () => {
 
       const busy = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "resume via alias", tools: ["read"], resumeFrom: alias }],
+        tasks: [{ prompt: "resume via alias", agent: "explore", resumeFrom: alias }],
       });
       expect(busy.isError).toBe(true);
       // The rejection names the canonical (real) path, proving the alias
@@ -223,7 +223,7 @@ describe("transcript exclusivity contract", () => {
       // Create the pooled session: a successful run persists its file.
       const first = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "seed the pool", tools: ["read"], sessionId: "pool-1" }],
+        tasks: [{ prompt: "seed the pool", agent: "explore", sessionId: "pool-1" }],
       });
       expect(first.isError).toBe(false);
 
@@ -240,7 +240,7 @@ describe("transcript exclusivity contract", () => {
 
       // Check the pooled session out on a gated async run.
       const dispatched = await callDelegate(session, {
-        tasks: [{ prompt: "hold the pooled session", tools: ["read"], sessionId: "pool-1" }],
+        tasks: [{ prompt: "hold the pooled session", agent: "explore", sessionId: "pool-1" }],
         async: true,
       });
       const ticket = ticketIdOf(dispatched.text);
@@ -251,7 +251,7 @@ describe("transcript exclusivity contract", () => {
 
       const busy = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "resume the pooled file", tools: ["read"], resumeFrom: pooledFile }],
+        tasks: [{ prompt: "resume the pooled file", agent: "explore", resumeFrom: pooledFile }],
       });
       expect(busy.isError).toBe(true);
       expect(busy.text).toContain("still in use");
@@ -262,7 +262,7 @@ describe("transcript exclusivity contract", () => {
 
       const after = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "resume the settled pool file", tools: ["read"], resumeFrom: pooledFile }],
+        tasks: [{ prompt: "resume the settled pool file", agent: "explore", resumeFrom: pooledFile }],
       });
       expect(after.isError).toBe(false);
       expect(after.text).toContain("RESUMED-POOL-FILE");
@@ -288,7 +288,7 @@ describe("transcript exclusivity contract", () => {
 
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "die on the first call", tools: ["read"] }],
+        tasks: [{ prompt: "die on the first call", agent: "explore" }],
       });
       expect(result.isError).toBe(true);
       expect(result.text).toContain("provider blew up");
@@ -307,7 +307,7 @@ describe("transcript exclusivity contract", () => {
       const resumed = await callDelegate(session, {
         async: false,
         tasks: [
-          { prompt: "continue", tools: ["read"], resumeFrom: sessionLine! },
+          { prompt: "continue", agent: "explore", resumeFrom: sessionLine! },
         ],
       });
       expect(resumed.isError).toBe(false);
@@ -338,7 +338,6 @@ describe("transcript exclusivity contract", () => {
           {
             prompt: "die in scratch",
             cwd: dir,
-            tools: ["write"],
             workspace: "scratch",
           },
         ],
@@ -369,7 +368,7 @@ describe("transcript exclusivity contract", () => {
       subagents.respond([fauxAssistantMessage("RESUMED-SYNC")]);
       const sync = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "continue", tools: ["read"], resumeFrom: transcript }],
+        tasks: [{ prompt: "continue", resumeFrom: transcript }],
       });
       expect(sync.isError).toBe(false);
       expect(sync.text).toContain("### Task task-1 ↻ab12cd34");
@@ -385,7 +384,7 @@ describe("transcript exclusivity contract", () => {
       subagents.respond([gated]);
       const dispatched = await callDelegate(session, {
         tasks: [
-          { prompt: "continue", tools: ["read"], resumeFrom: transcript },
+          { prompt: "continue", resumeFrom: transcript },
         ],
         async: true,
       });
@@ -431,7 +430,6 @@ describe("transcript exclusivity contract", () => {
           {
             agent: "default",
             prompt: "continue",
-            tools: ["read"],
             resumeFrom: second,
           },
         ],

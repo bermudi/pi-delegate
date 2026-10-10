@@ -66,10 +66,16 @@ describe("no nested dispatch and profile precedence (SPEC v3, issue #45)", () =>
     session = undefined;
   });
 
-  test("explicit task tools drop the delegate family silently", async () => {
-    // #45: a trained caller may pass the dispatch family through — the
-    // entries simply never exist in the child's inventory.
+  test("profile frontmatter tools drop the delegate family silently", async () => {
+    // #45: a trained caller may name the dispatch family in a profile's
+    // tools line — the entries simply never exist in the child's
+    // inventory. (#130 moved task-level tools to profiles.)
     session = await openDelegateBoundary();
+    mkdirSync(join(session.cwd, "agents"), { recursive: true });
+    writeFileSync(
+      join(session.cwd, "agents", "nestfree.md"),
+      "---\nname: nestfree\ndescription: ro plus the family\ntools: read, grep, delegate, delegate_ticket, delegate_session\n---\nInvestigates.\n",
+    );
     const subagents = await installSubagentModel(session);
     let observed: string[] | undefined;
     subagents.respond([
@@ -84,7 +90,7 @@ describe("no nested dispatch and profile precedence (SPEC v3, issue #45)", () =>
       tasks: [
         {
           prompt: "work",
-          tools: ["read", "delegate", "delegate_ticket", "delegate_session", "grep"],
+          agent: "nestfree",
         },
       ],
     });

@@ -281,6 +281,18 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   the /subagents dashboard. Unknown ticket actions now enumerate the
   available set (enumerate-or-inherit). The transcript-span read
   machinery stays internal to poll views and spill.
+- **Removed — task `tools` and `systemPrompt` overrides (#130,
+  2026-10-10).** Capability and base prompts belong to agents: the
+  default profile mirrors the parent's active tools, built-ins carry
+  fixed toolsets, and authored profiles select both via frontmatter
+  `tools` and body. Both fields reject with teaching before any work
+  (the string/array tools repairs and the blank-systemPrompt rule die
+  with the field); profile-frontmatter tool names keep their
+  discovery-time validation (an unknown name drops the profile, so
+  dispatching it fails closed as an enumerated unknown agent). The
+  web_search caller vector is gone with the field — children reach
+  extension tools only through the default profile's parent mirror,
+  gated per-task by the child provider's allowlist.
 - **Removed — task `description` display label (#130, 2026-10-10).**
   Labels are derived: call rows and result headers show the task id,
   else the agent name, else `inline` — an id set for correlation
@@ -522,7 +534,7 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   followed by the built-in role line and a fixed subagent framing appendix
   that carries no model identity. Extension-contributed sections, guidelines,
   and tool documentation are never inherited, and an extension-forced parent
-  prompt disables inheritance with a logged skip. Authored prompts (explicit
+  task `systemPrompt`, Markdown profile bodies) are used verbatim with nothing
   task `systemPrompt`, Markdown profile bodies) are used verbatim with nothing
   appended. Migration: none for callers — `default` now genuinely mirrors the
   parent persona, and built-in children keep their role while also honoring

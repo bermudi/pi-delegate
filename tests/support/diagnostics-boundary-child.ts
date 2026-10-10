@@ -191,7 +191,7 @@ try {
         fauxAssistantMessage("RECOVERY_OK"),
       ]);
       const first = await execute(delegate, {
-        tasks: [{ prompt: "PRIVATE_STARTUP", tools: [] }],
+        tasks: [{ prompt: "PRIVATE_STARTUP" }],
         async: false,
       }, true);
       assert(
@@ -215,7 +215,7 @@ try {
       // the per-return annotation itself: routing is repaired, so a fresh
       // dispatch carries no warning and does not see the earlier one.
       const fresh = await execute(delegate, {
-        tasks: [{ prompt: "PRIVATE_STARTUP", tools: [] }],
+        tasks: [{ prompt: "PRIVATE_STARTUP" }],
         async: false,
       });
       assert(
@@ -226,7 +226,7 @@ try {
       assert(model.state.callCount === 2, "Unkeyed identical dispatch did not execute independently");
       assert(!JSON.stringify(fresh.details).includes("diagnosticWarning"), "Warning polluted a clean result");
       const second = await execute(delegate, {
-        tasks: [{ prompt: "PRIVATE_RECOVERY", tools: [] }],
+        tasks: [{ prompt: "PRIVATE_RECOVERY" }],
         async: false,
       });
       assert(
@@ -234,7 +234,7 @@ try {
         "Routing recovery dispatch failed",
       );
       model.respond([fauxAssistantMessage("TICKET_RENDER_OK")]);
-      const receipt = await execute(delegate, { tasks: [{ prompt: "ticket warning", tools: [] }], async: true });
+      const receipt = await execute(delegate, { tasks: [{ prompt: "ticket warning" }], async: true });
       const ticket = ticketIdOf(text(receipt));
       await rpc({ action: "wait", ticket, timeoutMs: 3000 });
       blockBoth();
@@ -262,7 +262,7 @@ try {
       model.respond([fauxAssistantMessage("", {
         stopReason: "error", errorMessage: "invalid request: synthetic fixture failure",
       })]);
-      const failed = await execute(delegate, { tasks: [{ prompt: "synthetic failed task", tools: [] }], async: false }, true);
+      const failed = await execute(delegate, { tasks: [{ prompt: "synthetic failed task" }], async: false }, true);
       assert(failed.isError, "Failed worker did not return an error result");
       renderedWarning(delegate, failed, historyDelegate);
       history.dispose();
@@ -281,7 +281,7 @@ try {
         fauxAssistantMessage("RETRY_OK"),
       ]);
       const result = await execute(delegate, {
-        tasks: [{ prompt: "PRIVATE_RETRY", tools: [] }],
+        tasks: [{ prompt: "PRIVATE_RETRY" }],
         async: false,
       });
       assert(
@@ -434,7 +434,7 @@ try {
         const result = await execute(
           delegate,
           {
-            tasks: [{ prompt: "PRIVATE_UNSUPPORTED", tools: [] }],
+            tasks: [{ prompt: "PRIVATE_UNSUPPORTED" }],
             async: false,
           },
           true,
@@ -542,7 +542,6 @@ try {
           {
             id: "asker",
             prompt: "PRIVATE_ASK",
-            tools: ["write"],
             sessionId: "diagnostic-owned",
           },
         ],
@@ -685,7 +684,7 @@ try {
       },
     ]);
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "PRIVATE_PROMPT", tools: [] }],
+      tasks: [{ prompt: "PRIVATE_PROMPT" }],
       async: true,
     });
     if (dispatched.isError) throw new Error("Diagnostic dispatch failed");
@@ -707,7 +706,7 @@ try {
     const questionTicket = ticketIdOf(
       (
         await callDelegate(session, {
-          tasks: [{ id: "asker", prompt: "PRIVATE_ASK_PROMPT", tools: [] }],
+          tasks: [{ id: "asker", prompt: "PRIVATE_ASK_PROMPT" }],
           async: true,
         })
       ).text,
@@ -748,7 +747,7 @@ try {
     const steerTicket = ticketIdOf(
       (
         await callDelegate(session, {
-          tasks: [{ id: "steered", prompt: "PRIVATE_STEER_PROMPT", tools: [] }],
+          tasks: [{ id: "steered", prompt: "PRIVATE_STEER_PROMPT" }],
           async: true,
         })
       ).text,

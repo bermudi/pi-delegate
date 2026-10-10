@@ -121,7 +121,7 @@ describe("async result delivery", () => {
     // the delivery options.
     const sends = spyOn(host, "sendCustomMessage");
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "background result", tools: [] }],
+      tasks: [{ prompt: "background result", agent: "explore" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -333,7 +333,7 @@ describe("async result delivery", () => {
     ]);
     const dispatched = await callDelegate(session, {
       tasks: [
-        { prompt: "write proposal", tools: ["write"], workspace: "isolated" },
+        { prompt: "write proposal", workspace: "isolated" },
       ],
       async: true,
     });
@@ -390,7 +390,7 @@ describe("async result delivery", () => {
     });
     const dispatched = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "late work", tools: [] }],
+      tasks: [{ prompt: "late work", agent: "explore" }],
     });
     expect(dispatched.isError).toBe(true);
     expect(dispatched.text).toContain("shutting down");
@@ -501,7 +501,7 @@ describe("async result delivery", () => {
     );
     await callDelegate(session, {
       tasks: [
-        { prompt: "write proposal", tools: ["write"], workspace: "isolated" },
+        { prompt: "write proposal", workspace: "isolated" },
       ],
       async: true,
     });
@@ -529,7 +529,7 @@ describe("async result delivery", () => {
     ]);
     const sends = spyOn(host, "sendCustomMessage");
     await callDelegate(session, {
-      tasks: [{ prompt: "fail", tools: [] }],
+      tasks: [{ prompt: "fail", agent: "explore" }],
       async: true,
     });
     await until(() => sends.mock.calls.length === 1);
@@ -554,12 +554,12 @@ describe("async result delivery", () => {
     const sends = spyOn(host, "sendCustomMessage");
 
     const dispatchA = await callDelegate(session, {
-      tasks: [{ prompt: "batch a", tools: [] }],
+      tasks: [{ prompt: "batch a", agent: "explore" }],
       async: true,
     });
     const ticketA = ticketIdOf(dispatchA.text);
     const dispatchB = await callDelegate(session, {
-      tasks: [{ prompt: "batch b", tools: [] }],
+      tasks: [{ prompt: "batch b", agent: "explore" }],
       async: true,
     });
     const ticketB = ticketIdOf(dispatchB.text);
@@ -599,7 +599,7 @@ describe("async result delivery", () => {
     const sends = spyOn(host, "sendCustomMessage");
 
     const dispatchA = await callDelegate(session, {
-      tasks: [{ prompt: "early", tools: [] }],
+      tasks: [{ prompt: "early" }],
       async: true,
     });
     const ticketA = ticketIdOf(dispatchA.text);
@@ -607,7 +607,7 @@ describe("async result delivery", () => {
     await until(() => sends.mock.calls.length === 1);
 
     const dispatchB = await callDelegate(session, {
-      tasks: [{ prompt: "late", tools: [] }],
+      tasks: [{ prompt: "late" }],
       async: true,
     });
     const ticketB = ticketIdOf(dispatchB.text);
@@ -649,7 +649,7 @@ describe("async result delivery", () => {
     const sends = spyOn(host, "sendCustomMessage");
 
     const dispatchA = await callDelegate(session, {
-      tasks: [{ prompt: "before navigation", tools: [] }],
+      tasks: [{ prompt: "before navigation", agent: "explore" }],
       async: true,
     });
     const ticketA = ticketIdOf(dispatchA.text);
@@ -666,7 +666,7 @@ describe("async result delivery", () => {
     // B dispatches after the transition and stamps the new leaf/epoch —
     // its delivery stays a same-leaf wake.
     const dispatchB = await callDelegate(session, {
-      tasks: [{ prompt: "after navigation", tools: [] }],
+      tasks: [{ prompt: "after navigation", agent: "explore" }],
       async: true,
     });
     const ticketB = ticketIdOf(dispatchB.text);
@@ -709,7 +709,7 @@ describe("async result delivery", () => {
     const sends = spyOn(host, "sendCustomMessage");
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "once", tools: [] }],
+      tasks: [{ prompt: "once" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -739,7 +739,7 @@ describe("async result delivery", () => {
     const errors = spyOn(console, "error").mockImplementation(() => {});
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "suppressed", tools: [] }],
+      tasks: [{ prompt: "suppressed" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -805,7 +805,7 @@ describe("async result delivery", () => {
     const run = session.run(
       when("busy parent", [
         calls("delegate", {
-          tasks: [{ prompt: "bg", tools: [] }],
+          tasks: [{ prompt: "bg" }],
           async: true,
         }),
         calls("delegate_hold", {}),
@@ -864,7 +864,7 @@ describe("async result delivery", () => {
     const errors = spyOn(console, "error").mockImplementation(() => {});
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "bg", tools: [] }],
+      tasks: [{ prompt: "bg" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -913,7 +913,7 @@ describe("async result delivery", () => {
     const errors = spyOn(console, "error").mockImplementation(() => {});
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "bg", tools: [] }],
+      tasks: [{ prompt: "bg" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -963,7 +963,7 @@ describe("async result delivery", () => {
     const sends = spyOn(host, "sendCustomMessage");
 
     const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "bg", tools: [] }],
+      tasks: [{ prompt: "bg" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
@@ -992,12 +992,12 @@ describe("async result delivery", () => {
     const sends = spyOn(host, "sendCustomMessage");
 
     const dispatchA = await callDelegate(session, {
-      tasks: [{ prompt: "consumed", tools: [] }],
+      tasks: [{ prompt: "consumed", agent: "explore" }],
       async: true,
     });
     const ticketA = ticketIdOf(dispatchA.text);
     const dispatchB = await callDelegate(session, {
-      tasks: [{ prompt: "delivered", tools: [] }],
+      tasks: [{ prompt: "delivered", agent: "explore" }],
       async: true,
     });
     const ticketB = ticketIdOf(dispatchB.text);

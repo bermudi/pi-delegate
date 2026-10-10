@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   callDelegate,
   callDelegateSession,
@@ -335,26 +337,32 @@ describe("delegate validation contract", () => {
     "a custom or unknown tool name fails the whole call before any task starts",
     async () => {
       // INVARIANTS "Shared writes": unknown tools are mutating — admission
-      // must never narrow an unrecognized capability to read-only. The
-      // public boundary enforces the stricter form: a tool outside the
-      // known child inventory rejects the whole call during resolution,
-      // before admission or any worker exists. A caller-supplied name can
-      // never silently downgrade a writer into an unreserved reader.
+      // must never narrow an unrecognized capability to read-only. #130
+      // removed task-level tools, so the only caller-shaped tool vector
+      // left is profile frontmatter — and discovery drops a profile whose
+      // tools line names an unknown tool, so dispatching it fails closed
+      // as an unknown agent (enumerated), before admission or any worker
+      // exists. A caller-supplied name can never silently downgrade a
+      // writer into an unreserved reader.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
+      mkdirSync(join(session.cwd, "agents"), { recursive: true });
+      writeFileSync(
+        join(session.cwd, "agents", "foghorn.md"),
+        "---\nname: foghorn\ndescription: bogus tools\ntools: mcp__foghorn__index_the_universe\n---\nBogus profile body.\n",
+      );
 
       const result = await callDelegate(session, {
         async: false,
         tasks: [
           {
             prompt: "never runs",
-            tools: ["read", "mcp__foghorn__index_the_universe"],
+            agent: "foghorn",
           },
         ],
       });
       expect(result.isError).toBe(true);
-      expect(result.text).toMatch(/unknown tool 'mcp__foghorn__index_the_universe'/);
-      expect(result.text).toMatch(/Known tools/i);
+      expect(result.text).toMatch(/foghorn/);
       // The provider was never reached: the rejection is pre-worker.
       expect(subagents.state.callCount).toBe(0);
     },

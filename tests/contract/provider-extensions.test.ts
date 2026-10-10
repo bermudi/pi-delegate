@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import type { TestSession } from "@marcfargas/pi-test-harness";
@@ -202,7 +203,7 @@ describe("providerExtensions (#59)", () => {
       });
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ agent: "coder", prompt: "x", tools: ["read"] }],
+        tasks: [{ agent: "coder", prompt: "x" }],
       });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("CODEX-OK");
@@ -226,7 +227,7 @@ describe("providerExtensions (#59)", () => {
       });
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ agent: "coder", prompt: "x", tools: ["read"] }],
+        tasks: [{ agent: "coder", prompt: "x" }],
       });
       expect(result.isError).toBe(true);
       expect(result.text).toContain("not installed in the user scope");
@@ -249,7 +250,7 @@ describe("providerExtensions (#59)", () => {
       });
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ agent: "coder", prompt: "x", tools: ["read"] }],
+        tasks: [{ agent: "coder", prompt: "x" }],
       });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("CODEX-OK");
@@ -270,7 +271,7 @@ describe("providerExtensions (#59)", () => {
       });
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "x", tools: ["read"] }],
+        tasks: [{ prompt: "x", agent: "explore" }],
       });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("FAUX-OK");
@@ -278,19 +279,27 @@ describe("providerExtensions (#59)", () => {
   );
 
   test(
-    "explicit web_search is rejected for a provider without an extension allowlist",
+    "web_search has no caller surface: frontmatter naming it drops the profile",
     async () => {
       // v1 evidence: web_search is not a built-in child tool — it
-      // exists only when a provider extension supplies it.
+      // exists only when a provider extension supplies it. #130 removed
+      // task-level tools, so no caller surface can name it; a profile
+      // whose frontmatter tries is dropped at discovery, and dispatch
+      // by its name fails closed as an unknown agent (enumerated).
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
+      mkdirSync(join(session.cwd, "agents"), { recursive: true });
+      writeFileSync(
+        join(session.cwd, "agents", "searcher.md"),
+        "---\nname: searcher\ndescription: searches\ntools: web_search\n---\nSearches.\n",
+      );
       subagents.respond([fauxAssistantMessage("UNREACHABLE")]);
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "x", tools: ["web_search"] }],
+        tasks: [{ prompt: "x", agent: "searcher" }],
       });
       expect(result.isError).toBe(true);
-      expect(result.text).toContain("not available to subagents");
+      expect(result.text).toContain("searcher");
       expect(subagents.state.callCount).toBe(0);
     },
   );
@@ -300,8 +309,13 @@ describe("providerExtensions (#59)", () => {
     async () => {
       // v1 evidence: delegate.test.ts:594 — the child's tool registry
       // carries web_search when the provider extension supplies it;
-      // tools activate only after the verified allowlist loads.
-      session = await openDelegateBoundary();
+      // tools activate only after the verified allowlist loads. #130:
+      // the child reaches it through the default profile's parent
+      // mirror — the parent loads the extension, the child's own
+      // allowlist supplies the real registry.
+      session = await openDelegateBoundary({
+        leadingExtensions: [parentWebSearchPath],
+      });
       const subagents = await installSubagentModel(session);
       const extensionDir = installWebSearchFixture(session);
       configureDelegate(session, {
@@ -313,7 +327,7 @@ describe("providerExtensions (#59)", () => {
       ]);
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "x", tools: ["web_search"] }],
+        tasks: [{ prompt: "x", agent: "default" }],
       });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("CHILD-DONE");
@@ -359,7 +373,7 @@ describe("providerExtensions (#59)", () => {
       ]);
       const own = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "b", tools: ["web_search"] }],
+        tasks: [{ prompt: "b", agent: "default" }],
       });
       expect(own.isError).toBe(false);
       expect(
@@ -390,7 +404,7 @@ describe("providerExtensions (#59)", () => {
         tasks: [
           // Resolves cleanly (its shipped default is uninstalled,
           // best-effort-skipped); under per-task semantics it would run.
-          { agent: "coder", prompt: "a", tools: ["read"] },
+          { agent: "coder", prompt: "a" },
           { prompt: "b" },
         ],
         async: false,
@@ -520,8 +534,8 @@ describe("delegate:usage events (#60)", () => {
         // #126 vehicle: read-only tasks admit concurrently — subject is
         // the usage payload, not write admission.
         tasks: [
-          { prompt: "a", tools: ["read"] },
-          { prompt: "b", tools: ["read"] },
+          { prompt: "a", agent: "explore" },
+          { prompt: "b", agent: "explore" },
         ],
         async: true,
       });

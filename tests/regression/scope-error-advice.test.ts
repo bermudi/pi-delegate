@@ -39,7 +39,7 @@ describe("Git scope discovery repair advice (#51)", () => {
         writeFileSync(configPath, "[core\n");
       }
       const previousPath = process.env.PATH;
-      const args = { async: false, tasks: [{ prompt: "write after repair", cwd: source, tools: ["write"] }] };
+      const args = { async: false, tasks: [{ prompt: "write after repair", cwd: source }] };
       try {
         if (failure !== "malformed Git configuration") process.env.PATH = shim;
         const result = await callDelegate(session, args);

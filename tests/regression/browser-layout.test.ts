@@ -262,7 +262,7 @@ test("long tools occupy one scan row; Enter expands retained previews and Tab sh
     fauxAssistantMessage("RESPONSE-TEXT"),
   ]);
   const dispatched = await callDelegate(session, {
-    tasks: [{ prompt: "Long command · 界界\nsecond prompt line\taligned\rend", tools: ["bash"] }],
+    tasks: [{ prompt: "Long command · 界界\nsecond prompt line\taligned\rend" }],
     async: true,
   });
   const ticket = ticketIdOf(dispatched.text);

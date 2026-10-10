@@ -133,18 +133,7 @@ const taskSchema = Type.Object(
           "Working directory; relative paths resolve from the parent cwd.",
       }),
     ),
-    systemPrompt: Type.Optional(
-      Type.String({
-        description:
-          "Base prompt for the subagent; project context is added separately.",
-      }),
-    ),
-    tools: Type.Optional(
-      Type.Array(Type.String(), {
-        description:
-          "Exact capabilities. '*' = the writer group (read, bash, edit, write); 'ro' = the read-only group (read, grep, find, ls) — read-only tasks admit concurrently, never serialized as writers; other entries name one child tool each.",
-      }),
-    ),
+
     sessionId: Type.Optional(
       Type.String({
         description:
@@ -409,13 +398,6 @@ function parseArray(value: string): unknown[] | undefined {
   }
 }
 
-function normalizeTools(value: string): unknown {
-  const parsed = parseArray(value);
-  if (parsed) return parsed;
-  const token = value.trim();
-  return token !== "" && !/[\s,]/.test(token) ? [token] : value;
-}
-
 const TICKET_ACTIONS = ["poll", "wait", "cancel", "answer", "steer", "interrupt"];
 const SESSION_ACTIONS = ["list", "close"];
 
@@ -562,6 +544,26 @@ function rejectForeignContextFields(record: Record<string, unknown>): void {
 }
 
 /** Removed task deadlines reject by presence, before null stripping or flat recovery. */
+/** #130: task-level toolsets are gone; presence rejects with teaching. */
+function rejectTaskTools(record: Record<string, unknown>): void {
+  if (Object.hasOwn(record, "tools")) {
+    throw new Error(
+      "The task tools field has been removed — toolsets belong to agents. " +
+        "Pick the agent whose tools fit (explore is read-only; reviewer/verifier add bash), or author a Markdown profile with a tools line; remove the field.",
+    );
+  }
+}
+
+/** #130: task-level base prompts are gone; presence rejects with teaching. */
+function rejectTaskSystemPrompt(record: Record<string, unknown>): void {
+  if (Object.hasOwn(record, "systemPrompt") || Object.hasOwn(record, "system_prompt")) {
+    throw new Error(
+      "The task systemPrompt field has been removed — base prompts belong to profiles. " +
+        "Author a Markdown agent (its body is the system prompt) or dispatch bare; remove the field.",
+    );
+  }
+}
+
 /** #130: the display label is gone; presence rejects with teaching. */
 function rejectTaskDescription(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "description")) {
@@ -617,6 +619,8 @@ function normalizeTask(value: unknown, index: number): unknown {
   // Removed fields reject even when null — before null stripping.
   rejectTaskDeadline(task);
   rejectTaskDescription(task);
+  rejectTaskTools(task);
+  rejectTaskSystemPrompt(task);
   rejectObsoleteContext(task);
   rejectFieldAliases(task, true);
   // Same for the foreign context-sharing spellings (#56).
@@ -631,7 +635,6 @@ function normalizeTask(value: unknown, index: number): unknown {
   if (task.reasoning_effort !== undefined) {
     throw new Error(`tasks[${index}]: ${REASONING_EFFORT_FIELD_REJECTION}`);
   }
-  if (typeof task.tools === "string") task.tools = normalizeTools(task.tools);
   stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent"]);
   return task;
 }
@@ -656,17 +659,6 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
     );
   }
   if (!Array.isArray(args.tasks)) return;
-  args.tasks.forEach((task, index) => {
-    if (!isRecord(task)) return;
-    const where = `tasks[${index}]`;
-    // normalizeTask has already repaired JSON-array strings and bare tokens;
-    // a surviving string is ambiguous by construction.
-    if (typeof task.tools === "string") {
-      throw new Error(
-        `${where}: 'tools' must be an array of tool names — a JSON array string or one bare name also works — not an ambiguous string.`,
-      );
-    }
-  });
 }
 
 /**
@@ -1009,8 +1001,6 @@ const HELP_DISPATCH = `## delegate — ordinary dispatch
 
 const HELP_FULL_CONTROLS = `## delegate — task and batch controls
 - Task \`id\` correlates results and labels call rows and headers.
-  \`tools\` and \`systemPrompt\` override profile defaults. Tool groups:
-  \`*\` selects read/bash/edit/write; \`ro\` selects read/grep/find/ls.
 - \`sessionId\` reuses a child session; \`resumeFrom\` resumes an absolute .jsonl
   transcript. Only resumed tasks may omit prompt.
 - \`dependsOn\` names same-batch task ids. All prerequisites must succeed
@@ -1039,9 +1029,8 @@ function helpSharedRules(): string {
   frontmatter, the body is its system prompt. A discovered profile
   resolves by its exact name; authored names receive no automatic translations.
 - Subagents never nest: \`delegate\`, \`delegate_ticket\`, and
-  \`delegate_session\` are removed from every child toolset — explicit
-  \`tools\`, profile frontmatter \`tools\`, and the mirrored parent
-  set alike.
+  \`delegate_session\` are removed from every child toolset — profile
+  frontmatter \`tools\` and the mirrored parent set alike.
 - Children never inherit parent conversation history. Supply a self-contained
   brief; project instructions still apply, as does the child's own pooled/resumed session history.`;
 }

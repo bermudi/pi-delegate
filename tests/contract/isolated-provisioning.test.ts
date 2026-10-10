@@ -111,7 +111,6 @@ describe("isolated worktree dependency provisioning contract (#120)", () => {
             prompt: "Run: cat node_modules/dep-marker.txt",
             cwd: dir,
             workspace: "isolated",
-            tools: ["bash"],
           },
         ],
       });
@@ -152,7 +151,6 @@ describe("isolated worktree dependency provisioning contract (#120)", () => {
               "Run: echo changed >> node_modules/dep-marker.txt && echo hello > tracked.txt",
             cwd: dir,
             workspace: "isolated",
-            tools: ["bash"],
           },
         ],
       });
@@ -219,7 +217,6 @@ describe("isolated worktree dependency provisioning contract (#120)", () => {
               prompt: "probe",
               cwd: dir,
               workspace: "isolated",
-              tools: ["bash"],
             },
           ],
         });
@@ -260,7 +257,6 @@ describe("isolated worktree dependency provisioning contract (#120)", () => {
             prompt: "write out.txt",
             cwd: dir,
             workspace: "isolated",
-            tools: ["write"],
           },
         ],
       });

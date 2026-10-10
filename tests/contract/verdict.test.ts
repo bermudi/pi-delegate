@@ -346,11 +346,12 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       model.respond([byPrompt, byPrompt]);
 
       const result = await callDelegate(session, {
-        // #126 vehicle: the coder runs read-only so it admits beside the
-        // bash-carrying verifier — the subject is profile-keyed rendering.
+        // #126 vehicle: the sibling runs read-only (explore) so it
+        // admits beside the bash-carrying verifier — the subject is
+        // profile-keyed rendering.
         tasks: [
           { id: "v", agent: "verifier", prompt: "verify" },
-          { id: "c", agent: "coder", prompt: "build", tools: ["read"] },
+          { id: "c", agent: "explore", prompt: "build" },
         ],
         async: false,
       });

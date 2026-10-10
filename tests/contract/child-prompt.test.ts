@@ -168,18 +168,10 @@ describe("composed child base prompt contract (#33)", () => {
   );
 
   test(
-    "an explicit task systemPrompt is verbatim: no inheritance, no framing",
+    "the task systemPrompt field is removed and rejects with teaching",
     async () => {
       session = await openDelegateBoundary({ systemPrompt: PERSONA });
       const subagents = await installSubagentModel(session);
-      let seenPrompt = "";
-      subagents.respond([
-        (context) => {
-          const sys = context.messages.find((m) => m.role === "system");
-          seenPrompt = systemPromptText(sys);
-          return fauxAssistantMessage("OK-AUTHORED");
-        },
-      ]);
 
       const result = await callDelegate(session, {
         async: false,
@@ -188,10 +180,11 @@ describe("composed child base prompt contract (#33)", () => {
         ],
       });
 
-      expect(result.isError).toBe(false);
-      expect(seenPrompt).toContain("AUTHORED-PROMPT: do the thing.");
-      expect(seenPrompt).not.toContain("PARENT-PERSONA");
-      expect(seenPrompt).not.toContain(FRAMING);
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("systemPrompt field has been removed");
+      // The verbatim-authored-base behavior moved to profile bodies —
+      // the next test pins it there.
+      expect(subagents.state.callCount).toBe(0);
     },
   );
 

@@ -62,8 +62,8 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
         // #126 vehicle: two same-cwd tasks must be read-only to admit
         // concurrently — the subject is the brief, not write admission.
         tasks: [
-          { prompt: "alpha task", tools: ["read"] },
-          { prompt: "beta task", tools: ["read"] },
+          { prompt: "alpha task", agent: "explore" },
+          { prompt: "beta task", agent: "explore" },
         ],
         async: true,
       });
@@ -111,8 +111,8 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
         // #126 vehicle: same-cwd siblings run read-only (subject is the
         // header rendering, not write admission).
         tasks: [
-          { prompt: "a", tools: ["read"] },
-          { prompt: "b", tools: ["read"] },
+          { prompt: "a", agent: "explore" },
+          { prompt: "b", agent: "explore" },
         ],
         async: false,
       });

@@ -115,7 +115,7 @@ describe("delegate session contract", () => {
       await callDelegate(session, {
         async: false,
         tasks: [
-          { prompt: "x", sessionId: "conv",  tools: ["read"] },
+          { prompt: "x", sessionId: "conv",  agent: "explore" },
         ],
       });
 
@@ -125,7 +125,6 @@ describe("delegate session contract", () => {
           {
             prompt: "x",
             sessionId: "conv",
-            tools: ["read", "bash"],
           },
         ],
       });

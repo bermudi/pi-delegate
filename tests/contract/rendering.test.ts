@@ -194,8 +194,8 @@ test(
       // one blocked reader mid-flight is exactly the recorded/running
       // split under test.
       tasks: [
-        { prompt: "done-fast", tools: ["read"] },
-        { prompt: "blocked", tools: ["read"] },
+        { prompt: "done-fast", agent: "explore" },
+        { prompt: "blocked", agent: "explore" },
       ],
       async: true,
     });
@@ -541,8 +541,8 @@ test(
       // #126 vehicle: read-only tasks admit; one stays gated mid-flight
       // while the receipt collapses — the subject is the one-line shape.
       tasks: [
-        { prompt: "bg", tools: ["read"] },
-        { prompt: "bg2", tools: ["read"] },
+        { prompt: "bg", agent: "explore" },
+        { prompt: "bg2", agent: "explore" },
       ],
       async: true,
     });

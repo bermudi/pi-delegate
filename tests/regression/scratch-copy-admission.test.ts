@@ -117,11 +117,11 @@ describe("scratch source copying admission (#50)", () => {
         return fauxAssistantMessage("writer done");
       }, fauxAssistantMessage("copy after writer")]);
       const dispatch = dispatchFrom(session);
-      const holder = await dispatch({ async: true, tasks: [{ id: "holder", prompt: "writer", cwd: writerRoot, workspace, tools: ["write"] }] });
+      const holder = await dispatch({ async: true, tasks: [{ id: "holder", prompt: "writer", cwd: writerRoot, workspace }] });
       const ticket = ticketIdOf(textOf(holder));
       try {
         await bounded(started.promise);
-        const rejected = await dispatch({ async: false, tasks: [{ prompt: "copy", cwd: join(aliases, "cwd"), workspace: "scratch", tools: ["write"] }] });
+        const rejected = await dispatch({ async: false, tasks: [{ prompt: "copy", cwd: join(aliases, "cwd"), workspace: "scratch" }] });
         expect(rejected.isError).toBe(true);
         expect(textOf(rejected)).toContain(root);
         expect(textOf(rejected)).toMatch(/copy.*source|cannot copy source/i);
@@ -130,7 +130,7 @@ describe("scratch source copying admission (#50)", () => {
         expect(model.state.callCount).toBe(1);
       } finally { worker.release(); }
       await callDelegateTicket(session, { action: "wait", ticket });
-      const admitted = await dispatch({ async: false, tasks: [{ prompt: "copy", cwd: join(aliases, "cwd"), workspace: "scratch", tools: ["write"] }] });
+      const admitted = await dispatch({ async: false, tasks: [{ prompt: "copy", cwd: join(aliases, "cwd"), workspace: "scratch" }] });
       expect(admitted.isError).not.toBe(true);
       expect(textOf(admitted)).toContain("copy after writer");
     });
@@ -167,7 +167,7 @@ describe("scratch source copying admission (#50)", () => {
     };
     model.respond([response, response, response, response]);
     const dispatch = dispatchFrom(session);
-    const args = (cwd: string) => ({ async: false, tasks: [{ prompt: "scratch reader", cwd, workspace: "scratch", tools: ["write"] }] });
+    const args = (cwd: string) => ({ async: false, tasks: [{ prompt: "scratch reader", cwd, workspace: "scratch" }] });
     const first = dispatch(args(alias)), second = dispatch(args(source));
     try {
       await bounded(copies.promise);
@@ -178,18 +178,18 @@ describe("scratch source copying admission (#50)", () => {
         { cwd: join(alias, "child"), workspace: "shared" },
         { cwd: source, workspace: "isolated" },
       ]) {
-        const rejected = await dispatch({ async: false, tasks: [{ prompt: "writer", cwd, workspace, tools: ["write"] }] });
+        const rejected = await dispatch({ async: false, tasks: [{ prompt: "writer", cwd, workspace }] });
         expect(rejected.isError).toBe(true);
         expect(textOf(rejected)).toMatch(/scratch source copying/);
         expect(textOf(rejected)).toContain(source);
         expect(textOf(rejected)).toMatch(/copy.*finish.*retry/);
       }
-      const unrelated = await dispatch({ async: false, tasks: [{ prompt: "writer unrelated", cwd: tempDir(), tools: ["write"] }] });
+      const unrelated = await dispatch({ async: false, tasks: [{ prompt: "writer unrelated", cwd: tempDir() }] });
       expect(unrelated.isError).not.toBe(true);
       resume.release();
       await bounded(workers.promise);
       // Both copies finished, but their workers are STILL held in the provider.
-      const admitted = await dispatch({ async: false, tasks: [{ prompt: "writer", cwd: source, tools: ["write"] }] });
+      const admitted = await dispatch({ async: false, tasks: [{ prompt: "writer", cwd: source }] });
       expect(admitted.isError).not.toBe(true);
       expect(textOf(admitted)).toContain("writer admitted");
       expect(running).toBe(2);
@@ -209,11 +209,11 @@ describe("scratch source copying admission (#50)", () => {
       const hold = holdCopy(source, ending === "failure");
       const controller = new AbortController();
       const dispatch = dispatchFrom(session);
-      const pending = dispatch({ async: false, tasks: [{ prompt: "copy", cwd: source, workspace: "scratch", tools: ["write"] }] }, controller.signal);
+      const pending = dispatch({ async: false, tasks: [{ prompt: "copy", cwd: source, workspace: "scratch" }] }, controller.signal);
       try {
         await bounded(hold.entered);
         if (ending === "cancel") controller.abort();
-        const rejected = await dispatch({ async: false, tasks: [{ prompt: "writer", cwd: source, tools: ["write"] }] });
+        const rejected = await dispatch({ async: false, tasks: [{ prompt: "writer", cwd: source }] });
         expect(rejected.isError).toBe(true);
         expect(textOf(rejected)).toContain("scratch source copying");
         expect(model.state.callCount).toBe(0);
@@ -221,7 +221,7 @@ describe("scratch source copying admission (#50)", () => {
         const result = await bounded(pending);
         expect(textOf(result)).toMatch(ending === "failure" ? /cp filter failure/ : /abort|cancel/i);
         expect(model.state.callCount).toBe(0);
-        const admitted = await dispatch({ async: false, tasks: [{ prompt: "writer", cwd: source, tools: ["write"] }] });
+        const admitted = await dispatch({ async: false, tasks: [{ prompt: "writer", cwd: source }] });
         expect(admitted.isError).not.toBe(true);
         expect(textOf(admitted)).toContain("writer after failed copy");
       } finally {
@@ -239,8 +239,8 @@ describe("scratch source copying admission (#50)", () => {
     const hold = holdCopy(source);
     model.respond([fauxAssistantMessage("shared done"), fauxAssistantMessage("scratch done")]);
     const pending = callDelegate(session, { async: false, tasks: [
-      { prompt: "shared", cwd: source, tools: ["write"] },
-      { prompt: "scratch", cwd: source, tools: ["write"], workspace: "scratch" },
+      { prompt: "shared", cwd: source },
+      { prompt: "scratch", cwd: source, workspace: "scratch" },
     ] });
     try {
       await bounded(hold.entered);
@@ -277,8 +277,8 @@ describe("scratch source copying admission (#50)", () => {
       };
       model.respond([response, response, response, response]);
       const result = await callDelegate(session, { async: false, tasks: [
-        { id: "writer", prompt: "prior writer", cwd: source, workspace, tools: ["write"] },
-        { prompt: "read copied phase bytes", cwd: source, workspace: "scratch", tools: ["read", "write"], dependsOn: ["writer"] },
+        { id: "writer", prompt: "prior writer", cwd: source, workspace },
+        { prompt: "read copied phase bytes", cwd: source, workspace: "scratch", dependsOn: ["writer"] },
       ] });
       expect(result.isError).toBe(false);
       expect(model.state.callCount).toBe(4);
@@ -305,14 +305,14 @@ describe("scratch source copying admission (#50)", () => {
       model.respond([response, response, response]);
       try {
         const result = await callDelegate(session, { async: false, tasks: [
-          { id: "stuck", prompt: "stuck writer", cwd: source, workspace, tools: ["write"] },
-          { id: "ready", prompt: "quick prerequisite", cwd: source, tools: ["read"] },
-          { id: "copy", prompt: "scratch must not run", cwd: source, workspace: "scratch", tools: ["write"], dependsOn: ["ready"] },
+          { id: "stuck", prompt: "stuck writer", cwd: source, workspace },
+          { id: "ready", prompt: "quick prerequisite", cwd: source, agent: "explore" },
+          { id: "copy", prompt: "scratch must not run", cwd: source, workspace: "scratch", dependsOn: ["ready"] },
         ] });
         expect(model.state.callCount).toBe(2);
         expect(result.text).toMatch(/cannot copy source/);
         expect(result.text).toMatch(/writer stuck.*active or quarantined/);
-        const rejected = await callDelegate(session, { async: false, tasks: [{ prompt: "new scratch", cwd: source, workspace: "scratch", tools: ["write"] }] });
+        const rejected = await callDelegate(session, { async: false, tasks: [{ prompt: "new scratch", cwd: source, workspace: "scratch" }] });
         expect(rejected.isError).toBe(true);
         expect(model.state.callCount).toBe(2);
       } finally { worker.release(); }
@@ -320,7 +320,7 @@ describe("scratch source copying admission (#50)", () => {
       let after;
       const end = Date.now() + 5000;
       do {
-        after = await callDelegate(session, { async: false, tasks: [{ prompt: "copy after quiescence", cwd: source, workspace: "scratch", tools: ["write"] }] });
+        after = await callDelegate(session, { async: false, tasks: [{ prompt: "copy after quiescence", cwd: source, workspace: "scratch" }] });
         if (!after.isError) break;
         await Bun.sleep(5);
       } while (Date.now() < end);
@@ -336,8 +336,8 @@ describe("scratch source copying admission (#50)", () => {
       const source = tempDir(); gitInit(source);
       model.respond([fauxAssistantMessage("copy finished"), fauxAssistantMessage("future writer finished")]);
       const result = await callDelegate(session, { async: false, tasks: [
-        { id: "copy", prompt: "scratch now", cwd: source, workspace: "scratch", tools: ["write"] },
-        { prompt: "writer later", cwd: source, workspace, tools: ["write"], dependsOn: ["copy"] },
+        { id: "copy", prompt: "scratch now", cwd: source, workspace: "scratch" },
+        { prompt: "writer later", cwd: source, workspace, dependsOn: ["copy"] },
       ] });
       expect(result.isError).toBe(false);
       expect(result.text).toContain("copy finished");
@@ -401,9 +401,9 @@ describe("scratch source copying admission (#50)", () => {
       return originalCp(src, dst, options);
     });
     const pending = callDelegate(session, { async: false, tasks: [
-      { id: "late", prompt: "late isolated writer", cwd: source, workspace: "isolated", tools: ["write"] },
-      { id: "ready", prompt: "quick prerequisite", cwd: source, tools: ["read"] },
-      { id: "copy", prompt: "later-phase scratch must not run", cwd: source, workspace: "scratch", tools: ["write"], dependsOn: ["ready"] },
+      { id: "late", prompt: "late isolated writer", cwd: source, workspace: "isolated" },
+      { id: "ready", prompt: "quick prerequisite", cwd: source, agent: "explore" },
+      { id: "copy", prompt: "later-phase scratch must not run", cwd: source, workspace: "scratch", dependsOn: ["ready"] },
     ] });
     try {
       await bounded(reconcileEntered.promise);
@@ -429,7 +429,7 @@ describe("scratch source copying admission (#50)", () => {
       // A separate public call must also reject after the original dispatch
       // returned: replacing quarantine truth must not release its reservation.
       const rejected = await bounded(callDelegate(session, { async: false, tasks: [
-        { prompt: "cross-call scratch must not run", cwd: source, workspace: "scratch", tools: ["write"] },
+        { prompt: "cross-call scratch must not run", cwd: source, workspace: "scratch" },
       ] }));
       expect(rejected.isError).toBe(true);
       expect(rejected.text).toMatch(/cannot copy source/);
@@ -444,7 +444,7 @@ describe("scratch source copying admission (#50)", () => {
       const end = Date.now() + 5000;
       do {
         retry = await callDelegate(session, { async: false, tasks: [
-          { prompt: "scratch after cleanup", cwd: source, workspace: "scratch", tools: ["write"] },
+          { prompt: "scratch after cleanup", cwd: source, workspace: "scratch" },
         ] });
         if (!retry.isError) break;
         await Bun.sleep(5);
@@ -505,8 +505,8 @@ describe("scratch source copying admission (#50)", () => {
     type Outcomes = { results: { id: string; quarantined?: boolean; integration?: { status: string } }[] };
     try {
       const receipt = await bounded(callDelegate(session, { async: true, tasks: [
-        { id: "first", prompt: "first normal writer", cwd: firstSource, workspace: "isolated", tools: ["write"] },
-        { id: "late", prompt: "second gated writer", cwd: secondSource, workspace: "isolated", tools: ["write"] },
+        { id: "first", prompt: "first normal writer", cwd: firstSource, workspace: "isolated" },
+        { id: "late", prompt: "second gated writer", cwd: secondSource, workspace: "isolated" },
       ] }));
       expect(receipt.isError).toBe(false);
       ticket = ticketIdOf(receipt.text);
@@ -539,7 +539,7 @@ describe("scratch source copying admission (#50)", () => {
       expect(scans).toBe(1);
       expect(fs.existsSync(secondMetadata)).toBe(true);
       scratch = callDelegate(session, { async: false, tasks: [
-        { prompt: "scratch must reject before second reconciliation", cwd: secondSource, workspace: "scratch", tools: ["write"] },
+        { prompt: "scratch must reject before second reconciliation", cwd: secondSource, workspace: "scratch" },
       ] });
       // A broken guard admits REAL cp; stop its filter instead of letting it
       // race Git removal or hang this test. The negative control must fail on
@@ -563,7 +563,7 @@ describe("scratch source copying admission (#50)", () => {
       expect(execSync("git worktree list --porcelain", { cwd: secondSource, encoding: "utf8", env: gitFixtureEnv() })).not.toContain("worker-1");
       copy.release();
       const retry = await bounded(callDelegate(session, { async: false, tasks: [
-        { prompt: "scratch after both repositories reconcile", cwd: secondSource, workspace: "scratch", tools: ["write"] },
+        { prompt: "scratch after both repositories reconcile", cwd: secondSource, workspace: "scratch" },
       ] }));
       expect(retry.isError).toBe(false);
       expect(retry.text).toContain("scratch retry allowed");

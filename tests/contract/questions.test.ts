@@ -36,7 +36,7 @@ describe("async worker questions (#17)", () => {
     };
     model.respond([respond, respond, respond]);
     const first = ticketIdOf((await callDelegate(session, {
-      tasks: [{ id: "first", prompt: "FIRST-TASK", tools: ["read"] }], async: true,
+      tasks: [{ id: "first", prompt: "FIRST-TASK", agent: "explore" }], async: true,
     })).text);
     const questionId = await untilQuestion(session, first);
     const roster = await callDelegateTicket(session, { action: "poll" });
@@ -44,7 +44,7 @@ describe("async worker questions (#17)", () => {
     // The idle capacity is released; the first worker's question must not
     // monopolize the global or per-model slot.
     const second = ticketIdOf((await callDelegate(session, {
-      tasks: [{ prompt: "SECOND-TASK", tools: ["read"] }], async: true,
+      tasks: [{ prompt: "SECOND-TASK", agent: "explore" }], async: true,
     })).text);
     const finished = await callDelegateTicket(session, { action: "wait", ticket: second });
     expect(finished.text).toContain("SECOND-DONE");
@@ -92,11 +92,11 @@ describe("async worker questions (#17)", () => {
       fauxAssistantMessage("FINISHED"),
     ]);
     const ticket = ticketIdOf((await callDelegate(session, {
-      tasks: [{ id: "writer", prompt: "ask", tools: ["write"] }], async: true,
+      tasks: [{ id: "writer", prompt: "ask" }], async: true,
     })).text);
     const questionId = await untilQuestion(session, ticket);
     const conflicting = await callDelegate(session, {
-      tasks: [{ prompt: "same tree", tools: ["write"] }], async: true,
+      tasks: [{ prompt: "same tree" }], async: true,
     });
     expect(conflicting.isError).toBe(true);
     expect(conflicting.text).toMatch(/overlap|conflict|reserved|active/i);
@@ -230,7 +230,7 @@ describe("async worker questions (#17)", () => {
       fauxAssistantMessage("TURN-COMPLETED"),
     ]);
     const ticket = ticketIdOf((await callDelegate(session, {
-      tasks: [{ prompt: "ask and read", tools: ["read"] }], async: true,
+      tasks: [{ prompt: "ask and read", agent: "explore" }], async: true,
     })).text);
     const settled = await callDelegateTicket(session, { action: "wait", ticket });
     expect(settled.text).toContain("TURN-COMPLETED");
@@ -247,11 +247,11 @@ describe("async worker questions (#17)", () => {
     ]);
     const first = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "first", sessionId: "reuse", tools: ["read"] }],
+      tasks: [{ prompt: "first", sessionId: "reuse", agent: "explore" }],
     });
     expect(first.text).toContain("FIRST-DONE");
     const ticket = ticketIdOf((await callDelegate(session, {
-      tasks: [{ id: "again", prompt: "second", sessionId: "reuse", tools: ["read"] }], async: true,
+      tasks: [{ id: "again", prompt: "second", sessionId: "reuse", agent: "explore" }], async: true,
     })).text);
     const questionId = await untilQuestion(session, ticket);
     await callDelegateTicket(session, {
@@ -281,11 +281,11 @@ describe("async worker questions (#17)", () => {
     };
     model.respond([respond, respond, respond]);
     const first = ticketIdOf((await callDelegate(session, {
-      tasks: [{ id: "waiting", prompt: "ASK FIRST", tools: ["read"] }], async: true,
+      tasks: [{ id: "waiting", prompt: "ASK FIRST", agent: "explore" }], async: true,
     })).text);
     const questionId = await untilQuestion(session, first);
     const second = ticketIdOf((await callDelegate(session, {
-      tasks: [{ prompt: "OCCUPY", tools: ["read"] }], async: true,
+      tasks: [{ prompt: "OCCUPY", agent: "explore" }], async: true,
     })).text);
     let startTimeout: ReturnType<typeof setTimeout> | undefined;
     try {

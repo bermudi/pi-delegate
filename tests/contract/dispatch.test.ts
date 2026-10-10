@@ -111,8 +111,8 @@ describe("delegate dispatch contract", () => {
         // #126 vehicle: read-only siblings admit concurrently — the
         // subject is failure independence, not write admission.
         tasks: [
-          { prompt: "fine", tools: ["read"] },
-          { prompt: "doomed", tools: ["read"] },
+          { prompt: "fine", agent: "explore" },
+          { prompt: "doomed", agent: "explore" },
         ],
       });
 
@@ -246,7 +246,7 @@ describe("delegate dispatch contract", () => {
         async: false,
         tasks: [0, 1, 2].map((n) => ({
           prompt: `task ${n}`,
-          tools: ["read"],
+          agent: "explore",
         })),
       });
 
@@ -281,7 +281,7 @@ describe("delegate dispatch contract", () => {
         async: false,
         tasks: [0, 1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({
           prompt: `task ${n}`,
-          tools: ["read"],
+          agent: "explore",
         })),
       });
 
@@ -316,7 +316,7 @@ describe("delegate dispatch contract", () => {
         async: false,
         tasks: [0, 1, 2].map((n) => ({
           prompt: `low ${n}`,
-          tools: ["read"],
+          agent: "explore",
         })),
       });
       expect(maxActive).toBe(1);
@@ -329,7 +329,7 @@ describe("delegate dispatch contract", () => {
         async: false,
         tasks: [0, 1, 2, 3].map((n) => ({
           prompt: `high ${n}`,
-          tools: ["read"],
+          agent: "explore",
         })),
       });
       expect(maxActive).toBe(2);
@@ -363,7 +363,7 @@ describe("delegate dispatch contract", () => {
         async: false,
         tasks: [0, 1, 2].map((n) => ({
           prompt: `task ${n}`,
-          tools: ["read"],
+          agent: "explore",
         })),
       });
       expect(result.isError).toBe(false);
@@ -778,7 +778,7 @@ describe("delegate dispatch contract", () => {
     }]);
     const result = await callDelegate(session, {
       async: false,
-      tasks: [{ prompt: "SELF-CONTAINED-BRIEF", tools: [] }],
+      tasks: [{ prompt: "SELF-CONTAINED-BRIEF" }],
     });
     expect(result.isError).toBe(false);
     expect(observed).toContain("SELF-CONTAINED-BRIEF");
@@ -794,7 +794,7 @@ describe("delegate dispatch contract", () => {
         const result = await callDelegate(session, {
           async,
           tasks: [
-            { prompt: "valid sibling", tools: [] },
+            { prompt: "valid sibling" },
             { prompt: "obsolete request", context },
           ],
         });
@@ -844,7 +844,7 @@ describe("delegate dispatch contract", () => {
 
       const result = await callDelegate(session, {
         async: false,
-        tasks: [{ prompt: "hang", tools: ["write"] }],
+        tasks: [{ prompt: "hang" }],
       });
       expect(result.text).toMatch(/stall/i);
       // Per-task and aggregate wording: the caller cannot mistake a

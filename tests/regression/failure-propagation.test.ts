@@ -105,9 +105,9 @@ describe("regression: failure propagation and retries", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { id: "w1", prompt: "first writer", cwd, tools: ["write"] },
-          { id: "r", prompt: "scout", cwd, tools: ["read"] },
-          { id: "w2", prompt: "second writer", cwd, tools: ["write"], dependsOn: ["r"] },
+          { id: "w1", prompt: "first writer", cwd },
+          { id: "r", prompt: "scout", cwd, agent: "explore" },
+          { id: "w2", prompt: "second writer", cwd, dependsOn: ["r"] },
         ],
       });
       expect(result.isError).toBe(false);
@@ -150,8 +150,8 @@ describe("regression: failure propagation and retries", () => {
       const result = await callDelegate(session, {
         async: false,
         tasks: [
-          { prompt: "w1", cwd,  tools: ["write"] },
-          { prompt: "w2", cwd,  tools: ["write"] },
+          { prompt: "w1", cwd },
+          { prompt: "w2", cwd },
         ],
       });
       expect(result.isError).toBe(true);
