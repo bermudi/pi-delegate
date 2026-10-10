@@ -19,14 +19,15 @@ The user's explicit decision, “cut deadline,” overrides SPEC-V2's
 `deadlineMs` dispatch field, execution/retry wall-clock budgets, and deadline
 rules during resource loading, pause, questions, and pooled-session settlement.
 Tasks have no wall-clock deadline. Supplied `deadlineMs` rejects the entire call
-before execution in compact and full mode, including null, flat, and
+before execution, including null, flat, and
 stringified-task recovery shapes; it is not silently discarded. Historical
 saved deadline failures remain readable, but cannot authorize new calls.
 
 Inactivity/stall detection, cooperative abort and confirmed quiescence,
-reservations and quarantine, paused/question-waiting worker safety, detachable
-bounded ticket waits, and shutdown bounds remain unchanged. This removes
-only task deadlines, not unrelated internal timer bounds or batch token budgets.
+reservations and quarantine, paused/question-waiting worker safety, and
+shutdown bounds remain unchanged. This removes only task deadlines, not
+unrelated internal timer bounds. (#130 later removed the wait bound; #129
+removed batch token budgets entirely.)
 
 ## Operational diagnostics (#122, user-authorized)
 
@@ -550,6 +551,8 @@ with bermudi" — the handoff superseded that):
 
 User approved items 1–4: canonical fields/exact agent names, profile defaults
 with retained full overrides, operator-selected compact/full schema exposure,
-and one background default independent of task count. This supersedes the
+and one background default independent of task count. (Items 2–3 are
+superseded by ADR 0002, 2026-10-07: one surface, no compact/full split, no
+full-mode overrides.) This supersedes the
 original alias and cardinality ratifications above; no lifecycle rewrite,
 family-specific interface or weakened safety guarantee was authorized.

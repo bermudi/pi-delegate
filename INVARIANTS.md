@@ -137,7 +137,7 @@ use any design that makes these properties true and testable.
 - A delivered result MUST NOT trigger a turn on a session-tree leaf other
   than the one it was dispatched from.
 - Delivery failure MUST NOT undo settlement or make results unpollable.
-- Wait timeout or caller abort MUST detach only that waiter.
+- Caller abort MUST detach only that waiter (waits have no timeout — #130).
 - Pause is orthogonal to lifecycle and operator-dashboard-only (#130 —
   the model-facing actions are removed; the /subagents \`p\` binding
   drives the store directly): a paused ticket remains running and

@@ -352,9 +352,11 @@ gaps.
 - **Internal:** ticket id generation, TTL sweeping, roster/format string
   composition, busy-index internals, waiter plumbing.
 - **Covered now:** empty roster; error-valued unknown-ticket handling for
-  all singular actions; wait-to-settlement; timeout detach; cancel preview
+  all singular actions; wait-to-settlement; timeout detach (scenario retired —
+  #130 removed the wait timeout); cancel preview
   vs force; explicit `partial` mixed-batch and `failed` all-failure
-  settlement; cancelled-ticket retains completed results; pause/resume;
+  settlement; cancelled-ticket retains completed results; pause/resume (RPC
+  trigger removed by #130 — dashboard-only; gap noted in COMPATIBILITY);
   live activity in running polls (§3d item 8) — each unfinished task's
   row names the in-flight tool or the `last:` completed one, the running
   tool count, and an `active now`/`active Ns ago` age, queued tasks read
@@ -447,8 +449,9 @@ gaps.
 - **Covered now:** `tests/contract/rendering.test.ts` — the registered
   tools' `renderCall` return `Text` components whose lines match the
   contract for empty, single, four-plus, and resume-only calls. #63
-  relabels rows by description → caller id → agent → `inline` (positional
-  `task-N` dropped — compact callers cannot set ids), pads labels to a
+  relabels rows by description → caller id → agent → `inline` (the
+  description leg is gone — #130; labels derive id → agent → `inline`;
+  positional `task-N` dropped — compact callers cannot set ids), pads labels to a
   common width, and shortens ticket ids in display only (`t-<first8>`,
   including compound `<ticket>#<task>` steer/interrupt/tail/answer
   targets).
@@ -465,8 +468,9 @@ gaps.
   lines. The same honesty the expanded view carries applies collapsed:
   `unknown shell` survives a file count, unevidenced PASS/FAIL verdicts
   keep their `unverifiable`/`not corroborated` qualification, recovery
-  warnings/notices/pending questions and a wait's tail note (timeout,
-  detached, wait-any roster via `details.note`) render below the task
+  warnings/notices/pending questions and a wait's note render below the task
+  (the timeout and wait-any roster notes are gone — #130; settlement,
+  question, interrupt, and abort detach notes still ride `details.note`)
   lines, roster entries keep their warning/question sub-lines, a settled
   ticket's missing slot words itself (`cancelled`/`no outcome recorded`,
   never `running`), an error-flagged result still draws the task rows,
@@ -530,14 +534,16 @@ gaps.
   inactivity; tasks have no wall-clock deadlines (#118).
 - **Internal:** checkpoint machinery, `Agent.subscribe` gating, parked
   listener bookkeeping.
-- **Covered now:** pause holds queued work; paused ticket remains running;
+- **Covered now:** pause holds queued work; paused ticket remains running
+  (#130 removed the RPC trigger — these scenarios need a dashboard-level
+  test; gap noted in COMPATIBILITY);
   resume continues to settlement; parked time is not inactivity (the stall
   countdown freezes while parked and resumes with its remaining budget),
   and a silent in-flight turn still stalls under a paused ticket. v2 gates
   queued tasks before slot acquisition and parks between-turn continuations
   via the core `prepareNextTurnWithContext` hook. `tests/contract/pause.test.ts`
-  adds: domain rejections (pause/resume on settled, resume on non-paused)
-  as returned error results; the mid-turn sequence `pausing — finishing
+  adds: domain rejections (pause/resume on settled, resume on non-paused —
+  no public trigger since #130) as returned error results; the mid-turn sequence `pausing — finishing
   current turn` → `paused between turns` (poll lines) with tail
   `taskState: "paused"`; resume continuing the same live session
   (`callCount === 2`, no replay).
@@ -905,7 +911,8 @@ guards), `extension.ts` shutdown traces, `browser.ts`/`browser-state.ts`
 (browser surface, retention, pause key).
 
 - **Contract:** footer appears/merges/clears with ticket lifecycle and
-  reflects pause/resume; settle warning once per ticket activation with
+  reflects pause/resume (dashboard-only since #130 — pause gap note);
+  settle warning once per ticket activation with
   warning severity; sync dispatches never set the footer. Added
   2026-09-22 with the guard itself: the tree-navigation consent prompt —
   exactly two choices (v1's third "hold" option dropped by owner
@@ -922,7 +929,8 @@ guards), `extension.ts` shutdown traces, `browser.ts`/`browser-state.ts`
   occlusion, one physical row per compact tool, multiline prompt safety,
   expanded bounded previews, response switching, roster selection,
   scrollback/live-follow, resize/tiny-terminal behavior, editor non-mutation,
-  whole-ticket pause/resume, Escape completion and refresh cleanup.
+  whole-ticket pause/resume (dashboard-only since #130), Escape completion
+  and refresh cleanup.
 - **Internal:** browser rendering internals (SelectList wiring, refresh
   timer, generation counter), activity-store caps. The browser tests capture
   the public custom component using a terminal fixture, not production
@@ -1266,7 +1274,7 @@ turn, not only settlement; `timeoutMs` still detaches the waiter only.
   newly settling `interrupted` (the result names the task and reports
   the ticket still running). Activity already on record when the wait
   begins is stale news — the view shows it but a fresh wait keeps
-  waiting; a timeout detaches only that waiter.
+  waiting; an abort detaches only that waiter (the timeout is gone — #130).
 - **Covered now:** `tests/contract/tickets.test.ts` — the question wake
   carrying the full notice plus the `Wait detached` hint, the interrupt
   wake naming the task while the ticket keeps running (the interrupt
@@ -1520,7 +1528,7 @@ resolves on the first ticket to settle, the watcher's `Promise.any`.
 | `schema.test.ts`/`delegate.test.ts`: enum, control-field, and id rejection | Contract | Live tests in `tests/contract/validation.test.ts` |
 | `schema.test.ts`/`task-resolution.test.ts`: semantic validation (duplicates, removed deadline fields, workspace conflicts, mode mixing, unknown agent, required fields) | Contract | Pending tests in `tests/contract/validation.test.ts` |
 | `lifecycle.test.ts`/`dispatch.test.ts`: ordered sync results, sibling failure isolation, task-id echo, usage, async ticket return, concurrency bound | Contract | Pending tests in `tests/contract/dispatch.test.ts` |
-| `delegate.test.ts`/`pause.test.ts` ticket integration: roster, not-found, wait, timeout detach, cancel preview/force, retained results, pause/resume | Contract + Regression | Pending tests in `tests/contract/tickets.test.ts` |
+| `delegate.test.ts`/`pause.test.ts` ticket integration: roster, not-found, wait, cancel preview/force, retained results (timeout detach and pause/resume RPC scenarios retired — #130) | Contract + Regression | Pending tests in `tests/contract/tickets.test.ts` |
 | `lifecycle.test.ts` pool/session tests: pooling, list, close, frozen config, `resumeFrom` errors, busy conflicts | Contract + Regression | Live tests in `tests/contract/sessions.test.ts` |
 | `dispatch.test.ts`/`shared-write-safety.test.ts`/`workspace.test.ts`/`isolated-workspace.test.ts`: writer serialization, cross-call rejection, shared/isolated rejection, scratch discard, ordered apply, conflict retention | Contract + Regression | `tests/contract/workspaces.test.ts` (live) |
 | `lifecycle.test.ts` retry matrix and `dispatch.test.ts` serialized-successor | Regression | Pending tests in `tests/regression/failure-propagation.test.ts` |

@@ -223,10 +223,11 @@ function expandHint(theme: Theme): string {
 /**
  * The `delegate` tool's call row: a static `delegate N tasks` header plus
  * up to four task previews (`<label>  <~60 chars of prompt>`; a resume-only
- * task shows its `↻` tag instead). The label is the caller's `description`,
- * else its `id`, else the `agent` name, else `inline` — compact callers
- * cannot set ids, so a positional `task-N` would be noise, not information
- * (#63). Labels pad to a common width so previews align. Empty task lists
+ * task shows its `↻` tag instead). The label is the task's `id`, else the
+ * `agent` name, else `inline` — a stored caller `description` renders
+ * only from historical journals (#130 removed the field; #63 dropped
+ * positional `task-N` labels as noise). Labels pad to a common width so
+ * previews align. Empty task lists
  * render `delegate manual`. Deliberately stateless — no spinner, timers,
  * or live state: the row reads identically while the call streams and
  * after it settles, so a human scanning the transcript sees the same call

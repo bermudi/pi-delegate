@@ -61,12 +61,6 @@ export interface DispatchArguments {
    * prepended to each prompt as a delimited preamble.
    */
   readonly brief?: string;
-  /**
-   * Shared batch token ceiling (SPEC v3 "Batch token budget"): settled
-   * tasks' recorded usage counts against it; once exhausted, queued tasks
-   * settle `budget-exhausted` — running tasks always finish.
-   */
-  readonly tokenBudget?: number;
 }
 
 /** A validated delegate_ticket call; blank optionals normalized to absent. */
@@ -182,7 +176,8 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     // `answer` uses raw presence: an out-of-place blank reply is a
     // malformed call, not an absent field. Blank = missing only inside
     // action "answer", where it fails the nonempty requirement. `message`
-    // and `steerId` follow the same convention for action "steer".
+    // follows the same convention for action "steer" (the caller `steerId`
+    // is gone — #130; receipts key on the derived `steer:<toolCallId>`).
     ["answer", args.answer],
     ["message", args.message],
   ] as const) {

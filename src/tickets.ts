@@ -711,10 +711,10 @@ export class TicketStore {
     // Isolated batches settle only after reconciliation has annotated the
     // outcomes — a terminal ticket must already show applied/conflict state.
     // The ticket must be registered before the creation write so a
-    // storage-initialization or save failure can bind the operationId's
-    // duplicate-protection fingerprint to the original failure instead of
-    // forgetting it (a retry after fixing storage must return the
-    // failure, not start new work). Registration-before-write is safe:
+    // storage-initialization or save failure is journaled against the
+    // original attempt instead of being forgotten (a retry after fixing
+    // storage must return the failure, not start new work).
+    // Registration-before-write is safe:
     // runDispatchPipeline removes the ticket when preparation fails, so
     // a failed write never leaves a phantom live ticket behind.
     if (!this.journal) throw new Error("Ticket storage not initialized; async dispatch cannot start.");
@@ -961,8 +961,10 @@ export class TicketStore {
    * starts, which the message opens. `duplicate` replays the recorded
    * receipt verbatim (a parked steer whose task settled unflipped reports
    * `not-applied` instead — the stored record was corrected when it
-   * voided). `steerId` reuse with a different message or target is a
-   * conflict error naming both attempts.
+   * voided). The receipt key is caller-derived (`steer:<toolCallId>`) —
+   * the public surface cannot choose it (#130 removed `steerId`); a
+   * repeat under the same derived key with a different message or target
+   * is still a conflict error naming both attempts.
    */
   steer(
     ticket: Ticket,

@@ -200,7 +200,7 @@ const ticketSchema = Type.Object(
     ticket: Type.Optional(
       Type.String({
         description:
-          "Ticket id; required for every action except a roster poll — and optional on 'answer'/'steer'/'interrupt'/'tail' when taskId is a '<ticket>#<task>' compound, which carries its own ticket.",
+          "Ticket id; required for every action except a roster poll — and optional on 'answer'/'steer'/'interrupt' when taskId is a '<ticket>#<task>' compound, which carries its own ticket.",
       }),
     ),
     force: Type.Optional(
@@ -1006,10 +1006,7 @@ const HELP_FULL_CONTROLS = `## delegate — task and batch controls
 - \`dependsOn\` names same-batch task ids. All prerequisites must succeed
   and stop safely before a dependent starts. Their bounded outputs are handed
   off and their applied changes are visible. Failure blocks dependents,
-  not unrelated tasks.
-- \`operationId\` is a bounded host-lifetime retry key: same id/request reuses
-  the original execution/result, changed request conflicts. Unkeyed calls
-  always execute independently; it is not exactly-once crash recovery.`;
+  not unrelated tasks.`;
 
 // The manual documents exactly the controls the single schema accepts
 // (ADR 0002); the session-field exclusions are engine facts, not

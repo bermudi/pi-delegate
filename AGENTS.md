@@ -307,8 +307,9 @@ V1 is evidence for behavior, never a design source. When consulting it:
   defaults below delegate.json pins. `models`/`modelsByParent` keys may name
   built-ins and globally defined profiles only — project profiles pin via
   frontmatter `model:`. Names resolve exactly (#61): authored `general.md`
-  and `scout.md` are ordinary profiles, not aliases. Profile tools/body supply
-  reusable defaults; full-mode task overrides remain available.
+  and `scout.md` are ordinary profiles, not aliases. Profile tools/body are
+  the only capability and base-prompt selectors (#130 verdict 5 removed
+  task-level overrides).
 - Subagents never nest dispatch (#45): `delegate`/`delegate_ticket`/
   `delegate_session` are stripped — silently — from every child toolset
   (explicit `tools`, profile frontmatter, mirrored parent inventory).

@@ -213,10 +213,11 @@ export function fieldNotes(
 }
 
 /**
- * The caller's `description` as a single-line display label (SPEC v3
+ * A task's stored `description` as a single-line display label (SPEC v3
  * "Reflex meeting"): whitespace-collapsed and bounded for rows and
  * section heads; undefined when absent or blank so callers fall back to
- * the correlation id, then a prompt preview.
+ * the correlation id, then a prompt preview. #130 removed the field —
+ * this reads historical journals; new tasks derive their labels.
  */
 export function descriptionLabel(
   description: string | undefined,

@@ -20,7 +20,7 @@
     "@earendil-works/pi-coding-agent": ">=0.87.0 <2.0.0",
     "typebox": "*"
   },
-  "description": "Pi extension: subagent dispatch with compact/full controls, admission, durable tickets, workspaces, and steering",
+  "description": "Pi extension: subagent dispatch with admission, durable tickets, workspaces, and steering",
   "files": [
     "delegate.ts",
     "src",

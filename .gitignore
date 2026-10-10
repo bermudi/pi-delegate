@@ -39,3 +39,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # runtime capture artifacts from the stream-livelock repro (evidence of
 # live attempts; the instruments themselves are committed)
 docs/verification/support/stream-livelock-repro/captures/
+
+# one-shot edit scripts (never commit — they pollute the tree and are
+# mistaken for shipped tooling; twice-committed on 2026-10-10)
+scripts/.tmp-*

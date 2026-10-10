@@ -73,11 +73,13 @@ request-body dumps — and record `validation`-phase misfire rows.
 BREAKING: `deadlineMs` is removed in both compact and full mode. Its presence
 rejects before execution, including null and flat/stringified recovery shapes.
 Remove it from calls: tasks have no wall-clock deadline. Use cooperative ticket
-cancel/interrupt to stop work; wait/tail timeouts only detach the waiter.
+cancel/interrupt to stop work; waits park until settlement, a worker
+question, or a caller abort (no timeout — #130).
 Historical saved deadline failures remain readable. This explicitly overrides
 SPEC-V2's deadline field and its loading, retry, pause, question, and session
 rules. Stall detection, abort/quiescence, reservations, worker-question/paused
-safety, ticket wait/tail bounds, shutdown bounds, and token budgets are unchanged.
+safety, and shutdown bounds are unchanged. (#130 later removed the wait
+bound, the tail action, and the batch token budget.)
 
 ## Unordered shared-writer rejection (#126, owner-approved 2026-10-08)
 
@@ -161,8 +163,9 @@ This section supersedes the older alias and cardinality entries below.
 - BREAKING: omitted `async` now means background execution for one task as
   well as many. Add `async: false` where inline results are required.
 - BREAKING: cross-harness field synonyms and built-in name translations are
-  removed. Use `agent`, `prompt`, `id`, `async`, `brief`, and
-  `timeoutMs`, plus exact built-in or authored profile names. Removed
+  removed. Use `agent`, `prompt`, `id`, `async`, and `brief`, plus exact
+  built-in or authored profile names (the wait `timeoutMs` destination is
+  gone — #130). Removed
   fields reject the entire call, including null values. Existing saved
   ticket metadata remains readable; it does not authorize new alias calls.
 - BREAKING (superseded by ADR 0002 above): the default advertised and
@@ -177,11 +180,11 @@ This section supersedes the older alias and cardinality entries below.
   base instructions. Non-object calls also record empty-shape misfires.
   Recovery guards omit malformed values; correction examples retain relevant
   addresses but use placeholders for task/message/answer bodies.
-- Reusable tools/base-instruction choices belong in Markdown profiles;
-  explicit per-task overrides remain available in full mode. Dependencies,
-  budgets, resume, pooled sessions, output tailing and pause/resume
-  are not deleted. Compact ticket waits have no caller timeout; explicit
-  polling is immediate and full mode retains detach-only `timeoutMs`.
+- Reusable tools/base-instruction choices belong in Markdown profiles
+  (#130: per-task overrides are removed, not mode-gated). Dependencies,
+  resume, and pooled sessions are unchanged. The batch budget, output
+  tailing, pause/resume actions, and the wait `timeoutMs` are removed
+  (#130): waits park until settlement, a worker question, or a caller abort.
 - No changes to cancellation, workspace admission/application, session
   freezing, model authorization, usage, durable results, or delivery.
 
@@ -235,7 +238,8 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   `id` and a task-shaped `message` → `prompt` on `delegate` (the
   spawn_agent call dispatches; a bare `message` still routes to
   `delegate_ticket` steer guidance, and `message` stays steer-owned
-  there); `timeout_ms` → `timeoutMs` on `delegate_ticket wait`;
+  there); `timeout_ms`/`timeoutMs` on `delegate_ticket wait` — the wait bound is
+  gone (#130); both spellings now reject with the removal teaching;
   `explorer` → `explore`; `reasoning_effort` rejects with the
   `thinking` teaching at every level; `steerId` is optional — a
   steer without one receipts under a derived `steer:<tool-call-id>`
@@ -390,7 +394,8 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   explicit `.jsonl` `resumeFrom`, not automatic pool recovery after restart.
 - Frozen session configuration, same-ID serialization, insert-on-success,
   explicit close, and parent-shutdown cleanup.
-- Async fire-and-forget tickets, poll/wait/cancel/pause/resume behavior,
+- Async fire-and-forget tickets, poll/wait/cancel behavior (pause/resume
+  removed by #130),
   idempotent settlement, retained results, and session-tree leaf-aware delivery
   as specified in `SPEC.md` "Background delivery".
 - Saved async ticket results are pollable on a cold extension instance; an
@@ -452,8 +457,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   message as before the probe existed.
 - Aggregate usage on synchronous tool results where supported. Async delivered
   messages still cannot add usage to the parent total.
-- Optional duplicate-safe dispatch identity (`operationId`, issue #16): an
-  additive contract — a keyed call with the same normalized request reuses
+- Optional duplicate-safe dispatch identity (`operationId`, issue #16) —
+  **removed by #130** (dispatches are not caller-deduplicated; the bullet
+  below is the superseded contract): an additive contract — a keyed call with the same normalized request reuses
   the original in-flight or settled result, and a keyed call with a changed
   request conflicts. This is not content deduplication — unkeyed dispatches
   always execute — and not an exactly-once crash/restart guarantee —
@@ -534,9 +540,10 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   followed by the built-in role line and a fixed subagent framing appendix
   that carries no model identity. Extension-contributed sections, guidelines,
   and tool documentation are never inherited, and an extension-forced parent
-  task `systemPrompt`, Markdown profile bodies) are used verbatim with nothing
-  task `systemPrompt`, Markdown profile bodies) are used verbatim with nothing
-  appended. Migration: none for callers — `default` now genuinely mirrors the
+  prompt disables inheritance with a logged skip. Authored prompts (Markdown
+  profile bodies — the task `systemPrompt` override was removed by #130
+  after this section was written) are used verbatim with nothing appended.
+  Migration: none for callers — `default` now genuinely mirrors the
   parent persona, and built-in children keep their role while also honoring
   parent conventions; users who relied on built-in role prompts *overriding*
   parent persona must switch to a named Markdown profile.
@@ -578,9 +585,10 @@ and migration guidance; none may arrive as silent rewrite drift.
   A throwing active-tool probe no longer silently falls back to writer tools.
   If any `default` task omits `tools`, the whole sync or async call rejects
   before children start, with a logged, actionable error preserving the cause.
-  Migration: restore the parent's tool inventory or supply an intentional
-  explicit `tools` list (including `[]`) on every affected task. Explicit-tool,
-  explore/coder/reviewer, and inline dispatches do not probe the inventory;
+  Migration: restore the parent's tool inventory (the task-level `tools`
+  override is gone — #130; pick a named agent whose profile carries its
+  own tools). Named-profile, explore/coder/reviewer, and inline dispatches
+  do not probe the inventory;
   their existing capabilities are unchanged.
 
 - **Markdown profile discovery is narrower and cannot reshape built-ins
@@ -659,14 +667,14 @@ and migration guidance; none may arrive as silent rewrite drift.
   when #32 landed — model pins only, scoped by the parent's exact
   `provider/model-id`. Per-agent `thinking` is configured by the `:effort`
   suffix on those entries (#32: callers no longer set it at all);
-  per-agent `tools` preferences are task fields or Markdown profile
-  frontmatter now that named profiles have landed (#7). Async tickets
+  per-agent `tools` preferences are Markdown profile frontmatter (the
+  task-level field was removed by #130). Async tickets
   are uncapped in count and live for the host lifetime: `concurrency`
   bounds execution, not ticket creation, and settled tickets stay pollable
   until the host exits.
   Migration: express per-agent effort as `:effort` on `models`/
-  `modelsByParent` entries and per-agent tools as task fields or Markdown
-  profile frontmatter; drop the stale keys; rely on concurrency bounds and
+  `modelsByParent` entries and per-agent tools as Markdown profile
+  frontmatter (task fields removed — #130); drop the stale keys; rely on concurrency bounds and
   polling rather than a ticket cap or TTL sweep.
 
 - **Malformed numeric configuration fails loudly instead of keeping the
@@ -712,7 +720,10 @@ and migration guidance; none may arrive as silent rewrite drift.
   and `delegate_session` (required `action`: list/close) — sharing the same
   stores and runtime. A call that still mixes concerns does not partially
   execute: foreign fields fail the call with guidance naming the right tool
-  and an example built from the values the caller sent. The within-operation
+  and an example built from the values the caller sent. (#130 note: the
+  action set has since narrowed — pause/resume and the wait `timeoutMs`
+  rule named below are removed; the rules and table are historical.)
+  The within-operation
   rules are unchanged (`ticket` required except roster poll, `force` only
   with cancel, `timeoutMs` only with wait, `taskId`/`questionId`/`answer`
   only with answer; `sessionId` required for close and rejected for list).
