@@ -559,7 +559,7 @@ function rejectTaskDeadline(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "deadlineMs")) {
     throw new Error(
       "The deadlineMs field has been removed — tasks have no wall-clock deadline. " +
-        "Remove it; use delegate_ticket cancel or interrupt to stop work. Wait timeouts detach only the waiter.",
+        "Remove it; use delegate_ticket cancel or interrupt to stop work. Waits are unbounded — they end on settlement, never on a caller clock.",
     );
   }
 }
@@ -2078,9 +2078,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
                       const created = tickets.create(tasks, {
                         // Hold settlement through the coordinator's
                         // finally when the batch has workspace
-                        // reconciliation or a token budget — the final
-                        // account must land on the record before any
-                        // racing `wait` renders the settled view.
+                        // reconciliation — the reconciled state must
+                        // land on the record before any racing `wait`
+                        // renders the settled view.
                         holdSettlement: workspaceNeedsSettlementHold(tasks),
                         outputBounds: config.output,
                         // The shared batch brief — persisted on the ticket so
@@ -2118,8 +2118,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
             if (ticket !== undefined) {
               // The settled ticket's views (and its journal record) carry
-              // the final token-budget account — the coordinator persists
-              // it inside its own finally, before the settlement hold
+              // the reconciled outcome — the coordinator persists it
+              // inside its own finally, before the settlement hold
               // lifts, so a racing `wait` never misses it.
               void completion.catch((error: unknown) => {
                 // The coordinator's adopted work settles the dispatch's

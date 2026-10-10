@@ -172,12 +172,6 @@ export function briefNote(brief: string | undefined): string | undefined {
 }
 
 /**
- * The token-budget header note (SPEC v3 "Batch token budget"):
- * `token budget: <consumed>/<limit> tokens[, exhausted]` — mentioned
- * once at the head of a dispatch result or ticket view; per-task
- * `budget-exhausted` statuses carry the per-task story.
- */
-/**
  * The delimited preamble prepended to every task prompt when a dispatch
  * carries a batch brief (SPEC v3 "Batch brief") — the brief is a fenced
  * block, never merged into the task's own prose.
