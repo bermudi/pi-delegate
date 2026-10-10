@@ -2,6 +2,7 @@ import { DiagnosticSink } from "./diagnostics.ts";
 import type { DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AdmissionGrant } from "./admission.ts";
+import type { DispatchLifetime } from "./lifetime.ts";
 import {
   DEFAULT_CONFIG,
   modelConcurrencyLimit,
@@ -204,25 +205,17 @@ export class DispatchCoordinator {
        */
       brief?: string;
       /**
-       * This batch's shutdown barrier, accepted as part of taking the
-       * batch. `run` binds its resolver in the synchronous prefix of the
-       * call — before the first await — so the moment the dispatcher
-       * invokes `run` the transfer is total: the dispatcher's failure
-       * routine can no longer run, and this call resolves the barrier on
-       * every path it owns. The barrier resolves once EVERY task's
-       * quiescence is confirmed, every worker that settled late through
-       * `onWorkerSettled` has finished its deferred cleanup and
-       * retained-reservation release, AND the batch itself has finished —
-       * `finalize` (isolated reconciliation, scratch finalization) plus
-       * the admission-reservation release. Worker quiescence alone is not
-       * full quiescence: reconciliation still mutates the source tree
-       * after the last worker stops, and shutdown completing in that
-       * window would let a replacement session (whose admission
-       * controller knows nothing of this batch) start writers into it.
-       * The barrier resolves independently of this call's own fate and
-       * never while a quarantined worker is unconfirmed — no timeout.
+       * The dispatch's lifetime. `run` adopts this batch's full-quiescence
+       * work into it, synchronously, before its first await. The batch is
+       * covered once EVERY task's quiescence is confirmed, every late worker
+       * has finished its deferred cleanup and retained-reservation release,
+       * AND the batch itself has finished — `finalize` (isolated
+       * reconciliation, scratch finalization) plus the admission-reservation
+       * release. Worker quiescence alone is not full quiescence: the source
+       * tree is still mutated after the last worker stops. This call never
+       * resolves the lifetime itself; the dispatch pipeline closes it.
        */
-      quiescence: Deferred;
+      lifetime: DispatchLifetime;
     },
   ): Promise<DispatchOutcome> {
     const outcomes: (TaskOutcome | undefined)[] = new Array(tasks.length);
@@ -243,23 +236,17 @@ export class DispatchCoordinator {
     // scratch disposal) and the admission-reservation release in the
     // finally below.
     const bodySettled = new Deferred();
-    // Accept the batch's shutdown barrier before anything that could
-    // throw: this wiring is the synchronous prefix of the call, so from
-    // the moment `run` is invoked the coordinator owns the barrier's
-    // resolution on every path. The `finally` below always resolves
-    // `bodySettled` (even on a finalize failure), and a worker that never
-    // settles keeps its `fullyQuiesced` pending — so a batch this call has
-    // taken can never leak its barrier, and a worker that may still be
-    // mutating holds it.
-    void Promise.all([
-      ...tasks.map((task) => fullyQuiesced.get(task.index)!.promise),
-      bodySettled.promise,
-    ]).then(() => options.quiescence.resolve());
-    // Nothing between the barrier wiring above and the `try` below may
-    // throw. The dispatcher's cancelled-preparation rerun invokes `run`
-    // with no fallback catch: a throw in this gap on that path would leak
-    // the barrier and hang every future shutdown. `setLimit` cannot throw
-    // for a validated numeric config; keep it that way.
+    // Adopt the batch's shutdown obligation as the first act of the call.
+    // The `finally` below always resolves `bodySettled` (even on a finalize
+    // failure), and a worker that never settles keeps its `fullyQuiesced`
+    // pending — so the lifetime waits on exactly the work that may still be
+    // mutating. The pipeline, not this call, closes the lifetime.
+    options.lifetime.adopt(
+      Promise.all([
+        ...tasks.map((task) => fullyQuiesced.get(task.index)!.promise),
+        bodySettled.promise,
+      ]),
+    );
     this.semaphore.setLimit(options.config.maxConcurrent);
     const grant = options.grant;
     const loaders = new Map<string, Promise<DefaultResourceLoader>>();

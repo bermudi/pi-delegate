@@ -59,6 +59,10 @@ import {
 import { createActivityStore } from "./src/activity.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
 import { currentBootId } from "./src/owner.ts";
+import {
+  DispatchRegistry,
+  type DispatchLifetime,
+} from "./src/lifetime.ts";
 import { discoverProfiles } from "./src/profiles.ts";
 import {
   createMessageRenderer,
@@ -72,7 +76,6 @@ import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
 import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
 import {
-  Deferred,
   type OutputBounds,
   type ResolvedTask,
   type TaskOutcome,
@@ -1627,34 +1630,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
     },
   };
 
-  // Owned by this closure: one "fully quiesced" barrier per live dispatch;
-  // shutdown holds until every one resolves (INVARIANTS "Ticket state").
-  // every one resolves (INVARIANTS "Ticket state"). The value is the
-  // human-facing name for the shutdown waiting status (COMPATIBILITY
+  // Owned by this closure: one DispatchLifetime per live dispatch; shutdown
+  // holds until every one quiesces (INVARIANTS "Ticket state"). Each label is
+  // the human-facing name for the shutdown waiting status (COMPATIBILITY
   // "Blocking shutdown" names the tickets): the ticket id for a background
   // batch, the call number for a synchronous dispatch, and a "(preparing)"
   // label in the window before either exists.
-  const liveQuiescence = new Map<Promise<void>, string>();
-
-  const trackQuiescence = (
-    label: string,
-  ): { barrier: Deferred; relabel: (label: string) => void } => {
-    const barrier = new Deferred();
-    liveQuiescence.set(barrier.promise, label);
-    void barrier.promise.then(() => {
-      liveQuiescence.delete(barrier.promise);
-    });
-    return {
-      barrier,
-      relabel: (next: string) => {
-        // A resolved barrier is already untracked; relabeling must not
-        // resurrect its entry.
-        if (liveQuiescence.has(barrier.promise)) {
-          liveQuiescence.set(barrier.promise, next);
-        }
-      },
-    };
-  };
+  const dispatches = new DispatchRegistry();
 
   /**
    * Misfire telemetry (SPEC v3 "Observability"): one row per dispatch
@@ -1766,19 +1748,14 @@ export default function delegateExtension(api: ExtensionAPI): void {
    * the one seam between task validation and admission), origin capture,
    * delivery arming, and response formatting all live outside.
    *
-   * Barrier ownership (INVARIANTS "Ticket state"): the pipeline owns the
-   * barrier's resolve until the coordinator accepts the batch; the
-   * coordinator afterwards. The transfer is exhaustive by construction —
-   * there is no flag and no second resolution site. The `try` block below
-   * ends at the `coordinator.run(...)` invocation: `run` accepts the
-   * barrier synchronously before its first await (see DispatchCoordinator),
-   * and its rejections are composed into the returned completion instead
-   * of re-entering this function's catch. So the catch is provably
-   * pre-handoff: `barrier.resolve()` there is only ever reachable while
-   * the pipeline still owns the barrier, and after the handoff the
-   * coordinator resolves on every path it owns.
+   * Shutdown ownership (INVARIANTS "Ticket state"): the wrapper below opens
+   * the dispatch's `DispatchLifetime` and closes it on every exit. The
+   * coordinator adopts its batch's work into that lifetime, so shutdown
+   * waits on the work itself, and this function never resolves a barrier.
    */
-  const runDispatchPipeline = async (options: {
+  const runDispatchPipelineBody = async (
+    lifetime: DispatchLifetime,
+    options: {
     readonly requestedTasks: readonly TaskInput[];
     readonly ctx: ExtensionContext;
     /** The sync caller's host signal; async batches run on the ticket's. */
@@ -1813,24 +1790,17 @@ export default function delegateExtension(api: ExtensionAPI): void {
     outputBounds: OutputBounds;
   }> => {
     const { requestedTasks, ctx, signal, onNotices, createTicket } = options;
-    // The barrier is tracked before anything between here and the handoff
-    // can throw or yield: task resolution probes Git for each writer or
-    // isolated task's write scope, admission grants reservations, and
-    // workspace preparation awaits subprocesses. A shutdown that starts
-    // while this dispatch sits anywhere in that range must already count
-    // it in the liveQuiescence snapshot, or the session boundary could
-    // complete before the dispatch starts workers or releases its
-    // reservations. (Only async preparation is abortable: sync batches run
-    // on the caller's host signal, which shutdown does not abort, so a
-    // parked sync dispatch rides out the hold and runs to completion under
-    // the barrier. Async batches run on the ticket's cancellation signal,
+    // The lifetime is opened by the wrapper below, before anything here can
+    // throw or yield: task resolution probes Git for each writer or isolated
+    // task's write scope, admission grants reservations, and workspace
+    // preparation awaits subprocesses. Shutdown counts this dispatch from
+    // the moment the wrapper opens it. (Only async preparation is abortable:
+    // sync batches run on the caller's host signal, which shutdown does not
+    // abort, so a parked sync dispatch rides out the hold and runs to
+    // completion. Async batches run on the ticket's cancellation signal,
     // which shutdown force-cancels — their preparation aborts on its own
     // and the catch below settles the ticket as cancelled.)
-    const { barrier, relabel } = trackQuiescence(
-      createTicket !== undefined
-        ? "async dispatch (preparing)"
-        : "dispatch (preparing)",
-    );
+    const relabel = (label: string): void => lifetime.relabel(label);
     let ticket: Ticket | undefined;
     let plan: WorkspacePlan | undefined;
     // Everything the failure routine below may still need once admission
@@ -1981,7 +1951,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           sessions,
           signal: dispatchSignal,
           ticket,
-          quiescence: barrier,
+          lifetime,
           syncRunId: options.syncRunId,
           attribution: attributionWindows,
           attributionQuiescenceBoundMs: shutdownQuiescenceBudgetMs(),
@@ -2073,9 +2043,10 @@ export default function delegateExtension(api: ExtensionAPI): void {
         outputBounds: config.output,
       };
     } catch (error) {
-      // The one pre-handoff failure routine — the pipeline still owns the
-      // barrier here. A disposal failure must never erase the root cause:
-      // log it and keep the original as the thrown error.
+      // The one pre-handoff failure routine. The wrapper closes the
+      // lifetime after this, so no barrier is resolved here. A disposal
+      // failure must never erase the root cause: log it and keep the
+      // original as the thrown error.
       try {
         await plan?.dispose();
       } catch (cleanupError) {
@@ -2094,9 +2065,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
         // batch-end implementation, not a hand-rolled copy: under the
         // already-aborted signal `run` records a cancelled outcome for
         // every task, and its finally releases the grant, finishes the
-        // gates, and resolves the barrier through the same full-quiescence
-        // wiring as any batch. Telemetry records nothing — the span above
-        // is never finished for a failed preparation (SPEC.md
+        // gates, and its adopted full-quiescence work settles the lifetime
+        // through the same wiring as any batch. Telemetry records nothing —
+        // the span above is never finished for a failed preparation (SPEC.md
         // "Telemetry": failed preparation records nothing).
         diagnostic("info", "async dispatch preparation aborted after cancellation; settling as cancelled", { ticketId: cancelledTicket.id }, error);
         return {
@@ -2112,7 +2083,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               sessions,
               signal: batch.dispatchSignal,
               ticket: cancelledTicket,
-              quiescence: barrier,
+              lifetime,
               attribution: attributionWindows,
               attributionQuiescenceBoundMs: shutdownQuiescenceBudgetMs(),
               onTaskSettled: (task, outcome) => {
@@ -2138,8 +2109,27 @@ export default function delegateExtension(api: ExtensionAPI): void {
         tickets.remove(ticket.id);
       }
       batch?.grant.release();
-      barrier.resolve();
       throw error;
+    }
+  };
+
+  // The wrapper owns the lifetime and closes it on every exit: success (the
+  // coordinator's adopted work keeps shutdown waiting until it settles),
+  // a pre-handoff failure, and the cancelled-preparation rerun alike. No path
+  // can forget to release the barrier, so the pipeline never resolves one by
+  // hand.
+  const runDispatchPipeline = async (
+    options: Parameters<typeof runDispatchPipelineBody>[1],
+  ): ReturnType<typeof runDispatchPipelineBody> => {
+    const lifetime = dispatches.open(
+      options.createTicket !== undefined
+        ? "async dispatch (preparing)"
+        : "dispatch (preparing)",
+    );
+    try {
+      return await runDispatchPipelineBody(lifetime, options);
+    } finally {
+      lifetime.close();
     }
   };
 
@@ -2256,12 +2246,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
       tickets.cancel(ticket, true);
     }
     sessions.shutdown();
-    const pending = [...liveQuiescence];
+    const pending = dispatches.pending();
     if (pending.length > 0) {
       // The visible status names what is being waited on, so a worker that
       // ignores its abort is identifiable (its ticket id, or the sync call
       // label) without guessing from a bare count.
-      const names = pending.map(([, label]) => label).join(", ");
+      const names = pending.map(({ label }) => label).join(", ");
       try {
         ctx.ui.notify(
           `Delegate: waiting for ${pending.length} dispatch(es) to stop before shutdown (${names})…`,
@@ -2273,7 +2263,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       diagnostic("info", "shutdown waiting for dispatches to reach quiescence", { count: pending.length });
       const budgetMs = shutdownQuiescenceBudgetMs();
       const quiesced = await Promise.race([
-        Promise.all(pending.map(([promise]) => promise)).then(() => true),
+        Promise.all(pending.map(({ quiesced }) => quiesced)).then(() => true),
         new Promise<false>((resolve) =>
           setTimeout(() => resolve(false), budgetMs),
         ),
@@ -2560,9 +2550,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // it inside its own finally, before the settlement hold
               // lifts, so a racing `wait` never misses it.
               void completion.catch((error: unknown) => {
-                // The coordinator's task-quiescence chain owns the barrier
-                // and resolves it on this same rejection path; here the
-                // ticket just settles failed and the crash is reported.
+                // The coordinator's adopted work settles the dispatch's
+                // lifetime on this same rejection path; here the ticket just
+                // settles failed and the crash is reported.
                 tickets.settle(ticket, "failed");
                 diagnostic("error", "background ticket crashed", { ticketId: ticket.id }, error);
               });
