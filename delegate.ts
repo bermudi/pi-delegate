@@ -1388,7 +1388,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
    * wait/poll already returned to the model. The flush suppresses the
    * wake per ticket only when the view it would send now is identical —
    * a render taken while the ticket was still finalizing (the settled
-   * wait races the batch's own `finishBatch` by a few microtasks) still
+   * wait races the batch's own `markBatchFinished` by a few microtasks) still
    * suppresses, while a record that gained content since the render
    * (late outcomes, budget account, notices) still delivers. An
    * unconsumed sibling in the same window delivers normally.
@@ -1769,7 +1769,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
      * task's outcome lands.
      */
     readonly syncRunId?: string;
-    readonly onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
+    readonly onTaskOutcomeRecorded?: (task: ResolvedTask, outcome: TaskOutcome) => void;
     /**
      * Async mode's edge: creates the ticket once tasks are resolved, so
      * the pipeline spends the rest of the batch under its cancellation
@@ -1966,12 +1966,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 ? "The ticket was cancelled before source application."
                 : "The call was aborted before source application.",
             }),
-          onWorkerQuiesced: (taskIndex) => plan!.cleanupWorker(taskIndex),
+          cleanupStoppedWorker: (taskIndex) => plan!.cleanupWorker(taskIndex),
           disposeUnstarted: () => plan!.dispose(),
           // #60: task settlement is the usage event's firing point — the
           // settled outcome's recorded usage, tagged with its ticket and
           // task. No usage (never ran, cancelled pre-prompt) → no event.
-          onTaskSettled: (task, outcome) => {
+          onTaskOutcomeRecorded: (task, outcome) => {
             if (outcome.usage !== undefined) {
               emitUsage(
                 taskUsagePayload(task, outcome.usage, {
@@ -1982,9 +1982,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
             }
             // #119: an inline batch's board refreshes as each outcome
             // lands — display-only, so a throwing emitter is swallowed.
-            if (options.onTaskSettled !== undefined) {
+            if (options.onTaskOutcomeRecorded !== undefined) {
               try {
-                options.onTaskSettled(task, outcome);
+                options.onTaskOutcomeRecorded(task, outcome);
               } catch (error) {
                 diagnostic("error", "settle observer failed", { taskId: task.id }, error);
               }
@@ -2086,7 +2086,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               lifetime,
               attribution: attributionWindows,
               attributionQuiescenceBoundMs: shutdownQuiescenceBudgetMs(),
-              onTaskSettled: (task, outcome) => {
+              onTaskOutcomeRecorded: (task, outcome) => {
                 if (outcome.usage === undefined) return;
                 emitUsage(
                   taskUsagePayload(task, outcome.usage, {
@@ -2262,13 +2262,13 @@ export default function delegateExtension(api: ExtensionAPI): void {
       }
       diagnostic("info", "shutdown waiting for dispatches to reach quiescence", { count: pending.length });
       const budgetMs = shutdownQuiescenceBudgetMs();
-      const quiesced = await Promise.race([
-        Promise.all(pending.map(({ quiesced }) => quiesced)).then(() => true),
+      const resourcesStopped = await Promise.race([
+        Promise.all(pending.map(({ resourcesStopped }) => resourcesStopped)).then(() => true),
         new Promise<false>((resolve) =>
           setTimeout(() => resolve(false), budgetMs),
         ),
       ]);
-      if (!quiesced) {
+      if (!resourcesStopped) {
         // The invariant holds in the only direction it can: reservations
         // are never released without confirmed quiescence, so nothing is
         // unblocked by proceeding — the host simply stops waiting on work
@@ -2390,17 +2390,19 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
             // Async edge — background delivery. Armed once the pipeline has
             // handed the batch to the coordinator; it waits for caller
-            // settlement AND the finished gate, so the delivered view always
+            // terminal status AND batch finalization, so the delivered view always
             // carries the safe-to-expose outcome: finalized isolated
             // integrations, retained errors, and (on cancellation) partial
-            // results rather than a bare status. Delivery itself is the
+            // results rather than a bare status. This does not wait for the
+            // dispatch's resourcesStopped proof: quarantined work can still
+            // be active. Delivery itself is the
             // closure-level coalescing queue (SPEC v3 "Wake delivery"):
             // the ticket joins the current flush window rather than
             // sending alone.
             const armDelivery = (ticket: Ticket): void => {
               void Promise.all([
-                tickets.settledPromise(ticket),
-                tickets.finishedPromise(ticket),
+                tickets.terminalStatusAvailable(ticket),
+                tickets.batchFinished(ticket),
               ])
                 .then(() => enqueueDelivery(ticket, ctx))
                 .catch((error: unknown) => {
@@ -2477,7 +2479,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               ctx,
               brief: call.brief,
               syncRunId,
-              onTaskSettled:
+              onTaskOutcomeRecorded:
                 syncRunId === undefined ? undefined : () => emitBoard(),
               // One signal source in the pipeline: the caller's host signal
               // for a sync batch, the ticket's cancellation for an async one.

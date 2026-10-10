@@ -144,8 +144,8 @@ export class DispatchCoordinator {
    *
    * `finalize` runs after every task has a caller-visible outcome but inside
    * the admission-reservation window — isolated reconciliation lives there.
-   * `onWorkerQuiesced` runs when a provisionally-recorded worker's true
-   * settlement arrives, before its retained reservation is released.
+   * `cleanupStoppedWorker` runs after a provisionally-recorded worker's
+   * workerStopped signal fulfills, before its retained reservation releases.
    */
   async run(
     tasks: readonly ResolvedTask[],
@@ -172,7 +172,7 @@ export class DispatchCoordinator {
         phase: number,
         outcomes: TaskOutcome[],
       ) => Promise<readonly TaskOutcome[]>;
-      onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
+      cleanupStoppedWorker?: (taskIndex: number) => Promise<void>;
       /** Dispose prepared workspaces if batch setup fails before any task starts. */
       disposeUnstarted?: () => Promise<void>;
       /**
@@ -193,13 +193,13 @@ export class DispatchCoordinator {
        */
       attributionQuiescenceBoundMs?: number;
       /**
-       * One task's caller-visible settlement (#60): invoked for every
+       * One task's recorded caller-visible outcome (#60): invoked for every
        * recorded outcome — provisional or final — as it lands, with the
        * settled outcome's recorded usage. The sink publishes usage
        * telemetry (pi.events "delegate:usage"); it must never throw
        * into the dispatch — call sites guard like the activity feed.
        */
-      onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
+      onTaskOutcomeRecorded?: (task: ResolvedTask, outcome: TaskOutcome) => void;
       /**
        * Ticket-less (inline) dispatch identity (#119): the live-activity
        * run key this batch's rows track under — `sync-run:<runId>:<taskId>`
@@ -231,20 +231,22 @@ export class DispatchCoordinator {
     // A serialized successor must wait for its predecessor's confirmed
     // quiescence — not merely a recorded outcome. A provisional
     // (quarantined) predecessor may still be mutating the shared root.
-    const quiescence = new Map<number, Deferred>();
-    // Confirmed quiescence alone is not the full barrier: a late-settled
-    // worker still owes deferred cleanup and its retained-reservation
-    // release. `fullyQuiesced` resolves only after that tail completes.
-    const fullyQuiesced = new Map<number, Deferred>();
+    const workersStopped = new Map<number, Deferred>();
+    // Worker termination is not resource quiescence. A late worker also
+    // owes deferred workspace cleanup and retained-release bookkeeping.
+    // This map covers that tail, NOT phase reconciliation generally:
+    // ordinary outcomes resolve it before reconciliation, which remains
+    // covered by batchBodyStopped and the aggregate lifetime.
+    const workerTailsStopped = new Map<number, Deferred>();
     for (const task of tasks) {
-      quiescence.set(task.index, new Deferred());
-      fullyQuiesced.set(task.index, new Deferred());
+      workersStopped.set(task.index, new Deferred());
+      workerTailsStopped.set(task.index, new Deferred());
     }
     // Resolves once the run body itself has finished: `finalize` (isolated
     // reconciliation applying to or retaining against the source tree,
-    // scratch disposal) and the admission-reservation release in the
+    // scratch disposal) and admission-reservation release attempts in the
     // finally below.
-    const bodySettled = new Deferred();
+    const batchBodyStopped = new Deferred();
     const grant = options.grant;
     const started = new Set<number>();
     const failures: unknown[] = [];
@@ -253,8 +255,8 @@ export class DispatchCoordinator {
       // Register resolve-only proofs before starting work. Setup and every
       // later stage share this error boundary: never-started tasks are
       // settled below, while unknown worker state keeps its proofs pending.
-      options.lifetime.adopt(bodySettled);
-      for (const proof of fullyQuiesced.values()) options.lifetime.adopt(proof);
+      options.lifetime.adopt(batchBodyStopped);
+      for (const proof of workerTailsStopped.values()) options.lifetime.adopt(proof);
       this.semaphore.setLimit(options.config.maxConcurrent);
       const loaders = new Map<string, Promise<DefaultResourceLoader>>();
       // Dependency phases run in order: every task in a phase waits for
@@ -289,8 +291,8 @@ export class DispatchCoordinator {
               grant,
               loaders,
               outcomes,
-              quiescence,
-              fullyQuiesced,
+              workersStopped,
+              workerTailsStopped,
               tasks,
               prepError,
             );
@@ -360,7 +362,7 @@ export class DispatchCoordinator {
         // source Git metadata. Only the full worker+cleanup barrier is proof
         // for exempting this writer during a later scratch copy.
         for (const task of phaseTasks) {
-          if (fullyQuiesced.get(task.index)!.resolved) {
+          if (workerTailsStopped.get(task.index)!.resolved) {
             grant.confirmTaskQuiescence(task.index);
           }
         }
@@ -379,8 +381,8 @@ export class DispatchCoordinator {
         };
         outcomes[task.index] = outcome;
         // Proof comes from never entering runOne, not successful reporting.
-        quiescence.get(task.index)!.resolve();
-        fullyQuiesced.get(task.index)!.resolve();
+        workersStopped.get(task.index)!.resolve();
+        workerTailsStopped.get(task.index)!.resolve();
         try {
           if (options.ticket) this.tickets.recordOutcome(options.ticket, outcome);
         } catch (recordError) {
@@ -403,7 +405,7 @@ export class DispatchCoordinator {
       // isolated cleanup still changes its Git metadata.
       const retained = new Set<number>();
       for (const task of tasks) {
-        if (!fullyQuiesced.get(task.index)!.resolved) retained.add(task.index);
+        if (!workerTailsStopped.get(task.index)!.resolved) retained.add(task.index);
       }
       try {
         grant.release(retained);
@@ -412,14 +414,14 @@ export class DispatchCoordinator {
         this.diagnostics.log("error", "releasing dispatch reservations failed", {}, error);
       }
       try {
-        if (options.ticket) this.tickets.finishBatch(options.ticket);
+        if (options.ticket) this.tickets.markBatchFinished(options.ticket);
       } catch (error) {
         failures.push(error);
         this.diagnostics.log("error", "finishing dispatch ticket failed", {}, error);
       }
       // All synchronous finalization attempts ended. Unknown workers still
       // hold their own proof gates and retained reservations independently.
-      bodySettled.resolve();
+      batchBodyStopped.resolve();
     }
 
     if (failures.length === 1) throw failures[0];
@@ -443,8 +445,8 @@ export class DispatchCoordinator {
       sessions: SessionPool;
       signal?: AbortSignal;
       ticket?: Ticket;
-      onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
-      onTaskSettled?: (task: ResolvedTask, outcome: TaskOutcome) => void;
+      cleanupStoppedWorker?: (taskIndex: number) => Promise<void>;
+      onTaskOutcomeRecorded?: (task: ResolvedTask, outcome: TaskOutcome) => void;
       syncRunId?: string;
       brief?: string;
       attribution?: AttributionWindows;
@@ -453,8 +455,8 @@ export class DispatchCoordinator {
     grant: AdmissionGrant,
     loaders: Map<string, Promise<DefaultResourceLoader>>,
     outcomes: (TaskOutcome | undefined)[],
-    quiescence: Map<number, Deferred>,
-    fullyQuiesced: Map<number, Deferred>,
+    workersStopped: Map<number, Deferred>,
+    workerTailsStopped: Map<number, Deferred>,
     tasks: readonly ResolvedTask[],
     prepError: unknown,
   ): Promise<void> {
@@ -498,8 +500,8 @@ export class DispatchCoordinator {
         // A failed track never blocks the task it wanted to display.
       }
     }
-    const confirmed = quiescence.get(task.index)!;
-    const fully = fullyQuiesced.get(task.index)!;
+    const workerStoppedProof = workersStopped.get(task.index)!;
+    const workerTailStoppedProof = workerTailsStopped.get(task.index)!;
     // True once a worker session may exist; below that point a failure is
     // provably pre-worker and needs no quarantine.
     let workerCreated = false;
@@ -549,12 +551,12 @@ export class DispatchCoordinator {
           this.diagnostics.log("error", "activity feed failed", { taskId: task.id }, error);
         }
       }
-      // A non-quarantined outcome confirms the worker is done (or never
-      // started): serialized successors may proceed, and nothing remains
-      // owed to a shutdown barrier — no deferred cleanup is pending.
+      // A non-quarantined outcome confirms the worker stopped (or never
+      // started), with no late-worker cleanup tail. Phase reconciliation
+      // can still be pending; the batch-body proof holds shutdown through it.
       if (!outcome.quarantined) {
-        confirmed.resolve();
-        fully.resolve();
+        workerStoppedProof.resolve();
+        workerTailStoppedProof.resolve();
       }
       if (ticket) {
         // The store owns lifecycle; recording can settle the ticket but
@@ -564,9 +566,9 @@ export class DispatchCoordinator {
       // Usage reporting (#60): the settled outcome's recorded usage is
       // what the event carries — emit at the settlement point itself,
       // not at batch end, so a long-running ticket reports as it goes.
-      if (options.onTaskSettled !== undefined) {
+      if (options.onTaskOutcomeRecorded !== undefined) {
         try {
-          options.onTaskSettled(task, outcome);
+          options.onTaskOutcomeRecorded(task, outcome);
         } catch (error) {
           this.diagnostics.log("error", "usage settlement sink failed", { taskId: task.id }, error);
         }
@@ -577,10 +579,11 @@ export class DispatchCoordinator {
      * The live handle is dropped at real quiescence — a provisional
      * (cancelled-before-confirmed) outcome leaves the worker reachable for
      * a later, stronger abort. When the true outcome differs from what was
-     * recorded, it replaces it for visibility — never the ticket status —
-     * and confirmed quiescence releases the retained reservation.
+     * recorded, it replaces it for visibility — never the ticket status.
+     * Worker stop initiates deferred cleanup; the retained reservation
+     * releases only after that tail ends.
      */
-    const onWorkerSettled = (
+    const onWorkerStopped = (
       handle: ExecutionHandle,
       late: TaskOutcome | undefined,
     ) => {
@@ -625,7 +628,7 @@ export class DispatchCoordinator {
           // Diagnostics only; the outcome is already recorded.
         }
       }
-      // Settled() resolving proves the worker stopped — no background
+      // workerStopped() fulfilling proves the worker stopped — no background
       // continuations remain — even when an earlier abort threw and marked
       // the outcome quarantined. A thrown abort must not poison quiescence
       // confirmation for the worker's lifetime: confirm now, run the
@@ -633,13 +636,13 @@ export class DispatchCoordinator {
       // and admission are not held forever by a stopped worker. A worker
       // that never settles never reaches here, so its barrier correctly
       // stays pending while it may still be mutating.
-      confirmed.resolve();
+      workerStoppedProof.resolve();
       // Confirmed quiescence: deferred workspace cleanup first, then the
-      // retained reservation may be released. Only after that tail is the
-      // task fully quiesced for a shutdown barrier.
+      // retained reservation may be released. This completes the worker tail;
+      // batchBodyStopped independently covers phase reconciliation.
       void (async () => {
         try {
-          await options.onWorkerQuiesced?.(task.index);
+          await options.cleanupStoppedWorker?.(task.index);
         } catch (error) {
           this.diagnostics.log("error", "deferred cleanup after quiescence failed", { taskId: task.id }, error);
         }
@@ -650,7 +653,7 @@ export class DispatchCoordinator {
         } finally {
           // Worker and cleanup have stopped even if synchronous bookkeeping
           // failed. A failed release cannot authorize a new reservation.
-          fully.resolve();
+          workerTailStoppedProof.resolve();
         }
       })();
     };
@@ -686,7 +689,7 @@ export class DispatchCoordinator {
             !prerequisiteSatisfied(recorded, tasks[depIndex]!);
           if (!unsatisfiable) {
             await Promise.race([
-              quiescence.get(depIndex)?.promise ?? Promise.resolve(),
+              workersStopped.get(depIndex)?.promise ?? Promise.resolve(),
               onAbort(signal),
             ]);
           }
@@ -768,7 +771,7 @@ export class DispatchCoordinator {
           // Wait for confirmed quiescence, not caller-visible settlement: a
           // provisional predecessor may still be writing the shared root.
           await Promise.race([
-            quiescence.get(predecessor)?.promise ?? Promise.resolve(),
+            workersStopped.get(predecessor)?.promise ?? Promise.resolve(),
             onAbort(signal),
           ]);
         }
@@ -916,7 +919,7 @@ export class DispatchCoordinator {
                     this.tickets.registerExecution(ticket, task.index, handle);
                   }
                 },
-                onWorkerSettled,
+                onWorkerStopped,
               );
               // The window settles after the final attempt but before
               // workspace reconciliation — its diff must not count the
@@ -937,13 +940,13 @@ export class DispatchCoordinator {
                     options.attributionQuiescenceBoundMs ?? 30_000;
                   void (async () => {
                     try {
-                      const quiesced = await Promise.race([
-                        confirmed.promise.then(() => true),
+                      const workerStopConfirmed = await Promise.race([
+                        workerStoppedProof.promise.then(() => true),
                         new Promise<false>((resolve) =>
                           setTimeout(() => resolve(false), boundMs),
                         ),
                       ]);
-                      if (!quiesced) {
+                      if (!workerStopConfirmed) {
                         attribution.abandon(openWindow);
                         return;
                       }
@@ -1000,7 +1003,7 @@ export class DispatchCoordinator {
         quarantined: workerCreated || undefined,
       });
     } finally {
-      // The run body is over; only executions still winding down (settled()
+      // The run body is over; only executions still winding down (workerStopped()
       // pending) keep the propagation listeners alive past this point.
       runEnded = true;
       if (liveExecutions === 0) disposeSignal();

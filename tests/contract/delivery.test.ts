@@ -931,7 +931,7 @@ describe("async result delivery", () => {
         await Bun.sleep(2);
       }
       expect(view).toContain("DELIVERED-OUTPUT");
-      // One more poll past the settle→finishBatch hop: the batch's
+      // One more poll past the terminal-status→markBatchFinished hop: the batch's
       // finalization lands within microtasks of settlement, so this
       // read's fingerprint is the final view either way.
       await Bun.sleep(5);

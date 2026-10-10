@@ -345,10 +345,12 @@ export interface WorkerQuestion {
 
 export interface ExecutionHandle {
   /**
-   * Cooperative abort of in-flight model/tool work. The promise resolves
-   * only if the worker confirms quiescence — it may never resolve when a
-   * provider or tool ignores cancellation, so nothing caller-visible may
-   * block on it.
+   * Request cooperative abort of in-flight model/tool work. Its returned
+   * promise is not worker-stop proof: preflight can return before a session
+   * exists, and abort failures may be reported while work remains live.
+   * Conversely, an uncooperative provider/tool can keep it pending.
+   * Caller-visible completion must not block on this acknowledgement;
+   * workspace cleanup and admission release require their separate stop proofs.
    */
   abort(reason: string): Promise<void>;
   /**

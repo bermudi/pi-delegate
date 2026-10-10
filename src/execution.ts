@@ -271,24 +271,23 @@ function reportableTranscript(
 
 /**
  * One attempt at one task. Owns the child AgentSession for the attempt's
- * duration and exposes cooperative abort. A run ends when prompt() settles;
- * the child is extension-free, so settlement means no background
- * continuations remain. Disposal happens exactly once, in run()'s finally:
- * abort() alone is not proof of quiescence because a prompt in preflight
- * has not registered its run yet, and a run can still start afterward.
+ * duration and exposes cooperative abort. Worker-stop evidence arrives after
+ * prompt(), waitForIdle(), and session-custody settlement complete. An abort
+ * acknowledgement is not that evidence: a prompt in preflight has not
+ * registered its run yet, and a run can still start afterward.
  *
- * Two settlements are kept distinct:
+ * Two attempt-level completion signals are kept distinct:
  *
- * - result() is the caller-visible settlement. It resolves with the true
+ * - outcomeAvailable() is caller-visible completion. It resolves with the true
  *   outcome when the run winds down, or with a provisional cancelled /
  *   stall outcome as soon as cancellation is requested — a provider or
  *   tool that ignores the abort signal must not hold the caller. A
  *   provisional outcome is quarantined: termination is unconfirmed, so the
  *   worker's reservations stay held.
- * - settled() is the worker truth: it resolves only when the run actually
- *   wound down (prompt() and waitForIdle() settled), confirming quiescence.
- *   Its outcome may then release a retained reservation; it can never be a
- *   success after cancellation.
+ * - workerStopped() fulfills with worker truth only after the run actually
+ *   wound down and session custody was settled. Rejection is not stop proof.
+ *   This does not include phase reconciliation or deferred workspace cleanup:
+ *   the coordinator/lifetime own dispatch-wide resource quiescence.
  */
 export class TaskExecution implements ExecutionHandle {
   private session: AgentSession | undefined;
@@ -356,29 +355,29 @@ export class TaskExecution implements ExecutionHandle {
   private exclusiveQuestionTurn = false;
   /** Resolves the moment cancellation is requested, however it arrives. */
   private readonly abortRequested = new Deferred();
-  private readonly done: Promise<AttemptResult>;
+  private readonly stoppedOutcome: Promise<AttemptResult>;
 
   constructor(
     private readonly task: ResolvedTask,
     private readonly controls: RunControls,
     loader: DefaultResourceLoader,
   ) {
-    this.done = this.run(loader).then((outcome) => {
+    this.stoppedOutcome = this.run(loader).then((outcome) => {
       this.settleSession(outcome);
       return this.withAttribution(outcome);
     });
   }
 
-  result(): Promise<AttemptResult> {
+  outcomeAvailable(): Promise<AttemptResult> {
     return Promise.race([
-      this.done,
+      this.stoppedOutcome,
       this.abortRequested.promise.then(() =>
         this.withAttribution(this.provisionalOutcome())),
     ]);
   }
 
-  settled(): Promise<AttemptResult> {
-    return this.done;
+  workerStopped(): Promise<AttemptResult> {
+    return this.stoppedOutcome;
   }
 
   /**
@@ -1026,7 +1025,7 @@ export async function runTask(
   controls: RunControls,
   loaders: Map<string, Promise<DefaultResourceLoader>>,
   onExecution?: (handle: ExecutionHandle) => void,
-  onWorkerSettled?: (
+  onWorkerStopped?: (
     handle: ExecutionHandle,
     late: TaskOutcome | undefined,
   ) => void,
@@ -1114,22 +1113,22 @@ export async function runTask(
     );
     onExecution?.(execution);
     const usageBeforeAttempt = usage;
-    const recorded = await execution.result();
+    const recorded = await execution.outcomeAvailable();
     last = recorded;
     usage = addUsage(usage, last.usage);
     mergeAttribution(recorded);
 
-    // Worker truth is independent of caller settlement: every attempt's
-    // real settlement drops its live handle, and when result() reported a
-    // provisional outcome the true outcome still arrives — for visibility
-    // and, once quiescence is confirmed, reservation release.
+    // Worker truth is independent of caller completion: every attempt's
+    // workerStopped signal drops its live handle. When outcomeAvailable()
+    // reported a provisional outcome, the true outcome still arrives for
+    // visibility and, once quiescence is confirmed, reservation release.
     void execution
-      .settled()
+      .workerStopped()
       .then((real) => {
         // Worker truth may carry paths the provisional snapshot had not
         // yet observed — merge before the late outcome replaces it.
         mergeAttribution(real);
-        onWorkerSettled?.(
+        onWorkerStopped?.(
           execution,
           real === recorded
             ? undefined

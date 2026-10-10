@@ -53,6 +53,16 @@ function writeConcurrency(maxConcurrent: number): void {
   configureDelegate(session, { maxConcurrent });
 }
 
+/** Fail a stuck public call without leaving its provider gate held forever. */
+async function bounded<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("cancellation test barrier timed out")), 5000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 /**
  * Probe admission until a dispatch is accepted or the budget expires.
  * Rejection for a still-retained (quarantined) reservation fails inside
@@ -152,55 +162,70 @@ test(
     };
     subagents.respond([gated, fauxAssistantMessage("AFTER-QUARANTINE")]);
 
-    const dispatched = await callDelegate(session, {
-      tasks: [{ prompt: "hold" }],
-      async: true,
-    });
-    const ticket = ticketIdOf(dispatched.text);
+    let provisionalWait: Promise<ToolResultRecord> | undefined;
+    try {
+      const dispatched = await bounded(callDelegate(session, {
+        tasks: [{ prompt: "hold" }],
+        async: true,
+      }));
+      const ticket = ticketIdOf(dispatched.text);
 
-    // Wait until the provider call is definitely in flight: callCount is
-    // bumped synchronously inside the faux stream function.
-    const deadline = Date.now() + 5000;
-    while (subagents.state.callCount === 0 && Date.now() < deadline) {
-      await new Promise((r) => setImmediate(r));
+      // Wait until the provider call is definitely in flight: callCount is
+      // bumped synchronously inside the faux stream function.
+      const deadline = Date.now() + 5000;
+      while (subagents.state.callCount === 0 && Date.now() < deadline) {
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(subagents.state.callCount).toBe(1);
+
+      const cancelled = await bounded(callDelegateTicket(session, {
+        action: "cancel",
+        ticket,
+        force: true,
+      }));
+      expect(cancelled.isError).toBe(false);
+      expect(cancelled.text).toMatch(/cancel/i);
+
+      // A cancel receipt alone is not settlement. Wait must expose terminal
+      // cancellation BEFORE the abort-ignoring provider is allowed to return.
+      provisionalWait = callDelegateTicket(session, { action: "wait", ticket });
+      const provisional = await bounded(provisionalWait);
+      expect(provisional.text).toContain(`Ticket "${ticket}": cancelled`);
+      expect(provisional.text).not.toMatch(/— (completed|ok)/i);
+      expect(subagents.state.callCount).toBe(1);
+
+      // While the worker may still mutate, conflicting work rejects.
+      const rejected = await bounded(callDelegate(session, {
+        async: false,
+        tasks: [{ prompt: "conflict" }],
+      }));
+      expect(rejected.isError).toBe(true);
+      expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
+      expect(subagents.state.callCount).toBe(1);
+
+      // Confirmed quiescence: the gate releases, the provider sees the abort,
+      // the run winds down, and the reservation is released — proven by the
+      // same dispatch now being admitted. The intervening wait round-trip
+      // drains the worker's microtask cascade before this call is admitted.
+      release();
+      const settled = await bounded(callDelegateTicket(session, {
+        action: "wait",
+        ticket,
+      }));
+      expect(settled.text).toMatch(/cancelled/i);
+      // The late worker outcome can never turn cancellation into success.
+      expect(settled.text).not.toMatch(/— (completed|ok)/i);
+
+      const admitted = await bounded(callDelegate(session, {
+        async: false,
+        tasks: [{ prompt: "after" }],
+      }));
+      expect(admitted.isError).toBe(false);
+      expect(admitted.text).toContain("AFTER-QUARANTINE");
+    } finally {
+      release();
+      if (provisionalWait) await bounded(provisionalWait);
     }
-    expect(subagents.state.callCount).toBe(1);
-
-    const cancelled = await callDelegateTicket(session, {
-      action: "cancel",
-      ticket,
-      force: true,
-    });
-    expect(cancelled.isError).toBe(false);
-    expect(cancelled.text).toMatch(/cancel/i);
-
-    // While the worker may still mutate, conflicting work rejects.
-    const rejected = await callDelegate(session, {
-      async: false,
-      tasks: [{ prompt: "conflict" }],
-    });
-    expect(rejected.isError).toBe(true);
-    expect(rejected.text).toMatch(/conflict|running|overlap|active/i);
-
-    // Confirmed quiescence: the gate releases, the provider sees the abort,
-    // the run winds down, and the reservation is released — proven by the
-    // same dispatch now being admitted. The intervening wait round-trip
-    // drains the worker's microtask cascade before this call is admitted.
-    release();
-    const settled = await callDelegateTicket(session, {
-      action: "wait",
-      ticket,
-    });
-    expect(settled.text).toMatch(/cancelled/i);
-    // The late worker outcome can never turn cancellation into success.
-    expect(settled.text).not.toMatch(/— (completed|ok)/i);
-
-    const admitted = await callDelegate(session, {
-      async: false,
-      tasks: [{ prompt: "after" }],
-    });
-    expect(admitted.isError).toBe(false);
-    expect(admitted.text).toContain("AFTER-QUARANTINE");
   },
 );
 

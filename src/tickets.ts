@@ -110,14 +110,14 @@ interface TicketRuntime {
    */
   holdSettlement: boolean;
   pauseGate: Deferred | undefined;
-  /** Resolves when the ticket reaches a terminal status. */
-  readonly settledGate: Deferred;
+  /** Terminal ticket status only; forced cancellation can precede every outcome. */
+  readonly terminalGate: Deferred;
   /**
-   * Resolves when every task has a caller-visible outcome. Quarantined
-   * workers may still be winding down — this is caller settlement, not
-   * confirmed quiescence.
+   * Resolves when the coordinator ends its batch finalization path. Available
+   * outcomes and completed phase annotations are on record, but quarantined
+   * workers/cleanup can still be active. Never a resource-quiescence proof.
    */
-  readonly finishedGate: Deferred;
+  readonly batchFinishedGate: Deferred;
   readonly waiters: Set<() => void>;
   /** Live executions by task index, for cooperative abort. */
   readonly executions: Map<number, ExecutionHandle>;
@@ -647,8 +647,8 @@ export class TicketStore {
       pendingSteers: new Map(),
       holdSettlement,
       pauseGate: undefined,
-      settledGate: new Deferred(),
-      finishedGate: new Deferred(),
+      terminalGate: new Deferred(),
+      batchFinishedGate: new Deferred(),
       waiters: new Set(),
       executions: new Map(),
       settledView: undefined,
@@ -743,7 +743,7 @@ export class TicketStore {
    * terminal-but-unfrozen ticket (executions still draining, possibly
    * forever under quarantine) re-renders without writing a new file per
    * poll. A terminal view is also memoized whole once it can no longer
-   * change — the finished gate has resolved and no execution remains
+   * change — the batch-finished gate has resolved and no execution remains
    * live — so repeated polls of a settled ticket keep pointing at the
    * same spill file rather than writing a new one per render.
    */
@@ -752,7 +752,7 @@ export class TicketStore {
     const live: LiveState = { activity: this.activity, executions: rt.executions };
     if (
       isTerminal(record.status) &&
-      rt.finishedGate.resolved &&
+      rt.batchFinishedGate.resolved &&
       rt.executions.size === 0
     ) {
       rt.settledView ??= ticketView(this.diagnostics, record, false, rt.renderedOutputs, live);
@@ -1351,7 +1351,7 @@ export class TicketStore {
     }
     this.changed();
     rt.pauseGate?.resolve();
-    rt.settledGate.resolve();
+    rt.terminalGate.resolve();
     for (const notify of [...rt.waiters]) notify();
     return true;
   }
@@ -1569,22 +1569,22 @@ export class TicketStore {
   }
 
   /**
-   * Resolve the finished gate: every task has a caller-visible outcome.
-   * Quarantined workers may still be winding down — this is caller
-   * settlement, not confirmed quiescence. Idempotent.
+   * Mark the end of coordinator batch finalization. Quarantined workers
+   * and deferred cleanup can still be active; this is not stop proof.
+   * Idempotent.
    */
-  finishBatch(ticket: Ticket): void {
-    this.entry(ticket).rt.finishedGate.resolve();
+  markBatchFinished(ticket: Ticket): void {
+    this.entry(ticket).rt.batchFinishedGate.resolve();
   }
 
-  /** Resolves when the ticket reaches a terminal status. */
-  settledPromise(ticket: Ticket): Promise<void> {
-    return this.entry(ticket).rt.settledGate.promise;
+  /** Resolves on terminal ticket status, even if workers/outcomes remain pending. */
+  terminalStatusAvailable(ticket: Ticket): Promise<void> {
+    return this.entry(ticket).rt.terminalGate.promise;
   }
 
-  /** Resolves when every task has a caller-visible outcome. */
-  finishedPromise(ticket: Ticket): Promise<void> {
-    return this.entry(ticket).rt.finishedGate.promise;
+  /** Resolves after batch finalization, not after every deferred worker cleanup. */
+  batchFinished(ticket: Ticket): Promise<void> {
+    return this.entry(ticket).rt.batchFinishedGate.promise;
   }
 }
 

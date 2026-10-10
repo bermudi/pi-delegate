@@ -1,7 +1,7 @@
 import { Deferred } from "./types.ts";
 
 /**
- * One dispatch's shutdown obligation, owned by a single object.
+ * One dispatch's resource-quiescence obligation, owned by a single object.
  *
  * A dispatch is safe to leave behind only when (a) its owner has closed the
  * lifetime — the dispatch pipeline has finished, whether it handed off to the
@@ -15,20 +15,23 @@ import { Deferred } from "./types.ts";
  * so there is no pre-handoff failure routine that must know which party
  * still owns a barrier: whatever path the pipeline takes, `close()` runs in
  * its `finally`, and the barrier resolves once every adopted proof is confirmed.
+ * `resourcesStopped` means mutations have ended, not that disposal succeeded
+ * or resources became reusable. Ticket completion and abort acknowledgement
+ * do not fulfill this signal.
  */
 export class DispatchLifetime {
   private readonly obligations: Promise<void>[] = [];
   private closed = false;
-  private readonly done = new Deferred();
+  private readonly resourcesStoppedProof = new Deferred();
   /** Resolves when the lifetime is closed and every adopted proof is confirmed. */
-  readonly quiesced: Promise<void> = this.done.promise;
+  readonly resourcesStopped: Promise<void> = this.resourcesStoppedProof.promise;
 
   constructor(
     private currentLabel: string,
-    /** Called once, when `quiesced` resolves — the registry untracks the lifetime then. */
-    onQuiesced: () => void,
+    /** Called once, when resourcesStopped resolves; the registry untracks it then. */
+    onResourcesStopped: () => void,
   ) {
-    void this.quiesced.then(onQuiesced);
+    void this.resourcesStopped.then(onResourcesStopped);
   }
 
   /** The human-facing name shown while shutdown waits on this dispatch. */
@@ -38,7 +41,7 @@ export class DispatchLifetime {
 
   /** Rename the dispatch once its durable name exists (ticket id, call number). */
   relabel(next: string): void {
-    if (!this.done.resolved) this.currentLabel = next;
+    if (!this.resourcesStoppedProof.resolved) this.currentLabel = next;
   }
 
   /**
@@ -66,7 +69,7 @@ export class DispatchLifetime {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    void Promise.all(this.obligations).then(() => this.done.resolve());
+    void Promise.all(this.obligations).then(() => this.resourcesStoppedProof.resolve());
   }
 }
 
@@ -83,10 +86,10 @@ export class DispatchRegistry {
   }
 
   /** Dispatches whose barrier has not yet resolved, with their current labels. */
-  pending(): readonly { label: string; quiesced: Promise<void> }[] {
+  pending(): readonly { label: string; resourcesStopped: Promise<void> }[] {
     return [...this.live].map((lifetime) => ({
       label: lifetime.label,
-      quiesced: lifetime.quiesced,
+      resourcesStopped: lifetime.resourcesStopped,
     }));
   }
 }
