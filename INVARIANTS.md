@@ -1,9 +1,9 @@
-# Delegate v2 invariants
+# Delegate invariants (v2 origin, carried into v3)
 
 These are externally meaningful safety properties, not a prescription for
 recreating v1. References to v1 mechanisms—including event counters,
 quiescence barriers, locks, controllers, indexes, temporary Git indexes,
-private refs, worktrees, and timeout constants—are intentionally absent. V2 may
+private refs, worktrees, and timeout constants—are intentionally absent. Implementations may
 use any design that makes these properties true and testable.
 
 ## Cancellation and quiescence
@@ -25,7 +25,7 @@ use any design that makes these properties true and testable.
   back completed side effects.
 - Cancellation cause precedence is parent abort, then stall.
 - Tasks MUST carry no wall-clock deadline (#118, user-approved). Supplied
-  `deadlineMs` MUST reject before execution in both surfaces, even null or
+  `deadlineMs` MUST reject before execution, even null or
   recovered flat/stringified shapes. No configuration or host default may add
   a task deadline, and the inactivity watchdog MUST NOT become a wall-clock
   limit. Historical saved deadline failures MUST remain readable.
@@ -139,7 +139,7 @@ use any design that makes these properties true and testable.
 - Delivery failure MUST NOT undo settlement or make results unpollable.
 - Caller abort MUST detach only that waiter (waits have no timeout — #130).
 - Pause is orthogonal to lifecycle and operator-dashboard-only (#130 —
-  the model-facing actions are removed; the /subagents \`p\` binding
+  the model-facing actions are removed; the /subagents `p` binding
   drives the store directly): a paused ticket remains running and
   retains its sessions, workspace reservations, and protection against
   conflicting work.
@@ -201,7 +201,7 @@ use any design that makes these properties true and testable.
 - Git-scope and inherited-redirection failures MUST include the relevant
   correction and retry guidance, without suggesting an unconditional scratch
   bypass.
-- V2 ships no unsafe-write bypass: no operator or caller setting may skip
+- Delegate ships no unsafe-write bypass: no operator or caller setting may skip
   admission. Reintroducing one is a contract change, not a restoration.
 - Admission MUST NOT claim path confinement, cross-process locking, or
   protection from external processes.
