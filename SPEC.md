@@ -250,8 +250,8 @@ mid-flight the parent can steer. The grammar:
   it must never be discarded in favor of adjacent flat task fields.
 - **Prompt size bound (#121).** Each task `prompt` and the shared
   `brief` accept at most 32,768 characters. Oversized values reject
-  at validation — before any task starts, identically on both
-  surfaces and for async and inline — with a teaching error naming
+  at validation — before any task starts, identically for async and
+  inline calls (one surface since ADR 0002) — with a teaching error naming
   the field, the offending task, the limit, and the supplied count,
   pointing at the remedy: reference files by path instead of inlining
   contents. The bound is a constant, not a knob, and its diagnostics
@@ -436,35 +436,25 @@ mid-flight the parent can steer. The grammar:
 The engine is inherited as-built; v2's contracts become its historical
 contract:
 
-- `INVARIANTS.md` carries over verbatim, pending a ratification pass
-  (admission, quiescence, ticket state, session reuse, isolated
-  application — the red lines earned their keep in the comparison).
+- `INVARIANTS.md` carries over from v2 (admission, quiescence, ticket state, session
+  reuse, isolated application — the red lines earned their keep in the comparison). The
+  2026-09-27 carry-over pass found no conflict (ratification record below); later ratified
+  edits to it (#50, #51, #123, #126, #130) govern where they differ from v2 wording.
 - Engine behaviors unchanged in v3: workspaces
   (shared/scratch/isolated) and their admission semantics, session
   pools, spill, delivery once-ness,
   evidence-bearing telemetry rows — except the scratch-copy admission
   strengthening below, the unordered-shared-writer rejection (#126),
   and the isolated worktree dependency provisioning (#120) below.
-- **Scratch-copy admission (this repository's #50, owner-approved
-  2026-10-07).** Scratch holds no source write reservation during worker
-  execution, but copying takes a temporary read reservation on the
-  canonical source tree. An overlapping shared/isolated writer or
-  quarantined writer rejects copying; a new overlapping writer rejects
-  while copying is underway. Rejection, not waiting or a race warning,
-  is the policy. Concurrent scratch readers may coexist. Same-call
-  not-yet-started writers may coexist because each phase's copies finish
-  before that phase's workers start; earlier-phase writers must be
-  confirmed quiescent, including source-mutating deferred cleanup and
-  reconciliation, before they can be exempted. Copy claims release
-  on success, failure, or cancellation only after copying stops, before
-  the scratch worker starts. This protects against Delegate-owned writers
-  in the same host, not external processes or an atomic filesystem
-  snapshot.
-- **Actionable scope failures (this repository's #51).** Git-scope
-  discovery failures explain how to repair discovery and retry; inherited
-  Git-redirection failures name the offending variables and tell the
-  caller to clear or correct them before retrying. Neither failure
-  recommends scratch as an unconditional safety workaround.
+- **Scratch-copy admission (this repository's #50, owner-approved 2026-10-07).** Normative
+  rules: INVARIANTS.md, "Scratch source copying" (copy reservation, rejection while copying,
+  release before the scratch worker runs). Residual limit, not restated there: this is
+  same-host Delegate admission, not protection against external processes or an atomic
+  filesystem snapshot.
+- **Actionable scope failures (this repository's #51).** Normative rule: INVARIANTS.md,
+  "Git-scope and inherited-redirection failures" (correction and retry guidance, never an
+  unconditional scratch bypass). Residual detail: inherited Git-redirection failures name the
+  offending variables and tell the caller to clear or correct them before retrying.
 - **Workspace path guard (#62).** Isolated and scratch copies protect
   relative writes; absolute paths into the original tree previously
   sailed past the copy (observed live: workers edited the source tree
