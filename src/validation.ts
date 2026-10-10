@@ -45,7 +45,6 @@ export interface TicketArguments {
   readonly questionId?: string;
   readonly answer?: string;
   readonly message?: string;
-  readonly steerId?: string;
 }
 
 /** Post-schema delegate_session arguments. */
@@ -88,7 +87,6 @@ export interface TicketCall {
   readonly questionId: string | undefined;
   readonly answer: string | undefined;
   readonly message: string | undefined;
-  readonly steerId: string | undefined;
 }
 
 /** A validated delegate_session call. */
@@ -158,8 +156,8 @@ const oversizedPromptRemedy =
  * `steer`, and `interrupt` — a `<ticket>#<task>` compound in it
  * carries its own ticket, making the `ticket` field optional (#53) —
  * `questionId`/`answer` belong to
- * `answer` alone — which requires all three — and `message`/`steerId`
- * belong to `steer`, which requires the message (`steerId` is optional —
+ * `answer` alone — which requires all three — and `message`
+ * belongs to `steer`, which requires the message (the steer key is
  * omitted, the ticket boundary derives an idempotency key from the
  * Conditional carries are reported before missing
  * requirements, matching the historical precedence; blank values count as
@@ -171,7 +169,6 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
   const questionId = isBlank(args.questionId) ? undefined : args.questionId;
   const answer = isBlank(args.answer) ? undefined : args.answer;
   const message = isBlank(args.message) ? undefined : args.message;
-  const steerId = isBlank(args.steerId) ? undefined : args.steerId;
   if (args.force === true && args.action !== "cancel") {
     fail(`force is valid only with action "cancel".`);
   }
@@ -191,7 +188,6 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     // and `steerId` follow the same convention for action "steer".
     ["answer", args.answer],
     ["message", args.message],
-    ["steerId", args.steerId],
   ] as const) {
     const belongs =
       name === "questionId" || name === "answer"
@@ -213,15 +209,9 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     if (message === undefined) {
       fail(`action "steer" requires a nonempty message.`);
     }
-    // `steerId` is optional (#44): omitted, the ticket boundary derives
-    // `steer:<toolCallId>` — an idempotent key for transport-level retries.
+        // `steer:<toolCallId>` — an idempotent key for transport-level retries.
     // Explicit ids stay caller-owned and keep the strict charset; ':' is
     // admitted so a receipt's derived key can be echoed back verbatim.
-    if (steerId !== undefined && !/^[A-Za-z0-9._:-]{1,64}$/.test(steerId)) {
-      fail(
-        `steerId '${steerId}' is outside the id charset (letters, digits, '.', '_', '-', ':', at most 64 chars).`,
-      );
-    }
   }
   // A `<ticket>#<task>` compound in taskId carries its own ticket (#53):
   // the ticket field is then optional. "#" never appears in a dispatched
@@ -250,7 +240,6 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     questionId,
     answer,
     message,
-    steerId,
   };
 }
 

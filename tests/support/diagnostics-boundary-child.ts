@@ -757,7 +757,6 @@ try {
       action: "steer",
       ticket: steerTicket,
       taskId: "steered",
-      steerId: "safe-steer-id",
       message: "PRIVATE_STEER_BODY",
     });
     if (steered.isError) throw new Error("Steer failed");

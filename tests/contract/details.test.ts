@@ -220,23 +220,23 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
         action: "steer",
         ticket,
         message: "STEER-NOTE",
-        steerId: "s-51",
       });
       expect(receipt.isError).toBe(false);
       expect(Check(ticketDetailsSchema, receipt.details)).toBe(true);
       const steer = objectOf(receipt.details, "details").steer;
       expect(Check(steerDetailsSchema, steer)).toBe(true);
       expect(objectOf(steer, "details.steer").status).toBe("steered");
-
-      const replay = await callDelegateTicket(session, {
+      // A second steer is a new key seeing a live run (steered again) —
+      // duplicate replay needs a retried tool call, not expressible
+      // through the playbook boundary (#130: keys are per-call).
+      const second = await callDelegateTicket(session, {
         action: "steer",
         ticket,
         message: "STEER-NOTE",
-        steerId: "s-51",
       });
-      const replayed = objectOf(replay.details, "details").steer;
-      expect(Check(steerDetailsSchema, replayed)).toBe(true);
-      expect(objectOf(replayed, "details.steer").replayed).toBe("steered");
+      const secondSteer = objectOf(second.details, "details").steer;
+      expect(Check(steerDetailsSchema, secondSteer)).toBe(true);
+      expect(objectOf(secondSteer, "details.steer").status).toBe("steered");
 
       held.release();
       await callDelegateTicket(session, {

@@ -281,6 +281,16 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   the /subagents dashboard. Unknown ticket actions now enumerate the
   available set (enumerate-or-inherit). The transcript-span read
   machinery stays internal to poll views and spill.
+- **Removed — caller steer key `steerId` (#130, 2026-10-10; the
+  optional field was #44).** Every steer receipts under a key derived
+  from its own call (`steer:<toolCallId>`), so dedup survives without
+  a caller field: a transport retry replays the stored receipt.
+  Presence rejects with teaching (both spellings, every action); the
+  charset rule and the same-key-conflict error lost their public
+  trigger with the field — the store's collision guard remains
+  defensive. Same-key `duplicate` replay and conflict coverage has no
+  public trigger left (the playbook boundary mints unique call ids);
+  noted gap, same class as the pause RPC scenarios.
 - **Removed — wait `timeoutMs` and wait-any `tickets` (#130,
   2026-10-07; wait-any was #58).** Waits are unbounded: they park until
   the ticket settles or wakes on activity worth a turn (worker

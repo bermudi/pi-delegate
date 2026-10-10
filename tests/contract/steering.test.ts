@@ -87,28 +87,20 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         action: "steer",
         ticket,
         message: "STEER-NOTE-ALPHA",
-        steerId: "s-1",
       });
       expect(receipt.isError).toBe(false);
       expect(receipt.text).toContain("steered");
       expect(receipt.text).toContain("task-1");
       const steer = steerDetails(receipt);
       expect(steer.status).toBe("steered");
-      expect(steer.steerId).toBe("s-1");
+      // Every steer keys on its own call (#130): the receipt names the
+      // derived `steer:<toolCallId>` key. A same-key duplicate replay is
+      // only reachable by a transport retry replaying the same tool
+      // call — not expressible through the playbook boundary (unique ids
+      // per call), so that half of the dedup contract has no public
+      // trigger (same gap class as the dashboard pause scenarios).
+      expect(String(steer.steerId).startsWith("steer:")).toBe(true);
       expect(steer.taskId).toBe("task-1");
-
-      // SPEC: `duplicate` replays the original receipt, nothing re-injects.
-      const replay = await callDelegateTicket(session, {
-        action: "steer",
-        ticket,
-        message: "STEER-NOTE-ALPHA",
-        steerId: "s-1",
-      });
-      expect(replay.isError).toBe(false);
-      const replayed = steerDetails(replay);
-      expect(replayed.status).toBe("duplicate");
-      expect(replayed.replayed).toBe("steered");
-      expect(replay.text).toBe(receipt.text);
 
       first.release();
       const waited = await callDelegateTicket(session, {
@@ -159,7 +151,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         ticket,
         taskId: "task-2",
         message: "PARKED-STEER",
-        steerId: "s-2",
       });
       expect(receipt.isError).toBe(false);
       expect(receipt.text).toContain("activated");
@@ -201,7 +192,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         ticket: runningTicket,
         taskId: "task-99",
         message: "missing",
-        steerId: "s-5",
       });
       expect(bogusTask.isError).toBe(false);
       expect(bogusTask.text).toContain("not-applied");
@@ -219,7 +209,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         action: "steer",
         ticket: runningTicket,
         message: "too late",
-        steerId: "s-3",
       });
       expect(settled.isError).toBe(false);
       expect(settled.text).toContain("not-applied");
@@ -230,7 +219,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         action: "steer",
         ticket: "t-does-not-exist",
         message: "nowhere",
-        steerId: "s-4",
       });
       expect(unknown.isError).toBe(false);
       expect(unknown.text).toContain("not-applied");
@@ -240,11 +228,13 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
   );
 
   test(
-    "an ambiguous steer errors naming the running task ids; steerId reuse with a different attempt conflicts",
+    "an ambiguous steer errors naming the running task ids; a corrected retry succeeds",
     async () => {
       // SPEC: omitting taskId with several running tasks errors and
-      // lists the ids; reusing a steerId on a different message or
-      // target is a conflict naming both attempts.
+      // lists the ids. (Steer-key reuse conflicts are gone with the
+      // caller key (#130): derived keys are per-call, so a conflict has
+      // no public trigger — the store's collision guard is defensive
+      // only, same gap class as the duplicate replay.)
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const a = gate("A-OUT");
@@ -268,41 +258,19 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         action: "steer",
         ticket,
         message: "which one",
-        steerId: "s-6",
       });
       expect(ambiguous.isError).toBe(true);
       expect(ambiguous.text).toContain("task-1");
       expect(ambiguous.text).toContain("task-2");
-      // The failed ambiguity did not consume the steerId.
+      // The failed ambiguity rejected before any target resolution.
       const retried = await callDelegateTicket(session, {
         action: "steer",
         ticket,
         taskId: "task-1",
         message: "which one",
-        steerId: "s-6",
       });
       expect(retried.isError).toBe(false);
       expect(steerDetails(retried).status).toBe("steered");
-
-      const conflict = await callDelegateTicket(session, {
-        action: "steer",
-        ticket,
-        taskId: "task-1",
-        message: "a different message",
-        steerId: "s-6",
-      });
-      expect(conflict.isError).toBe(true);
-      expect(conflict.text).toContain("s-6");
-      expect(conflict.text).toMatch(/different/);
-      const targetConflict = await callDelegateTicket(session, {
-        action: "steer",
-        ticket,
-        taskId: "task-2",
-        message: "which one",
-        steerId: "s-6",
-      });
-      expect(targetConflict.isError).toBe(true);
-      expect(targetConflict.text).toContain("s-6");
 
       a.release();
       b.release();
@@ -350,7 +318,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         ticket,
         taskId: "task-2",
         message: "VOIDED-STEER",
-        steerId: "s-7",
       });
       expect(steerDetails(receipt).status).toBe("activated");
 
@@ -361,19 +328,19 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       });
       expect(cancelled.isError).toBe(false);
 
-      // Retrying the same steer replays the corrected receipt: the task
-      // settled before delivery, so the recorded outcome is not-applied.
+      // A fresh steer after the settle receipts not-applied directly:
+      // every steer keys on its own call (#130), so this is a new key
+      // seeing a settled task, not a duplicate replay. The guarantee
+      // under test — nothing reaches a dead session — is unchanged.
       const retry = await callDelegateTicket(session, {
         action: "steer",
         ticket,
         taskId: "task-2",
         message: "VOIDED-STEER",
-        steerId: "s-7",
       });
       expect(retry.isError).toBe(false);
       const steer = steerDetails(retry);
-      expect(steer.status).toBe("duplicate");
-      expect(steer.replayed).toBe("not-applied");
+      expect(steer.status).toBe("not-applied");
       expect(retry.text).toContain("not-applied");
 
       first.release();
@@ -424,7 +391,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         action: "steer",
         ticket,
         message: "CARRIED-STEER",
-        steerId: "s-retry-1",
       });
       expect(steerDetails(receipt).status).toBe("steered");
 
@@ -489,7 +455,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         ticket,
         taskId: "task-2",
         message: "PARKED-CARRIED",
-        steerId: "s-retry-2",
       });
       expect(steerDetails(receipt).status).toBe("activated");
 
@@ -508,7 +473,7 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
   );
 
   test(
-    "steer requires message; steerId is optional (#44), and steer fields belong to steer alone",
+    "steer requires message; the steer key is automatic (#130), and steer fields belong to steer alone",
     async () => {
       // SPEC: `message` (nonempty) is required; `steerId` is a caller
       // charset rule (≤64) only when sent — omitted, the boundary derives
@@ -527,21 +492,25 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       });
 
       for (const [arguments_, pattern] of [
-        [{ action: "steer", ticket, steerId: "s-8" }, /requires a nonempty message/],
+        [{ action: "steer", ticket }, /requires a nonempty message/],
         [
-          { action: "steer", ticket, message: "m", steerId: "bad id!" },
-          /id charset/,
+          { action: "steer", ticket, message: "m", steerId: "s-x" },
+          /steerId field has been removed/,
+        ],
+        [
+          { action: "steer", ticket, message: "m", steer_id: "s-y" },
+          /steerId field has been removed/,
+        ],
+        [
+          { action: "poll", ticket, steerId: "s-9" },
+          /steerId field has been removed/,
         ],
         [
           { action: "poll", ticket, message: "stray" },
           /message is valid only with action "steer"/,
         ],
         [
-          { action: "poll", ticket, steerId: "s-9" },
-          /steerId is valid only with action "steer"/,
-        ],
-        [
-          { action: "steer", ticket, message: "m", steerId: "s-10", answer: "a" },
+          { action: "steer", ticket, message: "m", answer: "a" },
           /answer is valid only with action "answer"/,
         ],
       ] as const) {
@@ -550,8 +519,8 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         expect(result.text).toMatch(pattern);
       }
 
-      // An omitted steerId on a settled ticket receipts not-applied with
-      // the derived key — validation no longer requires the field.
+      // A steer on a settled ticket receipts not-applied under its
+      // derived per-call key (#130): validation requires no key field.
       const derived = await callDelegateTicket(session, {
         action: "steer",
         ticket,
@@ -603,7 +572,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         ticket,
         taskId: "pooled",
         message: "keep going",
-        steerId: "s-pool-1",
       });
       expect(named.isError).toBe(false);
       expect(steerDetails(named).status).toBe("not-applied");
@@ -624,7 +592,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         ticket,
         taskId: "pooled",
         message: "keep going",
-        steerId: "s-pool-2",
       });
       expect(terminal.isError).toBe(false);
       expect(terminal.text).toContain("not-applied");
@@ -671,7 +638,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         ticket,
         taskId: "done",
         message: "keep going",
-        steerId: "s-fresh",
       });
       expect(fresh.isError).toBe(false);
       expect(steerDetails(fresh).status).toBe("not-applied");
@@ -684,7 +650,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
         ticket,
         taskId: "blocked",
         message: "keep going",
-        steerId: "s-blocked",
       });
       expect(blocked.isError).toBe(false);
       expect(steerDetails(blocked).status).toBe("not-applied");

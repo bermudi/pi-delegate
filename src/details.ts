@@ -208,8 +208,9 @@ export const steerDetailsSchema = Type.Object(
     /** On a duplicate receipt: the status the original call returned. */
     replayed: Type.Optional(steerStatusSchema),
     /**
-     * The key was derived from the calling tool call (#44) rather than
-     * caller-chosen — `steer:<toolCallId>`.
+     * Historical receipts only: true when the key was derived rather
+     * than caller-chosen. Every steer derives now (#130), so new
+     * receipts omit it; read compat keeps the field.
      */
     derived: Type.Optional(Type.Boolean()),
   },

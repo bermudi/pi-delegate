@@ -181,7 +181,6 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
         action: "steer",
         ticket,
         message: "wake up",
-        steerId: "s-cold",
       });
       expect(steered.isError).toBe(false);
       expect(steered.text).toContain("not-applied");

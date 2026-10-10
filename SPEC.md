@@ -164,33 +164,30 @@ mid-flight the parent can steer. The grammar:
   reusable, transcript resumable). Codex-trained callers expecting
   interrupt-then-message should steer or re-dispatch instead.
 
-  `delegate_ticket steer` carries `message`, an optional `steerId`
-  (#44 — omitted, the boundary derives `steer:<toolCallId>` and the
-  receipt names it; the derived id dedupes a transport-level retry of
-  the same tool call), and an optional `taskId` (default: the single
-  still-running task; an ambiguous omission errors naming the
-  running ids). Pi delivers steers at turn boundaries — never
-  mid-turn — so the receipts map: `steered` = queued on the live
-  child run, observed as a user message at its next turn boundary;
-  `activated` = no turn in flight (queued, preparing, between
-  attempts), the parked message opens the task's next turn;
-  `duplicate` = same `steerId`, byte-identical message, same
-  target — the original receipt replays verbatim, nothing
-  re-injects; `not-applied` = the target settled, is unknown, or
-  is a recovered ticket, with teaching toward poll — and toward
-  continuation when the settled task is identifiable (#57): a
-  pooled session still live teaches re-dispatch with its
-  `sessionId`, a fresh task's durable transcript teaches
-  `resumeFrom`, and a task with neither keeps the plain text.
-  Reusing a
-  `steerId` with a different message or target is a conflict error
-  naming both attempts. A parked steer whose task settles before
-  delivery voids to `not-applied` on retry — nothing delivers into
-  a dead session. When a transient failure retries the whole
-  task, the task has not settled: steers the failed attempt
-  already injected — drained parked messages and live steers
-  alike — are re-supplied through the next attempt's drain, so a
-  receipted message survives the session that died with it.
+  `delegate_ticket steer` carries `message` and an optional `taskId`
+  (default: the single still-running task; an ambiguous omission errors
+  naming the running ids). Every steer receipts under a key derived
+  from its own call (#44/#130 — `steer:<toolCallId>`; the caller key
+  field is removed): a transport-level retry of the same tool call
+  replays the stored receipt instead of re-injecting. Pi delivers
+  steers at turn boundaries — never mid-turn — so the receipts map:
+  `steered` = queued on the live child run, observed as a user
+  message at its next turn boundary; `activated` = no turn in flight
+  (queued, preparing, between attempts), the parked message opens the
+  task's next turn; `duplicate` = the same call replayed — the
+  original receipt replays verbatim, nothing re-injects;
+  `not-applied` = the target settled, is unknown, or is a recovered
+  ticket, with teaching toward poll — and toward continuation when
+  the settled task is identifiable (#57): a pooled session still live
+  teaches re-dispatch with its `sessionId`, a fresh task's durable
+  transcript teaches `resumeFrom`, and a task with neither keeps the
+  plain text. A parked steer whose task settles before delivery
+  voids to `not-applied` on retry — nothing delivers into a dead
+  session. When a transient failure retries the whole task, the task
+  has not settled: steers the failed attempt already injected —
+  drained parked messages and live steers alike — are re-supplied
+  through the next attempt's drain, so a receipted message survives
+  the session that died with it.
 - **Interrupt.** `delegate_ticket interrupt` (ticket, optional
   `taskId` defaulting like steer) cooperatively aborts the task's
   in-flight turn through the cancellation machinery — the same
@@ -283,9 +280,9 @@ mid-flight the parent can steer. The grammar:
   interrupt. (Field set as of the ADR 0002 unification; prune
   verdicts in #130 remove fields in their own changes — `tokenBudget`
   (#129), `operationId`, `pause`/`resume`, `tail` with `offset`/
-  `waitMs`, and the wait bound `timeoutMs` with wait-any `tickets`
-  are already gone.) Session list/close
-  unchanged. The manual is
+  `waitMs`, the wait bound `timeoutMs` with wait-any `tickets`, and
+  the caller steer key `steerId` are already gone.) Session
+  list/close unchanged. The manual is
   single-edition: it documents exactly what the schema accepts.
 - **Description is a feature, not an alias.** The optional task display label
   remains available in full mode; it is not a task correlation id.

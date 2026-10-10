@@ -88,9 +88,10 @@ interface TicketRuntime {
   readonly pendingQuestions: Map<string, { taskIndex: number; resolve: (answer: string) => void; reject: (error: Error) => void }>;
   readonly answeredQuestions: Map<string, { taskIndex: number; answer: string }>;
   /**
-   * steerId → the recorded attempt, for idempotent replay and conflict
-   * detection (derived-id discipline). Entries are written only once a
-   * target task resolved — malformed calls consume no id.
+   * steer key (always derived, `steer:<toolCallId>`) → the recorded
+   * attempt, for idempotent replay of retried calls. Entries are
+   * written only once a target task resolved — malformed calls consume
+   * no key.
    */
   readonly steers: Map<string, SteerRecord>;
   /**
@@ -968,12 +969,8 @@ export class TicketStore {
     callTaskId: string | undefined,
     steerId: string,
     message: string,
-    derivedId = false,
   ): TicketRpcResult {
     const { record, rt } = this.entry(ticket);
-    const derivedNote = derivedId
-      ? " (steerId derived from this call's tool-call id)"
-      : "";
     const seen = rt.steers.get(steerId);
     if (seen !== undefined) {
       // The id binds message + resolved target; an omitted taskId re-aims
@@ -995,7 +992,7 @@ export class TicketStore {
             `Steer id "${steerId}" conflict on ticket "${ticket.id}": first used for task "${taskAddress(ticket.id, seen.taskId)}"; ` +
             `this attempt targets ${attempted}` +
             `${seen.message !== message ? " and carries a different message" : ""}. ` +
-            `steerIds are single-use; retry with a new steerId.`,
+            `steer keys are per-call; this collision indicates a replayed call with mutated arguments.`,
           isError: true,
           ticket,
         };
@@ -1010,7 +1007,6 @@ export class TicketStore {
           taskId: seen.taskId,
           status: "duplicate",
           replayed: seen.receipt.status,
-          ...(derivedId ? { derived: true } : {}),
         },
       };
     }
@@ -1019,7 +1015,7 @@ export class TicketStore {
       taskId?: string,
       taskIndex?: number,
     ): TicketRpcResult => {
-      const receiptText = `${text}${derivedNote}`;
+      const receiptText = text;
       if (taskId !== undefined && taskIndex !== undefined) {
         rt.steers.set(steerId, {
           taskIndex,
@@ -1038,7 +1034,6 @@ export class TicketStore {
           ticket: ticket.id,
           taskId: taskId ?? "",
           status: "not-applied",
-          ...(derivedId ? { derived: true } : {}),
         },
       };
     };
@@ -1105,16 +1100,14 @@ export class TicketStore {
           text:
             `Steer "${steerId}" for task "${taskAddress(ticket.id, taskId)}": steered — ` +
             `queued on the live run; the child sees it as a user message at its next turn boundary (not a mid-turn interrupt).` +
-            pausedNote +
-            derivedNote,
+            pausedNote,
         }
       : {
           status: "activated" as const,
           text:
             `Steer "${steerId}" for task "${taskAddress(ticket.id, taskId)}": activated — ` +
             `the task has no live turn right now (queued, preparing, or between attempts); the message opens its next turn.` +
-            pausedNote +
-            derivedNote,
+            pausedNote,
         };
     if (!steered) {
       const queue = rt.pendingSteers.get(taskIndex);
@@ -1138,7 +1131,6 @@ export class TicketStore {
         ticket: ticket.id,
         taskId,
         status: receipt.status,
-        ...(derivedId ? { derived: true } : {}),
       },
     };
   }
@@ -1641,11 +1633,10 @@ export async function handleTicketRpc(
     questionId: string | undefined;
     answer: string | undefined;
     message: string | undefined;
-    steerId: string | undefined;
   },
   store: TicketStore,
   signal: AbortSignal | undefined,
-  /** The calling tool call's id — seeds the derived steerId (#44). */
+  /** The calling tool call's id — seeds the steer key (#44). */
   toolCallId = "",
   /** The calling Pi session's id — scopes roster/known-ticket listings (#64). */
   sessionId?: string,
@@ -1692,30 +1683,28 @@ export async function handleTicketRpc(
   const ticket = ticketName !== undefined ? store.get(ticketName) : undefined;
   // Steering is receipt-shaped end to end (SPEC v3 "Steering"): an
   // unknown, terminal, or recovered target answers not-applied, not a
-  // generic refusal. An omitted steerId derives `steer:<toolCallId>` —
-  // a retried tool call replays its stored receipt instead of
-  // re-injecting (the minimax task-append:<turnId>:<toolCallId> pattern,
-  // scoped to the one durable id this boundary sees).
-  const derivedSteer = call.action === "steer" && call.steerId === undefined;
-  const steerId = derivedSteer ? `steer:${toolCallId}` : call.steerId;
+  // generic refusal. Every steer keys on `steer:<toolCallId>` (#44 —
+  // caller keys removed, #130): a retried tool call replays its stored
+  // receipt instead of re-injecting (the minimax
+  // task-append:<turnId>:<toolCallId> pattern, scoped to the one
+  // durable id this boundary sees).
+  const steerId = `steer:${toolCallId}`;
   if (call.action === "steer") {
     if (ticket === undefined) {
       return {
         text:
-          `Steer "${steerId ?? ""}": not-applied — ticket '${ticketName ?? ""}' ` +
-          `is unknown; nothing was sent. ${knownTickets(store, sessionId)}` +
-          (derivedSteer ? " (steerId derived from this call's tool-call id)" : ""),
+          `Steer "${steerId}": not-applied — ticket '${ticketName ?? ""}' ` +
+          `is unknown; nothing was sent. ${knownTickets(store, sessionId)}`,
         isError: false,
         steer: {
-          steerId: steerId ?? "",
+          steerId,
           ticket: ticketName ?? "",
           taskId: taskId ?? "",
           status: "not-applied",
-          ...(derivedSteer ? { derived: true } : {}),
         },
       };
     }
-    return store.steer(ticket, taskId, steerId!, call.message!, derivedSteer);
+    return store.steer(ticket, taskId, steerId, call.message!);
   }
   // Interrupt shares the receipt discipline: an unknown or recovered
   // target answers not-applied, not a generic refusal.

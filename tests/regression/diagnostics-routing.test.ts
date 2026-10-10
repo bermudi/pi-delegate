@@ -223,7 +223,7 @@ async function runChild(scenario: string, tty: boolean) {
     records.some(
       (entry) =>
         entry.event === "task steer receipt" &&
-        entry.context.steerId === "safe-steer-id",
+        String(entry.context.steerId).startsWith("steer:"),
     ),
   ).toBe(true);
   expect(JSON.stringify(records)).not.toContain("PRIVATE_");

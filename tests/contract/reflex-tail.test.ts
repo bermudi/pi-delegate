@@ -148,10 +148,11 @@ describe("canonical reflex boundary (SPEC v3, #61 / #44)", () => {
     expect(subagents.state.callCount).toBe(0);
   });
 
-  test("steer without `steerId` derives `steer:<toolCallId>` and the receipt names it", async () => {
+  test("every steer keys on `steer:<toolCallId>` and the receipt names it", async () => {
     // #44.6: the tool-call id is the idempotency seed (minimax's
     // task-append:<turnId>:<toolCallId> pattern scoped to the id this
-    // boundary sees). The receipt carries the derived key, marked derived.
+    // boundary sees). #130: caller keys are gone — the derived key is
+    // the only key, and receipts no longer mark derivation.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
     const first = gate("TURN-ONE");
@@ -181,34 +182,13 @@ describe("canonical reflex boundary (SPEC v3, #61 / #44)", () => {
     const derivedKey = `steer:${receipt.toolCallId}`;
     const steer = steerDetails(receipt);
     expect(steer.steerId).toBe(derivedKey);
-    expect(steer.derived).toBe(true);
+    expect(steer.derived).toBeUndefined();
     expect(steer.status).toBe("steered");
     expect(receipt.text).toContain(derivedKey);
-    expect(receipt.text).toMatch(/derived from this call/);
-
-    // Same key + same message replays the stored receipt — the derived
-    // key can be echoed back verbatim (':' is admitted for exactly this).
-    const replay = await callDelegateTicket(session, {
-      action: "steer",
-      ticket,
-      message: "DERIVED-STEER",
-      steerId: derivedKey,
-    });
-    expect(replay.isError).toBe(false);
-    const replayed = steerDetails(replay);
-    expect(replayed.status).toBe("duplicate");
-    expect(replayed.replayed).toBe("steered");
-    expect(replay.text).toBe(receipt.text);
-
-    // Same key + different content stays a conflict.
-    const conflict = await callDelegateTicket(session, {
-      action: "steer",
-      ticket,
-      message: "DIFFERENT-STEER",
-      steerId: derivedKey,
-    });
-    expect(conflict.isError).toBe(true);
-    expect(conflict.text).toContain("conflict");
+    // Duplicate replay and key conflict need a caller key to trigger
+    // (#130 removed it): a transport retry replays the same tool call,
+    // which the playbook boundary cannot express (unique ids per call).
+    // Store-level dedup stays — asserted via the steering receipts test.
 
     first.release();
     const waited = await callDelegateTicket(session, {
@@ -216,45 +196,32 @@ describe("canonical reflex boundary (SPEC v3, #61 / #44)", () => {
       ticket,
     });
     expect(waited.text).toContain("TURN-TWO-SAW-IT");
-    // The child observed the steer exactly once — the replay never
-    // re-injected.
+    // The child observed the steer exactly once.
     expect(copies).toBe(1);
   });
 
-  test("an explicit `steerId` is unmarked — no derived note on the receipt", async () => {
-    // #44.6: explicit keys keep the power path — same dedup semantics,
-    // no derivation note.
+  test("an explicit `steerId` rejects with removal teaching", async () => {
+    // #130: the caller key is gone — dedup is automatic, so the field
+    // has no work left. Presence rejects on any action, both spellings.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
-    const first = gate("GATED");
-    subagents.respond([first.step, fauxAssistantMessage("DONE")]);
-
+    subagents.respond([fauxAssistantMessage("DONE")]);
     const dispatched = await callDelegate(session, {
       tasks: [{ prompt: "work" }],
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    await waitFor(
-      () => subagents.state.callCount === 1,
-      "child parked inside its first provider call",
-    );
+    await callDelegateTicket(session, { action: "wait", ticket });
 
-    const receipt = await callDelegateTicket(session, {
-      action: "steer",
-      ticket,
-      message: "EXPLICIT-STEER",
-      steerId: "caller-key-1",
-    });
-    expect(receipt.isError).toBe(false);
-    const steer = steerDetails(receipt);
-    expect(steer.steerId).toBe("caller-key-1");
-    expect(steer.derived).toBeUndefined();
-    expect(receipt.text).not.toContain("derived");
-
-    first.release();
-    await callDelegateTicket(session, {
-      action: "wait",
-      ticket,
-    });
+    for (const arguments_ of [
+      { action: "steer", ticket, message: "m", steerId: "caller-key-1" },
+      { action: "steer", ticket, message: "m", steer_id: "caller-key-2" },
+      { action: "poll", ticket, steerId: "caller-key-3" },
+    ] as const) {
+      const result = await callDelegateTicket(session, arguments_);
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("steerId field has been removed");
+      expect(result.text).toContain("dedupe automatically");
+    }
   });
 });

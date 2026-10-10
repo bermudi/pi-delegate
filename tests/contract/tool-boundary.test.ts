@@ -109,7 +109,6 @@ describe("delegate public tool contract", () => {
         "force",
         "message",
         "questionId",
-        "steerId",
         "taskId",
         "ticket",
       ].sort(),

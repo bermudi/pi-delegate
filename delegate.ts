@@ -212,7 +212,7 @@ const ticketSchema = Type.Object(
   {
     action: stringEnum(["poll", "wait", "cancel", "answer", "steer", "interrupt"], {
       description:
-        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement. cancel: preview, or cooperative cancellation with force: true. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown.",
+        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement. cancel: preview, or cooperative cancellation with force: true. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (a replayed call), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown.",
     }),
     ticket: Type.Optional(
       Type.String({
@@ -248,12 +248,6 @@ const ticketSchema = Type.Object(
       Type.String({
         description:
           "Only with action 'steer': the nonempty instruction merged into the task's run.",
-      }),
-    ),
-    steerId: Type.Optional(
-      Type.String({
-        description:
-          "Only with action 'steer': idempotency key — same id + same message + same target replays the original receipt instead of injecting twice; same id + different content is an error. Optional: omitted, one is derived from this tool call and named in the receipt.",
       }),
     ),
   },
@@ -382,7 +376,6 @@ const ticketFieldNames = [
   "questionId",
   "answer",
   "message",
-  "steerId",
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -449,7 +442,7 @@ function delegateTicketExample(args: Record<string, unknown>): string {
       ? args.ticketAction
       : typeof args.action === "string" && TICKET_ACTIONS.includes(args.action)
         ? args.action
-        : isGiven(args.message) || isGiven(args.steerId)
+        : isGiven(args.message)
           ? "steer"
           : isGiven(args.taskId) ||
                 isGiven(args.questionId) ||
@@ -471,7 +464,7 @@ function delegateTicketExample(args: Record<string, unknown>): string {
     }
   }
   if (action === "steer") {
-    for (const key of ["taskId", "message", "steerId"] as const) {
+    for (const key of ["taskId", "message"] as const) {
       if (typeof args[key] === "string" && !isBlank(args[key])) {
         fields.push(`${key}: ${key === "message" ? '"..."' : JSON.stringify(args[key])}`);
       }
@@ -594,6 +587,16 @@ function rejectTokenBudget(record: Record<string, unknown>): void {
   }
 }
 
+/** #130: the caller steer key is gone; presence rejects with teaching. */
+function rejectSteerId(record: Record<string, unknown>): void {
+  if (Object.hasOwn(record, "steerId") || Object.hasOwn(record, "steer_id")) {
+    throw new Error(
+      "The steerId field has been removed — steers dedupe automatically. " +
+        "Every steer receipts under a key derived from its own call, so a replayed call replays its receipt instead of injecting twice; remove the field.",
+    );
+  }
+}
+
 /** #130: dispatch dedup keys are gone; presence rejects with teaching. */
 function rejectOperationId(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "operationId")) {
@@ -676,6 +679,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
   rejectTaskDeadline(args);
   rejectTokenBudget(args);
   rejectOperationId(args);
+  rejectSteerId(args);
   rejectObsoleteContext(args);
   rejectFieldAliases(args, false);
   if (Object.hasOwn(args, "message")) {
@@ -697,7 +701,6 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     args.taskId !== undefined ||
     args.questionId !== undefined ||
     args.answer !== undefined ||
-    args.steerId !== undefined ||
     args.message !== undefined
   ) {
     throw new Error(
@@ -710,7 +713,6 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
           "questionId",
           "answer",
           "message",
-          "steerId",
         ]),
     );
   }
@@ -835,6 +837,7 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
         'Watching several? Wait on each in turn, or poll for the roster: delegate_ticket({ action: "poll" }).',
     );
   }
+  rejectSteerId(args);
   // Enumerate-or-inherit: an unknown action names the resolvable set
   // (#130 removed tail; the schema enum alone says only "not allowed").
   if (
@@ -849,9 +852,8 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
   stripNulls(args);
   // Blank `answer`/`message` survive: only validation may tell a
   // present-but-empty reply or steer from a missing one — a non-owning
-  // action must still reject them. `steerId` is an identifier: blank
-  // means absent, like `ticket`/`taskId`.
-  stripBlank(args, ["ticket", "taskId", "questionId", "steerId"]);
+  // action must still reject them.
+  stripBlank(args, ["ticket", "taskId", "questionId"]);
 
   if (args.ticketAction !== undefined) {
     throw new Error(
@@ -1093,12 +1095,11 @@ const HELP_TICKETS = `## delegate_ticket — tickets
 - \`{ action: "answer", ticket, taskId, questionId, answer }\` — answer a
   worker's pending \`ask_parent\` question (all four fields required).
   Poll to see outstanding questions. Only async workers can ask.
-- \`{ action: "steer", ticket, taskId, message, steerId? }\` — send a
+- \`{ action: "steer", ticket, taskId, message }\` — send a
   message into a running task: \`taskId\` defaults to the only still-
-  running task; \`steerId\` makes it retry-safe (same id + same message +
-  same target replays the original receipt; same id + different content
-  is an error) — omitted, a key is derived from this call and the receipt
-  names it. The receipt says what happened: \`steered\` (merged at
+  running task. Retries are safe by construction — the key is derived
+  from this call's id, so a replayed call replays its receipt instead
+  of injecting twice. The receipt says what happened: \`steered\` (merged at
   the child's next turn boundary), \`activated\` (queued, opens the next
   turn), \`duplicate\`, or \`not-applied\` (settled/unknown target).
 - \`{ action: "interrupt", ticket, taskId? }\` — abort one task's
@@ -2719,8 +2720,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
           // Ticket RPCs need the saved journal; a corrupt or inaccessible one
           // fails this call visibly but does not affect dispatch or sessions.
           tickets.connect(resolveAgentDir(ctx).dir);
-          // `toolCallId` seeds the derived steerId (#44) — an omitted key
-          // becomes `steer:<toolCallId>`, so a transport-level retry of the
+          // `toolCallId` seeds the steer key (#44): every steer receipts
+          // under `steer:<toolCallId>`, so a transport-level retry of the
           // same tool call replays rather than re-injecting.
           const result = await handleTicketRpc(
             call,

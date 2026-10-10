@@ -190,7 +190,6 @@ describe("owner-liveness startup recovery (issue #54)", () => {
         action: "steer",
         ticket,
         message: "wake up",
-        steerId: "s-sibling",
       });
       expect(steered.text).toContain("not-applied");
       expect(
