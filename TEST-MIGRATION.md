@@ -685,7 +685,7 @@ gaps.
 - **Provenance:** v1 `task-resolution.test.ts` "rejects a canonical alias of
   a quarantined resumeFrom transcript" and v1 `session-quarantine.ts` —
   v2 dropped the quarantine in the rewrite (2026-09-27 gap audit,
-  V1-V2-MAP §3d item 6); user decision restored the live-worker half.
+  docs/history/V1-V2-MAP.md §3d item 6); user decision restored the live-worker half.
   v1's abandoned-transcript quarantine (workers that died mid-run) was
   **not** restored: a dead writer no longer mutates the file, and v2
   reservations cannot outlive the process that held them.
@@ -2023,7 +2023,7 @@ with `appliedFiles` for files that never landed.
 
 New live tests in `tests/contract/child-prompt.test.ts` (v1 evidence:
 `agents.ts` `buildSubagentSystemPrompt` / `sanitizeParentToolInventory`,
-redesigned per user decision — see V1-V2-MAP 3a): an inline child inherits
+redesigned per user decision — see docs/history/V1-V2-MAP.md 3a): an inline child inherits
 the parent's custom persona and receives the fixed subagent framing; a
 stock parent still frames the child; built-in role lines (explore, coder)
 compose *under* the parent persona rather than beating it (deliberate

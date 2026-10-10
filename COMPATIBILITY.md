@@ -528,7 +528,7 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   Same-call graph-ordered writers still serialize (completion notices name
   the serialized tasks) and cross-call conflicts still reject; same-phase
   unordered shared writers reject at admission since #126. Decided during
-  the 2026-09-27 gap audit (V1-V2-MAP §3d item 1).
+  the 2026-09-27 gap audit (docs/history/V1-V2-MAP.md §3d item 1).
 
   **Restored in lighter form by SPEC v3 "Observability — Completion
   evidence" (#38).** V2 records the paths observed in each task's
