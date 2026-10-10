@@ -6,10 +6,11 @@ learned 2026-10-08 when "merge please" was executed as merge + tag +
 npm publish. If the operator's reply does not say publish/release/tag,
 ask once, plainly, before pushing any `pi-delegate-v*` tag.
 
-v3 ships as `@bermudi/pi-delegate@0.3.1`, displacing v1 (0.1.23) for
-every machine on next `pi update` or repin. The minor bump inside the
-0.x line continues v1's versioning; the v3 surface is documented in
-COMPATIBILITY.md.
+v3 cut over at `pi-delegate-v0.3.0`, displacing v1 (0.1.23) for every
+machine on next `pi update` or repin. Later releases continue the 0.x line;
+the v3 surface is documented in COMPATIBILITY.md. Throughout this file,
+`<version>` means the version in `package.json` — the release tag must match
+it exactly, or the workflow refuses to publish.
 
 Publish runs in CI, not locally: `.github/workflows/publish-npm.yml`
 fires on `pi-delegate-v*` tags, verifies the tag equals
@@ -27,13 +28,14 @@ auth is not needed and `npm publish` should not be run by hand.
 
 ## Publish
 
-    git tag pi-delegate-v0.3.1 && git push origin main pi-delegate-v0.3.1
+    git tag pi-delegate-v<version> && git push origin main pi-delegate-v<version>
 
-Watch the workflow run; npm lists 0.3.1 when it finishes.
+Watch the workflow run; `npm view @bermudi/pi-delegate version` should list
+`<version>` when it finishes.
 
 ## Post-publish verification
 
-1. `npm view @bermudi/pi-delegate version` → 0.3.1.
+1. `npm view @bermudi/pi-delegate version` → `<version>`.
 2. On the operator machine, `pi update --extensions` picks the release
    up — the `~/.pi/agent/settings.json` entry is the **unversioned**
    `npm:@bermudi/pi-delegate`. An exact `@x.y.z` pin makes `pi update`
@@ -44,16 +46,15 @@ Watch the workflow run; npm lists 0.3.1 when it finishes.
 3. In a scratch directory (NOT this repo): `pi install
    npm:@bermudi/pi-delegate`, start `pi`, dispatch one single-task and
    one two-task call — verify both return tickets and wake with results.
-   Verify `async:false` returns inline, removed aliases reject, compact
-   hides and rejects advanced controls, and `"surface":"full"` plus
-   reload enables the retained advanced controls.
+   Verify `async:false` returns inline and removed fields reject with
+   their teaching message.
 4. Confirm the OLD v1 behavior is gone in that install (sync-default
    batches and kitchen-sink tool schema) — the displacement worked.
 
 ## Rollback
 
-npm cannot unpublish after 72h. Before that window: `npm unpublish
-@bermudi/pi-delegate@0.3.1` restores 0.1.23 as latest. The local
-rollback is flipping the settings.json pin back to
-`npm:@bermudi/pi-delegate@0.1.23`. Document any rollback in
-COMPATIBILITY.
+npm cannot unpublish after 72h. Inside that window, `npm unpublish
+@bermudi/pi-delegate@<version>` removes a bad release. Locally, roll back by
+pinning the previous good version with `pi install npm:@bermudi/pi-delegate@<previous>`
+(step 2 explains why the pin must be exact), and return to the unpinned entry
+once a fixed release ships. Document any rollback in COMPATIBILITY.
