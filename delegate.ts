@@ -15,11 +15,7 @@ import {
   type ExtensionContext,
   type NormalizedBuildSystemPromptOptions,
 } from "@earendil-works/pi-coding-agent";
-import type { Usage } from "@earendil-works/pi-ai";
-import {
-  AdmissionController,
-  type AdmissionGrant,
-} from "./src/admission.ts";
+import { AdmissionController } from "./src/admission.ts";
 import {
   configuredModelFor,
   loadDelegateConfig,
@@ -43,27 +39,18 @@ import {
   type DispatchOutcome,
 } from "./src/coordinator.ts";
 import { AttributionWindows } from "./src/git-attribution.ts";
+import { briefNote, formatDispatchResult } from "./src/format.ts";
 import {
-  briefNote,
-  formatDispatchResult,
-  serializedNotices,
-} from "./src/format.ts";
-import {
-  hostEnvironment,
   parentModelRuntime,
-  resolveTasks,
-  type HostEnvironment,
   type ParentPromptInputs,
   type ParentPromptService,
 } from "./src/host.ts";
 import { createActivityStore } from "./src/activity.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
 import { currentBootId } from "./src/owner.ts";
-import {
-  DispatchRegistry,
-  type DispatchLifetime,
-} from "./src/lifetime.ts";
+import { DispatchRegistry } from "./src/lifetime.ts";
 import { discoverProfiles } from "./src/profiles.ts";
+import { DispatchPipeline, type UsageEventPayload } from "./src/pipeline.ts";
 import {
   createMessageRenderer,
   createResultRenderer,
@@ -75,12 +62,7 @@ import { VisibilitySignals } from "./src/visibility.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
 import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
-import {
-  type OutputBounds,
-  type ResolvedTask,
-  type TaskOutcome,
-  type Ticket,
-} from "./src/types.ts";
+import type { Ticket } from "./src/types.ts";
 import {
   MODEL_FIELD_REJECTION,
   PROMPT_CHAR_LIMIT,
@@ -92,11 +74,7 @@ import {
   type DispatchCall,
   type TaskInput,
 } from "./src/validation.ts";
-import {
-  prepareWorkspaces,
-  workspaceNeedsSettlementHold,
-  type WorkspacePlan,
-} from "./src/workspaces.ts";
+import { workspaceNeedsSettlementHold } from "./src/workspaces.ts";
 
 function stringEnum<const Values extends readonly string[]>(
   values: Values,
@@ -1312,14 +1290,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
   const sessions = new SessionPool(diagnostics);
   const coordinator = new DispatchCoordinator(diagnostics, tickets, activity);
   const telemetry = new TelemetryStore(diagnostics);
-  let callSeq = 0;
-  // Owned by this closure: one fallback warning per extension instance, not
-  // per call (see resolveAgentDir for why the fallback exists at all).
-  let warnedAgentDirFallback = false;
-  // Owned by this closure: profile file paths already warned about this
-  // session — discovery re-reads the disk per dispatch, but a broken file
-  // warns once per chat, not once per run (see discoverProfiles).
-  const warnedProfilePaths = new Set<string>();
   // Shutdown latch: once the host begins teardown, new dispatches reject and
   // pending results are never delivered.
   let shuttingDown = false;
@@ -1332,16 +1302,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // inside a settlement cluster only the first event goes out, which is
   // exactly what a refresh wake wants.
   let lastUsageEventAt = Number.NEGATIVE_INFINITY;
-  const emitUsage = (payload: {
-    ticketId?: string;
-    taskId?: string;
-    provider: string;
-    model: string;
-    totalTokens: number;
-    inputTokens: number;
-    outputTokens: number;
-    costUsd?: number;
-  }): void => {
+  const emitUsage = (payload: UsageEventPayload): void => {
     const now = Date.now();
     if (now - lastUsageEventAt < USAGE_EVENT_MIN_INTERVAL_MS) return;
     lastUsageEventAt = now;
@@ -1353,20 +1314,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
       diagnostic("error", "usage emit failed", {}, error);
     }
   };
-  /** One settled task's usage payload: the provider/model that burned it. */
-  const taskUsagePayload = (
-    task: ResolvedTask,
-    usage: Usage,
-    ids: { ticketId?: string; taskId?: string },
-  ): Parameters<typeof emitUsage>[0] => ({
-    ...ids,
-    provider: task.model.provider,
-    model: task.model.id,
-    totalTokens: usage.totalTokens,
-    inputTokens: usage.input,
-    outputTokens: usage.output,
-    costUsd: usage.cost.total,
-  });
 
   /**
    * SPEC v3 "Interaction grammar — Wake delivery": settled results
@@ -1677,6 +1624,23 @@ export default function delegateExtension(api: ExtensionAPI): void {
     }
   };
 
+  const pipeline = new DispatchPipeline({
+    diagnostics,
+    tickets,
+    admission,
+    sessions,
+    coordinator,
+    telemetry,
+    dispatches,
+    attributionWindows,
+    parentPrompt,
+    getActiveTools: () => api.getActiveTools(),
+    isShuttingDown: () => shuttingDown,
+    shutdownQuiescenceBudgetMs,
+    noteMisfire,
+    emitUsage,
+  });
+
   // Pi skips tool_result for schema/preparation errors. Start/end events
   // cover them; retain only sanitized batch metadata, never request bodies.
   const preflightDispatches = new Map<string, {
@@ -1738,400 +1702,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
       diagnostic("error", "preflight misfire telemetry failed", {}, error);
     }
   });
-
-  /**
-   * The one dispatch pipeline, from barrier tracking to the coordinator
-   * handoff, for sync and async batches alike — the optional ticket is the
-   * only mode input, and the batch runs on `signal ?? the ticket's
-   * cancellation signal` (reached through the store). Mode-specific edges
-   * stay with the caller: ticket creation (via `createTicket`, invoked at
-   * the one seam between task validation and admission), origin capture,
-   * delivery arming, and response formatting all live outside.
-   *
-   * Shutdown ownership (INVARIANTS "Ticket state"): the wrapper below opens
-   * the dispatch's `DispatchLifetime` and closes it on every exit. The
-   * coordinator adopts its batch's work into that lifetime, so shutdown
-   * waits on the work itself, and this function never resolves a barrier.
-   */
-  const runDispatchPipelineBody = async (
-    lifetime: DispatchLifetime,
-    options: {
-    readonly requestedTasks: readonly TaskInput[];
-    readonly ctx: ExtensionContext;
-    /** The sync caller's host signal; async batches run on the ticket's. */
-    readonly signal?: AbortSignal;
-    /** The shared batch brief (SPEC v3 "Batch brief"), if the call set one. */
-    readonly brief?: string;
-    readonly onNotices?: (notices: readonly string[]) => void;
-    /**
-     * Inline batches (#119): the dispatch key live activity rows track
-     * under, and a settle callback that fires the board refresh as each
-     * task's outcome lands.
-     */
-    readonly syncRunId?: string;
-    readonly onTaskOutcomeRecorded?: (task: ResolvedTask, outcome: TaskOutcome) => void;
-    /**
-     * Async mode's edge: creates the ticket once tasks are resolved, so
-     * the pipeline spends the rest of the batch under its cancellation
-     * signal; the pipeline relabels nothing for it.
-     */
-    readonly createTicket?: (
-      tasks: readonly ResolvedTask[],
-      relabel: (label: string) => void,
-      config: DelegateConfig,
-    ) => Ticket;
-  }): Promise<{
-    completion: Promise<DispatchOutcome>;
-    notices: readonly string[];
-    ticket: Ticket | undefined;
-    /** Resolved tasks, for settled-render spill labels on the sync path. */
-    tasks: readonly ResolvedTask[];
-    /** The loaded config's output bounds, for the sync result render. */
-    outputBounds: OutputBounds;
-  }> => {
-    const { requestedTasks, ctx, signal, onNotices, createTicket } = options;
-    // The lifetime is opened by the wrapper below, before anything here can
-    // throw or yield: task resolution probes Git for each writer or isolated
-    // task's write scope, admission grants reservations, and workspace
-    // preparation awaits subprocesses. Shutdown counts this dispatch from
-    // the moment the wrapper opens it. (Only async preparation is abortable:
-    // sync batches run on the caller's host signal, which shutdown does not
-    // abort, so a parked sync dispatch rides out the hold and runs to
-    // completion. Async batches run on the ticket's cancellation signal,
-    // which shutdown force-cancels — their preparation aborts on its own
-    // and the catch below settles the ticket as cancelled.)
-    const relabel = (label: string): void => lifetime.relabel(label);
-    let ticket: Ticket | undefined;
-    let plan: WorkspacePlan | undefined;
-    // Everything the failure routine below may still need once admission
-    // has run. Admission is synchronous and immediately follows ticket
-    // creation, so a ticket that exists at all always has its batch here:
-    // a ticket can only be cancelled while this pipeline is parked in an
-    // await, and there is none between creation and admission.
-    let batch:
-      | {
-          readonly tasks: readonly ResolvedTask[];
-          readonly env: HostEnvironment;
-          readonly config: DelegateConfig;
-          readonly grant: AdmissionGrant;
-          readonly dispatchSignal: AbortSignal | undefined;
-          readonly notices: readonly string[];
-        }
-      | undefined;
-    try {
-      // Async journal connect: async dispatch needs the saved journal and
-      // ticket creation must be durable before workers spawn, but the
-      // connect itself is synchronous filesystem setup — it runs here, in
-      // the pipeline, rather than in execute's synchronous prefix. A
-      // corrupt or inaccessible journal fails async dispatch visibly
-      // without blocking synchronous work (which never touches it).
-      if (createTicket !== undefined) {
-        tickets.connect(resolveAgentDir(ctx).dir);
-      }
-      const agentDirResolution = resolveAgentDir(ctx);
-      if (agentDirResolution.source === "cwd" && !warnedAgentDirFallback) {
-        warnedAgentDirFallback = true;
-        diagnostic("warn", "Falling back to agent directory; config and workspace trees use this path. Set DELEGATE_AGENT_DIR explicitly. Diagnostics destination is independent", { path: agentDirResolution.dir });
-      }
-      const env = hostEnvironment(
-        diagnostics,
-        ctx,
-        agentDirResolution.dir,
-        () => api.getActiveTools(),
-        parentPrompt,
-      );
-      const catalog = discoverProfiles(ctx.cwd, agentDirResolution.dir, {
-        warnedPaths: warnedProfilePaths,
-        diagnostics,
-      });
-      // Misfire phases (SPEC v3 "Observability"): config-load failures
-      // record under "config" (telemetry status salvaged from the raw
-      // file — the load itself just failed); task-resolution and
-      // pooled-session reuse rejections record under "validation";
-      // admission rejections record under "admission".
-      let config: DelegateConfig;
-      try {
-        config = loadDelegateConfig(
-          agentDirResolution.dir,
-          catalog.globalNames,
-        );
-      } catch (error) {
-        noteMisfire(
-          ctx, agentDirResolution.dir,
-          telemetryConfigHint(agentDirResolution.dir),
-          "config", error, requestedTasks, undefined,
-          createTicket !== undefined,
-        );
-        throw error;
-      }
-      let tasks: readonly ResolvedTask[];
-      try {
-        tasks = await resolveTasks(requestedTasks, env, config, catalog);
-      } catch (error) {
-        noteMisfire(
-          ctx, agentDirResolution.dir, config.telemetry,
-          "validation", error, requestedTasks, undefined,
-          createTicket !== undefined,
-        );
-        throw error;
-      }
-      // Shutdown may have begun while resolveTasks awaited a Git scope probe.
-      // Neither a pre-ticket async call nor a pre-admission sync call may
-      // start a worker after shutdown's snapshot of live work.
-      if (shuttingDown) {
-        throw new Error(
-          "Delegate shut down while this dispatch was preparing; no worker was started.",
-        );
-      }
-      try {
-        sessions.validateReuse(tasks);
-      } catch (error) {
-        noteMisfire(
-          ctx, agentDirResolution.dir, config.telemetry,
-          "validation", error, requestedTasks, undefined,
-          createTicket !== undefined,
-        );
-        throw error;
-      }
-      ticket = createTicket?.(tasks, relabel, config);
-      let owner = ticket?.id;
-      if (owner === undefined) {
-        callSeq += 1;
-        owner = `call-${callSeq}`;
-        relabel(owner);
-      }
-      const dispatchSignal = signal ??
-        (ticket ? tickets.cancellationSignal(ticket) : undefined);
-      let grant: AdmissionGrant;
-      try {
-        grant = admission.admit(tasks, owner, {
-          sessionFileOf: (sessionId) => sessions.transcriptFileOf(sessionId),
-          // Issue #51: a cross-call rejection names live capacity — the
-          // coordinator's in-flight count against this call's configured
-          // ceiling — beside the held claims it lists.
-          capacity: {
-            running: coordinator.runningCount(),
-            maxConcurrent: config.maxConcurrent,
-          },
-        });
-      } catch (error) {
-        noteMisfire(
-          ctx, agentDirResolution.dir, config.telemetry,
-          "admission", error, requestedTasks, undefined,
-          createTicket !== undefined,
-        );
-        throw error;
-      }
-      const notices = serializedNotices(tasks, grant.serialized);
-      if (ticket) tickets.setNotices(ticket, notices);
-      batch = { tasks, env, config, grant, dispatchSignal, notices };
-      onNotices?.(notices);
-      const telemetrySpan = telemetry.beginDispatch(
-        config.telemetry,
-        env.agentDir,
-        { async: ticket !== undefined, startedAt: Date.now(), tasks },
-      );
-      plan = await prepareWorkspaces(
-        diagnostics,
-        tasks,
-        grant,
-        env.agentDir,
-        dispatchSignal,
-        telemetrySpan.ownedPaths,
-      );
-      // The completion is returned without awaiting it here. The lifetime
-      // wrapper closes on every exit; the coordinator's adopted proofs cover
-      // execution, reconciliation, and cleanup independently of this catch.
-      const completion = coordinator
-        .run(tasks, {
-          env,
-          config,
-          grant,
-          sessions,
-          signal: dispatchSignal,
-          ticket,
-          lifetime,
-          syncRunId: options.syncRunId,
-          attribution: attributionWindows,
-          attributionQuiescenceBoundMs: shutdownQuiescenceBudgetMs(),
-          preparePhase: (phase) => plan!.preparePhase(phase),
-          reconcilePhase: (phase, outcomes) =>
-            // The dispatch facts the batch actually holds: plans consume
-            // what applies to them (only isolated reconciliation reads
-            // this context).
-            plan!.reconcilePhase(phase, outcomes, {
-              signal: dispatchSignal,
-              shouldApplySource: () => !dispatchSignal?.aborted,
-              retainedReason: ticket
-                ? "The ticket was cancelled before source application."
-                : "The call was aborted before source application.",
-            }),
-          cleanupStoppedWorker: (taskIndex) => plan!.cleanupWorker(taskIndex),
-          disposeUnstarted: () => plan!.dispose(),
-          // #60: task settlement is the usage event's firing point — the
-          // settled outcome's recorded usage, tagged with its ticket and
-          // task. No usage (never ran, cancelled pre-prompt) → no event.
-          onTaskOutcomeRecorded: (task, outcome) => {
-            if (outcome.usage !== undefined) {
-              emitUsage(
-                taskUsagePayload(task, outcome.usage, {
-                  ticketId: ticket?.id,
-                  taskId: task.id,
-                }),
-              );
-            }
-            // #119: an inline batch's board refreshes as each outcome
-            // lands — display-only, so a throwing emitter is swallowed.
-            if (options.onTaskOutcomeRecorded !== undefined) {
-              try {
-                options.onTaskOutcomeRecorded(task, outcome);
-              } catch (error) {
-                diagnostic("error", "settle observer failed", { taskId: task.id }, error);
-              }
-            }
-          },
-          brief: options.brief,
-        })
-        .then((outcome) => {
-          telemetrySpan.finish(outcome, ticket?.status);
-          // #60: batch settlement also reports — one event per distinct
-          // provider/model pair with its summed settled usage (the
-          // per-instance throttle decides what actually goes out).
-          const byModel = new Map<
-            string,
-            {
-              provider: string;
-              model: string;
-              totalTokens: number;
-              inputTokens: number;
-              outputTokens: number;
-              costUsd: number;
-            }
-          >();
-          for (const settled of outcome.outcomes) {
-            if (settled?.usage === undefined) continue;
-            const task = tasks[settled.index];
-            if (task === undefined) continue;
-            const key = `${task.model.provider}/${task.model.id}`;
-            const aggregate = byModel.get(key) ?? {
-              provider: task.model.provider,
-              model: task.model.id,
-              totalTokens: 0,
-              inputTokens: 0,
-              outputTokens: 0,
-              costUsd: 0,
-            };
-            aggregate.totalTokens += settled.usage.totalTokens;
-            aggregate.inputTokens += settled.usage.input;
-            aggregate.outputTokens += settled.usage.output;
-            aggregate.costUsd += settled.usage.cost.total;
-            byModel.set(key, aggregate);
-          }
-          for (const aggregate of byModel.values()) {
-            emitUsage({ ticketId: ticket?.id, ...aggregate });
-          }
-          return outcome;
-        })
-        .finally(() => {
-          if (ticket) tickets.releaseSettlement(ticket);
-        });
-      return {
-        completion,
-        notices,
-        ticket,
-        tasks,
-        outputBounds: config.output,
-      };
-    } catch (error) {
-      // The one pre-handoff failure routine. The wrapper closes the
-      // lifetime after this, so no barrier is resolved here. A disposal
-      // failure must never erase the root cause: log it and keep the
-      // original as the thrown error.
-      try {
-        await plan?.dispose();
-      } catch (cleanupError) {
-        diagnostic("error", "workspace disposal after preparation failure failed (root cause preserved)", {}, cleanupError);
-      }
-      if (
-        ticket !== undefined &&
-        ticket.status !== "running" &&
-        batch !== undefined
-      ) {
-        const cancelledTicket = ticket;
-        // Preparation raced a cancellation (shutdown or a force-cancel
-        // aborting the workspace copy/worktree): the ticket is already
-        // terminal cancelled and the caller still gets its id. End the
-        // batch through the coordinator's own settle path — the one
-        // batch-end implementation, not a hand-rolled copy: under the
-        // already-aborted signal `run` records a cancelled outcome for
-        // every task, and its finally releases the grant, finishes the
-        // gates, and its adopted full-quiescence work settles the lifetime
-        // through the same wiring as any batch. Telemetry records nothing —
-        // the span above is never finished for a failed preparation (SPEC.md
-        // "Telemetry": failed preparation records nothing).
-        diagnostic("info", "async dispatch preparation aborted after cancellation; settling as cancelled", { ticketId: cancelledTicket.id }, error);
-        return {
-          notices: batch.notices,
-          ticket: cancelledTicket,
-          tasks: batch.tasks,
-          outputBounds: batch.config.output,
-          completion: coordinator
-            .run(batch.tasks, {
-              env: batch.env,
-              config: batch.config,
-              grant: batch.grant,
-              sessions,
-              signal: batch.dispatchSignal,
-              ticket: cancelledTicket,
-              lifetime,
-              attribution: attributionWindows,
-              attributionQuiescenceBoundMs: shutdownQuiescenceBudgetMs(),
-              onTaskOutcomeRecorded: (task, outcome) => {
-                if (outcome.usage === undefined) return;
-                emitUsage(
-                  taskUsagePayload(task, outcome.usage, {
-                    ticketId: cancelledTicket.id,
-                    taskId: task.id,
-                  }),
-                );
-              },
-            })
-            .finally(() => tickets.releaseSettlement(cancelledTicket)),
-        };
-      }
-      if (ticket !== undefined && tickets.get(ticket.id) !== undefined) {
-        // A ticket whose batch never started is removed rather than
-        // exposed: the whole call fails with the cause instead. The get
-        // guard matters because create() itself removes its registration
-        // when its own creation write throws — removing again would
-        // delete another ticket's record if the id were ever reused, and
-        // journal.remove() on an unsaved id can only throw noise.
-        tickets.remove(ticket.id);
-      }
-      batch?.grant.release();
-      throw error;
-    }
-  };
-
-  // The wrapper owns the lifetime and closes it on every exit: success (the
-  // coordinator's adopted work keeps shutdown waiting until it settles),
-  // a pre-handoff failure, and the cancelled-preparation rerun alike. No path
-  // can forget to release the barrier, so the pipeline never resolves one by
-  // hand.
-  const runDispatchPipeline = async (
-    options: Parameters<typeof runDispatchPipelineBody>[1],
-  ): ReturnType<typeof runDispatchPipelineBody> => {
-    const lifetime = dispatches.open(
-      options.createTicket !== undefined
-        ? "async dispatch (preparing)"
-        : "dispatch (preparing)",
-    );
-    try {
-      return await runDispatchPipelineBody(lifetime, options);
-    } finally {
-      lifetime.close();
-    }
-  };
 
   // Tree navigation is user-driven and not a session replacement: the
   // runtime and the tickets survive it. The epoch bumps unconditionally —
@@ -2474,7 +2044,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               }
             };
             const { completion, ticket, notices, tasks, outputBounds } =
-              await runDispatchPipeline({
+              await pipeline.run({
               requestedTasks: call.tasks,
               ctx,
               brief: call.brief,

@@ -7,7 +7,7 @@
  * proof that no further model turn started. Gated factories plus the
  * `maxConcurrent: 1` bound let tests place tasks at exact lifecycle points.
  */
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { execSync } from "node:child_process";
 import {
   chmodSync,
@@ -994,97 +994,81 @@ function installGitFailure(failAtCall: number): {
 }
 
 async function expectShutdownSettles(current: TestSession): Promise<void> {
-  // A dispatch that ended before the coordinator handoff must have
-  // resolved its shutdown barrier: the session boundary may not hang on a
-  // batch that never started (INVARIANTS "Ticket state").
-  let settled = false;
-  const shutdown = (current.session as AgentSession).extensionRunner
-    .emit({ type: "session_shutdown", reason: "quit" })
-    .then(() => {
-      settled = true;
-    });
-  await Promise.race([
-    shutdown,
-    Bun.sleep(15_000).then(() => {
-      throw new Error("shutdown never settled after the failed preparation");
-    }),
-  ]);
-  expect(settled).toBe(true);
+  // A return alone is not proof: shutdown can proceed at its quiescence
+  // budget. Observe the REAL UI warning, not a fabricated host context.
+  const host = current.session as AgentSession;
+  const notify = spyOn(host.extensionRunner.createContext().ui, "notify");
+  const previousBudget = process.env.DELEGATE_SHUTDOWN_QUIESCENCE_MS;
+  process.env.DELEGATE_SHUTDOWN_QUIESCENCE_MS = "300";
+  try {
+    await bounded(host.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }));
+    expect(notify.mock.calls.filter(([text, kind]) =>
+      kind === "warning" && /still stopping|still.*mutat|quiescence.*expir/i.test(text),
+    ), "failed preparation must confirm quiescence, not exhaust the shutdown budget").toEqual([]);
+  } finally {
+    notify.mockRestore();
+    if (previousBudget === undefined) delete process.env.DELEGATE_SHUTDOWN_QUIESCENCE_MS;
+    else process.env.DELEGATE_SHUTDOWN_QUIESCENCE_MS = previousBudget;
+  }
 }
 
-test(
-  "an async dispatch whose workspace preparation fails exposes no ticket and leaves no barrier",
-  async () => {
-    // Prep-FAILURE variant of the shutdown-prep races: a copy/worktree
-    // error that throws (rather than aborts) must fail the whole call —
-    // no phantom ticket left behind — and the dispatch's shutdown barrier
-    // must resolve with it.
-    const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
-    gitInitForShutdownRace(repo);
-    const failure = installGitFailure(2);
-    try {
-      session = await openDelegateBoundary();
-      await installSubagentModel(session);
+for (const async of [true, false]) {
+  for (const next of ["shutdown", "retry"] as const) {
+    test(
+      `${async ? "async" : "sync"} workspace preparation failure ${next === "retry" ? "allows an immediate same-source retry" : "leaves no shutdown barrier before any retry"} (#133/#134)`,
+      async () => {
+        // Real Git prep failure, not a synthetic coordinator fault. Keep
+        // shutdown-before-retry separate: a successful later dispatch must
+        // not hide a lifetime leaked by the one that never started.
+        const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
+        gitInitForShutdownRace(repo);
+        const failure = installGitFailure(2);
+        try {
+          session = await openDelegateBoundary();
+          const model = await installSubagentModel(session);
+          model.respond([fauxAssistantMessage("PREP-RETRY-SUCCEEDED")]);
+          const args = {
+            async,
+            workspace: "isolated",
+            tasks: [{ prompt: "fail at preparation", cwd: repo }],
+          };
+          // Call 1 (write-scope probe) succeeds; call 2, the repository
+          // probe inside isolated preparation, fails.
+          const result = await callDelegate(session, args);
+          expect(result.isError).toBe(true);
+          expect(result.text).toMatch(/requires a Git repository/i);
+          expect(model.state.callCount).toBe(0);
+          expect(result.text).not.toContain('Ticket "');
+          const roster = await callDelegateTicket(session, { action: "poll" });
+          expect(roster.text).toContain("No tickets");
 
-      // Call 1 (write-scope probe) succeeds; call 2, the repository probe
-      // inside prepareIsolated, fails.
-      const result = await callDelegate(session, {
-        async: true,
-        workspace: "isolated",
-        tasks: [
-          { prompt: "fail at preparation", cwd: repo },
-        ],
-      });
-      expect(result.isError).toBe(true);
-      expect(result.text).toMatch(/requires a Git repository/i);
-      // The ticket never started, so it is not exposed: the failure text
-      // names no ticket id, and the roster is empty.
-      expect(result.text).not.toContain('Ticket "');
-      const roster = await callDelegateTicket(session, { action: "poll" });
-      expect(roster.text).toContain("No tickets");
-
-      await expectShutdownSettles(session);
-    } finally {
-      failure.restore();
-      rmSync(failure.shimDir, { recursive: true, force: true });
-      rmSync(repo, { recursive: true, force: true });
-    }
-  },
-  30_000,
-);
-
-test(
-  "a sync dispatch whose workspace preparation fails leaves no barrier",
-  async () => {
-    // Same failure on the sync path: the call fails with the preparation
-    // cause and the session boundary is not held by a batch that never
-    // started.
-    const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
-    gitInitForShutdownRace(repo);
-    const failure = installGitFailure(2);
-    try {
-      session = await openDelegateBoundary();
-      await installSubagentModel(session);
-
-      const result = await callDelegate(session, {
-        async: false,
-        workspace: "isolated",
-        tasks: [
-          { prompt: "fail at preparation", cwd: repo },
-        ],
-      });
-      expect(result.isError).toBe(true);
-      expect(result.text).toMatch(/requires a Git repository/i);
-
-      await expectShutdownSettles(session);
-    } finally {
-      failure.restore();
-      rmSync(failure.shimDir, { recursive: true, force: true });
-      rmSync(repo, { recursive: true, force: true });
-    }
-  },
-  30_000,
-);
+          failure.restore();
+          if (next === "retry") {
+            // No polling for admission and no delay: the failed preparation
+            // must already have released this exact source reservation.
+            const retried = await callDelegate(session, args);
+            expect(retried.isError).toBe(false);
+            const outcome = async
+              ? await callDelegateTicket(session, {
+                  action: "wait", ticket: ticketIdOf(retried.text),
+                })
+              : retried;
+            expect(outcome.isError).toBe(false);
+            expect(outcome.text).toContain("PREP-RETRY-SUCCEEDED");
+            expect(model.state.callCount).toBe(1);
+          }
+          await expectShutdownSettles(session);
+          expect(model.state.callCount).toBe(next === "retry" ? 1 : 0);
+        } finally {
+          failure.restore();
+          rmSync(failure.shimDir, { recursive: true, force: true });
+          rmSync(repo, { recursive: true, force: true });
+        }
+      },
+      30_000,
+    );
+  }
+}
 
 test(
   "tasks have no wall-clock budget at all",
