@@ -307,7 +307,6 @@ describe("delegate dependency graph and handoffs", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.isError).toBe(false);
       // The blocked dependent consumed no worker: after settlement only
@@ -707,7 +706,6 @@ describe("delegate dependency graph and handoffs", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain(`Ticket "${ticket}": cancelled`);
       const childSection = settled.text.slice(

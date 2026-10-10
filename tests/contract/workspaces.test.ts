@@ -390,7 +390,6 @@ describe("delegate workspace and shared-write contract", () => {
       await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
     },
   );
@@ -1676,7 +1675,6 @@ exec '${realGit}' "$@"
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain(`Ticket "${ticket}": cancelled`);
       expect(settled.text).toMatch(/INTEGRATION: discarded/);
@@ -1724,7 +1722,6 @@ exec '${realGit}' "$@"
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.text).toContain("FIRST-WRITER-DONE");
 

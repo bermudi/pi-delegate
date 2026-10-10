@@ -275,7 +275,6 @@ describe("verifier profile — verdict evidence (SPEC v3 #49)", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.isError).toBe(false);
       expect(waited.text).toContain("verdict: PASS — unverifiable");

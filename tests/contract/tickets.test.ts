@@ -108,7 +108,7 @@ describe("delegate ticket contract", () => {
       session = await openDelegateBoundary();
       for (const arguments_ of [
         { action: "poll", ticket: "nope-1" },
-        { action: "wait", ticket: "nope-1", timeoutMs: 50 },
+        { action: "wait", ticket: "nope-1" },
         { action: "cancel", ticket: "nope-1", force: true },
       ]) {
         const result = await callDelegateTicket(session, arguments_);
@@ -139,7 +139,6 @@ describe("delegate ticket contract", () => {
       const waiting = callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       release();
       const waited = await waiting;
@@ -157,11 +156,12 @@ describe("delegate ticket contract", () => {
   );
 
   test(
-    "a wait timeout detaches the waiter without cancelling background work",
+    "a wait parks without cancelling — the ticket settles when work unblocks",
     async () => {
-      // v1 evidence: delegate.test.ts "wait timeout returns running status and
-      // does not cancel ticket"; INVARIANTS: wait timeout or caller abort
-      // detaches only that waiter.
+      // #130 removed the wait timeout; the surviving contract is the one
+      // beneath the old test: waiting never cancels background work, and
+      // the ticket finishes once the work unblocks. Poll observes the
+      // running state without parking (the old timeout's role).
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const { release, step } = gate();
@@ -173,25 +173,18 @@ describe("delegate ticket contract", () => {
       });
       const ticket = ticketIdOf(dispatched.text);
 
-      const timedOut = await callDelegateTicket(session, {
-        action: "wait",
+      const polled = await callDelegateTicket(session, {
+        action: "poll",
         ticket,
-        timeoutMs: 30,
       });
-      expect(timedOut.isError).toBe(false);
-      expect(timedOut.text).toMatch(/running|timeout|pending/i);
-      // The tail sentence is machine-readable so the collapsed view can
-      // show why the wait ended instead of hiding it (#63).
-      expect(
-        (timedOut.details as { note?: string }).note,
-      ).toContain("Wait timed out");
+      expect(polled.isError).toBe(false);
+      expect(polled.text).toMatch(/running/i);
 
       // The ticket is still alive and finishes once the work unblocks.
       release();
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("OUTPUT-RELEASED");
     },
@@ -315,7 +308,6 @@ describe("delegate ticket contract", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.isError).toBe(false);
       expect(waited.text).toContain(`Ticket "${ticket}": partial`);
@@ -344,7 +336,6 @@ describe("delegate ticket contract", () => {
     const waited = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(waited.isError).toBe(false);
     expect(waited.text).toContain(`Ticket "${ticket}": failed`);
@@ -406,7 +397,6 @@ describe("delegate ticket contract", () => {
       await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
     },
   );
@@ -460,7 +450,6 @@ describe("delegate ticket contract", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("ANSWERED-DONE");
     },
@@ -523,7 +512,6 @@ describe("delegate ticket contract", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("OUTPUT-RELEASED");
       expect(settled.text).toContain("### Task task-2 — completed");
@@ -531,12 +519,11 @@ describe("delegate ticket contract", () => {
   );
 
   test(
-    "a wait entered after an interruption parks for the next event — timeout still detaches (#48)",
+    "a wait entered after an interruption parks for the next event (#48)",
     async () => {
-      // Issue #48: the interruption wake is event-scoped, like the
-      // question wake but without an actionable pending state — an
-      // interruption already on record is stale news the view carries, so
-      // a fresh wait keeps waiting and a timeout detaches the waiter only.
+      // Issue #48: the interruption wake is event-scoped — an interruption
+      // already on record is stale news the view carries, so a fresh wait
+      // keeps waiting and ends on the next real event (here: settlement).
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const first = gate();
@@ -561,19 +548,14 @@ describe("delegate ticket contract", () => {
         taskId: "task-1",
       });
 
-      const timedOut = await callDelegateTicket(session, {
-        action: "wait",
-        ticket,
-        timeoutMs: 60,
-      });
-      expect(timedOut.isError).toBe(false);
-      expect(timedOut.text).toContain("Wait timed out");
-      expect(timedOut.text).toContain("### Task task-1 — interrupted");
-      expect(timedOut.text).toContain("still running");
-
+      // The stale interruption is on record; the wait parks past it and
+      // ends on the settlement event.
       first.release();
       second.release();
-      await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+      const settled = await callDelegateTicket(session, { action: "wait", ticket });
+      expect(settled.isError).toBe(false);
+      expect(settled.text).toContain("### Task task-1 — interrupted");
+      expect(settled.text).toContain("OUTPUT-RELEASED");
     },
   );
 
@@ -629,222 +611,48 @@ describe("delegate ticket contract", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("ANSWERED-CONTINUE");
     },
   );
 
-  test(
-    "wait-any resolves on the first ticket to settle with its view and a running roster (#58)",
-    async () => {
-      // Issue #58 (third codex comparison): `tickets` watches several
-      // ids — the wait resolves on the first to settle, leading with
-      // that ticket's view and a one-line roster of the rest still
-      // running.
-      session = await openDelegateBoundary();
-      const subagents = await installSubagentModel(session);
-      const early = gate();
-      const late = gate();
-      // Two separate dispatches race to the provider — route by each
-      // ticket's prompt so "first" always parks on early and "second" on
-      // late, regardless of which worker's provider call lands first.
-      const byPrompt: FauxResponseFactory = (context, options, state, model) =>
-        JSON.stringify(context.messages).includes('"first"')
-          ? early.step(context, options, state, model)
-          : late.step(context, options, state, model);
-      subagents.respond([byPrompt, byPrompt]);
 
-      const a = ticketIdOf(
-        (
-          await callDelegate(session, {
-            tasks: [{ prompt: "first", tools: ["read"] }],
-            async: true,
-          })
-        ).text,
-      );
-      const b = ticketIdOf(
-        (
-          await callDelegate(session, {
-            tasks: [{ prompt: "second", tools: ["read"] }],
-            async: true,
-          })
-        ).text,
-      );
-      await waitFor(
-        () => subagents.state.callCount === 2,
-        "both tickets parked in provider calls",
-      );
 
-      // Watch order is [b, a] but a settles first — the resolved ticket
-      // is the settler, not the list head.
-      const waiting = callDelegateTicket(session, {
-        action: "wait",
-        tickets: [b, a],
-      });
-      early.release();
-      const waited = await waiting;
-      expect(waited.isError).toBe(false);
-      expect(waited.text).toContain("OUTPUT-RELEASED");
-      expect(waited.text).toContain(`Ticket "${a}"`);
-      expect(waited.text).toContain("first watched ticket to settle");
-      expect(waited.text).toContain(`"${b}"`);
-      expect(waited.text).toMatch(/still running: "t-[0-9a-f-]+" \(running/);
-      const details = objectOf(waited.details, "waited.details");
-      expect(details.ticket).toBe(a);
 
-      late.release();
-      const settled = await callDelegateTicket(session, {
-        action: "wait",
-        ticket: b,
-        timeoutMs: 5000,
-      });
-      expect(settled.text).toContain("OUTPUT-RELEASED");
-    },
-  );
 
-  test(
-    "a wait-any timeout detaches only the waiter — every watched ticket keeps running (#58)",
-    async () => {
-      // Issue #58: timeout semantics are the single wait's, detached —
-      // nothing is cancelled and each ticket settles on its own clock.
-      session = await openDelegateBoundary();
-      const subagents = await installSubagentModel(session);
-      const a = gate();
-      const b = gate();
-      subagents.respond([a.step, b.step]);
 
-      const ta = ticketIdOf(
-        (
-          await callDelegate(session, { tasks: [{ prompt: "one", tools: ["read"] }], async: true })
-        ).text,
-      );
-      const tb = ticketIdOf(
-        (
-          await callDelegate(session, { tasks: [{ prompt: "two", tools: ["read"] }], async: true })
-        ).text,
-      );
-      await waitFor(
-        () => subagents.state.callCount === 2,
-        "both tickets parked in provider calls",
-      );
 
-      const timedOut = await callDelegateTicket(session, {
-        action: "wait",
-        tickets: [ta, tb],
-        timeoutMs: 40,
-      });
-      expect(timedOut.isError).toBe(false);
-      expect(timedOut.text).toMatch(/timed out/i);
-      expect(timedOut.text).toContain(ta);
-      expect(timedOut.text).toContain(tb);
-      expect(timedOut.text).toMatch(/running/);
+  test("the tickets wait-list and timeoutMs are removed — wait takes one ticket, bare (#130)", async () => {
+    // Field verdict 7: blocking-posture upgrades obsoleted by the
+    // background default and wake delivery. Both fields reject; a plain
+    // wait still parks until settlement.
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([fauxAssistantMessage("PLAIN-WAIT")]);
+    const dispatched = await callDelegate(session, {
+      tasks: [{ prompt: "bg" }],
+      async: true,
+    });
+    expect(dispatched.isError).toBe(false);
+    const ticket = ticketIdOf(dispatched.text);
 
-      // Both are still alive and settle normally once released.
-      a.release();
-      b.release();
-      for (const ticket of [ta, tb]) {
-        const settled = await callDelegateTicket(session, {
-          action: "wait",
-          ticket,
-          timeoutMs: 5000,
-        });
-        expect(settled.text).toContain("OUTPUT-RELEASED");
-      }
-    },
-  );
-
-  test(
-    "wait-any validation: disagreement names both spellings, agreement folds, unknown ids error, tickets stays wait-only (#58)",
-    async () => {
-      // Issue #58: `ticket` and `tickets` name the same wait target —
-      // agreeing forms take the single-ticket path untouched; a
-      // divergence is a validation error naming both.
-      session = await openDelegateBoundary();
-      const subagents = await installSubagentModel(session);
-      const a = gate();
-      const b = gate();
-      // Two dispatches race to the provider — route by prompt so `a`'s
-      // release below always unblocks ta's own worker.
-      const byPrompt: FauxResponseFactory = (context, options, state, model) =>
-        JSON.stringify(context.messages).includes('"one"')
-          ? a.step(context, options, state, model)
-          : b.step(context, options, state, model);
-      subagents.respond([byPrompt, byPrompt]);
-
-      const ta = ticketIdOf(
-        (
-          await callDelegate(session, { tasks: [{ prompt: "one", tools: ["read"] }], async: true })
-        ).text,
-      );
-      const tb = ticketIdOf(
-        (
-          await callDelegate(session, { tasks: [{ prompt: "two", tools: ["read"] }], async: true })
-        ).text,
-      );
-
-      // `ticket` + a `tickets` list naming a different set: error naming
-      // both fields and both values.
-      const disagree = await callDelegateTicket(session, {
-        action: "wait",
-        ticket: ta,
-        tickets: [ta, tb],
-      });
-      expect(disagree.isError).toBe(true);
-      expect(disagree.text).toContain("'ticket'");
-      expect(disagree.text).toContain("'tickets'");
-      expect(disagree.text).toContain(ta);
-      expect(disagree.text).toContain(tb);
-
-      // An unknown id in the list fails like the singular unknown.
-      const unknown = await callDelegateTicket(session, {
-        action: "wait",
-        tickets: [ta, "t-00000000-0000-4000-8000-000000000000"],
-      });
-      expect(unknown.isError).toBe(true);
-      expect(unknown.text).toContain("t-00000000-0000-4000-8000-000000000000");
-      expect(unknown.text).toMatch(/not found/i);
-
-      // `tickets` belongs to wait alone.
-      const misplaced = await callDelegateTicket(session, {
-        action: "poll",
-        tickets: [ta, tb],
-      });
-      expect(misplaced.isError).toBe(true);
-      expect(misplaced.text).toMatch(/tickets is valid only with action "wait"/);
-
-      // A bare wait teaches both spellings.
-      const bare = await callDelegateTicket(session, {
-        action: "wait",
-        timeoutMs: 10,
-      });
-      expect(bare.isError).toBe(true);
-      expect(bare.text).toMatch(/requires a ticket id/);
-      expect(bare.text).toContain("'tickets'");
-
-      // Agreement — `ticket` plus a one-id `tickets` naming it — folds
-      // to the single-ticket path: the settled view rides bare, with
-      // no wait-any resolution line.
-      a.release();
-      const agreed = await callDelegateTicket(session, {
-        action: "wait",
-        ticket: ta,
-        tickets: [ta],
-        timeoutMs: 5000,
-      });
-      expect(agreed.isError).toBe(false);
-      expect(agreed.text).toContain("OUTPUT-RELEASED");
-      expect(agreed.text).not.toContain("watched ticket");
-
-      b.release();
-      const solo = await callDelegateTicket(session, {
-        action: "wait",
-        tickets: [tb],
-        timeoutMs: 5000,
-      });
-      expect(solo.isError).toBe(false);
-      expect(solo.text).toContain("OUTPUT-RELEASED");
-      expect(solo.text).not.toContain("watched ticket");
-    },
-  );
+    for (const extra of [{ timeoutMs: 1000 }, { tickets: [ticket] }] as const) {
+      const rejected = await callDelegateTicket(session, { action: "wait", ticket, ...extra });
+      expect(rejected.isError).toBe(true);
+      expect(rejected.text).toContain("has been removed");
+    }
+    const bounded = await callDelegateTicket(session, {
+      action: "wait", ticket, timeoutMs: 1000,
+    });
+    expect(bounded.text).toContain("unbounded");
+    // The reflex spelling teaches too: timeout_ms aliases timeoutMs, so its
+    // rejection names both spellings before the removed-field wall.
+    const aliased = await callDelegateTicket(session, {
+      action: "wait", ticket, timeout_ms: 1000,
+    });
+    expect(aliased.isError).toBe(true);
+    const plain = await callDelegateTicket(session, { action: "wait", ticket });
+    expect(plain.isError).toBe(false);
+    expect(plain.text).toContain("PLAIN-WAIT");
+  });
 });

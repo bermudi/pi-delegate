@@ -275,7 +275,6 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
     const waited = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(waited.text).toContain("files: deliverable.md");
     const attributed = attributedOf(waited.details);
@@ -321,7 +320,7 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
       expect(live?.files).toEqual([join(session.cwd, "progress.txt")]);
     } finally {
       release();
-      await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+      await callDelegateTicket(session, { action: "wait", ticket });
     }
   });
 
@@ -381,7 +380,7 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(first, { action: "wait", ticket });
 
     const next = await openAt(first.cwd);
     const polled = await callDelegateTicket(next, { action: "poll", ticket });
@@ -404,7 +403,7 @@ describe("completion evidence — file attribution (SPEC v3 Observability)", () 
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(first, { action: "wait", ticket });
     // Strip the new fields to simulate a pre-attribution record (which
     // also predates the optional task cwd field).
     const path = join(first.cwd, "delegate-tickets", `${ticket}.json`);
@@ -700,7 +699,6 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 10_000,
       });
       expect(waited.isError).toBe(false);
       const attributed = attributedOf(waited.details);
@@ -771,7 +769,6 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 10_000,
       });
       expect(waited.isError).toBe(false);
       expect(waited.text).toContain("may include concurrent edits by: parent");
@@ -833,7 +830,6 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 10_000,
       });
       expect(waited.isError).toBe(false);
       const attributed = attributedOf(waited.details);

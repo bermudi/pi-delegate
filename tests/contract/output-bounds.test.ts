@@ -234,7 +234,6 @@ describe("delegate output bounding", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("spilled to");
       const filePath = spilledPathOf(settled.text);
@@ -263,7 +262,6 @@ describe("delegate output bounding", () => {
     await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
 
     const first = await callDelegateTicket(session, {
@@ -315,7 +313,6 @@ describe("delegate output bounding", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.text).toContain("spilled to");
       expect(spilledPathOf(waited.text)).toBeDefined();

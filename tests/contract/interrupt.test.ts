@@ -111,7 +111,6 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 3000,
       });
       // The whole ticket settles interrupted — first-class, not cancelled.
       expect(waited.text).toContain("interrupted");
@@ -168,7 +167,6 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("POOLED-TWO");
 
@@ -224,7 +222,6 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 3000,
       });
       expect(waited.text).toContain("interrupted");
 
@@ -324,7 +321,6 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.isError).toBe(false);
       const terminal = await callDelegateTicket(session, {
@@ -370,7 +366,6 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       held.release();
       expect(waited.text).toContain("### Task a — interrupted");
@@ -407,7 +402,6 @@ describe("ticket interrupt — abort the turn, keep the worker (SPEC v3, issue #
       await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       held.release();
 

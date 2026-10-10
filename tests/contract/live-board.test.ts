@@ -297,7 +297,6 @@ describe("inline dispatch live board (#119)", () => {
     await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
   });
 

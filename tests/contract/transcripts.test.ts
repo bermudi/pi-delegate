@@ -414,7 +414,6 @@ describe("transcript exclusivity contract", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("### Task task-1 ↻ab12cd34");
 
@@ -452,7 +451,6 @@ describe("transcript exclusivity contract", () => {
       await callDelegateTicket(session, {
         action: "wait",
         ticket: ticket2,
-        timeoutMs: 5000,
       });
     },
   );

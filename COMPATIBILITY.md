@@ -281,6 +281,15 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   the /subagents dashboard. Unknown ticket actions now enumerate the
   available set (enumerate-or-inherit). The transcript-span read
   machinery stays internal to poll views and spill.
+- **Removed — wait `timeoutMs` and wait-any `tickets` (#130,
+  2026-10-07; wait-any was #58).** Waits are unbounded: they park until
+  the ticket settles or wakes on activity worth a turn (worker
+  question, interruption), and wake delivery settles the parent anyway
+  — a caller-side bound had no work left. Both fields reject with
+  teaching before any work (the `timeout_ms` alias still resolves into
+  that teaching); `wait` takes a single `ticket`, and watching several
+  means waiting on each or polling the roster. The engine's settle
+  queue and coalesced multi-ticket wake delivery are untouched.
 - Landed since: steering receipts (#37), `delegate_ticket interrupt`
   (#42 — abort one task's in-flight turn; it settles `interrupted`,
   resumable, distinct from `cancel`'s ticket teardown), recovery resume

@@ -187,7 +187,6 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.text).toContain("ASYNC-DONE");
       expect(Check(ticketDetailsSchema, waited.details)).toBe(true);
@@ -243,7 +242,6 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
       await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
     },
   );
@@ -283,7 +281,6 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
       await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
     },
   );
@@ -338,7 +335,6 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("USED-ANSWER");
     },

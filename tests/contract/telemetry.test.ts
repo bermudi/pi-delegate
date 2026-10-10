@@ -812,7 +812,6 @@ describe("delegate telemetry contract", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 10_000,
       });
       expect(waited.isError).toBe(false);
 

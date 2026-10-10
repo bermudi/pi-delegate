@@ -46,7 +46,7 @@ describe("async worker questions (#17)", () => {
     const second = ticketIdOf((await callDelegate(session, {
       tasks: [{ prompt: "SECOND-TASK", tools: ["read"] }], async: true,
     })).text);
-    const finished = await callDelegateTicket(session, { action: "wait", ticket: second, timeoutMs: 2000 });
+    const finished = await callDelegateTicket(session, { action: "wait", ticket: second });
     expect(finished.text).toContain("SECOND-DONE");
     const wrongTask = await callDelegateTicket(session, {
       action: "answer", ticket: first, taskId: "wrong", questionId, answer: "PARENT-ANSWER",
@@ -59,7 +59,7 @@ describe("async worker questions (#17)", () => {
     expect((await callDelegateTicket(session, {
       action: "answer", ticket: first, taskId: "first", questionId, answer: "DIFFERENT",
     })).isError).toBe(true);
-    const result = await callDelegateTicket(session, { action: "wait", ticket: first, timeoutMs: 2000 });
+    const result = await callDelegateTicket(session, { action: "wait", ticket: first });
     expect(result.text).toContain("USED-PARENT-ANSWER");
     expect(result.text).not.toContain("Waiting for parent answer");
     expect((await callDelegateTicket(session, {
@@ -79,7 +79,7 @@ describe("async worker questions (#17)", () => {
     expect((await callDelegateTicket(session, {
       action: "answer", ticket, taskId: "cancel", questionId, answer: "yes",
     })).isError).toBe(true);
-    const result = await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 });
+    const result = await callDelegateTicket(session, { action: "wait", ticket });
     expect(result.text).toContain("cancelled");
   });
 
@@ -102,7 +102,7 @@ describe("async worker questions (#17)", () => {
     expect(conflicting.text).toMatch(/overlap|conflict|reserved|active/i);
     expect(model.state.callCount).toBe(1);
     await callDelegateTicket(session, { action: "answer", ticket, taskId: "writer", questionId, answer: "do it" });
-    expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("FINISHED");
+    expect((await callDelegateTicket(session, { action: "wait", ticket })).text).toContain("FINISHED");
   });
 
   test("an answered question cannot be re-answered; the worker continues once", async () => {
@@ -182,7 +182,7 @@ describe("async worker questions (#17)", () => {
     await callDelegateTicket(session, {
       action: "answer", ticket, taskId: "block", questionId: match![1], answer: "yes",
     });
-    expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("done");
+    expect((await callDelegateTicket(session, { action: "wait", ticket })).text).toContain("done");
   });
 
   test("a worker-question notice rides steering delivery like a result wake", async () => {
@@ -214,7 +214,7 @@ describe("async worker questions (#17)", () => {
     });
     expect(
       (await callDelegateTicket(session, {
-        action: "wait", ticket, timeoutMs: 2000,
+        action: "wait", ticket,
       })).text,
     ).toContain("ANSWERED");
   });
@@ -232,7 +232,7 @@ describe("async worker questions (#17)", () => {
     const ticket = ticketIdOf((await callDelegate(session, {
       tasks: [{ prompt: "ask and read", tools: ["read"] }], async: true,
     })).text);
-    const settled = await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 });
+    const settled = await callDelegateTicket(session, { action: "wait", ticket });
     expect(settled.text).toContain("TURN-COMPLETED");
     expect((await callDelegateTicket(session, { action: "poll", ticket })).text).not.toContain("Waiting for parent answer");
   });
@@ -257,7 +257,7 @@ describe("async worker questions (#17)", () => {
     await callDelegateTicket(session, {
       action: "answer", ticket, taskId: "again", questionId, answer: "continue",
     });
-    expect((await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 2000 })).text).toContain("SECOND-DONE");
+    expect((await callDelegateTicket(session, { action: "wait", ticket })).text).toContain("SECOND-DONE");
   });
 
   test("cancelling an answered worker queued to reacquire capacity cannot restart it", async () => {
@@ -306,7 +306,7 @@ describe("async worker questions (#17)", () => {
     });
     await callDelegateTicket(session, { action: "cancel", ticket: first, force: true });
     releaseOccupier();
-    expect((await callDelegateTicket(session, { action: "wait", ticket: second, timeoutMs: 2000 })).text).toContain("OCCUPIER-FINISHED");
+    expect((await callDelegateTicket(session, { action: "wait", ticket: second })).text).toContain("OCCUPIER-FINISHED");
     const cancelled = await callDelegateTicket(session, { action: "poll", ticket: first });
     expect(cancelled.text).toContain("cancelled");
     expect(cancelled.text).not.toContain("MUST-NOT-CONTINUE");

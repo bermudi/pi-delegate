@@ -52,14 +52,14 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       tasks: [{ prompt: "provide a report" }], async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(first, { action: "wait", ticket });
 
     const next = await openAt(first.cwd);
     const polled = await callDelegateTicket(next, { action: "poll", ticket });
     expect(polled.isError).toBe(false);
     expect(polled.text).toContain("completed");
     expect(polled.text).toContain("SAVED-OUTPUT");
-    expect((await callDelegateTicket(next, { action: "wait", ticket, timeoutMs: 10 })).text)
+    expect((await callDelegateTicket(next, { action: "wait", ticket })).text)
       .toContain("SAVED-OUTPUT");
     // #64: the record belongs to the dispatching session — the bare roster
     // hides it behind the count line; explicit-id poll above still reads it.
@@ -80,7 +80,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     const ticket = ticketIdOf((await callDelegate(first, {
       tasks: [{ prompt: "report" }], async: true,
     })).text);
-    await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(first, { action: "wait", ticket });
     const path = join(first.cwd, "delegate-tickets", `${ticket}.json`);
     const isRecord = (value: unknown): value is Record<string, unknown> =>
       typeof value === "object" && value !== null && !Array.isArray(value);
@@ -143,7 +143,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       expect(poll.text).toContain("COMPLETED-FIRST");
       expect(poll.text).not.toContain("LATE-OUTPUT");
       expect(poll.text).toMatch(/unknown|may have changed/i);
-      const again = await callDelegateTicket(next, { action: "wait", ticket, timeoutMs: 10 });
+      const again = await callDelegateTicket(next, { action: "wait", ticket });
       expect(again.text).toContain("interrupted");
       const cancel = await callDelegateTicket(next, { action: "cancel", ticket, force: true });
       expect(cancel.isError).toBe(true);
@@ -291,7 +291,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
       tasks: [{ prompt: "fail in the background" }], async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    const settled = await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
+    const settled = await callDelegateTicket(first, { action: "wait", ticket });
     const sessionLine = /^session: (\S+\.jsonl)$/m.exec(settled.text)?.[1];
     expect(sessionLine).toBeDefined();
     expect(settled.text).toContain("→ To retry:");
@@ -384,7 +384,7 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
     chmodSync(dir, 0o500);
     try {
       release();
-      const live = await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
+      const live = await callDelegateTicket(first, { action: "wait", ticket });
       expect(live.text).toContain("LIVE-ONLY-OUTPUT");
       expect(live.text).toMatch(/recovery save failed/i);
     } finally {

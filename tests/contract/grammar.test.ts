@@ -80,7 +80,7 @@ describe("delegate interaction grammar (SPEC v3, #61)", () => {
     expect(result.isError).toBe(false);
     expect(objectOf(result.details, "details").async).toBe(true);
     const settled = await callDelegateTicket(session, {
-      action: "wait", ticket: ticketIdOf(result.text), timeoutMs: 5000,
+      action: "wait", ticket: ticketIdOf(result.text),
     });
     expect(settled.text).toContain("EXPLICIT-BACKGROUND");
   });

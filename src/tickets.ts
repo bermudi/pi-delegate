@@ -1465,12 +1465,10 @@ export class TicketStore {
    */
   async wait(
     ticket: Ticket,
-    timeoutMs: number | undefined,
     signal: AbortSignal | undefined,
-  ): Promise<{ timedOut: boolean; aborted: boolean; questionPending: boolean; interrupted: readonly string[] }> {
+  ): Promise<{ aborted: boolean; questionPending: boolean; interrupted: readonly string[] }> {
     const { record, rt } = this.entry(ticket);
     const none = {
-      timedOut: false,
       aborted: false,
       questionPending: false,
       interrupted: [] as readonly string[],
@@ -1498,14 +1496,6 @@ export class TicketStore {
       rt.waiters.add(notify);
     });
     const races: Promise<unknown>[] = [onSettled];
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    if (timeoutMs !== undefined) {
-      races.push(
-        new Promise((resolve) => {
-          timeout = setTimeout(() => resolve("timeout"), timeoutMs);
-        }),
-      );
-    }
     let onAbort: (() => void) | undefined;
     if (signal !== undefined) {
       races.push(
@@ -1519,7 +1509,6 @@ export class TicketStore {
     try {
       outcome = await Promise.race(races);
     } finally {
-      if (timeout !== undefined) clearTimeout(timeout);
       if (onAbort !== undefined) {
         signal?.removeEventListener("abort", onAbort);
       }
@@ -1538,138 +1527,7 @@ export class TicketStore {
     }
     // A question can be answered by another caller between its notification
     // and this waiter resuming. Do not misreport that wake-up as a timeout.
-    return { ...none, timedOut: outcome === "timeout" };
-  }
-
-  /**
-   * Wait-any (#58): park across several tickets and resolve on the first
-   * one to settle — the watcher's equivalent of `Promise.any`. The same
-   * activity wakes apply per watched ticket (a pending question or a
-   * newly interrupted task ends the wait on that ticket), the same
-   * detach-only timeout applies to the waiter, and the caller's list
-   * order decides which settled ticket wins a tie. A wait that can never
-   * hear anything — every watched ticket a recovered record — returns
-   * `unhearable` at once rather than sitting out the timeout, mirroring
-   * the single wait's recovered early-return.
-   */
-  async waitAny(
-    ids: readonly string[],
-    timeoutMs: number | undefined,
-    signal: AbortSignal | undefined,
-  ): Promise<WaitAnyResult> {
-    const entries = ids.map((id) => {
-      const record = this.get(id);
-      if (record === undefined) {
-        throw new Error(`internal: unknown ticket '${id}'`);
-      }
-      return this.entry(record);
-    });
-    // Same event-scope rule as wait(): interruptions already on record
-    // are stale news — only a NEW interrupted outcome wakes this waiter.
-    const baseline = entries.map(({ record }) => {
-      const known = new Set<number>();
-      for (const [index, outcome] of record.outcomes.entries()) {
-        if (outcome?.status === "interrupted") known.add(index);
-      }
-      return known;
-    });
-    const scan = (): WaitAnyResult | undefined => {
-      for (const { record } of entries) {
-        if (isTerminal(record.status)) {
-          return { cause: "settled", ticket: record };
-        }
-      }
-      for (const { record } of entries) {
-        if (record.questions.length > 0) {
-          return { cause: "question", ticket: record };
-        }
-      }
-      for (let e = 0; e < entries.length; e++) {
-        const { record } = entries[e]!;
-        const fresh = record.tasks.flatMap((task, index) =>
-          record.outcomes[index]?.status === "interrupted" &&
-          !baseline[e]!.has(index)
-            ? [task.id]
-            : [],
-        );
-        if (fresh.length > 0) {
-          return { cause: "interrupted", ticket: record, interrupted: fresh };
-        }
-      }
-      return undefined;
-    };
-    // The deadline is one clock for the whole call — a wake loop must not
-    // reset it.
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise =
-      timeoutMs === undefined
-        ? undefined
-        : new Promise<"timeout">((resolve) => {
-            timeout = setTimeout(() => resolve("timeout"), timeoutMs);
-          });
-    let onAbort: (() => void) | undefined;
-    const abortPromise =
-      signal === undefined
-        ? undefined
-        : new Promise<"aborted">((resolve) => {
-            onAbort = () => resolve("aborted");
-            signal.addEventListener("abort", onAbort);
-          });
-    let notify: (() => void) | undefined;
-    try {
-      for (;;) {
-        // Register before scanning: any event between the scan and the
-        // subscription would otherwise be a missed wake — registered
-        // first, the same event either resolves `parked` or is visible
-        // to the scan itself.
-        let parkedNotify!: () => void;
-        const parked = new Promise<void>((resolve) => {
-          parkedNotify = () => resolve();
-        });
-        notify = parkedNotify;
-        for (const { record, rt } of entries) {
-          if (record.recovered !== true && !isTerminal(record.status)) {
-            rt.waiters.add(parkedNotify);
-          }
-        }
-        const hit = scan();
-        if (hit !== undefined) return hit;
-        if (signal?.aborted === true) return { cause: "aborted" };
-        if (
-          entries.every(
-            ({ record }) =>
-              record.recovered === true || isTerminal(record.status),
-          )
-        ) {
-          return { cause: "unhearable" };
-        }
-        const races: Promise<unknown>[] = [parked];
-        if (timeoutPromise !== undefined) races.push(timeoutPromise);
-        if (abortPromise !== undefined) races.push(abortPromise);
-        const outcome = await Promise.race(races);
-        // Detach this iteration's waiter before rescanning — a re-park
-        // registers a fresh notify; leaving the resolved one would leak
-        // it into every watched ticket's set.
-        for (const { rt } of entries) rt.waiters.delete(parkedNotify);
-        notify = undefined;
-        // A wake resolving to nothing new (e.g. a question answered by
-        // another caller mid-flight) parks again — never a misreported
-        // timeout.
-        const again = scan();
-        if (again !== undefined) return again;
-        if (outcome === "aborted" || signal?.aborted) {
-          return { cause: "aborted" };
-        }
-        if (outcome === "timeout") return { cause: "timeout" };
-      }
-    } finally {
-      if (timeout !== undefined) clearTimeout(timeout);
-      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
-      if (notify !== undefined) {
-        for (const { rt } of entries) rt.waiters.delete(notify);
-        notify = undefined;
-      }
-    }
+    return none;
   }
 
   /**
@@ -1745,9 +1603,9 @@ export interface TicketRpcResult {
    */
   readonly ticket?: Ticket;
   /**
-   * The tail a wait result appends after the ticket view — the wait-any
-   * roster sentence, a timeout/detached notice, or a pending-question
-   * pointer. Carried on details.note so the collapsed view shows it too.
+   * The tail a wait result appends after the ticket view — a detached
+   * notice (pending question, interrupted task, caller abort). Carried
+   * on details.note so the collapsed view shows it too.
    */
   readonly note?: string;
   /**
@@ -1766,19 +1624,6 @@ export interface TicketRpcResult {
   readonly interrupt?: InterruptDetails;
 }
 
-/** What ended a wait-any call (#58); `ticket` is the watched ticket the cause names. */
-export interface WaitAnyResult {
-  readonly cause:
-    | "settled"
-    | "question"
-    | "interrupted"
-    | "timeout"
-    | "aborted"
-    | "unhearable";
-  readonly ticket?: Ticket;
-  /** Newly interrupted task ids on `ticket` (cause "interrupted" only). */
-  readonly interrupted?: readonly string[];
-}
 
 /** delegate_ticket actions against the store. */
 export async function handleTicketRpc(
@@ -1791,9 +1636,7 @@ export async function handleTicketRpc(
       | "steer"
       | "interrupt";
     ticket: string | undefined;
-    tickets: readonly string[] | undefined;
     force: boolean;
-    timeoutMs: number | undefined;
     taskId: string | undefined;
     questionId: string | undefined;
     answer: string | undefined;
@@ -1892,67 +1735,6 @@ export async function handleTicketRpc(
     }
     return store.interrupt(ticket, taskId);
   }
-  // Wait-any (#58): `tickets` resolves on the first watched ticket to
-  // settle — validation already folded a one-id list into `ticket`, so
-  // this branch sees only genuine multi-ticket waits. Every id must
-  // resolve: an unknown one fails the call like the singular path.
-  if (call.action === "wait" && call.tickets !== undefined) {
-    const missing = call.tickets.filter((id) => store.get(id) === undefined);
-    if (missing.length > 0) {
-      return {
-        text:
-          `Ticket ${missing.map((id) => `'${id}'`).join(", ")} not found. ` +
-          knownTickets(store, sessionId),
-        isError: true,
-      };
-    }
-    const result = await store.waitAny(call.tickets, call.timeoutMs, signal);
-    // The rest of the watch list in one roster line — the settled view
-    // leads, the still-running remainder follows.
-    const rest = call.tickets
-      .filter((id) => id !== result.ticket?.id)
-      .map((id) => store.get(id)!)
-      .filter((other) => !isTerminal(other.status));
-    const roster =
-      rest.length === 0
-        ? "the other watched tickets settled too"
-        : `still running: ${rest
-            .map(
-              (other) =>
-                `"${other.id}" (${statusWord(other)}, ${completedCount(other)}/${other.totalTasks} tasks finished)`,
-            )
-            .join(", ")}`;
-    if (result.ticket !== undefined) {
-      const view = store.view(result.ticket);
-      // Fingerprint for delivery consumption: the exact terminal view
-      // the model just received — the flush suppresses only an
-      // identical repeat (see TicketRpcResult.consumedView).
-      const consumedView = isTerminal(result.ticket.status)
-        ? view
-        : undefined;
-      const note =
-        result.cause === "question"
-          ? `Wait detached: ticket "${result.ticket.id}" is waiting on an answer — ${roster}.`
-          : result.cause === "interrupted"
-            ? `Wait detached: ${result.interrupted!.length === 1 ? "task" : "tasks"} ${result.interrupted!.map((id) => `"${result.ticket!.id}#${id}"`).join(", ")} ${result.interrupted!.length === 1 ? "was" : "were"} interrupted — ${roster}.`
-            : `Resolved on the first watched ticket to settle — ${roster}.`;
-      return { text: `${view}\n\n${note}`, isError: false, ticket: result.ticket, note, consumedView };
-    }
-    const all = call.tickets
-      .map((id) => store.get(id)!)
-      .map(
-        (other) =>
-          `"${other.id}" (${statusWord(other)}, ${completedCount(other)}/${other.totalTasks} tasks finished)`,
-      )
-      .join(", ");
-    const text =
-      result.cause === "timeout"
-        ? `Wait timed out — none of the watched tickets settled; the wait detached, they keep running.\n${all}`
-        : result.cause === "aborted"
-          ? `Wait detached; the caller aborted the wait.\n${all}`
-          : `None of the watched tickets can produce activity here — each is a recovered record owned by another session; poll them for their recorded views.\n${all}`;
-    return { text, isError: false };
-  }
   if (!ticket) {
     return {
       text: `Ticket '${ticketName ?? ""}' not found. ${knownTickets(store, sessionId)}`,
@@ -1977,24 +1759,21 @@ export async function handleTicketRpc(
       };
     }
     case "wait": {
-      const { timedOut, aborted, questionPending, interrupted } = await store.wait(
+      const { aborted, questionPending, interrupted } = await store.wait(
         ticket,
-        call.timeoutMs,
         signal,
       );
       const view = store.view(ticket);
       // Same fingerprint as poll: only a terminal view can consume the
-      // pending wake — a running/timed-out/detached one never does.
+      // pending wake — a running/detached one never does.
       const consumedView = isTerminal(ticket.status) ? view : undefined;
       const note = questionPending
         ? `Wait detached: answer the pending question before waiting for this ticket.`
         : interrupted.length > 0
           ? `Wait detached: ${interrupted.length === 1 ? "task" : "tasks"} ${interrupted.map((id) => `"${ticket.id}#${id}"`).join(", ")} ${interrupted.length === 1 ? "was" : "were"} interrupted — the ticket is still ${statusWord(ticket)}.`
-          : timedOut
-            ? `Wait timed out; the ticket is still ${statusWord(ticket)}.`
-            : aborted
-              ? `Wait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
-              : undefined;
+          : aborted
+            ? `Wait detached; the caller aborted the wait. The ticket is still ${statusWord(ticket)}.`
+            : undefined;
       return {
         text: note !== undefined ? `${view}\n\n${note}` : view,
         isError: false,

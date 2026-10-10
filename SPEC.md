@@ -132,10 +132,11 @@ mid-flight the parent can steer. The grammar:
   inline results; async tickets still auto-deliver settled results.
 - **No timers.** Parking budgets are rejected: the pros don't decide
   them because their grammar has no long-blocking dispatch to convert
-  (#28 superseded). The only timeouts are caller-chosen, on waits.
-- **Waiting is explicit and detachable.** `delegate_ticket wait` with
-  the caller's `timeoutMs`; a timeout detaches the waiter only — the
-  ticket keeps running. A parked wait also wakes on ticket activity
+  (#28 superseded). Waits are unbounded (#130 verdict 7) — a parked
+  wait ends on settlement or on ticket activity worth a turn, never on
+  a caller clock.
+- **Waiting is explicit and unbounded.** `delegate_ticket wait` parks
+  until the ticket settles. A parked wait also wakes on ticket activity
   worth a turn (#48): settlement returns the complete settled view; a
   worker-question arrival carries the question notice inline (ticket
   id, task id, question text, answer invocation) — the separate
@@ -143,15 +144,10 @@ mid-flight the parent can steer. The grammar:
   task newly settling `interrupted` carries the interrupted notice
   naming the task. Events already on record when a wait begins are
   stale news — view-visible, not a wake. (Engine behavior already;
-  promoted to grammar.) `wait` also takes `tickets: [ids]` —
-  wait-any (#58): the call resolves on the first watched ticket to
-  settle, returning that ticket's view plus a one-line roster of the
-  rest still running; the same parked-wait wakes (question,
-  interruption) apply across the watch list, and the same
-  detach-only timeout governs the whole call. `ticket` and
-  `tickets` naming different targets is a validation error naming
-  both; a one-id `tickets` is the single-ticket wait under another
-  spelling.
+  promoted to grammar.) Waiting on several tickets means waiting on
+  each or polling the roster — the wait-any watch list (#58) was
+  removed with the timeout (#130 verdict 7): with delivery waking the
+  parent on settlement, a caller-side multiplexer had no work left.
 - **Fan-out shape.** Batches in one call, taught at the boundary.
   N parallel single-task dispatches — the trained fan-out reflex — must
   work for read-only tasks (they hold no write claims); for overlapping
@@ -283,11 +279,12 @@ mid-flight the parent can steer. The grammar:
   `workspace`, and `brief`; each task has `prompt`, `agent`, `cwd`,
   `workspace`, `id`, `description`, `tools`, `systemPrompt`,
   `sessionId`, `resumeFrom`, and `dependsOn`;
-  ticket actions are poll, wait, cancel, answer, steer, interrupt,
-  and tail, with wait-any `tickets`,
-  `timeoutMs`, `steerId`, `offset`, and `waitMs`. (Field set as of the
-  ADR 0002 unification; prune verdicts in #130 remove fields in their
-  own changes — `tokenBudget` is already gone, #129.) Session list/close
+  ticket actions are poll, wait, cancel, answer, steer, and
+  interrupt. (Field set as of the ADR 0002 unification; prune
+  verdicts in #130 remove fields in their own changes — `tokenBudget`
+  (#129), `operationId`, `pause`/`resume`, `tail` with `offset`/
+  `waitMs`, and the wait bound `timeoutMs` with wait-any `tickets`
+  are already gone.) Session list/close
   unchanged. The manual is
   single-edition: it documents exactly what the schema accepts.
 - **Description is a feature, not an alias.** The optional task display label

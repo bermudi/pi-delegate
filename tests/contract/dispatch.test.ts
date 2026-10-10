@@ -213,7 +213,6 @@ describe("delegate dispatch contract", () => {
       const polled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(polled.isError).toBe(false);
       expect(polled.text).toContain("OUTPUT-ASYNC");

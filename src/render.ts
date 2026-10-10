@@ -318,9 +318,7 @@ export function renderTicketCall(
         )}`
       : args.ticket !== undefined
         ? ` #${shortTicket(displaySafe(args.ticket))}`
-        : Array.isArray(args.tickets) && args.tickets.length > 0
-          ? ` ${args.tickets.map((id) => `#${shortTicket(displaySafe(id))}`).join(",")}`
-          : "";
+        : "";
   component.setText(
     theme.fg("toolTitle", theme.bold(`delegate_ticket ${args.action}`)) +
       theme.fg("muted", target),
@@ -635,7 +633,7 @@ function collapsedBody(
     // The view's header material rides below the task lines so the
     // collapsed surface drops none of it (#63): recovery/cleanup
     // warnings, advisory notices, pending questions, and a wait's tail
-    // note (timeout / detached / the wait-any still-running roster).
+    // note (detached: pending question / interrupted task / abort).
     if (ticket !== undefined) {
       const warning = recoveryWarning(ticket);
       if (warning !== undefined) {

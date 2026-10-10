@@ -114,11 +114,14 @@ describe("regression: malformed provider calls recover at the public boundary", 
     expect(invalidTools.text).not.toContain("dispatch is not implemented");
   });
 
-  test("rejects string-typed boolean and number fields instead of coercing them", async () => {
+  test("rejects string-typed boolean and array fields instead of coercing them", async () => {
     // The host's Value.Convert would silently turn these into true/123/1000
     // and run the call; SPEC's repair list does not include them, so they
     // must fail the whole call at the boundary (v1 rejected them by
-    // schema). Regression found in the #10 review.
+    // schema). Regression found in the #10 review. (No numeric field
+    // survives on the model surface since #130; `timeoutMs` removal
+    // teaching fires before typing, so mistyped shapes pin on the
+    // boolean and array specimens.)
     const force = await callTicket({
       action: "cancel",
       ticket: "t-1",
@@ -127,13 +130,11 @@ describe("regression: malformed provider calls recover at the public boundary", 
     expect(force.isError).toBe(true);
     expect(force.text).toContain("'force'");
 
-    const timeout = await callTicket({
-      action: "wait",
-      ticket: "t-1",
-      timeoutMs: "123",
+    const depends = await call({
+      tasks: [{ prompt: "inspect", dependsOn: 5 }],
     });
-    expect(timeout.isError).toBe(true);
-    expect(timeout.text).toContain("'timeoutMs'");
+    expect(depends.isError).toBe(true);
+    expect(depends.text).toContain("dependsOn");
 
     const deadline = await call({
       tasks: [{ prompt: "inspect", deadlineMs: "1000" }],

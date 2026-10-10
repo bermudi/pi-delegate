@@ -425,7 +425,6 @@ describe("delegate session contract", () => {
       const stalled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(stalled.text).toMatch(/stall/i);
 
@@ -595,7 +594,6 @@ describe("delegate session contract", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("BG-DONE");
 

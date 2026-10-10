@@ -105,7 +105,7 @@ describe("delegate visibility signals", () => {
     expect(warnings[0]!.type).toBe("warning");
 
     release();
-    await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket });
     expect(
       notifies(session).filter((n) => /still running/.test(n.message)),
     ).toHaveLength(1);
@@ -146,13 +146,13 @@ describe("delegate visibility signals", () => {
     );
 
     g1.release();
-    await callDelegateTicket(session, { action: "wait", ticket: t1, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket: t1 });
     expect(
       statusTexts(session).some((t) => t === `⏳ 1 subagent(s) · ${t2} · /subagents`),
     ).toBe(true);
 
     g2.release();
-    await callDelegateTicket(session, { action: "wait", ticket: t2, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket: t2 });
     expect(statusTexts(session).at(-1)).toBeUndefined();
   });
 
@@ -178,7 +178,6 @@ describe("delegate visibility signals", () => {
     const waited = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(waited.isError).toBe(false);
 
@@ -238,7 +237,7 @@ describe("delegate visibility signals", () => {
     expect(footer).toContain(ticket);
 
     release();
-    await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket });
   });
 
   test("tree guard: the cancel choice kills the work and navigates", async () => {
@@ -275,6 +274,6 @@ describe("delegate visibility signals", () => {
     expect(statusTexts(session).at(-1)).toBeUndefined();
 
     release();
-    await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket });
   });
 });

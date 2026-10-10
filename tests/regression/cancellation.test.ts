@@ -120,7 +120,6 @@ test(
     const waited = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(waited.text).toMatch(/cancelled/i);
     expect(subagents.state.callCount).toBe(1);
@@ -191,7 +190,6 @@ test(
     const settled = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(settled.text).toMatch(/cancelled/i);
     // The late worker outcome can never turn cancellation into success.
@@ -394,7 +392,6 @@ test(
     const settled = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(settled.isError).toBe(false);
     expect(subagents.state.callCount).toBe(3);
@@ -557,7 +554,6 @@ test(
     const waited = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(waited.text).toMatch(/cancelled/i);
     expect(subagents.state.callCount).toBe(1);
@@ -1115,7 +1111,6 @@ test(
     const settled = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(settled.text).toContain("EVENTUALLY-DONE");
     expect(settled.text).toMatch(/completed/i);

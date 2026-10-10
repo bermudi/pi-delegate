@@ -530,7 +530,6 @@ describe("delegate:usage events (#60)", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.isError).toBe(false);
 

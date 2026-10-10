@@ -128,7 +128,7 @@ describe("canonical ticket#task addressing (#53)", () => {
       ) as InterruptDetails;
       expect(interruptDetails.ticket).toBe(ticket);
       expect(interruptDetails.taskId).toBe("alpha");
-      await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 4000 });
+      await callDelegateTicket(session, { action: "wait", ticket });
     },
   );
 
@@ -188,7 +188,6 @@ describe("canonical ticket#task addressing (#53)", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 4000,
       });
       expect(settled.text).toContain("ANSWER-USED");
     },
@@ -217,7 +216,6 @@ describe("canonical ticket#task addressing (#53)", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 4000,
       });
       // The settled view is the delivered result's content.
       expect(settled.text).toContain(`### Task one — completed · ${ticket}#one`);

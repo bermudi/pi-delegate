@@ -238,7 +238,6 @@ describe("async result delivery", () => {
     const waiting = callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     await Bun.sleep(10);
     let shutdownSettled = false;
@@ -721,7 +720,6 @@ describe("async result delivery", () => {
     await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 1000,
     });
     // Well past the flush window: a second enqueue would have sent.
     await Bun.sleep(300);
@@ -876,7 +874,6 @@ describe("async result delivery", () => {
       const waiting = callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       await until(() =>
         session.events.all.some(
@@ -953,9 +950,11 @@ describe("async result delivery", () => {
     }
   });
 
-  test("a wait that detaches while still running does not consume the delivery", async () => {
-    // A timed-out wait returns a running view — never a terminal one —
-    // so the settled result still wakes on its own.
+  test("a non-terminal view (poll mid-run) does not consume the delivery", async () => {
+    // #130 removed the wait timeout; the invariant stands for any
+    // non-terminal view a caller can hold mid-run — poll returns a
+    // running view, never a terminal one, so the settled result still
+    // wakes on its own.
     session = await openDelegateBoundary();
     const host = session.session as AgentSession;
     const model = await installSubagentModel(session);
@@ -968,12 +967,11 @@ describe("async result delivery", () => {
       async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    const waited = await callDelegateTicket(session, {
-      action: "wait",
+    const polled = await callDelegateTicket(session, {
+      action: "poll",
       ticket,
-      timeoutMs: 150,
     });
-    expect(waited.text).toContain("timed out");
+    expect(polled.text).toMatch(/running/i);
     blocked.release();
     await until(() => sends.mock.calls.length === 1);
     await host.agent.waitForIdle();
@@ -1007,7 +1005,6 @@ describe("async result delivery", () => {
     const waiting = callDelegateTicket(session, {
       action: "wait",
       ticket: ticketA,
-      timeoutMs: 5000,
     });
     await until(() =>
       session.events.all.some(

@@ -179,7 +179,7 @@ test("the roster groups tickets, settles collapse by default, and expanding dive
     async: true,
   });
   const ticket = ticketIdOf(dispatched.text);
-  await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+  await callDelegateTicket(session, { action: "wait", ticket });
   const browser = await openBrowser();
   browser.render();
   // Roster segment of each frame line: the first 37 plain columns cover
@@ -233,7 +233,7 @@ test("the transcript interleaves narrative with tools, condenses paths, and fold
     async: true,
   });
   const ticket = ticketIdOf(dispatched.text);
-  await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+  await callDelegateTicket(session, { action: "wait", ticket });
   const browser = await openBrowser();
   browser.render();
   browser.key("\r"); // expand + select the task
@@ -266,7 +266,7 @@ test("long tools occupy one scan row; Enter expands retained previews and Tab sh
     async: true,
   });
   const ticket = ticketIdOf(dispatched.text);
-  await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+  await callDelegateTicket(session, { action: "wait", ticket });
   const browser = await openBrowser();
   browser.render();
   browser.key("\r"); // expand the settled ticket and select the task
@@ -329,7 +329,7 @@ test("a roster longer than its pane keeps every item reachable", async () => {
     async: true,
   });
   const ticket = ticketIdOf(dispatched.text);
-  await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 30_000 });
+  await callDelegateTicket(session, { action: "wait", ticket });
   const browser = await openBrowser();
   browser.render();
   browser.key("\r"); // expand the settled ticket; selection dives to w0
@@ -415,6 +415,6 @@ test("pause remains a whole-ticket action, and closing stops refresh callbacks",
     expect(browser.requests()).toBe(count);
   } finally {
     release();
-    await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket });
   }
 });

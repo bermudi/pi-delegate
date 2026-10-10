@@ -129,7 +129,7 @@ describe("scratch source copying admission (#50)", () => {
         expect(textOf(rejected)).toMatch(/quiescence.*retry/i);
         expect(model.state.callCount).toBe(1);
       } finally { worker.release(); }
-      await callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 });
+      await callDelegateTicket(session, { action: "wait", ticket });
       const admitted = await dispatch({ async: false, tasks: [{ prompt: "copy", cwd: join(aliases, "cwd"), workspace: "scratch", tools: ["write"] }] });
       expect(admitted.isError).not.toBe(true);
       expect(textOf(admitted)).toContain("copy after writer");
@@ -555,7 +555,7 @@ describe("scratch source copying admission (#50)", () => {
       expect(fs.existsSync(secondMetadata)).toBe(true);
 
       finishReconcile.release();
-      const completed = await bounded(callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 }));
+      const completed = await bounded(callDelegateTicket(session, { action: "wait", ticket }));
       expect(completed.isError).toBe(false);
       expect(completed.text).toMatch(/done|complet/i);
       expect(fs.existsSync(firstMetadata)).toBe(false);
@@ -574,7 +574,7 @@ describe("scratch source copying admission (#50)", () => {
       worker.release(); finishReconcile.release(); copy.release();
       try {
         if (scratch) await bounded(scratch);
-        if (ticket) await bounded(callDelegateTicket(session, { action: "wait", ticket, timeoutMs: 5000 }));
+        if (ticket) await bounded(callDelegateTicket(session, { action: "wait", ticket }));
       } finally {
         readdirSpy.mockRestore(); copy.restore();
       }

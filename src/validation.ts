@@ -40,9 +40,6 @@ export interface TicketArguments {
     | "steer"
     | "interrupt";
   readonly ticket?: string;
-  /** Wait-any (#58): several ticket ids — the wait resolves on the first to settle. */
-  readonly tickets?: readonly string[];
-  readonly timeoutMs?: number;
   readonly force?: boolean;
   readonly taskId?: string;
   readonly questionId?: string;
@@ -86,14 +83,7 @@ export interface TicketCall {
     | "steer"
     | "interrupt";
   readonly ticket: string | undefined;
-  /**
-   * Wait-any watch list (#58): present only when `tickets` carried two or
-   * more distinct ids (a one-id list — including one agreeing with
-   * `ticket` — folds into `ticket` and takes the single-ticket path).
-   */
-  readonly tickets: readonly string[] | undefined;
   readonly force: boolean;
-  readonly timeoutMs: number | undefined;
   readonly taskId: string | undefined;
   readonly questionId: string | undefined;
   readonly answer: string | undefined;
@@ -164,7 +154,7 @@ const oversizedPromptRemedy =
 /**
  * Within-tool rules for `delegate_ticket`: `ticket` is required for every
  * action except `poll` (bare poll is the roster), `force` only accompanies
- * `cancel`, `timeoutMs` only `wait`, `taskId` belongs to `answer`,
+ * `cancel`, `taskId` belongs to `answer`,
  * `steer`, and `interrupt` — a `<ticket>#<task>` compound in it
  * carries its own ticket, making the `ticket` field optional (#53) —
  * `questionId`/`answer` belong to
@@ -177,34 +167,6 @@ const oversizedPromptRemedy =
  */
 export function validateTicketCall(args: TicketArguments): TicketCall {
   let ticket = isBlank(args.ticket) ? undefined : args.ticket;
-  // `tickets` is wait-any (#58): watch several ids, resolve on the first
-  // to settle. `ticket` and `tickets` name the same target under two
-  // spellings — agreement folds to the single-ticket wait; divergence is
-  // a validation error naming both. Blank entries count as absent (the usual
-  // identifier rule); duplicates collapse.
-  const ticketIds = [
-    ...new Set(
-      (args.tickets ?? []).filter((id) => !isBlank(id)),
-    ),
-  ];
-  let tickets: readonly string[] | undefined;
-  if (ticketIds.length > 0 && args.action !== "wait") {
-    fail(`tickets is valid only with action "wait".`);
-  }
-  if (ticketIds.length > 0) {
-    if (
-      ticket !== undefined &&
-      !(ticketIds.length === 1 && ticketIds[0] === ticket)
-    ) {
-      fail(
-        `'ticket' (${JSON.stringify(ticket)}) and 'tickets' (${JSON.stringify(ticketIds)}) disagree — they name the same wait target under two spellings; send one.`,
-      );
-    }
-    if (ticket === undefined) {
-      if (ticketIds.length === 1) ticket = ticketIds[0];
-      else tickets = ticketIds;
-    }
-  }
   const taskId = isBlank(args.taskId) ? undefined : args.taskId;
   const questionId = isBlank(args.questionId) ? undefined : args.questionId;
   const answer = isBlank(args.answer) ? undefined : args.answer;
@@ -212,10 +174,6 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
   const steerId = isBlank(args.steerId) ? undefined : args.steerId;
   if (args.force === true && args.action !== "cancel") {
     fail(`force is valid only with action "cancel".`);
-  }
-  const timeoutMs = args.timeoutMs;
-  if (timeoutMs !== undefined && args.action !== "wait") {
-    fail(`timeoutMs is valid only with action "wait".`);
   }
   if (
     taskId !== undefined &&
@@ -279,19 +237,15 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
       );
     }
   }
-  if (args.action !== "poll" && ticket === undefined && tickets === undefined && !compoundShaped) {
+  if (args.action !== "poll" && ticket === undefined && !compoundShaped) {
     fail(
-      args.action === "wait"
-        ? `action "wait" requires a ticket id in the ticket field — or several ticket ids in 'tickets' to resolve on the first to settle.`
-        : `action "${args.action}" requires a ticket id in the ticket field.`,
+      `action "${args.action}" requires a ticket id in the ticket field.`,
     );
   }
   return {
     action: args.action,
     ticket,
-    tickets,
     force: args.force === true,
-    timeoutMs,
     taskId,
     questionId,
     answer,

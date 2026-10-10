@@ -165,7 +165,6 @@ test(
     const settled = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(settled.text).toContain("spilled to");
 
@@ -228,7 +227,6 @@ test(
     await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
   },
 );
@@ -520,7 +518,6 @@ test(
     const settled = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     const settledCollapsed = renderToolResult(session, settled, false);
     expect(settledCollapsed).toContain("· completed 2/2");
@@ -930,7 +927,7 @@ test(
     });
     const live = ticketIdOf(dispatched.text);
     blocked.release();
-    await callDelegateTicket(session, { action: "wait", ticket: live, timeoutMs: 5000 });
+    await callDelegateTicket(session, { action: "wait", ticket: live });
 
     const renderer = host.extensionRunner.getMessageRenderer("delegate-result")!;
     const message = {

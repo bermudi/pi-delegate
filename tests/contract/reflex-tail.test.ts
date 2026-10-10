@@ -106,7 +106,7 @@ describe("canonical reflex boundary (SPEC v3, #61 / #44)", () => {
       session = await openDelegateBoundary();
       for (const value of [1000, 2000, null]) {
         const result = await callDelegateTicket(session, {
-          action, ticket: "ticket-none", timeoutMs: 1000, timeout_ms: value,
+          action, ticket: "ticket-none", timeout_ms: value,
         });
         expect(result.isError).toBe(true);
         expect(result.text).toContain("timeout_ms");
@@ -214,7 +214,6 @@ describe("canonical reflex boundary (SPEC v3, #61 / #44)", () => {
     const waited = await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
     expect(waited.text).toContain("TURN-TWO-SAW-IT");
     // The child observed the steer exactly once — the replay never
@@ -256,7 +255,6 @@ describe("canonical reflex boundary (SPEC v3, #61 / #44)", () => {
     await callDelegateTicket(session, {
       action: "wait",
       ticket,
-      timeoutMs: 5000,
     });
   });
 });

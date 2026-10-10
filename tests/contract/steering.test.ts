@@ -114,7 +114,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.text).toContain("TURN-TWO-SAW-IT");
       // The child observed the steer exactly once — one user message,
@@ -170,7 +169,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.text).toContain("TASK-TWO-OUT");
       expect(copies).toBe(1);
@@ -215,7 +213,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       await callDelegateTicket(session, {
         action: "wait",
         ticket: runningTicket,
-        timeoutMs: 5000,
       });
 
       const settled = await callDelegateTicket(session, {
@@ -312,7 +309,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
     },
   );
@@ -436,7 +432,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.text).toContain("RETRY-OUT");
       // Call sequence: attempt 1 turn 1 (gated), attempt 1 turn 2
@@ -502,7 +497,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       const waited = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(waited.text).toContain("TASK-TWO-OUT");
       // call 1: task-1 gated; call 2: task-2 attempt 1 (drained steer,
@@ -530,7 +524,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
 
       for (const [arguments_, pattern] of [
@@ -624,7 +617,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.text).toContain("HELD-OUT");
       const terminal = await callDelegateTicket(session, {
@@ -671,7 +663,6 @@ describe("ticket steering with delivery receipts (SPEC v3, issue #37)", () => {
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(settled.isError).toBe(false);
 

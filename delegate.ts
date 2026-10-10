@@ -212,24 +212,12 @@ const ticketSchema = Type.Object(
   {
     action: stringEnum(["poll", "wait", "cancel", "answer", "steer", "interrupt"], {
       description:
-        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement or timeoutMs. cancel: preview, or cooperative cancellation with force: true. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown.",
+        "Ticket operation. poll: one ticket's view, or the roster when ticket is omitted. wait: block until settlement. cancel: preview, or cooperative cancellation with force: true. answer: reply to a worker's pending question. steer: send a message into a running task — the receipt reports steered (merged at its next turn boundary), activated (queued; opens the next turn), duplicate (same steerId replayed), or not-applied. interrupt: abort one task's in-flight turn — the task settles interrupted and stays resumable, unlike cancel's whole-ticket teardown.",
     }),
     ticket: Type.Optional(
       Type.String({
         description:
           "Ticket id; required for every action except a roster poll — and optional on 'answer'/'steer'/'interrupt'/'tail' when taskId is a '<ticket>#<task>' compound, which carries its own ticket.",
-      }),
-    ),
-    tickets: Type.Optional(
-      Type.Array(Type.String(), {
-        description:
-          "Only with action 'wait': watch several tickets — the call resolves on the first to settle and reports the rest still running. 'ticket' and 'tickets' naming different targets is a validation error; a one-entry list is the single-ticket wait under another spelling.",
-      }),
-    ),
-    timeoutMs: Type.Optional(
-      Type.Number({
-        description:
-          "Maximum wait in milliseconds; only with action 'wait'. A timeout detaches the waiter only — the ticket keeps running.",
       }),
     ),
     force: Type.Optional(
@@ -389,9 +377,7 @@ const dispatchFieldNames = [
 const ticketFieldNames = [
   "ticketAction",
   "ticket",
-  "tickets",
   "force",
-  "timeoutMs",
   "taskId",
   "questionId",
   "answer",
@@ -465,9 +451,7 @@ function delegateTicketExample(args: Record<string, unknown>): string {
         ? args.action
         : isGiven(args.message) || isGiven(args.steerId)
           ? "steer"
-          : Array.isArray(args.tickets) && args.tickets.length > 0
-            ? "wait"
-            : isGiven(args.taskId) ||
+          : isGiven(args.taskId) ||
                 isGiven(args.questionId) ||
                 isGiven(args.answer)
               ? "answer"
@@ -479,16 +463,6 @@ function delegateTicketExample(args: Record<string, unknown>): string {
     fields.push(`ticket: ${JSON.stringify(args.ticket)}`);
   }
   if (action === "cancel" && args.force === true) fields.push("force: true");
-  if (action === "wait") {
-    if (Array.isArray(args.tickets) && args.tickets.length > 0) {
-      fields.push(`tickets: ${args.tickets.every((id) => typeof id === "string")
-        ? JSON.stringify(args.tickets) : '["<ticket>"]'}`);
-    }
-    const timeout = args.timeoutMs;
-    if (typeof timeout === "number") {
-      fields.push(`timeoutMs: ${JSON.stringify(timeout)}`);
-    }
-  }
   if (action === "answer") {
     for (const key of ["taskId", "questionId", "answer"] as const) {
       if (typeof args[key] === "string" && !isBlank(args[key])) {
@@ -731,8 +705,7 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
         unrunFieldsNote(args, [
           "ticketAction",
           "ticket",
-          "tickets",
-          "force",
+                  "force",
           "taskId",
           "questionId",
           "answer",
@@ -748,11 +721,10 @@ function prepareDispatchArguments(value: unknown): DelegateArguments {
     );
   }
   if (args.timeoutMs !== undefined) {
-    const sent = typeof args.timeoutMs === "number" ? args.timeoutMs : 1000;
     throw new Error(
       `A delegate run waits for every task and cannot be bounded with timeoutMs. ` +
-        `Dispatch with async: true, then bound the wait on its ticket: ` +
-        `delegate_ticket({ action: "wait", ticket: "<ticket>", timeoutMs: ${JSON.stringify(sent)} }).`,
+        `Dispatch with async: true and wait on its ticket — delegate_ticket({ action: "wait", ticket: "<ticket>" }) ` +
+        `parks until settlement or a new question/interruption.`,
     );
   }
   if (args.action !== undefined) {
@@ -846,6 +818,21 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
     throw new Error(
       'The "' + String(args.action) + '" action has been removed from delegate_ticket — it is operator-dashboard-only (/subagents). ' +
         'Blocked on this work? action "wait" parks until settlement; action "cancel" stops it.',
+    );
+  }
+  // #130 verdict 7: the wait bound and the watch list are gone — waits
+  // park until the ticket settles, a new worker question, or an
+  // interruption; delivery wakes the parent on settlement anyway.
+  if (Object.hasOwn(args, "timeoutMs")) {
+    throw new Error(
+      'The timeoutMs field has been removed — waits are unbounded. ' +
+        'action "wait" parks until the ticket settles; delivered results arrive on their own, so polling is enough if you would rather move on.',
+    );
+  }
+  if (Object.hasOwn(args, "tickets")) {
+    throw new Error(
+      'The tickets field has been removed — wait takes a single ticket id. ' +
+        'Watching several? Wait on each in turn, or poll for the roster: delegate_ticket({ action: "poll" }).',
     );
   }
   // Enumerate-or-inherit: an unknown action names the resolvable set
@@ -1098,11 +1085,8 @@ const HELP_TICKETS = `## delegate_ticket — tickets
 
 - \`{ action: "poll" }\` — this session's ticket roster, or one ticket's
   status with \`ticket\`. Never blocks.
-- \`{ action: "wait", ticket }\` — block until the ticket settles;
-  \`timeoutMs\` (full mode, milliseconds) detaches only the
-  waiter, the work continues. \`tickets: [ids]\` watches several and
-  resolves on the first to settle — the result shows that ticket's
-  view plus a one-line roster of the rest still running.
+- \`{ action: "wait", ticket }\` — block until the ticket settles; a new
+  worker question or a task interruption also ends the wait.
 - \`{ action: "cancel", ticket }\` — previews without \`force\`; with
   \`force: true\` the ticket is cancelled now and in-flight tasks are asked
   to stop (cooperative; no rollback).

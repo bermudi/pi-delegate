@@ -167,7 +167,6 @@ describe("owner-liveness startup recovery (issue #54)", () => {
       const waited = await callDelegateTicket(next, {
         action: "wait",
         ticket,
-        timeoutMs: 10,
       });
       expect(waited.isError).toBe(false);
       expect(waited.text).toContain("running");
@@ -274,7 +273,7 @@ describe("owner-liveness startup recovery (issue #54)", () => {
       tasks: [{ prompt: "finish quickly" }], async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    await callDelegateTicket(first, { action: "wait", ticket, timeoutMs: 5000 });
+    await callDelegateTicket(first, { action: "wait", ticket });
 
     // Even a dead owner must not reopen a settled record.
     const dead = await deadPid();
@@ -340,7 +339,6 @@ describe("owner-liveness startup recovery (issue #54)", () => {
       const settled = await callDelegateTicket(next, {
         action: "wait",
         ticket: own,
-        timeoutMs: 5000,
       });
       expect(settled.isError).toBe(false);
 

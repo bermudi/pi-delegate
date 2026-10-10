@@ -72,7 +72,6 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
       await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
 
       expect(prompts.length).toBe(2);
@@ -154,7 +153,6 @@ describe("shared batch brief — context prepended to every task (SPEC v3, issue
       const settled = await callDelegateTicket(session, {
         action: "wait",
         ticket,
-        timeoutMs: 5000,
       });
       expect(occurrences(settled.text, 'brief: "ASYNC-BRIEF-MARKER"')).toBe(1);
 
