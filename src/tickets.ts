@@ -122,18 +122,17 @@ interface TicketRuntime {
   /** Live executions by task index, for cooperative abort. */
   readonly executions: Map<number, ExecutionHandle>;
   /**
-   * Memoized terminal view, populated by `view` once the ticket's record
-   * can no longer change — every task has a caller-visible outcome and no
-   * execution remains live. Settled rendering can write spill files; the
-   * freeze keeps repeated polls pointing at one stable path instead of
-   * writing a fresh file per render.
+   * Memoized terminal view once the batch has finished and no execution
+   * remains live. Deferred evidence can still replace/annotate an outcome;
+   * recordOutcome invalidates this view on publication. Unchanged polls
+   * reuse it, and renderedOutputs keeps spill paths stable across refreshes.
    */
   settledView: string | undefined;
   /**
    * Spill-rendered output per recorded outcome — at most one spill file
-   * per outcome. A terminal ticket can be re-rendered before `settledView`
-   * freezes (executions may stay registered for the session's life under
-   * quarantine); this keeps every render pointing at one stable path.
+   * per outcome. A terminal ticket can be re-rendered before or between
+   * cached views (executions may stay registered for the session's life
+   * under quarantine); each unchanged outcome keeps one stable path.
    * A replaced outcome (late worker truth) is a new object and gets its
    * own render.
    */
@@ -742,10 +741,10 @@ export class TicketStore {
    * the bounds snapshotted at creation, memoized per recorded outcome so a
    * terminal-but-unfrozen ticket (executions still draining, possibly
    * forever under quarantine) re-renders without writing a new file per
-   * poll. A terminal view is also memoized whole once it can no longer
-   * change — the batch-finished gate has resolved and no execution remains
-   * live — so repeated polls of a settled ticket keep pointing at the
-   * same spill file rather than writing a new one per render.
+   * poll. A terminal view is also memoized whole once the batch-finished
+   * gate has resolved and no execution remains live. A later outcome
+   * publication invalidates that view, without clearing per-outcome spill
+   * renders, so unchanged polls of the same outcome keep stable paths.
    */
   view(ticket: Ticket): string {
     const { record, rt } = this.entry(ticket);
@@ -882,6 +881,11 @@ export class TicketStore {
     const outcomes = record.outcomes as (TaskOutcome | undefined)[];
     const previous = outcomes[outcome.index];
     outcomes[outcome.index] = outcome;
+    // Publication can follow execution removal (e.g. deferred Git evidence)
+    // or carry annotations on the same object; neither terminal status nor
+    // outcome identity proves the cached document is still current. Refresh
+    // it on every record write, retaining the per-outcome spill renders.
+    rt.settledView = undefined;
     // A settled task can never drain a parked steer — void them so a
     // retry of that steerId reports not-applied, not a stale activated.
     this.voidPendingSteers(ticket, outcome.index);

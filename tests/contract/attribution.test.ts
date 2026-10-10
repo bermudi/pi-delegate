@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync, execSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -506,6 +506,235 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
     expect(attributed[0]!.files).toEqual([inRepo(repo, "made.txt")]);
     expect(attributed[0]!.uncertain).toBe(false);
   });
+
+  test("deferred Git evidence enriches worker truth without reversing provisional ticket cancellation (#133/#134)", async () => {
+    // SPEC "Completion evidence" + INVARIANTS "Ticket state": terminal
+    // cancellation is not proof that the worker stopped. Its eventual Git
+    // footprint must still become visible, without changing ticket status.
+    const session = await openAt();
+    // Keep the repository outside agentDir: ticket/transcript writes must
+    // not accidentally supply the evidence this assertion is looking for.
+    const repo = mkdtempSync(join(tmpdir(), "delegate-late-attribution-"));
+    initRepo(repo);
+    const model = await installSubagentModel(session);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    model.respond([
+      fauxAssistantMessage([
+        fauxToolCall("bash", { command: "printf 'worker shell write\\n' > late.txt" }),
+      ]),
+      async () => {
+        // Intentionally ignore abort until released, keeping the actual
+        // worker alive beyond the caller-visible cancellation outcome.
+        await gate;
+        return fauxAssistantMessage("LATE-RESPONSE");
+      },
+    ]);
+    const dispatched = await callDelegate(session, {
+      async: true,
+      tasks: [{ prompt: "write via bash then wait", cwd: repo }],
+    });
+    const ticket = ticketIdOf(dispatched.text);
+    try {
+      const started = Date.now() + 5000;
+      while (model.state.callCount < 2 && Date.now() < started) {
+        await Bun.sleep(10);
+      }
+      expect(model.state.callCount).toBe(2);
+      expect(readFileSync(join(repo, "late.txt"), "utf8")).toBe("worker shell write\n");
+
+      const cancelled = await callDelegateTicket(session, {
+        action: "cancel", ticket, force: true,
+      });
+      expect(cancelled.isError).toBe(false);
+      // A receipt alone proves nothing: wait must return terminal status
+      // while the final provider response is STILL held.
+      const provisional = await callDelegateTicket(session, { action: "wait", ticket });
+      expect(provisional.text).toContain(`Ticket "${ticket}": cancelled`);
+      const provisionalOutcome = objectOf((objectOf(provisional.details).results as unknown[])[0]);
+      expect(provisionalOutcome.quarantined).toBe(true);
+      // Bash has no observed path; only the deferred Git snapshot can name it.
+      expect(attributedOf(provisional.details)[0]!.files).toEqual([]);
+
+      release();
+      const deadline = Date.now() + 5000;
+      // Gate the first post-stop render on the PUBLIC durable outcome.
+      // Worker stop and the final Git snapshot are separate continuations;
+      // rendering between them can freeze the baseline's terminal text
+      // before evidence lands. This checkpoint observes real journal writes,
+      // not coordinator state, and keeps the display assertion meaningful.
+      const journal = join(session.cwd, "delegate-tickets", `${ticket}.json`);
+      for (;;) {
+        const saved = JSON.parse(readFileSync(journal, "utf8")) as {
+          outcomes: ({ attributedFiles?: string[] } | null)[];
+        };
+        if (saved.outcomes[0]?.attributedFiles?.includes(inRepo(repo, "late.txt"))) break;
+        if (Date.now() > deadline) throw new Error("deferred Git evidence never reached the ticket journal");
+        await Bun.sleep(10);
+      }
+      for (;;) {
+        const poll = await callDelegateTicket(session, { action: "poll", ticket });
+        expect(poll.text).toContain(`Ticket "${ticket}": cancelled`);
+        const outcome = objectOf((objectOf(poll.details).results as unknown[])[0]);
+        const evidence = attributedOf(poll.details)[0]!;
+        // Worker truth and its evidence can arrive on different turns.
+        // Await BOTH public effects, not just a terminal ticket or idle worker.
+        if (outcome.quarantined !== true && evidence.files.includes(inRepo(repo, "late.txt"))) {
+          expect(evidence.files).toEqual([inRepo(repo, "late.txt")]);
+          expect(evidence.uncertain).toBe(false);
+          expect(outcome.attributedFiles).toEqual(evidence.files);
+          expect(poll.text).toContain("files: late.txt");
+          break;
+        }
+        if (Date.now() > deadline) {
+          throw new Error(`deferred worker truth/Git evidence never arrived: ${poll.text}`);
+        }
+        await Bun.sleep(10);
+      }
+      expect(model.state.callCount).toBe(2);
+    } finally {
+      release();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("a terminal poll cached before the final Git probe refreshes when evidence lands", async () => {
+    // Regression: #133/#134's journal-first checkpoint deliberately avoids
+    // this gap. Worker truth can remove quarantine and the live execution
+    // before the final Git status completes; a poll in that gap must not
+    // permanently freeze text without the subsequently published evidence.
+    const session = await openAt();
+    const scratch = mkdtempSync(join(tmpdir(), "delegate-terminal-git-race-"));
+    const repo = join(scratch, "repo");
+    const shimDir = join(scratch, "bin");
+    mkdirSync(repo, { mode: 0o700 });
+    mkdirSync(shimDir, { mode: 0o700 });
+    const realGit = Bun.which("git")!;
+    // Like Delegate's real Git probes, fixture setup strips inherited Git
+    // redirection. No synthetic repository responses or production imports.
+    const gitEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+    );
+    execFileSync(realGit, ["-C", repo, "init", "-q"], { env: gitEnv });
+    const entered = join(scratch, "entered");
+    const exited = join(scratch, "exited");
+    const releaseGit = join(scratch, "release");
+    const invocations = join(scratch, "invocations");
+    const quote = (value: string): string => "'" + value.replaceAll("'", "'\\''") + "'";
+    writeFileSync(join(shimDir, "git"), `#!/bin/sh
+printf '%s\\n' "$*" >> ${quote(invocations)}
+if [ "$1" = -C ] && [ "$2" = ${quote(realpathSync(repo))} ] &&
+   [ "$3" = status ] && [ "$4" = --porcelain=v1 ] &&
+   [ -e ${quote(join(repo, "late.txt"))} ]; then
+  printf '%s\\n' "$*" > ${quote(entered)}
+  while [ ! -e ${quote(releaseGit)} ]; do sleep 0.01; done
+  ${quote(realGit)} "$@"
+  result=$?
+  printf '%s\\n' "$result" > ${quote(exited)}
+  exit "$result"
+fi
+exec ${quote(realGit)} "$@"
+`, { mode: 0o700 });
+    const previousPath = process.env.PATH;
+    const model = await installSubagentModel(session);
+    let releaseWorker!: () => void;
+    const providerGate = new Promise<void>((resolve) => { releaseWorker = resolve; });
+    model.respond([
+      fauxAssistantMessage([
+        fauxToolCall("bash", { command: "printf 'worker shell write\\n' > late.txt" }),
+      ]),
+      async () => {
+        // Abort is deliberately ignored: caller settlement is not worker stop.
+        await providerGate;
+        return fauxAssistantMessage("LATE-RESPONSE");
+      },
+    ]);
+    async function until(check: () => boolean, label: string): Promise<void> {
+      const deadline = Date.now() + 5000;
+      while (!check()) {
+        if (Date.now() > deadline) throw new Error(`Timed out: ${label}`);
+        await Bun.sleep(10);
+      }
+    }
+    let ticket: string | undefined;
+    const journalHasEvidence = (): boolean => {
+      const journal = join(session.cwd, "delegate-tickets", `${ticket}.json`);
+      if (!existsSync(journal)) return false;
+      const saved = JSON.parse(readFileSync(journal, "utf8")) as {
+        outcomes: ({ attributedFiles?: string[] } | null)[];
+      };
+      return saved.outcomes[0]?.attributedFiles?.includes(inRepo(repo, "late.txt")) === true;
+    };
+    try {
+      process.env.PATH = `${shimDir}${previousPath ? `:${previousPath}` : ""}`;
+      const dispatched = await callDelegate(session, {
+        async: true,
+        tasks: [{ prompt: "write via bash then wait", cwd: repo }],
+      });
+      ticket = ticketIdOf(dispatched.text);
+      await until(() => model.state.callCount === 2, "worker reached held final provider");
+      expect(readFileSync(join(repo, "late.txt"), "utf8")).toBe("worker shell write\n");
+      expect(existsSync(entered)).toBe(false);
+      await callDelegateTicket(session, { action: "cancel", ticket, force: true });
+      const provisional = await callDelegateTicket(session, { action: "wait", ticket });
+      expect(provisional.text).toContain(`Ticket "${ticket}": cancelled`);
+      expect(objectOf((objectOf(provisional.details).results as unknown[])[0]).quarantined).toBe(true);
+      expect(attributedOf(provisional.details)[0]!.files).toEqual([]);
+
+      releaseWorker();
+      await until(() => existsSync(entered), "actual final Git status entered shim");
+      expect(readFileSync(entered, "utf8")).toContain("status --porcelain=v1 -z --untracked-files=all");
+      expect(readFileSync(invocations, "utf8")).toContain(readFileSync(entered, "utf8"));
+      expect(existsSync(exited)).toBe(false);
+      expect(journalHasEvidence()).toBe(false);
+      // Prime the whole terminal-view cache while the native status is held.
+      const primed = await callDelegateTicket(session, { action: "poll", ticket });
+      expect(primed.text).toContain(`Ticket "${ticket}": cancelled`);
+      expect(objectOf((objectOf(primed.details).results as unknown[])[0]).quarantined).not.toBe(true);
+      expect(attributedOf(primed.details)[0]!.files).toEqual([]);
+      expect(primed.text).not.toContain("files: late.txt");
+      const primedAgain = await callDelegateTicket(session, { action: "poll", ticket });
+      expect(primedAgain.text).toBe(primed.text);
+      expect(existsSync(exited)).toBe(false);
+      expect(journalHasEvidence()).toBe(false);
+
+      writeFileSync(releaseGit, "");
+      await until(() => existsSync(exited), "native Git status exited");
+      expect(readFileSync(exited, "utf8").trim()).toBe("0");
+      await until(journalHasEvidence, "actual journal published final Git evidence");
+      const enriched = await callDelegateTicket(session, { action: "poll", ticket });
+      expect(enriched.text).toContain(`Ticket "${ticket}": cancelled`);
+      const outcome = objectOf((objectOf(enriched.details).results as unknown[])[0]);
+      expect(outcome.quarantined).not.toBe(true);
+      const evidence = attributedOf(enriched.details)[0]!;
+      expect(evidence.files).toEqual([inRepo(repo, "late.txt")]);
+      expect(evidence.uncertain).toBe(false);
+      expect(outcome.attributedFiles).toEqual(evidence.files);
+      expect(enriched.text).toContain("files: late.txt");
+      expect(enriched.text).not.toBe(primed.text);
+      const repeated = await callDelegateTicket(session, { action: "poll", ticket });
+      expect(repeated.text).toBe(enriched.text);
+      expect(attributedOf(repeated.details)).toEqual(attributedOf(enriched.details));
+      expect(model.state.callCount).toBe(2);
+    } finally {
+      // Release both gates even if an assertion fails, restore the ambient
+      // PATH, and drain native Git plus its durable publication before any
+      // owner scratch directory (or the parent session) can be removed.
+      releaseWorker();
+      writeFileSync(releaseGit, "");
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      try {
+        if (ticket !== undefined) await until(journalHasEvidence, "teardown drained deferred Git evidence");
+      } finally {
+        try {
+          if (existsSync(entered)) await until(() => existsSync(exited), "teardown drained native probe");
+        } finally {
+          rmSync(scratch, { recursive: true, force: true });
+        }
+      }
+    }
+  }, 15_000);
 
   test("a bash-modified pre-dirty file is reported while an untouched pre-dirty file is not", async () => {
     // Contract: SPEC "Completion evidence" — the window diffs state, not
