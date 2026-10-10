@@ -396,8 +396,10 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 - User-global `delegate.json` configuration. Project files do not become
   delegate configuration.
 - Parent model inheritance and project instructions and extension isolation, with children
-  resolved through the parent's shared model runtime (extension-free; no
-  provider-extension allowlist — verified live 2026-09-26, issue #5) and the
+  resolved through the parent's shared model runtime (extension-free by
+  default; the 2026-09-26 live check, issue #5, recorded "no provider-extension
+  allowlist" — **superseded by #59**, which ships one: see SPEC.md's
+  provider-scoped extensions bullet) and the
   meanings of `*` and `ro`, subject to the model-selection and parent-history
   departures below.
 
