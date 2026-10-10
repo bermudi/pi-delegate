@@ -177,7 +177,7 @@ v3 is a contract layer on the same engine. Caller-visible changes:
 - **Superseded — cross-harness task-field spellings (#41, retired by #61).**
   `subagent_type`, `agent_type`, `task_name`, `run_in_background`, `timeout_ms`, and a
   task-level `message` now reject with teaching
-  (`delegate.ts`, `rejectFieldAliases`). `timeout_ms` names `timeoutMs`, which #130 also removed, so its teaching ends at the removal. The folding and conflict rules are gone.
+  (`delegate.ts`, `rejectFieldAliases`). `timeout_ms` names `timeoutMs`; a dispatch that sends `timeoutMs` is rejected toward `async: true` and a ticket wait (`delegate.ts`), and on the wait tool `timeoutMs` is removed (#130). The folding and conflict rules are gone.
 - **Additive — shared batch `brief` (#43).** Top-level `brief` prepends a
   `--- batch brief ---` preamble to every task's prompt; the result and ticket headers name it
   once. The `context` spelling no longer normalizes to `brief`: `context` is removed and
