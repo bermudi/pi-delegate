@@ -837,10 +837,13 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
   rejectSteerId(args);
   // Enumerate-or-inherit: an unknown action names the resolvable set
   // (#130 removed tail; the schema enum alone says only "not allowed").
+  // Session actions are exempt — the routing branch below points them at
+  // delegate_session instead of rejecting them as unknown.
   if (
     typeof args.action === "string" &&
     args.action !== "" &&
-    !TICKET_ACTIONS.includes(args.action)
+    !TICKET_ACTIONS.includes(args.action) &&
+    !SESSION_ACTIONS.includes(args.action)
   ) {
     throw new Error(
       `Unknown delegate_ticket action "${args.action}". Available actions: ${TICKET_ACTIONS.join(", ")}.`,

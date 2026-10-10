@@ -192,17 +192,17 @@ describe("input normalization contract", () => {
 
   test("a sibling tool's action value routes there", async () => {
     // A correct-shaped call aimed at the wrong tool gets named guidance,
-    // not a bare enum rejection: an unknown ticket action enumerates the
-    // resolvable set (enumerate-or-inherit), and a session-side action
-    // names delegate_session's actions.
+    // not a bare enum rejection: a session action on delegate_ticket
+    // routes to delegate_session's example, and vice versa.
     const sessionAction = await callTicket({ action: "list" });
     expect(sessionAction.isError).toBe(true);
-    expect(sessionAction.text).toContain("Unknown delegate_ticket action");
-    expect(sessionAction.text).toContain("poll, wait, cancel");
+    expect(sessionAction.text).toContain("delegate_session");
+    expect(sessionAction.text).toContain('delegate_session({ action: "list" })');
 
     const ticketAction = await callSession({ action: "poll" });
     expect(ticketAction.isError).toBe(true);
-    expect(ticketAction.text).toContain("delegate_session");
+    expect(ticketAction.text).toContain("delegate_ticket");
+    expect(ticketAction.text).toContain('delegate_ticket({ action: "poll" })');
   });
 
   test("a mixed call's guidance names the half that did not run", async () => {
