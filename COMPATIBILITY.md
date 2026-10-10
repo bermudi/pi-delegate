@@ -23,53 +23,11 @@ SPEC.md has no call-row preview language, so it stays as is.
 
 ## Terminal-safe operational diagnostics (#122)
 
-This supersedes inherited SPEC-V2 stderr-only logging (including delivery-skip
-logs). Delegate chooses the destination from actual `process.stderr.isTTY`:
-false/undefined uses stderr for error/warn/info; true appends private JSONL to
-`<agentDir>/delegate-diagnostics/<pid>.jsonl`. Here `agentDir` is the nonempty
-explicit `DELEGATE_AGENT_DIR`, otherwise Pi's public `getAgentDir()` — never the
-engine's context/session/cwd fallback. Even print mode uses the file when its
-stderr remains terminal-attached. Diagnostic stdout is never used; worker
-stdout remains its framed protocol.
-
-New diagnostic directories/files are owner-only 0700/0600. Existing insecure,
-foreign-owned, linked, or symlinked entries reject rather than being repaired
-or followed. A blocked primary uses the equally private deterministic
-`<tmpdir>/pi-delegate-diagnostics-<uid>-<pid>/<pid>.jsonl`, recording bounded,
-safe primary-failure context. No attached-terminal fallback is allowed. Only
-failure of both secure destinations produces a bounded managed warning, never
-an execution/lifecycle exception: the extension-owned sink retains safe event,
-primary destination/operation and primary/fallback class/code context, reports
-via Pi UI notices when available and the next public tool result. A failed
-notice remains visible in that result warning, without recursive logging.
-The per-return `details.diagnosticWarning` is attached to cloned metadata, not
-cached operation/ticket outcomes; all three tools render it collapsed/expanded
-and on history replay without a live store. After repair, replaying an operation
-must not carry its previous return's warning.
-Cancellation, quiescence, admission release, cleanup, surface selection and
-telemetry/recovery remain noninterfering even with no writable destination.
-Standalone dormant supervisors include warnings in their exit results without
-changing worker classification. Secure file routing is Linux-only until foreign
-filesystem behavior is verified; missing getuid/no-follow/directory capabilities
-and non-Linux attached streams produce safe unsupported warnings, not terminal
-fallback or dispatch failure. Headless stderr works independently of this limit.
-Records are bounded structured events
-with safe operational ids/paths/counts and allowlisted error class/code, not
-raw error messages/stacks or request/profile/provider content. Allowlisted
-operational codes survive bounded Error.cause traversal without invoking error
-accessors. Caller-visible
-tool errors, task lifecycle, models, and settings remain unchanged. Neither
-log rotation nor automatic deletion is introduced; operators can remove old
-process logs. No global console interception or diagnostic config knobs.
-Whole directory components `delegate-diagnostics` and
-`pi-delegate-diagnostics-<numeric uid>-<numeric pid>` are reserved runtime
-namespaces anywhere under source, independent of engine agentDir and current
-environment. Scratch copies, all private Git snapshots (including tracked seeds),
-and drift/attribution omit them and existing symlink aliases; actual destinations
-are excluded even before creation. This covers retained fallback trees from other
-processes. Ordinary similarly named source (`delegate-diagnostics.md`,
-`pi-delegate-diagnostics-guide`) remains included. Existing historical Git objects
-are not rewritten or scrubbed.
+This supersedes the inherited stderr-only logging, including delivery-skip logs.
+Normative text: SPEC.md, "Operational diagnostics (#122)". Residual points that
+SPEC.md does not state: no log rotation or automatic deletion is introduced (operators
+remove old process logs); diagnostic-destination failures never interfere with
+telemetry; caller-visible tool errors, task lifecycle, models, and settings are unchanged.
 
 ## Prompt size cap (#121)
 
@@ -91,16 +49,12 @@ request-body dumps — and record `validation`-phase misfire rows.
 
 ## Task deadlines removed (#118, user-approved)
 
-BREAKING: `deadlineMs` is removed in both compact and full mode. Its presence
-rejects before execution, including null and flat/stringified recovery shapes.
-Remove it from calls: tasks have no wall-clock deadline. Use cooperative ticket
-cancel/interrupt to stop work; waits park until settlement, a worker
-question, or a caller abort (no timeout — #130).
-Historical saved deadline failures remain readable. This explicitly overrides
-SPEC-V2's deadline field and its loading, retry, pause, question, and session
-rules. Stall detection, abort/quiescence, reservations, worker-question/paused
-safety, and shutdown bounds are unchanged. (#130 later removed the wait
-bound, the tail action, and the batch token budget.)
+BREAKING: `deadlineMs` is removed (in both compact and full mode when this was decided;
+ADR 0002 later merged the two into one surface). Its presence rejects before execution,
+including null and flat/stringified recovery shapes. Remove it from calls: tasks have no
+wall-clock deadline. Use cooperative ticket cancel/interrupt to stop work; waits park until
+settlement, a worker question, or a caller abort (#130). Normative text: SPEC.md, "Task
+deadlines removed (#118, user-approved)".
 
 ## Unordered shared-writer rejection (#126, owner-approved 2026-10-08)
 
@@ -135,19 +89,12 @@ the #126 record called out: `isolated` is now a usable parallel path
 for suite-running tasks (reviews that run `bun test` / `tsc`), not
 just edit fan-outs.
 
-Invariants unchanged: ignored files never enter proposals, merges, or
-drift — they are read-only inputs, and worker-local mutations of them
-(e.g. a `bun install` inside the worktree) are discarded with the
-worktree at reconcile. Delegate-owned runtime trees (artifact roots
-and the agent-dir delegate trees) are never provisioned, however the
-source's gitignore covers them — including a collapsed ignored
-ancestor (an ignored agent dir under the repo) that contains them;
-without this, provisioning sibling workers' live worktrees is wasted
-disk and copying the artifact base fails outright (fs.cp refuses
-copying a directory into itself). Baselines, candidate worktrees, and
-drift checks are never provisioned. Provisioning failures fail the group
-loud; a source entry that vanishes between listing and copying is
-skipped silently (a racy source is not worth failing a batch).
+Invariants, mechanism, and failure rules are normative in SPEC.md, "Isolated worktree
+dependency provisioning (#120)": ignored files are read-only inputs and never enter
+proposals, merges, or drift; Delegate-owned runtime trees are never provisioned; a provisioning
+failure fails the group loud, while a source entry that vanishes mid-copy is skipped. One
+rationale SPEC.md does not carry: artifact trees are excluded because `fs.cp` refuses to copy
+a directory into itself, and copying sibling workers' live trees is wasted disk.
 
 Design provenance: port-of-idea from xai-org/grok-build's
 `xai-fast-worktree` copy arm, second pass (`execute.rs:832-871`,
@@ -170,12 +117,9 @@ rules (canonical fields, exact names, background default) stand.
   accepted schema — the former full vocabulary, pruned per the #130 field
   verdicts. A supplied `"surface"` key rejects at config load with
   teaching; remove the key and /reload.
-- The rationale (owner ruling): the mode wall was crossed only by /reload,
-  which cancels active workers — so no full-only field ever executed in
-  production (0 of 2,001 dispatches), the session pool was write-only
-  (reuse needs the formerly full-only `sessionId`), and #123/#124
-  recovery hints were muted. One surface makes every surviving field
-  reachable mid-session. See `docs/decisions/0002-one-surface.md`.
+- Rationale and the 2,001-dispatch evidence: docs/decisions/0002-one-surface.md. The
+  normative rule (one schema; a supplied `"surface"` key rejects at config load) is SPEC.md,
+  "One surface (ADR 0002, 2026-10-07)".
 
 ## Simplified v3 surface (#61, user-approved 2026-09-29)
 
@@ -189,12 +133,9 @@ This section supersedes the older alias and cardinality entries below.
   gone — #130). Removed
   fields reject the entire call, including null values. Existing saved
   ticket metadata remains readable; it does not authorize new alias calls.
-- BREAKING (superseded by ADR 0002 above): the default advertised and
-  accepted surface is compact. Set `"surface": "full"` in user-global
-  `delegate.json` and reload to retain all canonical advanced call
-  controls. `"surface": "compact"` is the default. Invalid surface
-  values fail visibly; no per-model choice. (As of ADR 0002 the key
-  rejects — one surface carries every control.)
+- BREAKING (superseded by ADR 0002 above): the compact-by-default surface and its
+  `"surface": "full"` opt-in are gone; the key now rejects at config load. Original
+  wording is in git history.
 - Malformed supplied non-array `tasks` reject instead of being discarded by
   flat recovery. Schema diagnostics exclude request-body dumps; pre-schema
   rejection telemetry stores those safe messages verbatim, never prompts or
@@ -219,59 +160,39 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   relied on the v2 blanket sync default must pass `async: false`.
   Single-task calls still block inline by default; `async: true`
   overrides either way.
-- **Additive — agent-name aliases.** `general`, `general-purpose`,
-  `worker` resolve to `default`; `explorer`, `plan`, `scout` to
-  `explore`; `implement` to `coder`. Exact case-sensitive match;
-  expansion is
-  visible in results; unknown names still error with the available
-  list. Config model pins key on the canonical name.
+- **Superseded — agent-name aliases (retired by #61).** The alias table (`general`,
+  `general-purpose`, `worker`, `explorer`, `plan`, `scout`, `implement`) is gone. Names match
+  exactly, and an unauthored alias rejects the whole batch as an unknown agent, pinned by
+  `tests/contract/grammar.test.ts`. An authored `general.md` or `scout.md` is an ordinary profile.
 - **Renamed — the read-only built-in is `explore`, not `scout` (#40).**
-  The trained read-only name is canonical; `agent: "scout"` still works
-  through the reverse alias with the usual visible expansion note.
+  The trained read-only name is canonical. Superseded by #61: `agent: "scout"` no longer
+  resolves to `explore`, and an unauthored `scout` rejects as an unknown agent
+  (`tests/contract/grammar.test.ts`).
   **Breaking for config:** `models.scout` and `modelsByParent` `scout`
   keys are rejected at load with a migration message — rename them to
   `models.explore`. Built-in semantics (toolset, role, read-only
   concurrency) are unchanged.
 - **Additive — misfire telemetry.** Dispatches rejected before
   execution record a telemetry row. No behavior change.
-- **Additive — cross-harness task-field spellings (#41).** Task objects
-  accept `subagent_type` (normalizes to `agent` before alias
-  resolution), `description` (≤200-char display label preferred over
-  the id in call rows and section headers — not a correlation key),
-  and `run_in_background` at top level or per task (normalizes to
-  `async`). Conflicting spellings (`agent` vs `subagent_type` naming
-  different agents, `async` vs `run_in_background` disagreeing) are
-  validation errors naming both; each applied rename is reported as
-  `field "<field>" → "<to>"`. `additionalProperties: false` stays.
-- **Additive — shared batch `brief` (#43).** Top-level `brief` prepends
-  a `--- batch brief ---` preamble to every task's prompt; the result
-  and ticket headers name it once. `context` is its cross-harness
-  spelling — it normalizes to `brief` with the same rename note, and
-  `brief`+`context` with different text errors naming both. The
-  removed task-level `context` (v1's `fresh`/`with-parent-transcript`)
-  still rejects with migration guidance — at top level those trained
-  enum values keep the removal error rather than folding.
+- **Superseded — cross-harness task-field spellings (#41, retired by #61).**
+  `subagent_type`, `agent_type`, `task_name`, `run_in_background`, `timeout_ms`, and a
+  task-level `message` now reject with teaching that names the replacement
+  (`delegate.ts`, `rejectFieldAliases`). The folding and conflict rules are gone.
+- **Additive — shared batch `brief` (#43).** Top-level `brief` prepends a
+  `--- batch brief ---` preamble to every task's prompt; the result and ticket headers name it
+  once. The `context` spelling no longer normalizes to `brief`: `context` is removed and
+  rejects with teaching (see the #14 entry below).
 - **Changed — default `maxConcurrent` is 8, not 3 (#41).** Field
   survey: letta/grok/oh-my-pi default 32; minimax/deepseek/MiMo/fx
   uncapped. The `concurrency` maps remain the rate-limit guard.
-- **Additive — trained-reflex long tail (#44).** `agent_type` folds
-  to `agent` with `subagent_type`'s conflict rules; `task_name` →
-  `id` and a task-shaped `message` → `prompt` on `delegate` (the
-  spawn_agent call dispatches; a bare `message` still routes to
-  `delegate_ticket` steer guidance, and `message` stays steer-owned
-  there); `timeout_ms`/`timeoutMs` on `delegate_ticket wait` — the wait bound is
-  gone (#130); both spellings now reject with the removal teaching;
-  `explorer` → `explore`; `reasoning_effort` rejects with the
-  `thinking` teaching at every level; `steerId` is optional — a
-  steer without one receipts under a derived `steer:<tool-call-id>`
-  key so a transport retry dedupes instead of re-injecting.
-- **Changed — alias precedence and no nested dispatch (#45).**
-  Discovered user/project profiles claim their exact names ahead of
-  the alias table — an authored `general.md` resolves to that profile,
-  not `default` (built-ins still win collisions). And the delegate
-  family is stripped silently from every child toolset — explicit
-  `tools`, profile frontmatter, and the mirrored parent set alike —
-  so subagents never nest.
+- **Superseded — trained-reflex long tail (#44; folds retired by #61).** The name-folding
+  described before is gone; the spellings now reject with teaching (see #41 above). What stays
+  from #44: `reasoning_effort` rejects with the `thinking` teaching at every level, and model
+  and effort selection is user-configured only (#32).
+- **Changed — no nested dispatch (#45).** The alias-precedence half of this bullet is
+  superseded by #61 (names match exactly). The delegate family is stripped silently from
+  every child toolset — explicit `tools`, profile frontmatter, and the mirrored parent set
+  alike — so subagents never nest.
 - **Changed — pooled-session idle residency is bounded (#46).** Idle
   sessions beyond `sessions.maxIdle` (default 4) unload to their
   transcript and transparently reload on the next reuse — callers see
@@ -351,14 +272,9 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   hints (#123 — the worker's claimed transcript is journaled before its
   first turn; a recovered `interrupted` outcome names the durable file
   with the same `resumeFrom` recipe a failed outcome renders).
-- **Changed — shutdown quiescence is bounded (#52, 0.3.2).** Session
-  shutdown waits for live dispatches' confirmed quiescence up to ~30s
-  (`DELEGATE_SHUTDOWN_QUIESCENCE_MS`), then proceeds, logging the
-  still-unconfirmed dispatch names. Previously the wait was unbounded: a
-  worker whose provider/tool ignored abort wedged host exit forever.
-  No reservation is ever released by the expiry — confirmed quiescence
-  remains the only release, so the bound costs protection only against
-  workers that would outlive any bound anyway.
+- **Changed — shutdown quiescence is bounded (#52, 0.3.2).** Shutdown waits up to about 30s
+  for confirmed quiescence, then proceeds with a warning; an expired budget never releases
+  reservations. The current rule is under Known host limitations, "Blocking shutdown."
 
 ## Status and rule
 
@@ -480,13 +396,10 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   message as before the probe existed.
 - Aggregate usage on synchronous tool results where supported. Async delivered
   messages still cannot add usage to the parent total.
-- Optional duplicate-safe dispatch identity (`operationId`, issue #16) —
-  **removed by #130** (dispatches are not caller-deduplicated; the bullet
-  below is the superseded contract): an additive contract — a keyed call with the same normalized request reuses
-  the original in-flight or settled result, and a keyed call with a changed
-  request conflicts. This is not content deduplication — unkeyed dispatches
-  always execute — and not an exactly-once crash/restart guarantee —
-  identity is host-lifetime only with bounded retention.
+- Optional duplicate-safe dispatch identity (`operationId`, issue #16) — **removed by #130**.
+  Dispatches are not caller-deduplicated, and a supplied `operationId` rejects with teaching.
+  The superseded keyed-reuse contract is in git history; SPEC.md's canonical-surface removed-field
+  list records the removal.
 - Explicit task dependencies with output and workspace handoffs (issue #18):
   an additive contract — a task `dependsOn` field names same-batch
   prerequisites by id; the graph is fully validated before spawn; the batch
@@ -518,39 +431,11 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 
 ## v2 deliberate breaking changes
 
-- **Touched-file attribution reporting removed (user decision 2026-09-27;
-  restored under v3 the same day).** V1 reported which physical files each
-  task touched — resolved through symlinks with conservative `uncertain`
-  flags, external writes through worker links reported at their physical
-  paths — in results and poll/cancel/wait views, warned when tasks touched
-  the same files (`details.overlapWarning`), and preserved touched-file
-  lists on partial failure. V2 outcomes carried no touched-file data at
-  all. **Restored under v3 the same day (SPEC v3 "Observability —
-  Completion evidence", #38) — see the restoration note below.**
-  Same-call graph-ordered writers still serialize (completion notices name
-  the serialized tasks) and cross-call conflicts still reject; same-phase
-  unordered shared writers reject at admission since #126. Decided during
-  the 2026-09-27 gap audit (docs/history/V1-V2-MAP.md §3d item 1).
-
-  **Restored in lighter form by SPEC v3 "Observability — Completion
-  evidence" (#38).** V2 records the paths observed in each task's
-  write/edit tool calls — resolved against the task cwd, ordered,
-  deduplicated — plus an uncertainty marker when the task ran
-  bash/exec outside Git coverage. This is evidence, not v1's physical
-  tracking: no inode signatures, no symlink canonicalization, and no
-  claim about paths a tool call never named. Display, overlap
-  reporting, and `details.attributedFiles` are the restored surfaces;
-  v1's `details.overlapWarning` shape and physical-identity semantics
-  are not. **Extended by user decision 2026-10-02 (live session
-  01a0fdba):** the earlier "no git-diff inference" carve-out is
-  reversed — a Git evidence window (a `HEAD`/`status`/`lstat`
-  snapshot before the task's first attempt and another after the
-  last, plus `git diff --name-only` across a moved `HEAD`) supplies
-  the shell's file footprint wherever the worker's cwd is a usable
-  repository, and the uncertainty mark survives only where no window
-  covered the shell. Concurrency is reported, not hidden: a window
-  names the overlapping mutating writers (the parent's tool calls,
-  same-root siblings) whose changes may be folded into it.
+- **Touched-file attribution: removed 2026-09-27, restored under v3 the same day, then extended
+  2026-10-02.** The current contract is SPEC.md, "Observability — Completion evidence" (#38):
+  paths from write/edit calls, plus a Git evidence window for changes made from the shell, with
+  concurrent writers named rather than hidden. V1's physical-identity tracking and its
+  `details.overlapWarning` shape were not restored. Decision record: docs/history/V1-V2-MAP.md §3d item 1.
 
 - **Child base prompt is composed, not precedence-chosen (#33, user decision
   2026-09-26).** V1 picked one prompt by precedence — task, then agent, then a
@@ -807,15 +692,10 @@ from v1.
   2 000 characters per text event) feeding the interleaved view.
   Below ~96 columns the panes stack; below 40×16 the browser asks for a
   larger terminal.
-- **Large-output bounding (#25)** — shipped 2026-09-23 with v1's
-  semantics: settled and synchronous results spill output past
-  `output.spillThresholdChars` (default 8 000) to an owner-only temp
-  file and render a `output.spillTailChars`-long (default 2 000)
-  surrogate-safe tail with a pointer; running-ticket views bound to the
-  tail only and never write a file; a failed write degrades to the full
-  output in-context; complete output stays in result `details` and on the
-  ticket record. Bounds snapshot per ticket at creation; a settled
-  ticket's frozen view keeps one stable spill path across polls.
+- **Large-output bounding (#25)** — shipped 2026-09-23 with v1's semantics. The normative rules
+  (thresholds, tail, failed-write fallback, stable spill path, owner-only files) are SPEC-V2.md,
+  "LLM-facing projection" (settled output through stability). Config defaults:
+  `output.spillThresholdChars` 8000, `output.spillTailChars` 2000.
 
 ## Known host limitations (accepted 2026-09-19, issue #3)
 
@@ -883,27 +763,5 @@ would be intentional public API changes, not implementation freedom.
 
 ## Test migration policy
 
-Do **not** port the v1 test suite wholesale. Its regression knowledge is useful;
-its decomposition is not a v2 contract. Before reimplementation, classify each
-v1 test by purpose:
-
-1. **Contract tests** cover behavior promised by `SPEC.md`: accepted calls,
-   validation, results, sessions, tickets, workspaces, usage, and other
-   caller-visible effects. Reimplement these against v2's public tool boundary.
-2. **Regression tests** reproduce a real failure that could violate the public
-   contract or an invariant. Preserve the scenario and expected outcome, but
-   reimplement it through the public boundary rather than carrying over v1
-   fixtures, mocks, call sequences, or helper assumptions.
-3. **Internal tests** exist only to validate a v1 helper, module boundary,
-   intermediate representation, private state transition, or decomposition.
-   Delete them. Add new internal tests only when v2's own design warrants them.
-
-Tests should assert observable results and effects: returned tool content,
-ticket/session behavior, filesystem state, preserved user Git state, resource
-availability, emitted usage, and actionable failure. They should not assert
-which v1 helper was called, the shape of private state, exact internal event
-ordering, or a particular cleanup/reconciliation mechanism.
-
-The old suite is a source catalogue for discovering cases, not code to copy and
-not a coverage target. Similar test counts, file names, fixtures, and line
-coverage are explicitly not compatibility goals.
+Moved verbatim to TEST-MIGRATION.md, section "Migration policy". This contract
+does not govern how v1 tests are migrated.
