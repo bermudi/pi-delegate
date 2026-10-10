@@ -34,7 +34,6 @@ import {
   formatDuration,
   resumeTagOf,
   truncateLine,
-  truncateWords,
 } from "./format.ts";
 import { UNBOUNDED_OUTPUT } from "./spill.ts";
 import { recoveryWarning, type TicketStore } from "./tickets.ts";
@@ -50,18 +49,10 @@ import type { SessionArguments, TicketArguments } from "./validation.ts";
 
 /** Matches the stock tool-result fallback's collapsed preview budget. */
 const COLLAPSED_PREVIEW_LINES = 10;
-/** How many task previews a delegate call line lists before summarizing. */
-const CALL_PREVIEW_TASKS = 4;
+/** How many task rows a delegate call lists before summarizing the rest. */
+const CALL_ROW_TASKS = 4;
 /** Display budget for a collapsed one-line task summary. */
 const COLLAPSED_LINE_LIMIT = 110;
-/**
- * Call-row prompt preview budget: with label and indent it keeps each
- * task to one line on a ~100-column terminal, and `Text` soft-wraps at
- * word boundaries on narrower ones. Sized so the boundary cut around a
- * ~30-char path token keeps its leading directory instead of dropping
- * it whole.
- */
-const CALL_PREVIEW_LIMIT = 86;
 /** Call-row labels align to the longest shown, never wider than this. */
 const CALL_LABEL_WIDTH = 16;
 /** Result-line labels truncate so the summary keeps its budget. */
@@ -196,14 +187,6 @@ function styled(text: string, theme: Theme): string {
     .join("\n");
 }
 
-/** Collapse a prompt to a single line for the call row. */
-function promptPreview(prompt: string): string {
-  return truncateWords(
-    displaySafe(prompt).replace(/\s+/g, " ").trim(),
-    CALL_PREVIEW_LIMIT,
-  );
-}
-
 function textOf(component: Component | undefined): Text {
   return component instanceof Text ? component : new Text("", 0, 0);
 }
@@ -222,16 +205,16 @@ function expandHint(theme: Theme): string {
 
 /**
  * The `delegate` tool's call row: a static `delegate N tasks` header plus
- * up to four task previews (`<label>  <~60 chars of prompt>`; a resume-only
- * task shows its `↻` tag instead). The label is the task's `id`, else the
- * `agent` name, else `inline` — a stored caller `description` renders
- * only from historical journals (#130 removed the field; #63 dropped
- * positional `task-N` labels as noise). Labels pad to a common width so
- * previews align. Empty task lists
- * render `delegate manual`. Deliberately stateless — no spinner, timers,
- * or live state: the row reads identically while the call streams and
- * after it settles, so a human scanning the transcript sees the same call
- * the model made.
+ * one line per task, up to four. Each line shows the task's label — its `id`,
+ * else the `agent` name, else `inline` — and, for a resumed task, its `↻`
+ * tag. A stored caller `description` renders only from historical journals
+ * (#130 removed the field; #63 dropped positional `task-N` labels as noise).
+ * Prompt text is deliberately not shown: prompts share boilerplate, so a
+ * truncated preview told the rows apart by nothing (user-approved
+ * 2026-10-10). Empty task lists render `delegate manual`. Deliberately
+ * stateless — no spinner, timers, or live state: the row reads identically
+ * while the call streams and after it settles, so a human scanning the
+ * transcript sees the same call the model made.
  */
 export function renderDelegateCall(
   args: {
@@ -252,7 +235,7 @@ export function renderDelegateCall(
     component.setText(theme.fg("toolTitle", theme.bold("delegate manual")));
     return component;
   }
-  const shown = tasks.slice(0, CALL_PREVIEW_TASKS).map((task) => ({
+  const shown = tasks.slice(0, CALL_ROW_TASKS).map((task) => ({
     task,
     label: truncateLine(
       displaySafe(
@@ -273,23 +256,22 @@ export function renderDelegateCall(
       ),
   ];
   for (const { task, label } of shown) {
-    const preview =
-      task.prompt !== undefined && task.prompt.trim() !== ""
-        ? promptPreview(task.prompt)
-        : task.resumeFrom !== undefined
-          ? `↻${resumeTagOf(task.resumeFrom)}`
-          : "(no prompt)";
-    // An accent dispatch arrow per task (the result rows answer with
-    // their ✓/✗ glyphs), bright labels, dim previews: three depths so
-    // the eye can scan agents apart from work on the tinted card.
+    // The `↻<tag>` marks a resumed task whether or not it also has a prompt.
+    // Results carry the same marker, and without prompt text a resumed task
+    // would otherwise look like a fresh one. Tags align when labels are padded.
+    const tag =
+      task.resumeFrom === undefined ? undefined : resumeTagOf(task.resumeFrom);
+    // An accent arrow per task (the result rows answer with their ✓/✗
+    // glyphs), bright labels, a dim tag: three depths so the eye can scan
+    // the batch apart from the tinted card.
     lines.push(
       theme.fg("muted", "  ") +
         theme.fg("accent", "▸ ") +
-        theme.fg("toolTitle", `${label.padEnd(width)}  `) +
-        theme.fg("muted", preview),
+        theme.fg("toolTitle", tag === undefined ? label : label.padEnd(width)) +
+        (tag === undefined ? "" : theme.fg("muted", `  ↻${tag}`)),
     );
   }
-  const rest = tasks.length - CALL_PREVIEW_TASKS;
+  const rest = tasks.length - CALL_ROW_TASKS;
   if (rest > 0) {
     lines.push(theme.fg("muted", `  … and ${rest} more`));
   }

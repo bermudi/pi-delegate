@@ -525,8 +525,10 @@ gaps.
 
 - **Contract:** all three delegate tools render a static call row — the
   line the host shows while the tool call is outstanding. `delegate`
-  renders `delegate N task(s)` plus up to four prompt previews (`↻<tag>`
-  on resume-only tasks, caller ids where given) and `… and K more`;
+  renders `delegate N task(s)` plus one label line per task, up to four
+  (`▸ <label>`, with a `↻<tag>` on resumed tasks), and `… and K more`. Prompt
+  text is never shown (user-approved 2026-10-10: prompts share boilerplate, so
+  previews told rows apart by nothing);
   an empty call reads `delegate manual`. `delegate_ticket` and
   `delegate_session` render `action target` one-liners. No timers,
   spinners, or live state.
@@ -535,8 +537,8 @@ gaps.
   contract for empty, single, four-plus, and resume-only calls. #63
   relabels rows by description → caller id → agent → `inline` (the
   description leg is gone — #130; labels derive id → agent → `inline`;
-  positional `task-N` dropped — compact callers cannot set ids), pads labels to a
-  common width, and shortens ticket ids in display only (`t-<first8>`,
+  positional `task-N` dropped — compact callers cannot set ids), pads tagged labels to a
+  common width so tags align, and shortens ticket ids in display only (`t-<first8>`,
   including compound `<ticket>#<task>` steer/interrupt/tail/answer
   targets).
 - **Collapsed result views (#63):** the collapsed `renderResult`/`message`

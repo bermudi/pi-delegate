@@ -1,5 +1,26 @@
 # Delegate v2 compatibility contract
 
+## Call row shows labels, not prompts (user-approved 2026-10-10)
+
+The `delegate` call row is the static line shown while a call is outstanding.
+It used to show the first ~86 characters of each task's prompt. Those prompts
+shared a long boilerplate opening, so the previews told rows apart by nothing.
+The row now reads `delegate N tasks`, then one line per task (up to four, then
+`… and K more`): the task's label — `id`, else `agent`, else `inline` — and a
+`↻<tag>` marker on every resumed task. Tagged labels pad to a common width so
+the tags line up.
+
+Display only. Dispatch arguments, results, tickets, and the live board are
+unchanged. Two visible consequences:
+
+- A resumed task that also has a prompt now shows its `↻<tag>`. Before, the
+  prompt took the slot and the marker was hidden. Results already show the
+  marker for every resumed task, so the row now matches them.
+- Existing sessions re-render in the new layout, because the call row is
+  computed from the recorded arguments each time it draws.
+
+SPEC.md has no call-row preview language, so it stays as is.
+
 ## Terminal-safe operational diagnostics (#122)
 
 This supersedes inherited SPEC-V2 stderr-only logging (including delivery-skip

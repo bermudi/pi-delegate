@@ -1882,7 +1882,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             prepareDispatchArguments(args));
         },
         // The call row is static by contract: `delegate N tasks` plus up
-        // to four prompt previews — no spinner or live state.
+        // to four task labels — no spinner or live state.
         renderCall: renderDelegateCall,
         // The stock renderer only displays `content` — which is the
         // spill-bounded projection — so expansion never showed the whole

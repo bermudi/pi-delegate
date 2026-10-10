@@ -311,68 +311,79 @@ test(
 );
 
 test(
-  "the delegate call row is a static count plus up to four prompt previews",
+  "the delegate call row is a static count plus one label line per task",
   async () => {
-    // Work-order §3d.8 + #63: `delegate N tasks`, one line per task
-    // showing its label — description, then caller id, then agent, then
-    // `inline` (compact callers cannot set ids, so a positional task-N is
-    // noise) — and the first ~86 chars of its prompt (cut at a word
-    // boundary), `… and K more` past four, `delegate manual` for an empty
-    // list — and deliberately static: no spinner, timers, or live state.
+    // Work-order §3d.8 + #63, revised 2026-10-10 (user-approved): `delegate N
+    // tasks`, then one line per task — up to four — showing its label:
+    // description, then caller id, then agent, then `inline`. Prompt text is
+    // not shown; prompts share boilerplate, so previews told rows apart by
+    // nothing. `… and K more` past four; `delegate manual` for an empty list.
+    // Deliberately static: no spinner, timers, or live state.
     session = await openDelegateBoundary();
     const render = (args: unknown) => renderToolCall(session!, "delegate", args);
 
     expect(render({ tasks: [] })).toBe("delegate manual");
+    // Prompt text never reaches the row, whatever its length.
     expect(render({ tasks: [{ prompt: "hello world" }] })).toBe(
-      "delegate 1 task\n  ▸ inline  hello world",
+      "delegate 1 task\n  ▸ inline",
     );
-    // A caller-provided id replaces the fallback label; agent labels
-    // compact tasks; description wins over both.
+    expect(render({ tasks: [{ prompt: "p".repeat(200) }] })).toBe(
+      "delegate 1 task\n  ▸ inline",
+    );
+    // A caller-provided id replaces the fallback label; agent labels compact
+    // tasks; a stored description still wins over both (historical journals).
     expect(render({ tasks: [{ id: "alpha", prompt: "x" }] })).toBe(
-      "delegate 1 task\n  ▸ alpha  x",
+      "delegate 1 task\n  ▸ alpha",
     );
     expect(render({ tasks: [{ agent: "scout", prompt: "x" }] })).toBe(
-      "delegate 1 task\n  ▸ scout  x",
+      "delegate 1 task\n  ▸ scout",
     );
     expect(
       render({
         tasks: [{ id: "alpha", agent: "scout", description: "scan the tree", prompt: "x" }],
       }),
-    ).toBe("delegate 1 task\n  ▸ scan the tree  x");
+    ).toBe("delegate 1 task\n  ▸ scan the tree");
     const four = render({
-      tasks: [1, 2, 3, 4].map((n) => ({ prompt: `prompt ${n}` })),
+      tasks: ["alpha", "beta", "gamma", "delta"].map((id) => ({ id, prompt: "x" })),
     });
-    expect(four).toContain("delegate 4 tasks");
-    expect(four).toContain("  ▸ inline  prompt 4");
-    expect(four).not.toContain("… and");
-    // Labels pad to a common width so prompt previews align.
-    const padded = render({
+    expect(four).toBe(
+      "delegate 4 tasks\n  ▸ alpha\n  ▸ beta\n  ▸ gamma\n  ▸ delta",
+    );
+    const six = render({
+      tasks: ["a", "b", "c", "d", "e", "f"].map((id) => ({ id, prompt: "x" })),
+    });
+    expect(six).toBe("delegate 6 tasks\n  ▸ a\n  ▸ b\n  ▸ c\n  ▸ d\n  … and 2 more");
+    // Untagged labels are not padded: nothing trails them.
+    const untagged = render({
       tasks: [
         { id: "a", prompt: "first" },
         { id: "longer-label", prompt: "second" },
       ],
     });
-    const paddedLines = padded.split("\n");
-    expect(paddedLines[1]).toMatch(/^  ▸ a\s+  first$/);
-    expect(paddedLines[2]).toMatch(/^  ▸ longer-label  second$/);
-    const six = render({
-      tasks: [1, 2, 3, 4, 5, 6].map((n) => ({ prompt: `prompt ${n}` })),
-    });
-    expect(six).toContain("  … and 2 more");
-    expect(six).not.toContain("prompt 5");
-    // A ~86-char preview with an ellipsis; long prompts stay one line.
-    const long = render({ tasks: [{ prompt: "p".repeat(200) }] });
-    const previewLine = long.split("\n")[1]!;
-    expect(previewLine.length).toBeLessThanOrEqual(2 + 16 + 2 + 86);
-    expect(previewLine).toContain("…");
-    // The cut lands between words when the prompt has them.
-    const words = render({ tasks: [{ prompt: "alpha ".repeat(30) }] });
-    expect(words.split("\n")[1]).toMatch(/alpha…$/);
-    // A resume-only task shows its revival tag instead of a prompt.
-    const resumed = render({
-      tasks: [{ resumeFrom: "/tmp/x/sess_ab12cd34ef.jsonl" }],
-    });
-    expect(resumed).toContain("↻ab12cd34");
+    expect(untagged.split("\n")).toEqual([
+      "delegate 2 tasks",
+      "  ▸ a",
+      "  ▸ longer-label",
+    ]);
+    // A resumed task carries its ↻ tag whether or not it has a prompt: results
+    // show the same marker, and a prompt-less row alone would hide the resume.
+    const resumeFrom = "/tmp/x/sess_ab12cd34ef.jsonl";
+    expect(render({ tasks: [{ resumeFrom }] })).toBe(
+      "delegate 1 task\n  ▸ inline  ↻ab12cd34",
+    );
+    expect(render({ tasks: [{ resumeFrom, prompt: "continue" }] })).toBe(
+      "delegate 1 task\n  ▸ inline  ↻ab12cd34",
+    );
+    // Tags line up in a column when labels differ in length.
+    const mixed = render({
+      tasks: [
+        { id: "a", resumeFrom },
+        { id: "longer-label", resumeFrom },
+      ],
+    }).split("\n");
+    expect(mixed[1]).toMatch(/^  ▸ a\s+↻ab12cd34$/);
+    expect(mixed[2]).toBe("  ▸ longer-label  ↻ab12cd34");
+    expect(mixed[1]!.indexOf("↻")).toBe(mixed[2]!.indexOf("↻"));
   },
 );
 
