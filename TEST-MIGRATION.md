@@ -69,8 +69,10 @@ cross-phase serialization, lower-bound accounting, and provisional telemetry.
 `preflight-races.test.ts` covers slow loading without a budget and cancellation
 of blocked loading. `failure-propagation.test.ts` covers safe retry/backoff
 without a wall-clock budget. Cancellation, question shutdown/late answers,
-stall suspension during pause/questions, wait/tail detachment, and shutdown
-bounds remain covered. Only deadline-specific paused/cause-precedence and
+stall suspension during pause/questions and shutdown bounds remain
+covered. (#130 later removed the wait timeout and the tail action — the
+detachment scenarios named here are retired with those fields; waits now
+end on settlement, a worker question, or an interruption.) Only deadline-specific paused/cause-precedence and
 question expiry assertions are retired. `recovery.test.ts` verifies historical
 saved deadline failures remain pollable/waitable without replay. Historical
 v1 deadline scenarios are superseded, not a coverage gap.
@@ -154,15 +156,13 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
   `surface.test.ts` also rejects malformed supplied task lists instead
   of discarding them during flat recovery, and verifies omitted/true async
   operation equivalence versus explicit-false conflict.
-- **Surface-scoped manual (#64):** `surface.test.ts` proves the compact
-  manual keeps the shared sections yet never names a full-only control as
-  callable (no full-mode-controls section, no pause/resume/tail/timed-wait/
-  steerId docs) and closes with the "Full surface adds" signpost; the full
-  manual keeps every section. Outside the sessions section's `close`
-  argument and the closing delta, the compact text never names
-  `sessionId`/`resumeFrom` at all — shared rules, workspace exclusions,
-  the interrupt doc, and the `delegate_session` description all drop
-  them.
+- **Surface-scoped manual (#64, superseded by ADR 0002):** the
+  compact/full manual split this bullet pinned is gone — there is one
+  surface and one manual (see #130). `surface.test.ts` now pins the
+  single manual: it documents exactly the accepted schema, and every
+  removed control (pause/resume, tail, timed wait, wait-any, steerId,
+  tokenBudget, operationId, task description, task tools/systemPrompt)
+  rejects with teaching instead.
 - **Provenance:** user-approved simplification supersedes #35/#41/#43/#44
   alias acceptance and cardinality defaults.
 
@@ -209,11 +209,11 @@ copy its fixtures, mocks, call graph, or intermediate assertions.
 
 - **Contract:** async-only child `ask_parent` and correlated ticket `answer`;
   visible unanswered questions; parked execution capacity with session/write
-  reservation retained; cancellation, pause, duplicate/late answers;
+  reservation retained; cancellation, duplicate/late answers;
   a parent ticket wait returns on a question rather than deadlocking.
 - **Covered now:** provider-free public-tool tests in `tests/contract/questions.test.ts`
   exercise ask/answer/resume, another ticket using yielded capacity, shared
-  write rejection while parked, wrong/duplicate/late answers, pause,
+  write rejection while parked, wrong/duplicate/late answers
   cancellation, invalid RPCs, and a parent already waiting.
   Also covers rejection of parallel tool calls, questions from reused
   pooled sessions, and cancellation while reacquiring capacity.

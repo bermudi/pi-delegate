@@ -295,6 +295,12 @@ V1 is evidence for behavior, never a design source. When consulting it:
   task `model`, `thinking`, and `reasoning_effort` fields are rejected
   (#32, #44). Registry
   resolvability is not authorization; see SPEC.md and COMPATIBILITY.md.
+- Removed fields reject with teaching, pre-schema (the deadlineMs #118
+  pattern): `tokenBudget` (#129), `operationId`, task `description`,
+  task `tools`/`systemPrompt`, wait `timeoutMs`/`tickets`, `steerId`,
+  and the `pause`/`resume`/`tail` actions (all #130, ADR 0002's prune
+  verdicts). Never silently discard a removed field; historical
+  telemetry/journal records stay readable.
 - Markdown profiles (#7): `<project>/.pi/agents` then `<agentDir>/agents`,
   first definition wins, built-ins win name collisions, `.claude/agents`
   never imported. Frontmatter `model:`/`thinking`/`tools` are profile
@@ -317,8 +323,9 @@ V1 is evidence for behavior, never a design source. When consulting it:
   cold polling recovers results, but running snapshots become `interrupted`
   (never resumed or delivered — the recovered view names the transcript
   journaled at claim time (#123) for a deliberate `resumeFrom`, it never
-  resumes automatically). `operationId` stays host-lifetime; do not
-  mistake ticket recovery for exactly-once dispatch.
+  resumes automatically). Dispatches are not caller-deduplicated
+  (#130 removed operationId); do not mistake ticket recovery for
+  exactly-once dispatch.
 - Pi's child `AgentSession` auto-retries retryable provider errors by default
   before Delegate sees them. Child session settings disable that in memory;
   Delegate's own side-effect-aware retry decides whether a short retry is
