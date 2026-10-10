@@ -3,6 +3,7 @@ import type { DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AdmissionGrant } from "./admission.ts";
 import type { DispatchLifetime } from "./lifetime.ts";
+import { TaskLifetime } from "./task-lifetime.ts";
 import {
   DEFAULT_CONFIG,
   modelConcurrencyLimit,
@@ -26,7 +27,6 @@ import type { SessionPool } from "./sessions.ts";
 import { Deferred, Semaphore } from "./types.ts";
 import type { TicketStore } from "./tickets.ts";
 import type {
-  ExecutionHandle,
   ResolvedTask,
   TaskOutcome,
   Ticket,
@@ -461,21 +461,6 @@ export class DispatchCoordinator {
     prepError: unknown,
   ): Promise<void> {
     const ticket = options.ticket;
-    // The composed signal propagates the (long-lived) dispatch and ticket
-    // cancellation signals to this task's controls. Its listeners on those
-    // sources are removed once the task is fully done: every created
-    // execution has truly settled AND the run body has ended. Until both
-    // hold, removal could silence a still-live worker's abort propagation;
-    // after both, nothing listens to the composed signal anymore.
-    let combined: ReturnType<typeof combineSignals> | undefined;
-    let liveExecutions = 0;
-    let runEnded = false;
-    let disposed = false;
-    const disposeSignal = () => {
-      if (disposed) return;
-      disposed = true;
-      combined?.dispose();
-    };
     const taskStartedAt = Date.now();
     // Live browser rows from the start (diagnostics only): ticket tasks
     // key by ticket id, inline tasks by this dispatch's run id (#119).
@@ -502,172 +487,36 @@ export class DispatchCoordinator {
     }
     const workerStoppedProof = workersStopped.get(task.index)!;
     const workerTailStoppedProof = workerTailsStopped.get(task.index)!;
-    // True once a worker session may exist; below that point a failure is
-    // provably pre-worker and needs no quarantine.
-    let workerCreated = false;
-    // Once the worker's true outcome has landed it must not be overwritten
-    // by a provisional one — worker truth is strictly better information.
-    let workerTruthRecorded = false;
     // The task's Git evidence window, once settled: a late worker-truth
     // outcome folds the same evidence over its own observed set.
     let windowEvidence: WindowEvidence | undefined;
-    const record = (outcome: TaskOutcome) => {
-      if (workerTruthRecorded) return;
-      outcomes[task.index] = outcome;
-      // Live-activity feed: ticket rows update status; sync tasks become
-      // retained browser rows. Best-effort — the browser is diagnostics,
-      // never a dispatch dependency: a throwing sink must not skip the
-      // store's own outcome recording below it.
-      if (this.activity !== undefined) {
-        try {
-          if (ticket !== undefined) {
-            this.activity.setTicketTaskStatus(ticket.id, task.id, outcome.status);
-          } else if (options.syncRunId !== undefined) {
-            // A tracked inline row settles in place — it IS the retained
-            // row, keeping its tool-call history and observed tail.
-            this.activity.setSyncTaskStatus(
-              options.syncRunId,
-              task.id,
-              outcome.status,
-              outcome.status === "ok"
-                ? (outcome.output ?? "")
-                : (outcome.error ?? outcome.output ?? "no output"),
-            );
-          } else {
-            this.activity.retainSyncRun({
-              taskId: task.id,
-              label: task.agent,
-              prompt: task.prompt,
-              status: outcome.status,
-              startedAt: taskStartedAt,
-              endedAt: Date.now(),
-              summary:
-                outcome.status === "ok"
-                  ? (outcome.output ?? "")
-                  : (outcome.error ?? outcome.output ?? "no output"),
-            });
-          }
-        } catch (error) {
-          this.diagnostics.log("error", "activity feed failed", { taskId: task.id }, error);
-        }
-      }
-      // A non-quarantined outcome confirms the worker stopped (or never
-      // started), with no late-worker cleanup tail. Phase reconciliation
-      // can still be pending; the batch-body proof holds shutdown through it.
-      if (!outcome.quarantined) {
-        workerStoppedProof.resolve();
-        workerTailStoppedProof.resolve();
-      }
-      if (ticket) {
-        // The store owns lifecycle; recording can settle the ticket but
-        // never un-settles it.
-        this.tickets.recordOutcome(ticket, outcome);
-      }
-      // Usage reporting (#60): the settled outcome's recorded usage is
-      // what the event carries — emit at the settlement point itself,
-      // not at batch end, so a long-running ticket reports as it goes.
-      if (options.onTaskOutcomeRecorded !== undefined) {
-        try {
-          options.onTaskOutcomeRecorded(task, outcome);
-        } catch (error) {
-          this.diagnostics.log("error", "usage settlement sink failed", { taskId: task.id }, error);
-        }
-      }
-    };
-    /**
-     * The worker's true settlement, independent of the caller-visible one.
-     * The live handle is dropped at real quiescence — a provisional
-     * (cancelled-before-confirmed) outcome leaves the worker reachable for
-     * a later, stronger abort. When the true outcome differs from what was
-     * recorded, it replaces it for visibility — never the ticket status.
-     * Worker stop initiates deferred cleanup; the retained reservation
-     * releases only after that tail ends.
-     */
-    const onWorkerStopped = (
-      handle: ExecutionHandle,
-      late: TaskOutcome | undefined,
-    ) => {
-      // The worker's true settlement: it can no longer observe the composed
-      // signal, so this attempt's propagation listeners become droppable.
-      liveExecutions -= 1;
-      if (liveExecutions === 0 && runEnded) disposeSignal();
-      if (ticket) {
-        this.tickets.dropExecution(ticket, task.index, handle);
-      }
-      if (late === undefined) return;
-      workerTruthRecorded = true;
-      // Reconciliation may already have annotated the provisional entry;
-      // worker truth replaces the run outcome but keeps its integration —
-      // and the Git window's evidence folds over its own observed set.
-      const merged: TaskOutcome = {
-        ...(windowEvidence === undefined
-          ? late
-          : withGitEvidence(late, windowEvidence)),
-        integration: outcomes[task.index]?.integration ?? late.integration,
-      };
-      outcomes[task.index] = merged;
-      if (ticket) {
-        this.tickets.recordOutcome(ticket, merged);
-      } else if (
-        options.syncRunId !== undefined &&
-        this.activity !== undefined
-      ) {
-        // A provisional row keeps its provisional status until worker
-        // truth lands — fold it so a live row never reads cancelled when
-        // the worker actually finished.
-        try {
-          this.activity.setSyncTaskStatus(
-            options.syncRunId,
-            task.id,
-            merged.status,
-            merged.status === "ok"
-              ? (merged.output ?? "")
-              : (merged.error ?? merged.output ?? "no output"),
-          );
-        } catch {
-          // Diagnostics only; the outcome is already recorded.
-        }
-      }
-      // workerStopped() fulfilling proves the worker stopped — no background
-      // continuations remain — even when an earlier abort threw and marked
-      // the outcome quarantined. A thrown abort must not poison quiescence
-      // confirmation for the worker's lifetime: confirm now, run the
-      // deferred cleanup, and release the retained reservation so shutdown
-      // and admission are not held forever by a stopped worker. A worker
-      // that never settles never reaches here, so its barrier correctly
-      // stays pending while it may still be mutating.
-      workerStoppedProof.resolve();
-      // Confirmed quiescence: deferred workspace cleanup first, then the
-      // retained reservation may be released. This completes the worker tail;
-      // batchBodyStopped independently covers phase reconciliation.
-      void (async () => {
-        try {
-          await options.cleanupStoppedWorker?.(task.index);
-        } catch (error) {
-          this.diagnostics.log("error", "deferred cleanup after quiescence failed", { taskId: task.id }, error);
-        }
-        try {
-          grant.releaseRetained(task.index);
-        } catch (error) {
-          this.diagnostics.log("error", "releasing quiesced task reservations failed", { taskId: task.id }, error);
-        } finally {
-          // Worker and cleanup have stopped even if synchronous bookkeeping
-          // failed. A failed release cannot authorize a new reservation.
-          workerTailStoppedProof.resolve();
-        }
-      })();
-    };
+    const lifetime = new TaskLifetime({
+      task,
+      outcomes,
+      workerStoppedProof,
+      workerTailStoppedProof,
+      diagnostics: this.diagnostics,
+      tickets: this.tickets,
+      activity: this.activity,
+      grant,
+      ticket,
+      taskStartedAt,
+      syncRunId: options.syncRunId,
+      cleanupStoppedWorker: options.cleanupStoppedWorker,
+      onTaskOutcomeRecorded: options.onTaskOutcomeRecorded,
+      decorateLateOutcome: (late) =>
+        windowEvidence === undefined ? late : withGitEvidence(late, windowEvidence),
+    });
 
     // Queued tasks hold no execution resources: pause first, then wait for a
     // serialized writer predecessor, then acquire a concurrency slot.
     // A throw anywhere below is an infrastructure fault, not a task failure —
     // convert it so Promise.all can never reject while siblings still run.
     try {
-      combined = combineSignals(
+      const signal = lifetime.attachSignal(combineSignals(
         options.signal,
         ticket ? this.tickets.cancellationSignal(ticket) : undefined,
-      );
-      const signal = combined.signal;
+      ));
       // Dependency gate: every prerequisite's confirmed quiescence first —
       // a provisional (quarantined) one may still be mutating — then its
       // terminal state decides. A failed, cancelled, or unapplied-isolated
@@ -694,7 +543,7 @@ export class DispatchCoordinator {
             ]);
           }
           if (signal.aborted) {
-            record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
+            lifetime.recordOutcome({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
             return;
           }
         }
@@ -703,7 +552,7 @@ export class DispatchCoordinator {
             !prerequisiteSatisfied(outcomes[depIndex]!, tasks[depIndex]!),
         );
         if (blockers.length > 0) {
-          record({
+          lifetime.recordOutcome({
             index: task.index,
             id: task.id,
             status: "blocked",
@@ -725,7 +574,7 @@ export class DispatchCoordinator {
       // would touch the real tree. This is a pre-worker failure: nothing
       // ran, so no quarantine.
       if (prepError !== undefined && task.workspace !== "shared") {
-        record({
+        lifetime.recordOutcome({
           index: task.index,
           id: task.id,
           status: "failed",
@@ -763,7 +612,7 @@ export class DispatchCoordinator {
       while (true) {
         if (ticket) await this.waitWhilePaused(ticket, signal);
         if (signal.aborted) {
-          record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
+          lifetime.recordOutcome({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
           return;
         }
         const predecessor = grant.predecessors.get(task.index);
@@ -776,7 +625,7 @@ export class DispatchCoordinator {
           ]);
         }
         if (signal.aborted) {
-          record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
+          lifetime.recordOutcome({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
           return;
         }
         // Queued tasks need both a per-model slot and a global slot; abort
@@ -786,13 +635,13 @@ export class DispatchCoordinator {
           signal,
         );
         if (modelRelease === undefined) {
-          record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
+          lifetime.recordOutcome({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
           return;
         }
         const release = await this.acquireOrAborted(this.semaphore, signal);
         if (release === undefined) {
           modelRelease();
-          record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
+          lifetime.recordOutcome({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
           return;
         }
         let held: (() => void) | undefined = () => {
@@ -806,7 +655,7 @@ export class DispatchCoordinator {
         if (!ticket?.paused || signal.aborted) {
           try {
             if (signal.aborted) {
-              record({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
+              lifetime.recordOutcome({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
               return;
             }
             const controls: RunControls = {
@@ -912,14 +761,8 @@ export class DispatchCoordinator {
                 effectiveTask,
                 controls,
                 loaders,
-                (handle) => {
-                  workerCreated = true;
-                  liveExecutions += 1;
-                  if (ticket) {
-                    this.tickets.registerExecution(ticket, task.index, handle);
-                  }
-                },
-                onWorkerStopped,
+                (handle) => lifetime.executionCreated(handle),
+                (handle, late) => lifetime.executionStopped(handle, late),
               );
               // The window settles after the final attempt but before
               // workspace reconciliation — its diff must not count the
@@ -982,7 +825,7 @@ export class DispatchCoordinator {
                 options.attribution?.abandon(window);
               }
             }
-            record(outcome);
+            lifetime.recordOutcome(outcome);
             return;
           } finally {
             releaseBoth();
@@ -994,19 +837,18 @@ export class DispatchCoordinator {
     } catch (error) {
       // Unknown task state: quarantine when a worker session may exist so
       // its reservation stays held; otherwise the root is provably clean.
-      record({
+      lifetime.recordOutcome({
         index: task.index,
         id: task.id,
         status: "failed",
         error: `internal dispatch error: ${error instanceof Error ? error.message : String(error)}`,
         retries: 0,
-        quarantined: workerCreated || undefined,
+        quarantined: lifetime.workerMayExist || undefined,
       });
     } finally {
       // The run body is over; only executions still winding down (workerStopped()
       // pending) keep the propagation listeners alive past this point.
-      runEnded = true;
-      if (liveExecutions === 0) disposeSignal();
+      lifetime.finishRun();
     }
   }
 
