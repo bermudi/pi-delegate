@@ -3,6 +3,29 @@
 The v1 suite is evidence, not source material. Tests are rewritten against the
 registered `delegate` tool; they do not import implementation helpers.
 
+## Single-owner dispatch shutdown lifetime (#131)
+
+- **Regression:** `tests/regression/dispatch-lifetime.test.ts` injects
+  synthetic platform faults through the registered tools, never production
+  helper imports. A distinctive concurrency setting selects a one-shot
+  `Math.floor` failure during batch setup. Sync and async cases prove zero
+  provider calls, aligned non-quarantined failures, immediate same-scope
+  readmission, and confirmed shutdown both before and after a retry. Shutdown
+  checks reject the actual budget-expiry warning; merely returning is not
+  evidence of quiescence.
+- A real filesystem-copy observation also proves setup failure discards its
+  prepared scratch copy, leaves the source untouched, and releases that scope.
+- Child resource-loader rejection preserves an independent sibling's result
+  and releases both write scopes. Caller-signal listener failure proves
+  pre-worker task setup remains inside the failure boundary.
+- Existing `cancellation.test.ts`, `preflight-races.test.ts`, and
+  `scratch-copy-admission.test.ts` retain coverage for preparation/shutdown
+  races, provisional cancellation, confirmed worker quiescence, deferred
+  workspace cleanup, and source reservations through reconciliation.
+- Adopted lifetime obligations are resolve-only `Deferred` proofs, not
+  execution promises: rejected work cannot enter the proof API. No internal
+  unit test or production export is added for the lifetime abstraction.
+
 ## Terminal-safe diagnostic routing (#122)
 
 - **Regression:** raw Delegate console diagnostics moved Pi's shared terminal

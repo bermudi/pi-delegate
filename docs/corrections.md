@@ -55,6 +55,8 @@ move. This file is the ledger; the reasoning behind the ladder lives in
   writes are rejected; private diagnostic routing owns the stderr exception.
 - Real-PTY diagnostic fault tests preserve answers, shutdown and startup;
   public Git/copy tests prevent private records entering worker state.
+- `dispatch-lifetime.test.ts`: public failed-start faults require immediate
+  admission release and confirmed shutdown, never a budget-expiry fallback.
 - `.github/workflows/ci.yml`: install + typecheck + test + build on every
   push/PR to main. Publishing separately gated (`publish-npm.yml`): tag must
   equal `package.json` version, OIDC, no local npm auth.
@@ -149,3 +151,4 @@ runs both.
 - 2026-10-10 — #130 prune commits shipped tracked one-shot scripts (`scripts/.tmp-*`) into the tree, and the fixup's own `git add -A` re-committed two fresh ones mid-sweep. Ignore the pattern (`scripts/.tmp-*` in .gitignore), trash after use, never `add -A` while a tmp script exists.
 - 2026-10-10 — #130 operator review found stale live-text behind shipped removals the per-verdict sweeps missed: the manual's `operationId` bullet, `'tail'` in a schema description, a dead `DispatchArguments.tokenBudget` field, and stale claims across SPEC/COMPATIBILITY/INVARIANTS/TEST-MIGRATION. After a field dies, grep the whole repo for the name — model-facing text included — not just the files the verdict touched.
 - 2026-10-10 — the verdict-5 COMPATIBILITY edit garbled the #33 block (duplicated fragment, eaten clause) while the edit script exited clean; the fixup's first pass then created column-0 continuations inside markdown lists and a newline inside a table row. Verify what an edit WROTE — read back each edited region and check line shapes — an exit code only proves the matcher hit.
+- 2026-10-10 — #131 model-comparison review found both lifetime patches claiming placement-independent safety while coordinator setup still preceded its `try`; arbitrary adopted promises also left unhandled rejection paths. Guard setup/finalization, accept resolve-only proof gates, and enforce failed-start admission/shutdown through public-tool platform-fault regressions (`dispatch-lifetime.test.ts`).

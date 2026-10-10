@@ -807,9 +807,11 @@ worked around with a host modification.
   model call and an aborted turn in the old transcript. Workspace safety is
   unaffected because shutdown still waits for worker quiescence.
 - **Blocking shutdown.** Quit and session replacement wait for cancelled
-  workers to actually stop. Cancellation is cooperative, so a worker whose
-  provider or tool ignores the abort delays shutdown for as long as it runs.
-  A visible status names the tickets being waited on.
+  workers and their cleanup to actually stop, up to the shutdown-quiescence
+  budget (~30s; #52). Cancellation is cooperative: if a provider or tool
+  ignores the abort past that budget, shutdown proceeds only with a warning
+  naming the still-unconfirmed work. Budget expiry never releases its
+  reservations. A visible status names the dispatches being waited on.
 - **Saved tickets, not resumed work.** Ticket identities and saved results
   survive `/reload` and session replacement under the same agent directory;
   orderly shutdown cancels active tickets. An unclean exit leaves a running
