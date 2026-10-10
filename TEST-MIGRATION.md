@@ -166,6 +166,33 @@ question expiry assertions are retired. `recovery.test.ts` verifies historical
 saved deadline failures remain pollable/waitable without replay. Historical
 v1 deadline scenarios are superseded, not a coverage gap.
 
+## Migration policy (moved from COMPATIBILITY.md, 2026-10-10)
+
+Do **not** port the v1 test suite wholesale. Its regression knowledge is useful;
+its decomposition is not a v2 contract. Before reimplementation, classify each
+v1 test by purpose:
+
+1. **Contract tests** cover behavior promised by `SPEC.md`: accepted calls,
+   validation, results, sessions, tickets, workspaces, usage, and other
+   caller-visible effects. Reimplement these against v2's public tool boundary.
+2. **Regression tests** reproduce a real failure that could violate the public
+   contract or an invariant. Preserve the scenario and expected outcome, but
+   reimplement it through the public boundary rather than carrying over v1
+   fixtures, mocks, call sequences, or helper assumptions.
+3. **Internal tests** exist only to validate a v1 helper, module boundary,
+   intermediate representation, private state transition, or decomposition.
+   Delete them. Add new internal tests only when v2's own design warrants them.
+
+Tests should assert observable results and effects: returned tool content,
+ticket/session behavior, filesystem state, preserved user Git state, resource
+availability, emitted usage, and actionable failure. They should not assert
+which v1 helper was called, the shape of private state, exact internal event
+ordering, or a particular cleanup/reconciliation mechanism.
+
+The old suite is a source catalogue for discovering cases, not code to copy and
+not a coverage target. Similar test counts, file names, fixtures, and line
+coverage are explicitly not compatibility goals.
+
 ## Classification
 
 - **Contract** — proves behavior promised by `SPEC.md`.
