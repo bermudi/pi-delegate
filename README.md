@@ -3,11 +3,10 @@
 Subagent dispatch for the [Pi coding agent](https://github.com/earendil-works/pi).
 Delegate registers three tools: `delegate` runs one task or a batch of tasks;
 `delegate_ticket` operates the durable ticket a backgrounded dispatch returns
-(poll, wait, cancel, interrupt, pause, resume, answer, steer, tail);
-`delegate_session` lists and
+(poll, wait, cancel, answer, steer, interrupt); `delegate_session` lists and
 closes pooled subagent sessions. Tasks run against the shared tree, a disposable
 copy, or a private Git worktree. `SPEC.md` is the v3 behavioral contract;
-`COMPATIBILITY.md` records deliberate v2→v3 breaks.
+`COMPATIBILITY.md` records deliberate breaks from earlier versions.
 
 ## Quickstart
 
@@ -35,57 +34,43 @@ always means background execution. `tasks: []` shows the manual.
 Delegation is never automatic: the parent model decides whether to call
 these tools, so a model that never calls them does all the work itself.
 
-## Compact and full interfaces
+## One tool surface
 
-Compact is the default: batch `tasks`, `async`, `workspace`, `brief`; each task
-has `prompt`, `agent`, `cwd`, `workspace`. Named Markdown profiles supply the
-usual tools and base instructions.
-
-To enable all advanced controls, set `"surface": "full"` in user-global
-`delegate.json`, then `/reload`. Both interfaces use the same engine. Hidden
-advanced inputs reject with instructions rather than silently executing. This
-is an operator setting, not a model-family switch.
-Choose before launching work: `/reload` cancels active workers and waits for
-safe cleanup, as it does for any extension reload.
-
-The manual (`tasks: []`) documents only the selected surface's controls and,
-on compact, ends with the list of what full adds.
-
-Full mode adds task ids/display labels, explicit tools/base-prompt overrides,
-session reuse, transcript resume and dependencies; batch token
-budgets/retry keys; ticket pause/resume/tail, wait-any, timed waits and explicit
-steering retry keys. Safety guarantees are the same in both modes.
+There is one tool surface (ADR 0002). Every field and action in this README is
+advertised and accepted; there is no compact or full mode to choose. A
+`delegate.json` that still sets `surface` fails at load — remove the key and
+`/reload`. Removed fields reject with an explanation rather than being ignored
+(see Dispatch).
 
 ## Dispatch
 
 A call resolves profiles, tools, workspaces and write claims before running
-work. Compact mode covers ordinary calls. Full-mode task fields are `prompt`
-(required unless `resumeFrom`), `id` (auto `task-1`…), `description` (display
-label, ≤200 chars), `agent`, `cwd`, `systemPrompt`, `tools`, `sessionId`,
-`resumeFrom`, `workspace`, `dependsOn`. Batch `workspace`
-is the default for tasks without their own; full-mode `operationId` is a
-host-lifetime dispatch retry key.
+work. Task fields are `prompt` (required unless `resumeFrom`), `id` (optional
+correlation key; unnamed tasks are `task-1`, `task-2`…), `agent`, `cwd`,
+`sessionId`, `resumeFrom`, `workspace`, and `dependsOn`. The top-level
+`workspace` is the default for tasks that do not set their own.
 
-Tasks have no wall-clock deadline (#118): `deadlineMs` has been removed and
-rejects before execution in both modes, even when null. Stall detection remains
-an inactivity watchdog. Cancel/interrupt stop work cooperatively; ticket wait
-and tail timeouts detach only the waiter. Saved historical deadline failures
-remain readable.
+Each `prompt` and the top-level `brief` are capped at 32,768 characters.
+Reference files by path instead of pasting their contents.
 
-Only canonical field names are accepted. Removed cross-harness spellings
-reject before any worker starts, even when null or accompanied by the
-canonical field. Models/effort remain operator-configured, never call fields.
-Top-level `brief` is shared batch
-context: it prepends to every task's prompt inside a `--- batch brief ---`
-fence (task sections and headers note it once; it never merges into the
-prompt's prose). Top-level `tokenBudget` (positive integer) caps the
-batch's recorded token usage: settled tasks charge their usage to it, and
-once the ceiling is reached queued tasks settle `budget-exhausted`
-instead of starting — tasks already running always finish, and dependents
-of an exhausted task block naming the budget. Result and ticket headers
-report `token budget: consumed/limit`, `details.tokenBudget` carries
-`{limit, consumed, exhaustedAt}`, and the dispatch's telemetry row
-records the account.
+Tasks have no wall-clock deadline (#118): `deadlineMs` is removed and rejects
+before execution, even when null. Stall detection remains an inactivity
+watchdog (`stallTimeoutMs`). Cancel and interrupt stop work cooperatively.
+Saved historical deadline failures remain readable.
+
+Only canonical field names are accepted. Removed fields reject before any
+worker starts, even when null or accompanied by the canonical field:
+`description`, `systemPrompt`, `tools`, `operationId`, `steerId`, `deadlineMs`,
+`tokenBudget` (batch spend is bounded by task count and concurrency, not a
+caller budget), `timeoutMs`, and the cross-harness spellings `subagent_type`,
+`agent_type`, `task_name`, `run_in_background`, `timeout_ms`, and a task-level
+`message`. Each rejection says what to do instead. `model`, `thinking`, and
+`reasoning_effort` are rejected wherever they appear: models and effort are
+configured in `delegate.json`, never set by a call.
+
+Top-level `brief` is shared batch context: it prepends to every task's prompt
+inside a `--- batch brief ---` fence (task sections and headers note it once; it
+never merges into the prompt's prose).
 
 Delivery happens once, when the batch fully settles: tickets settling within the
 same flush window coalesce into a single steering wake when the parent is still
@@ -122,29 +107,25 @@ then `<agentDir>/agents/*.md` — first definition wins; built-ins win name
 collisions. Frontmatter requires `name` and `description` and may set `tools`,
 `model`, `thinking`; the body is the system prompt. `.claude/agents` is never
 imported. An authored `general.md` or `scout.md` is an ordinary exact-name
-profile, not an alias. Profile tools/body are defaults; full-mode task
-overrides retain precedence.
+profile, not an alias. Profile tools and body are the only capability and
+base-prompt selectors; there are no per-task overrides.
 
 ## Steering
 
-`delegate_ticket({ ticket, action: "steer", message, steerId })` sends text to a
-running task; `taskId` picks the target when several run (it defaults to the
-only running task, and an ambiguous call errors naming the running ids).
-`steerId` is optional — omitted, the receipt names a `steer:<tool-call-id>`
-key derived from the tool call itself, so a transport-level retry dedupes
-instead of re-injecting.
-Receipts:
+`delegate_ticket({ ticket, action: "steer", message })` sends text to a running
+task. `taskId` picks the target when several run; it defaults to the only running
+task, and an ambiguous call errors naming the running ids. Each steer receipts
+under a key derived from its own tool call, so a transport-level retry replays
+the receipt instead of injecting the message twice. Receipts:
 
 - `steered` — queued on a live run; the child sees it at the next turn boundary.
 - `activated` — no run in flight (queued, between retries, pre-prompt); the
   message is parked and opens the task's next turn.
-- `duplicate` — this `steerId` already applied an identical steer; nothing
-  re-applies.
+- `duplicate` — this steer already applied; nothing re-applies.
 - `not-applied` — the task settled, the ticket was recovered, or nothing
   matches.
 
-Reusing `steerId` with a different task or message is a conflict error naming
-both attempts. Steering is boundary delivery: the child's model receives the
+Steering is boundary delivery: the child's model receives the
 message at run start or a turn boundary, never merged into a turn already
 streaming. Parked steers void to `not-applied` if the task settles first;
 recovered tickets always refuse steering. A whole-task retry re-supplies
@@ -196,7 +177,6 @@ silently does nothing; see `COMPATIBILITY.md` for the mapping.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `surface` | `"compact"` | Advertised and validated interface: `"compact"` or `"full"`; changes take effect on `/reload`. |
 | `maxConcurrent` | `8` | Global cap on simultaneous tasks. |
 | `concurrency.default` | unset | Fallback in-flight bound. |
 | `concurrency.providers` | `{}` | Per-provider bound, e.g. `{"anthropic": 2}`. |
@@ -222,27 +202,19 @@ and disables telemetry without changing delegation results. Inspect with
 
 ## Tickets
 
-Compact supports poll/wait/cancel/answer/steer/interrupt. The optional timed
-wait, wait-any, pause/resume and tail controls below require full mode.
-
-`delegate_ticket({ ticket, action, ... })` operates on a ticket:
+`delegate_ticket({ ticket, action, ... })` operates on a ticket. Its actions are
+`poll`, `wait`, `cancel`, `answer`, `steer`, and `interrupt`. Any other action
+name is rejected with that list.
 
 - `poll` — this session's ticket roster, or one ticket's task list and
   settled results.
-- `wait` — block until the ticket settles; `timeoutMs` bounds the wait (unset
-  means wait for settlement) and a `tickets` array watches several, returning
-  when the first watched ticket settles — a one-id list folds into the
-  single-ticket wait. Both `timeoutMs` and `tickets` are full-mode controls.
-  Timing out or detaching never affects the task.
+- `wait` — parks until the ticket settles, a worker asks a question, or an
+  interruption arrives. Waits are unbounded; detaching never affects the task,
+  and delivered results arrive on their own, so polling is enough if you would
+  rather move on.
 - `cancel` — the first call previews what would stop and warns that writes and
   commands are not rolled back; `force: true` terminates the ticket and asks
   workers to abort.
-- `pause` / `resume` — cooperative pause at a turn boundary; the current model
-  response and tool calls finish first. A requested-but-not-yet-parked task
-  shows `pausing`; `paused` means parked between turns (or held while
-  queued). A paused task keeps its execution slot, session, and workspace
-  reservation by design — paused remains running (INVARIANTS) — so a small
-  `maxConcurrent` can be starved by a long-paused ticket; resume frees it.
 - `answer` — reply to a worker question (see below).
 - `steer` — send text to a running task (see Steering).
 - `interrupt` — abort one task's in-flight turn cooperatively (`taskId`
@@ -250,22 +222,21 @@ wait, wait-any, pause/resume and tail controls below require full mode.
   `interrupted`, not `cancelled`: a pooled session returns reusable, a
   fresh task keeps its transcript and a `resumeFrom` hint. A settled,
   already-interrupted, or not-yet-running target receipts `not-applied`.
-- `tail` — a bounded, incremental read of one task's assistant output
-  (`taskId` defaults to the ticket's only unsettled or only task and is
-  required when several ran).
-  `offset` is a char cursor that clamps when out of range; the reply
-  carries the chunk plus a `nextOffset` cursor for the following read.
-  `waitMs` bounds a park that resolves early when new output lands or the
-  task settles — omitted or `0` is a pure snapshot.
+
+Pause and resume are not model-facing. They are operator controls in the
+`/subagents` dashboard, and the tool rejects `pause` and `resume` with a pointer
+to `wait` and `cancel`. A paused task keeps its execution slot, session, and
+workspace reservation by design — paused remains running (INVARIANTS) — so a
+small `maxConcurrent` can be starved by a long-paused ticket; resuming it frees
+the slot.
 
 Tickets are durable journals under `<agentDir>/delegate-tickets/` with
 owner-only permissions. Settled outcomes are recoverable after a restart via
 `poll`/`wait`; a snapshot that was running recovers as `interrupted` — running
-work is never resumed automatically. `operationId` deduplication and delivered
-wakes do not survive restart; only the recorded outcomes do. The bare roster
-and unknown-ticket hints list only the current session's tickets — records
-owned by sibling sessions stay readable by explicit id and are counted in a
-trailing note.
+work is never resumed automatically. Delivered wakes do not survive restart;
+only the recorded outcomes do. The bare roster and unknown-ticket hints list
+only the current session's tickets — records owned by sibling sessions stay
+readable by explicit id and are counted in a trailing note.
 
 ## Worker questions
 
@@ -291,16 +262,20 @@ transcript.
 
 ## Parent conversation isolation
 
-Children do not share the parent's conversation. The child system prompt is an
-authored `systemPrompt` or Markdown profile body verbatim when present;
-otherwise the parent's user-authored prompt inputs plus a subagent framing.
+Children do not share the parent's conversation. The child system prompt is a
+Markdown profile's body, verbatim, when the profile has one; otherwise —
+including the built-in profiles — it is composed from the parent's
+user-authored prompt inputs plus a subagent framing.
 Project context files under the task's cwd are kept; user-global context files
-are excluded. Children run with no extensions and an in-memory settings
-profile: no parent extensions or MCP tools, no parent history or transcript
-tail, and no delegate tools of their own — `delegate`, `delegate_ticket`, and
-`delegate_session` are stripped from every child toolset (explicit `tools`,
-profile frontmatter, and the mirrored parent set alike), so subagents never
-nest dispatches.
+are excluded. Children run with an in-memory settings profile and no parent
+extensions, no parent history or transcript tail, and no MCP tools from the
+parent. One exception is `providerExtensions`: a provider's subagents may load
+the packages configured for that provider (the shipped default gives
+`openai-codex` children a companion package, best-effort — see Configuration).
+No delegate tools are ever available to children — `delegate`,
+`delegate_ticket`, and `delegate_session` are stripped from every child toolset
+(explicit `tools`, profile frontmatter, and the mirrored parent set alike), so
+subagents never nest dispatches.
 
 ## Develop
 
