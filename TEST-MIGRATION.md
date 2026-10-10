@@ -48,6 +48,45 @@ registered `delegate` tool; they do not import implementation helpers.
   Per-worker tail completion is intentionally not named global resource
   safety: ordinary outcomes can precede phase reconciliation.
 
+## Task lifetime and pipeline extraction (#133/#134)
+
+- **Behavior-preserving ownership refactor:** `TaskLifetime` owns started-task
+  signal disposal, worker counts/existence, provisional-versus-late outcome
+  precedence, integration-preserving replacement, and cleanup-tail proof
+  confirmation. Planned never-started proofs, scheduling, reconciliation,
+  and Git-window timing remain coordinator-owned. `DispatchPipeline` owns
+  resolution/config/admission/workspace/completion flow; native API/UI,
+  shutdown, usage throttling, parent attribution hooks and prompt capture
+  remain extension-owned.
+- `attribution.test.ts` adds a real-bash write followed by provisional
+  cancellation. The worker's eventual Git footprint must enrich its truth
+  without reversing ticket cancellation. This preservation guard waits for
+  the actual durable evidence before rendering; the separate #135 case
+  deliberately exercises rendering before that evidence.
+- `cancellation.test.ts` parameterizes real isolated-preparation failure
+  across sync/async and immediate same-source retry/shutdown-before-retry.
+  It proves unused reservations release without polling admission, no
+  worker starts on failure, and shutdown confirms quiescence rather than
+  merely exhausting its budget. These guards pass the pre-extraction tree.
+- Existing cancellation, cleanup-held shutdown, dependency/retry, live-board,
+  usage and telemetry tests remain the primary behavioral guards. No
+  lifecycle helper imports or test-only production exports are introduced.
+
+## Terminal rendering after deferred evidence (#135)
+
+- **Regression:** a terminal poll could freeze text after execution removal
+  but before the deferred Git window closed. Journal/details later contained
+  the file path while cached text still said it was unknown.
+- `attribution.test.ts` holds the real final Git status command behind a PATH
+  shim that delegates native Git, then renders worker truth before evidence.
+  After releasing the probe it requires both text and details to name the
+  actual bash-written file, with cancellation unchanged. Repeated unchanged
+  polls remain stable; existing output-bound tests retain spill-path coverage.
+- The regression fails without terminal-view invalidation and passes when
+  every outcome publication invalidates that document. Per-outcome output
+  caches remain intact; neither object identity nor execution removal is
+  assumed to prove final annotation.
+
 ## Terminal-safe diagnostic routing (#122)
 
 - **Regression:** raw Delegate console diagnostics moved Pi's shared terminal
