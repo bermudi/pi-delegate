@@ -1939,10 +1939,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
         dispatchSignal,
         telemetrySpan.ownedPaths,
       );
-      // The handoff. This invocation is the try block's last statement and
-      // the completion it yields is composed and returned, never awaited
-      // here — the ownership comment above spells out why that makes the
-      // catch below provably pre-handoff.
+      // The completion is returned without awaiting it here. The lifetime
+      // wrapper closes on every exit; the coordinator's adopted proofs cover
+      // execution, reconciliation, and cleanup independently of this catch.
       const completion = coordinator
         .run(tasks, {
           env,
@@ -1968,6 +1967,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 : "The call was aborted before source application.",
             }),
           onWorkerQuiesced: (taskIndex) => plan!.cleanupWorker(taskIndex),
+          disposeUnstarted: () => plan!.dispose(),
           // #60: task settlement is the usage event's firing point — the
           // settled outcome's recorded usage, tagged with its ticket and
           // task. No usage (never ran, cancelled pre-prompt) → no event.

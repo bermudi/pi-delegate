@@ -39,6 +39,13 @@ function onAbort(signal: AbortSignal): Promise<void> {
   );
 }
 
+/** Public tool errors render `.message`; keep the primary failure visible there. */
+function aggregateFailure(message: string, failures: readonly unknown[]): AggregateError {
+  const first = failures[0];
+  const detail = first instanceof Error ? first.message : String(first);
+  return new AggregateError(failures, `${message}: ${detail}`, { cause: first });
+}
+
 /**
  * Compose abort sources into one signal. The returned `dispose` removes the
  * listeners this call attached to the (possibly long-lived) source signals —
@@ -166,6 +173,8 @@ export class DispatchCoordinator {
         outcomes: TaskOutcome[],
       ) => Promise<readonly TaskOutcome[]>;
       onWorkerQuiesced?: (taskIndex: number) => Promise<void>;
+      /** Dispose prepared workspaces if batch setup fails before any task starts. */
+      disposeUnstarted?: () => Promise<void>;
       /**
        * The session's Git evidence-window registry (SPEC v3
        * "Observability — Completion evidence"; user decision 2026-10-02):
@@ -236,22 +245,18 @@ export class DispatchCoordinator {
     // scratch disposal) and the admission-reservation release in the
     // finally below.
     const bodySettled = new Deferred();
-    // Adopt the batch's shutdown obligation as the first act of the call.
-    // The `finally` below always resolves `bodySettled` (even on a finalize
-    // failure), and a worker that never settles keeps its `fullyQuiesced`
-    // pending — so the lifetime waits on exactly the work that may still be
-    // mutating. The pipeline, not this call, closes the lifetime.
-    options.lifetime.adopt(
-      Promise.all([
-        ...tasks.map((task) => fullyQuiesced.get(task.index)!.promise),
-        bodySettled.promise,
-      ]),
-    );
-    this.semaphore.setLimit(options.config.maxConcurrent);
     const grant = options.grant;
-    const loaders = new Map<string, Promise<DefaultResourceLoader>>();
+    const started = new Set<number>();
+    const failures: unknown[] = [];
 
     try {
+      // Register resolve-only proofs before starting work. Setup and every
+      // later stage share this error boundary: never-started tasks are
+      // settled below, while unknown worker state keeps its proofs pending.
+      options.lifetime.adopt(bodySettled);
+      for (const proof of fullyQuiesced.values()) options.lifetime.adopt(proof);
+      this.semaphore.setLimit(options.config.maxConcurrent);
+      const loaders = new Map<string, Promise<DefaultResourceLoader>>();
       // Dependency phases run in order: every task in a phase waits for
       // the whole earlier phase — including its isolated reconciliation —
       // before it starts, so a dependent's tree carries prerequisite work.
@@ -275,9 +280,10 @@ export class DispatchCoordinator {
             this.diagnostics.log("error", "workspace preparation failed", { phase }, error);
           }
         }
-        await Promise.all(
-          phaseTasks.map((task) =>
-            this.runOne(
+        const runs = await Promise.allSettled(
+          phaseTasks.map((task) => {
+            started.add(task.index);
+            return this.runOne(
               preparedByIndex.get(task.index) ?? task,
               options,
               grant,
@@ -287,8 +293,8 @@ export class DispatchCoordinator {
               fullyQuiesced,
               tasks,
               prepError,
-            ),
-          ),
+            );
+          }),
         );
         // Defensive: runOne is exception-safe and every exit records an
         // outcome, but a silent gap would skip reconciliation, block every
@@ -315,40 +321,23 @@ export class DispatchCoordinator {
             }
           }
         }
+        // An infrastructure exception escaping runOne must not finalize the
+        // batch while sibling run bodies are still active. Wait for them all,
+        // then surface the failures; unknown workers remain quarantined.
+        const runFailures: unknown[] = runs.flatMap((run) =>
+          run.status === "rejected" ? [run.reason as unknown] : [],
+        );
+        if (runFailures.length > 0) {
+          throw aggregateFailure("task infrastructure failed", runFailures);
+        }
         if (options.reconcilePhase !== undefined) {
           const ticket = options.ticket;
           try {
             await options.reconcilePhase(phase, outcomes as TaskOutcome[]);
           } catch (error) {
-            // The tree's integration failed mid-flight: later phases can
-            // never run on it. Settle every unstarted task now — a task
-            // without an outcome never entered runOne, so no worker can
-            // exist: a pre-worker failure needs no quarantine, and
-            // resolving its gates here is what keeps the batch's shutdown
-            // barrier from waiting forever on tasks that will never run.
-            // The error still propagates: the batch fails as a whole once
-            // the finally below has recorded this phase's reconciled
-            // outcomes.
-            const reason = `workspace reconciliation failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`;
+            // Stop later phases. The outer failure boundary settles their
+            // never-started tasks after this phase's final annotations land.
             this.diagnostics.log("error", "workspace reconciliation failed", { phase }, error);
-            for (const task of tasks) {
-              if (outcomes[task.index] !== undefined) continue;
-              const outcome: TaskOutcome = {
-                index: task.index,
-                id: task.id,
-                status: "failed",
-                error: reason,
-                retries: 0,
-              };
-              outcomes[task.index] = outcome;
-              quiescence.get(task.index)!.resolve();
-              fullyQuiesced.get(task.index)!.resolve();
-              if (ticket) {
-                this.tickets.recordOutcome(ticket, outcome);
-              }
-            }
             throw error;
           } finally {
             if (ticket) {
@@ -376,6 +365,37 @@ export class DispatchCoordinator {
           }
         }
       }
+    } catch (error) {
+      failures.push(error);
+      this.diagnostics.log("error", "dispatch infrastructure failed", {}, error);
+      for (const task of tasks) {
+        if (started.has(task.index)) continue;
+        const outcome: TaskOutcome = {
+          index: task.index,
+          id: task.id,
+          status: options.signal?.aborted ? "cancelled" : "failed",
+          error: `dispatch infrastructure failed: ${error instanceof Error ? error.message : String(error)}`,
+          retries: 0,
+        };
+        outcomes[task.index] = outcome;
+        // Proof comes from never entering runOne, not successful reporting.
+        quiescence.get(task.index)!.resolve();
+        fullyQuiesced.get(task.index)!.resolve();
+        try {
+          if (options.ticket) this.tickets.recordOutcome(options.ticket, outcome);
+        } catch (recordError) {
+          failures.push(recordError);
+          this.diagnostics.log("error", "recording unstarted task failure failed", { taskId: task.id }, recordError);
+        }
+      }
+      if (started.size === 0) {
+        try {
+          await options.disposeUnstarted?.();
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+          this.diagnostics.log("error", "disposing unstarted dispatch failed", {}, cleanupError);
+        }
+      }
     } finally {
       // Late worker truth can look nonquarantined before its cleanup tail
       // finishes. Keep reservations through that full barrier too, otherwise
@@ -385,13 +405,27 @@ export class DispatchCoordinator {
       for (const task of tasks) {
         if (!fullyQuiesced.get(task.index)!.resolved) retained.add(task.index);
       }
-      grant.release(retained);
-      if (options.ticket) this.tickets.finishBatch(options.ticket);
-      // Only now is the batch fully quiesced for a shutdown barrier:
-      // finalization and every admission reservation release have run.
+      try {
+        grant.release(retained);
+      } catch (error) {
+        failures.push(error);
+        this.diagnostics.log("error", "releasing dispatch reservations failed", {}, error);
+      }
+      try {
+        if (options.ticket) this.tickets.finishBatch(options.ticket);
+      } catch (error) {
+        failures.push(error);
+        this.diagnostics.log("error", "finishing dispatch ticket failed", {}, error);
+      }
+      // All synchronous finalization attempts ended. Unknown workers still
+      // hold their own proof gates and retained reservations independently.
       bodySettled.resolve();
     }
 
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw aggregateFailure("dispatch infrastructure and finalization failed", failures);
+    }
     return {
       outcomes: outcomes as TaskOutcome[],
       usage: outcomes.reduce<Usage | undefined>(
@@ -431,18 +465,14 @@ export class DispatchCoordinator {
     // execution has truly settled AND the run body has ended. Until both
     // hold, removal could silence a still-live worker's abort propagation;
     // after both, nothing listens to the composed signal anymore.
-    const combined = combineSignals(
-      options.signal,
-      ticket ? this.tickets.cancellationSignal(ticket) : undefined,
-    );
-    const signal = combined.signal;
+    let combined: ReturnType<typeof combineSignals> | undefined;
     let liveExecutions = 0;
     let runEnded = false;
     let disposed = false;
     const disposeSignal = () => {
       if (disposed) return;
       disposed = true;
-      combined.dispose();
+      combined?.dispose();
     };
     const taskStartedAt = Date.now();
     // Live browser rows from the start (diagnostics only): ticket tasks
@@ -613,8 +643,15 @@ export class DispatchCoordinator {
         } catch (error) {
           this.diagnostics.log("error", "deferred cleanup after quiescence failed", { taskId: task.id }, error);
         }
-        grant.releaseRetained(task.index);
-        fully.resolve();
+        try {
+          grant.releaseRetained(task.index);
+        } catch (error) {
+          this.diagnostics.log("error", "releasing quiesced task reservations failed", { taskId: task.id }, error);
+        } finally {
+          // Worker and cleanup have stopped even if synchronous bookkeeping
+          // failed. A failed release cannot authorize a new reservation.
+          fully.resolve();
+        }
       })();
     };
 
@@ -623,6 +660,11 @@ export class DispatchCoordinator {
     // A throw anywhere below is an infrastructure fault, not a task failure —
     // convert it so Promise.all can never reject while siblings still run.
     try {
+      combined = combineSignals(
+        options.signal,
+        ticket ? this.tickets.cancellationSignal(ticket) : undefined,
+      );
+      const signal = combined.signal;
       // Dependency gate: every prerequisite's confirmed quiescence first —
       // a provisional (quarantined) one may still be mutating — then its
       // terminal state decides. A failed, cancelled, or unapplied-isolated
