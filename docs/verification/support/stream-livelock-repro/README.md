@@ -116,3 +116,11 @@ Notes:
 - `toolChoice: "required"` is needed because glm-5.3 otherwise answers
   the review request in prose; named forcing (`{type:"function",…}`) is
   rejected by zai with error 1210.
+
+## Capture verdicts (raw data cleared)
+
+12 live attempts against stock pi-ai on 2026-10-04/05 (zai/glm-5.3-flash):
+9 COMPLETED, 3 ERRORED (stream result errors), 0 WEDGE — the wild trigger
+was never reproduced. These verdicts were read from each attempt's
+meta.json before the raw captures were cleared (untracked by policy);
+`capture-live.mjs` regenerates equivalent data on demand.
