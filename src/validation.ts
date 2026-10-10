@@ -14,7 +14,6 @@ export interface TaskInput {
   readonly resumeFrom?: string;
   readonly workspace?: "shared" | "scratch" | "isolated";
   readonly dependsOn?: string[];
-  readonly description?: string;
 }
 
 export type DispatchCall =
@@ -350,11 +349,6 @@ function validateTasks(tasks: readonly TaskInput[]): void {
     if (task.prompt !== undefined && task.prompt.length > PROMPT_CHAR_LIMIT) {
       fail(
         `${where}: prompt must be at most ${PROMPT_CHAR_LIMIT} characters; got ${task.prompt.length}. ${oversizedPromptRemedy}`,
-      );
-    }
-    if (task.description !== undefined && task.description.length > 200) {
-      fail(
-        `${where}: description must be at most 200 characters; got ${task.description.length}.`,
       );
     }
     if (task.systemPrompt !== undefined && task.systemPrompt.trim() === "") {

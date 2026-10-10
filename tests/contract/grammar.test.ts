@@ -206,16 +206,23 @@ describe("canonical task fields (SPEC v3, #61)", () => {
     }
   }
 
-  test("full-mode description labels output without replacing the correlation id", async () => {
+  test("the task description field is removed and rejects with teaching", async () => {
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
     subagents.respond([fauxAssistantMessage("LABELED")]);
-    const result = await callDelegate(session, {
+    const rejected = await callDelegate(session, {
       async: false,
       tasks: [{ id: "correlation", description: "classify auth", prompt: "work", agent: "explore" }],
     });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.text).toContain("description field has been removed");
+    // Labels are derived now: id first, agent when no id is set.
+    const result = await callDelegate(session, {
+      async: false,
+      tasks: [{ id: "correlation", prompt: "work", agent: "explore" }],
+    });
     expect(result.isError).toBe(false);
-    expect(result.text).toContain("### Task classify auth — completed");
+    expect(result.text).toContain("### Task correlation — completed");
     const results = objectOf(result.details, "details").results as { id: string }[];
     expect(results[0]!.id).toBe("correlation");
   });

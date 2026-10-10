@@ -168,14 +168,8 @@ const taskSchema = Type.Object(
           "Ids of tasks in this batch that must succeed before this one starts; their outputs are handed off.",
       }),
     ),
-    description: Type.Optional(
-      Type.String({
-        maxLength: 200,
-        description:
-          "Optional short label shown in place of the task id in call rows and section headers. Not a correlation key — dependsOn, answer, and steer still use id.",
-      }),
-    ),
   },
+
   { additionalProperties: false },
 );
 
@@ -568,6 +562,16 @@ function rejectForeignContextFields(record: Record<string, unknown>): void {
 }
 
 /** Removed task deadlines reject by presence, before null stripping or flat recovery. */
+/** #130: the display label is gone; presence rejects with teaching. */
+function rejectTaskDescription(record: Record<string, unknown>): void {
+  if (Object.hasOwn(record, "description")) {
+    throw new Error(
+      "The task description field has been removed — labels are derived. " +
+        "Call rows and result headers show the task id (or agent when no id is set); remove the field and rely on id.",
+    );
+  }
+}
+
 function rejectTaskDeadline(record: Record<string, unknown>): void {
   if (Object.hasOwn(record, "deadlineMs")) {
     throw new Error(
@@ -612,6 +616,7 @@ function normalizeTask(value: unknown, index: number): unknown {
   const task = { ...value };
   // Removed fields reject even when null — before null stripping.
   rejectTaskDeadline(task);
+  rejectTaskDescription(task);
   rejectObsoleteContext(task);
   rejectFieldAliases(task, true);
   // Same for the foreign context-sharing spellings (#56).
@@ -627,7 +632,7 @@ function normalizeTask(value: unknown, index: number): unknown {
     throw new Error(`tasks[${index}]: ${REASONING_EFFORT_FIELD_REJECTION}`);
   }
   if (typeof task.tools === "string") task.tools = normalizeTools(task.tools);
-  stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent", "description"]);
+  stripBlank(task, ["sessionId", "cwd", "resumeFrom", "agent"]);
   return task;
 }
 
@@ -1003,7 +1008,7 @@ const HELP_DISPATCH = `## delegate — ordinary dispatch
   independent edits.`;
 
 const HELP_FULL_CONTROLS = `## delegate — task and batch controls
-- Task \`id\` correlates results; \`description\` is a display label only.
+- Task \`id\` correlates results and labels call rows and headers.
   \`tools\` and \`systemPrompt\` override profile defaults. Tool groups:
   \`*\` selects read/bash/edit/write; \`ro\` selects read/grep/find/ls.
 - \`sessionId\` reuses a child session; \`resumeFrom\` resumes an absolute .jsonl

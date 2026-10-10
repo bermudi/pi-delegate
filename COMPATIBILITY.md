@@ -281,6 +281,14 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   the /subagents dashboard. Unknown ticket actions now enumerate the
   available set (enumerate-or-inherit). The transcript-span read
   machinery stays internal to poll views and spill.
+- **Removed — task `description` display label (#130, 2026-10-10).**
+  Labels are derived: call rows and result headers show the task id,
+  else the agent name, else `inline` — an id set for correlation
+  doubles as the label. Presence rejects with teaching before any
+  work. Historical records keep their labels: the render/replay
+  paths still honor a stored `description` from pre-removal
+  journals, and the journal/details read shape is unchanged (new
+  tickets simply never set it).
 - **Removed — caller steer key `steerId` (#130, 2026-10-10; the
   optional field was #44).** Every steer receipts under a key derived
   from its own call (`steer:<toolCallId>`), so dedup survives without

@@ -280,12 +280,15 @@ mid-flight the parent can steer. The grammar:
   interrupt. (Field set as of the ADR 0002 unification; prune
   verdicts in #130 remove fields in their own changes — `tokenBudget`
   (#129), `operationId`, `pause`/`resume`, `tail` with `offset`/
-  `waitMs`, the wait bound `timeoutMs` with wait-any `tickets`, and
-  the caller steer key `steerId` are already gone.) Session
+  `waitMs`, the wait bound `timeoutMs` with wait-any `tickets`, the
+  caller steer key `steerId`, and the task display label
+  `description` are already gone.) Session
   list/close unchanged. The manual is
   single-edition: it documents exactly what the schema accepts.
-- **Description is a feature, not an alias.** The optional task display label
-  remains available in full mode; it is not a task correlation id.
+- **Labels are derived, not supplied.** Call rows and result headers
+  label tasks by id, falling back to the agent name and `inline`;
+  the optional `description` label was removed with the rest of the
+  #130 prunes — an id set for correlation doubles as the label.
 - **Conversation and model boundaries remain closed.** Parent history is
   never shared. `context` and foreign history-fork fields reject with
   guidance toward `brief`; model/effort selectors remain forbidden.

@@ -458,7 +458,8 @@ export async function resolveTasks(
         (resumeTag !== undefined ? `resume:${resumeTag}` : "inline"),
       aliasedFrom: undefined,
       normalizedFrom: undefined,
-      description: task.description,
+      // Historical read compat: pre-#130 journals carry display labels.
+      description: undefined,
       cwd: canonicalPath(cwd),
       model,
       thinking,

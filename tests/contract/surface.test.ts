@@ -35,7 +35,7 @@ describe("the single delegate surface", () => {
     expect(Object.keys(top).sort()).toEqual(["async", "brief", "tasks", "workspace"]);
     const task = objectOf(objectOf(top.tasks).items);
     expect(Object.keys(objectOf(task.properties)).sort()).toEqual([
-      "agent", "cwd", "dependsOn", "description", "id", "prompt",
+      "agent", "cwd", "dependsOn", "id", "prompt",
       "resumeFrom", "sessionId", "systemPrompt", "tools", "workspace",
     ]);
     expect(task.additionalProperties).toBe(false);
@@ -106,7 +106,7 @@ describe("the single delegate surface", () => {
     // own suites.
     const session = await open();
     const task = objectOf(objectOf(objectOf(properties(session).tasks).items).properties);
-    for (const key of ["id", "tools", "systemPrompt", "dependsOn", "sessionId", "resumeFrom", "description"]) {
+    for (const key of ["id", "tools", "systemPrompt", "dependsOn", "sessionId", "resumeFrom"]) {
       expect(task[key]).toBeDefined();
     }
     const subagents = await installSubagentModel(session);

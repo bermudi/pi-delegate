@@ -87,7 +87,6 @@ describe("delegate public tool contract", () => {
         "agent",
         "cwd",
         "dependsOn",
-        "description",
         "id",
         "prompt",
         "resumeFrom",
