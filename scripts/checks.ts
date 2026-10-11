@@ -284,6 +284,10 @@ interface ModuleSpecifier {
   readonly reExport: boolean;
   /** `import * as` / `export *` — consumes the target's whole surface. */
   readonly star: boolean;
+  /** Names this file's own export surface gains — for `export { a as b }`,
+   * `names` carries the consumed target name `a` while `provided` carries
+   * the visible re-export `b`; `export * as ns` provides `ns`. */
+  readonly provided: readonly string[];
   /** False for a wholly type-only declaration: it uses the module's exports
    * (names still count) but produces no runtime edge, so it cannot take part
    * in an import cycle. */
@@ -314,7 +318,14 @@ function collectSpecifiers(source: string, fileName: string): ModuleSpecifier[] 
       const spec = node.moduleSpecifier.text;
       const clause = node.importClause;
       if (clause === undefined) {
-        out.push({ spec, names: [], reExport: false, star: false, runtime: true });
+        out.push({
+          spec,
+          names: [],
+          reExport: false,
+          star: false,
+          runtime: true,
+          provided: [],
+        });
       } else {
         const names: string[] = [];
         let star = false;
@@ -335,6 +346,7 @@ function collectSpecifiers(source: string, fileName: string): ModuleSpecifier[] 
           reExport: false,
           star,
           runtime: !clause.isTypeOnly,
+          provided: [],
         });
       }
     } else if (
@@ -351,8 +363,14 @@ function collectSpecifiers(source: string, fileName: string): ModuleSpecifier[] 
           reExport: true,
           star: true,
           runtime: !node.isTypeOnly,
+          // `export *` re-provides the target's surface anonymously;
+          // `export * as ns` provides `ns` as this file's export name.
+          provided:
+            clause === undefined ? [] : [clause.name.text],
         });
       } else {
+        // `export { a as b }`: `names` is what the target must provide
+        // (`a`), `provided` is what importers of this file see (`b`).
         const names = clause.elements.map(
           (el) => (el.propertyName ?? el.name).text,
         );
@@ -362,6 +380,7 @@ function collectSpecifiers(source: string, fileName: string): ModuleSpecifier[] 
           reExport: true,
           star: false,
           runtime: !node.isTypeOnly,
+          provided: clause.elements.map((el) => el.name.text),
         });
       }
     } else if (ts.isImportEqualsDeclaration(node)) {
@@ -377,13 +396,17 @@ function collectSpecifiers(source: string, fileName: string): ModuleSpecifier[] 
           reExport: false,
           star: false,
           runtime: !node.isTypeOnly,
+          provided: [],
         });
       }
     } else if (
       ts.isCallExpression(node) &&
-      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-      node.arguments.length === 1 &&
-      ts.isStringLiteral(node.arguments[0]!)
+      node.arguments.length >= 1 &&
+      ts.isStringLiteral(node.arguments[0]!) &&
+      // `import("x")` (a second argument is an import-attributes object)
+      // or `require("x")` — both produce runtime edges.
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(node.expression) && node.expression.text === "require"))
     ) {
       out.push({
         spec: node.arguments[0].text,
@@ -391,6 +414,7 @@ function collectSpecifiers(source: string, fileName: string): ModuleSpecifier[] 
         reExport: false,
         star: false,
         runtime: true,
+        provided: [],
       });
     }
     ts.forEachChild(node, visit);
@@ -421,9 +445,9 @@ function buildGraph(): ModuleGraph {
         for (const name of entry.names) set.add(name);
         imported.set(target, set);
       }
-      if (entry.reExport && entry.names.length > 0) {
+      if (entry.reExport) {
         const own = reExported.get(path) ?? new Set<string>();
-        for (const name of entry.names) own.add(name);
+        for (const name of entry.provided) own.add(name);
         reExported.set(path, own);
       }
     }
@@ -476,7 +500,7 @@ function findCycles(edges: ReadonlyMap<string, readonly string[]>): string[][] {
 // cannot fail on a planted cycle proves nothing.
 // ---------------------------------------------------------------------------
 {
-  const fixturePaths = new Set(["/f/a.ts", "/f/b.ts", "/f/c.ts", "/f/d.ts", "/f/g.ts", "/f/h.ts"]);
+  const fixturePaths = new Set(["/f/a.ts", "/f/b.ts", "/f/c.ts", "/f/d.ts", "/f/e.ts", "/f/f.ts", "/f/g.ts", "/f/h.ts"]);
   const fixtureSources = new Map<string, string>([
     // a↔b two-file cycle through a DEFAULT import (the regex set's miss).
     ["/f/a.ts", `import B from "./b.ts";\nexport const a = 1;\n`],
@@ -484,6 +508,9 @@ function findCycles(edges: ReadonlyMap<string, readonly string[]>): string[][] {
     // c↔d cycle through `export *` re-export edges (also missed before).
     ["/f/c.ts", `export * from "./d.ts";\n`],
     ["/f/d.ts", `export * from "./c.ts";\n`],
+    // e↔f cycle through require() and dynamic import() edges.
+    ["/f/e.ts", `const f = require("./f.ts");\nexport const e = 3;\n`],
+    ["/f/f.ts", `const e = await import("./e.ts");\nexport const f = 4;\n`],
     // g←h is a real edge, g→h is type-only: no runtime cycle.
     ["/f/g.ts", `import type { H } from "./h.ts";\nexport const g = 2;\n`],
     ["/f/h.ts", `import { g } from "./g.ts";\nexport type H = typeof g;\n`],
@@ -507,12 +534,13 @@ function findCycles(edges: ReadonlyMap<string, readonly string[]>): string[][] {
   };
   expectCycle("/f/a.ts");
   expectCycle("/f/c.ts");
+  expectCycle("/f/e.ts");
   if (found.some((cycle) => cycle.includes("/f/g.ts"))) {
     failures.push("self-test: a type-only import produced a runtime edge");
   }
   record(
     "self-test",
-    `cycle detector sees default-import and export-* edges (${found.length} fixture cycles found)`,
+    `cycle detector sees default-import, export-*, require, and dynamic-import edges (${found.length} fixture cycles found)`,
     failures,
   );
 }
