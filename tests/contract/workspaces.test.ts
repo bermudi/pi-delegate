@@ -36,7 +36,7 @@ function gitInit(dir: string): void {
   // An initial commit is required: isolated baselines are built on HEAD.
   execSync(
     "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-    { cwd: dir },
+    { cwd: dir, env: gitFixtureEnv() },
   );
 }
 
@@ -468,7 +468,7 @@ describe("delegate workspace and shared-write contract", () => {
       const dir = tempDir();
       gitInit(dir);
       const linked = join(dir, "linked");
-      execSync("git worktree add --detach linked HEAD", { cwd: dir });
+      execSync("git worktree add --detach linked HEAD", { cwd: dir, env: gitFixtureEnv() });
 
       const result = await callDelegate(session, {
         async: false,
@@ -764,11 +764,11 @@ describe("delegate workspace and shared-write contract", () => {
       // the user's index: a dirty tracked edit, an untracked file, and a
       // staged-but-uncommitted index entry.
       writeFileSync(join(dir, "tracked.txt"), "committed");
-      execSync("git add -A && git commit -qm add-tracked", { cwd: dir });
+      execSync("git add -A && git commit -qm add-tracked", { cwd: dir, env: gitFixtureEnv() });
       writeFileSync(join(dir, "tracked.txt"), "dirty-edit");
       writeFileSync(join(dir, "untracked.txt"), "untracked");
       writeFileSync(join(dir, "staged.txt"), "staged");
-      execSync("git add staged.txt", { cwd: dir });
+      execSync("git add staged.txt", { cwd: dir, env: gitFixtureEnv() });
 
       const fileA = join(dir, "a.txt");
       const fileB = join(dir, "b.txt");
@@ -822,7 +822,7 @@ describe("delegate workspace and shared-write contract", () => {
         "untracked",
       );
       expect(
-        execSync("git diff --cached --name-only", { cwd: dir })
+        execSync("git diff --cached --name-only", { cwd: dir, env: gitFixtureEnv() })
           .toString()
           .trim(),
       ).toBe("staged.txt");
@@ -846,7 +846,7 @@ describe("delegate workspace and shared-write contract", () => {
       // reaches verify-before-write rather than the drift check.
       const lines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
       writeFileSync(join(dir, "victim.txt"), lines.join("\n") + "\n");
-      execSync("git add -A && git commit -qm base", { cwd: dir });
+      execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
 
       let workerStarted!: () => void;
       const started = new Promise<void>((resolve) => {
@@ -914,7 +914,7 @@ describe("delegate workspace and shared-write contract", () => {
       gitInit(dir);
       const target = join(dir, "same.txt");
       writeFileSync(target, "base\n");
-      execSync("git add -A && git commit -qm base", { cwd: dir });
+      execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
 
       const identicalWrite: FauxResponseFactory = async (context) => {
         if (context.messages.some((m) => m.role === "toolResult")) {
@@ -969,7 +969,7 @@ describe("delegate workspace and shared-write contract", () => {
     gitInit(dir);
     writeFileSync(join(dir, "a.txt"), "base\n");
     writeFileSync(join(dir, "b.txt"), "base\n");
-    execSync("git add -A && git commit -qm base", { cwd: dir });
+    execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
     chmodSync(join(dir, "a.txt"), 0o600);
     // Refused-path invariance: a failed apply must leave the user's index
     // and branch exactly as they were — capture them before the shim lands.
@@ -1050,7 +1050,7 @@ exec '${realGit}' "$@"
     gitInit(dir);
     writeFileSync(join(dir, "a.txt"), "original\n");
     writeFileSync(join(dir, "b.txt"), "original\n");
-    execSync("git add -A && git commit -qm base", { cwd: dir });
+    execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
     const shimDir = tempDir();
     const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
     writeFileSync(join(shimDir, "git"), `#!/bin/sh
@@ -1228,7 +1228,7 @@ exec '${realGit}' "$@"
     const dir = tempDir();
     gitInit(dir);
     writeFileSync(join(dir, "same.txt"), "base\n");
-    execSync("git add -A && git commit -qm base", { cwd: dir });
+    execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
     let started!: () => void;
     const ready = new Promise<void>((resolve) => { started = resolve; });
     let release!: () => void;
@@ -1271,7 +1271,7 @@ exec '${realGit}' "$@"
     gitInit(dir);
     writeFileSync(join(dir, "a.txt"), "base\n");
     writeFileSync(join(dir, "b.txt"), "base\n");
-    execSync("git add -A && git commit -qm base", { cwd: dir });
+    execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
     let started!: () => void;
     const ready = new Promise<void>((resolve) => { started = resolve; });
     let release!: () => void;
@@ -1310,7 +1310,7 @@ exec '${realGit}' "$@"
     gitInit(dir);
     writeFileSync(join(dir, "target.txt"), "target bytes\n");
     symlinkSync("target.txt", join(dir, "link.txt"));
-    execSync("git add -A && git commit -qm links", { cwd: dir });
+    execSync("git add -A && git commit -qm links", { cwd: dir, env: gitFixtureEnv() });
     const write: FauxResponseFactory = async (context) =>
       context.messages.some((m) => m.role === "toolResult")
         ? fauxAssistantMessage("DONE")
@@ -1327,7 +1327,7 @@ exec '${realGit}' "$@"
     const dir = tempDir();
     gitInit(dir);
     writeFileSync(join(dir, "a"), "old file\n");
-    execSync("git add -A && git commit -qm base", { cwd: dir });
+    execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
     const step: FauxResponseFactory = async (context) =>
       context.messages.some((m) => m.role === "toolResult")
         ? fauxAssistantMessage("DONE")
@@ -1350,7 +1350,7 @@ exec '${realGit}' "$@"
     gitInit(dir);
     mkdirSync(join(dir, "a"));
     writeFileSync(join(dir, "a/old"), "old file\n");
-    execSync("git add -A && git commit -qm base", { cwd: dir });
+    execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
     const step: FauxResponseFactory = async (context) =>
       context.messages.some((m) => m.role === "toolResult")
         ? fauxAssistantMessage("DONE")
@@ -1372,7 +1372,7 @@ exec '${realGit}' "$@"
     const dir = tempDir();
     gitInit(dir);
     writeFileSync(join(dir, "a"), "original\n");
-    execSync("git add -A && git commit -qm base", { cwd: dir });
+    execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
     const shimDir = tempDir();
     const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
     writeFileSync(join(shimDir, "git"), `#!/bin/sh
@@ -1409,11 +1409,11 @@ exec '${realGit}' "$@"
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
     const dir = tempDir();
-    execSync("git init -q --object-format=sha256 && git config user.email t@t && git config user.name t", { cwd: dir });
+    execSync("git init -q --object-format=sha256 && git config user.email t@t && git config user.name t", { cwd: dir, env: gitFixtureEnv() });
     writeFileSync(join(dir, "old.txt"), "old\n");
     writeFileSync(join(dir, "new.txt"), "new\n");
     symlinkSync("old.txt", join(dir, "link"));
-    execSync("git add -A && git commit -qm base", { cwd: dir });
+    execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
     const step: FauxResponseFactory = async (context) =>
       context.messages.some((m) => m.role === "toolResult")
         ? fauxAssistantMessage("DONE")
@@ -1439,7 +1439,7 @@ exec '${realGit}' "$@"
       gitInit(dir);
       const target = join(dir, "conflict.txt");
       writeFileSync(target, "original");
-      execSync("git add -A && git commit -qm init", { cwd: dir });
+      execSync("git add -A && git commit -qm init", { cwd: dir, env: gitFixtureEnv() });
       // Refused-path invariance needs an index worth preserving: a
       // staged-but-uncommitted entry the reconcile machinery must leave
       // staged, plus HEAD and the branch ref for "unmoved" to mean
@@ -1722,7 +1722,7 @@ exec '${realGit}' "$@"
       );
       expect(existsSync(join(dir, "finished.txt"))).toBe(false);
       expect(
-        execSync("git status --porcelain", { cwd: dir, encoding: "utf8" }),
+        execSync("git status --porcelain", { cwd: dir, encoding: "utf8", env: gitFixtureEnv() }),
       ).toBe("");
     },
     15_000,
@@ -1890,7 +1890,7 @@ exec '${realGit}' "$@"
         await new Promise((r) => setTimeout(r, 25));
       }
       expect(
-        execSync("git status --porcelain", { cwd: dir, encoding: "utf8" }),
+        execSync("git status --porcelain", { cwd: dir, encoding: "utf8", env: gitFixtureEnv() }),
       ).toBe("");
     },
     15_000,
@@ -2341,6 +2341,7 @@ exec '${realGit}' "$@"
       const dir = tempDir();
       execSync("git init -q && git config user.email t@t && git config user.name t", {
         cwd: dir,
+        env: gitFixtureEnv(),
       });
 
       const escape: FauxResponseFactory = async (context) =>
