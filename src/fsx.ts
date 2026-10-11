@@ -193,6 +193,68 @@ export function exec(
   });
 }
 
+// Probes fail fast and produce tiny output; the shared exec takes explicit
+// limits so the per-use divergence from the copy path stays visible.
+export const PROBE_EXEC = {
+  timeoutMs: 5_000,
+  maxBuffer: 4 * 1024 * 1024,
+} as const;
+
+export interface GitRootDiscovery {
+  /** The probed cwd, realpathed — what every containment check compares. */
+  readonly physicalCwd: string;
+  /**
+   * The repository top-level the probe reported, realpathed; undefined when
+   * discovery produced nothing usable — `error` then carries the failure.
+   */
+  readonly top: string | undefined;
+  /** The probe or top-level realpath failure when `top` is undefined. */
+  readonly error?: unknown;
+}
+
+/**
+ * Discover the Git worktree root containing `cwd`: realpath the cwd, probe
+ * `rev-parse --show-toplevel` under the deterministic probe posture, and
+ * realpath the answer. Discovery itself is policy-free — a failed or empty
+ * probe is reported, never thrown — because the workspace kinds disagree on
+ * what an unusable answer means (a scratch copy falls back to the bare cwd;
+ * an isolated worktree refuses). The abort contract is shared: a cancelled
+ * signal rethrows rather than reporting an absence. A vanished `cwd` itself
+ * still throws raw ENOENT — unrecoverable input either way, matching every
+ * former call site.
+ */
+export async function discoverGitRoot(
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<GitRootDiscovery> {
+  const physicalCwd = await fs.promises.realpath(cwd);
+  let top: string | undefined;
+  let error: unknown;
+  try {
+    const probed = (
+      await exec("git", ["-C", physicalCwd, "rev-parse", "--show-toplevel"], {
+        ...PROBE_EXEC,
+        env: gitProbeEnv(),
+        signal,
+      })
+    ).stdout.trim();
+    if (probed) {
+      top = await fs.promises.realpath(probed);
+    } else {
+      // A bare repository has no worktree: the probe succeeds and prints
+      // nothing. Report it as a failure so a fail-closed caller can name
+      // a reason rather than interpolating undefined.
+      error = new Error("git rev-parse --show-toplevel returned no top-level");
+    }
+  } catch (probeError) {
+    if (signal?.aborted) throw probeError;
+    // Not a repository, Git unusable, or a vanished top-level: the caller's
+    // policy decides what an absent root means.
+    error = probeError;
+  }
+  return { physicalCwd, top, error };
+}
+
 /** Grace window between SIGTERM and SIGKILL when draining a workspace. */
 const PROCESS_GRACE_MS = 500;
 

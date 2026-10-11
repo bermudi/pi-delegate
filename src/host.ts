@@ -8,6 +8,7 @@ import {
   exec,
   gitProbeEnv,
   isWithin,
+  PROBE_EXEC,
 } from "./fsx.ts";
 import {
   createAgentSession,
@@ -93,10 +94,6 @@ export function hostEnvironment(
     parentPrompt,
   };
 }
-
-// Probes fail fast and produce tiny output; the shared exec takes explicit
-// limits so the per-use divergence from snapshot-sized traffic stays visible.
-const PROBE_EXEC = { timeoutMs: 5_000, maxBuffer: 4 * 1024 * 1024 } as const;
 
 /** Probe failure carrying Git's stderr for fail-closed classification. */
 class GitProbeError extends Error {

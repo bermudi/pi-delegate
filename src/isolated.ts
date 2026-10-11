@@ -6,6 +6,7 @@ import {
   canonicalPath,
   DELEGATE_TREES,
   diagnosticExclusions,
+  discoverGitRoot,
   exec,
   type ExecOptions,
   type ExecResult,
@@ -64,44 +65,34 @@ function pathEntryExists(candidate: string): boolean {
  * submodules and cwds that do not map inside the discovered root fail closed.
  */
 async function repositoryRoot(cwd: string, signal?: AbortSignal): Promise<string> {
-  const physicalCwd = await fs.promises.realpath(cwd);
-  let root: string;
-  try {
-    root = (
-      await git(["rev-parse", "--show-toplevel"], {
-        cwd: physicalCwd,
-        signal,
-      })
-    ).stdout.trim();
-  } catch (error) {
-    if (signal?.aborted) throw error;
+  const { physicalCwd, top, error } = await discoverGitRoot(cwd, signal);
+  if (top === undefined) {
     throw new Error(
       `workspace "isolated" requires a Git repository: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const physicalRoot = await fs.promises.realpath(root);
-  if (!isWithin(physicalRoot, physicalCwd)) {
+  if (!isWithin(top, physicalCwd)) {
     throw new Error(
-      `Could not map the isolated task cwd '${physicalCwd}' into its Git root '${physicalRoot}'.`,
+      `Could not map the isolated task cwd '${physicalCwd}' into its Git root '${top}'.`,
     );
   }
   try {
     await git(["rev-parse", "--verify", "HEAD^{commit}"], {
-      cwd: physicalRoot,
+      cwd: top,
       signal,
     });
-  } catch (error) {
-    if (signal?.aborted) throw error;
+  } catch (verifyError) {
+    if (signal?.aborted) throw verifyError;
     throw new Error(
-      `workspace "isolated" requires a repository with at least one commit; '${physicalRoot}' has none.`,
+      `workspace "isolated" requires a repository with at least one commit; '${top}' has none.`,
     );
   }
-  if (fs.existsSync(path.join(physicalRoot, ".gitmodules"))) {
+  if (fs.existsSync(path.join(top, ".gitmodules"))) {
     throw new Error(
       'workspace "isolated" does not yet support repositories with submodules.',
     );
   }
-  return physicalRoot;
+  return top;
 }
 
 function privateRef(batchId: string, suffix: string): string {

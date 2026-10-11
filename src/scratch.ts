@@ -6,9 +6,11 @@ import * as path from "node:path";
 import {
   canonicalPath,
   DELEGATE_TREES,
+  discoverGitRoot,
   exec,
   gitProbeEnv,
   isWithin,
+  PROBE_EXEC,
   stopWorkspaceProcesses,
 } from "./fsx.ts";
 import {
@@ -17,10 +19,6 @@ import {
   SOURCE_DRIFT_LIMIT,
 } from "./isolated.ts";
 import type { ResolvedTask, TaskOutcome } from "./types.ts";
-
-// Probes fail fast and produce tiny output; the shared exec takes explicit
-// limits so the per-use divergence from the copy path stays visible.
-const PROBE_EXEC = { timeoutMs: 5_000, maxBuffer: 4 * 1024 * 1024 } as const;
 
 const FALLBACK_REMEDY =
   `Resubmit with workspace: "shared" to run in the source tree, ` +
@@ -46,24 +44,10 @@ async function copySourceOf(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<{ root: string; cwd: string; gitRoot: boolean }> {
-  const physicalCwd = await fs.promises.realpath(cwd);
-  let root: string | undefined;
-  try {
-    const top = (
-      await exec("git", ["-C", physicalCwd, "rev-parse", "--show-toplevel"], {
-        ...PROBE_EXEC,
-        env: gitProbeEnv(),
-        signal,
-      })
-    ).stdout.trim();
-    if (top) {
-      const resolved = await fs.promises.realpath(top);
-      if (isWithin(resolved, physicalCwd)) root = resolved;
-    }
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    // Not a repository, or Git unusable: the cwd alone is the copy.
-  }
+  const { physicalCwd, top } = await discoverGitRoot(cwd, signal);
+  // Not a repository, Git unusable, or a root that does not contain the
+  // cwd: the cwd alone is the copy.
+  let root = top !== undefined && isWithin(top, physicalCwd) ? top : undefined;
   const gitRoot = root !== undefined;
   root ??= physicalCwd;
   const dotGit = await fs.promises
