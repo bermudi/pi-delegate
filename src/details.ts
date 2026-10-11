@@ -23,7 +23,7 @@ import {
   TASK_VERDICT_VALUES,
   usageSchema,
 } from "./schema-primitives.ts";
-import type { TaskOutcome } from "./types.ts";
+import type { TaskIntegration, TaskOutcome } from "./types.ts";
 
 /**
  * A required string enum, like delegate.ts's `stringEnum` helper — a
@@ -430,10 +430,78 @@ export type QuestionNoticeDetails = Static<
   typeof questionNoticeDetailsSchema
 >;
 
+type TaskOutcomeDetails = Static<typeof taskOutcomeDetailsSchema>;
+type TaskIntegrationDetails = Static<typeof taskIntegrationSchema>;
+
+/**
+ * The outcome keys `taskOutcomeDetailsSchema` admits, projected through
+ * by `publicOutcome` below. Compile-time coupled to the schema in both
+ * directions: `satisfies` rejects a tuple element that is not a schema
+ * key (a typo or a removed field), and `CoversAll` rejects a schema key
+ * missing from the tuple (a schema-added field that would otherwise be
+ * silently dropped).
+ */
+const TASK_OUTCOME_DETAILS_KEYS = [
+  "index",
+  "id",
+  "status",
+  "output",
+  "error",
+  "retries",
+  "usage",
+  "integration",
+  "blockedBy",
+  "quarantined",
+  "sessionFile",
+  "transcriptStart",
+  "attributedFiles",
+  "observedFiles",
+  "uncertainFiles",
+  "shellObserved",
+  "concurrentWriters",
+  "verdict",
+] as const satisfies readonly (keyof TaskOutcomeDetails)[];
+
+/** Same coupling for `taskIntegrationSchema`'s nested strict object. */
+const TASK_INTEGRATION_DETAILS_KEYS = [
+  "status",
+  "reason",
+  "proposedFiles",
+  "appliedFiles",
+  "conflicts",
+  "baselineRef",
+  "proposalRef",
+  "patchPath",
+  "worktreePath",
+  "sourceDrift",
+] as const satisfies readonly (keyof TaskIntegrationDetails)[];
+
+type CoversAll<Missing extends never> = Missing;
+/** Writable view of a readonly interface — projection assembly only. */
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+type _OutcomeKeysCoverSchema = CoversAll<
+  Exclude<
+    keyof TaskOutcomeDetails,
+    (typeof TASK_OUTCOME_DETAILS_KEYS)[number]
+  >
+>;
+type _IntegrationKeysCoverSchema = CoversAll<
+  Exclude<
+    keyof TaskIntegrationDetails,
+    (typeof TASK_INTEGRATION_DETAILS_KEYS)[number]
+  >
+>;
+
 /**
  * #127: `durationMs` is internal telemetry evidence only — never a
  * caller-visible field, and the strict `details.results` outcome schema
- * would reject it. Strip it where recorded outcomes enter details.
+ * would reject it. This is an allowlist projection, not a strip: the
+ * journal's load path tolerates unknown keys for additive evolution
+ * (#62/#123/#127), so a recovered outcome can carry fields the strict
+ * emitted schema forbids — at the outcome level and inside its nested
+ * `integration`/`conflicts` objects. Only schema-admitted keys are
+ * copied, and absent optional fields stay absent keys (the strict
+ * schema counts own keys, so `undefined` is never assigned).
  */
 export function publicOutcome(outcome: TaskOutcome): TaskOutcome;
 export function publicOutcome(
@@ -442,7 +510,49 @@ export function publicOutcome(
 export function publicOutcome(
   outcome: TaskOutcome | undefined,
 ): TaskOutcome | undefined {
-  if (outcome?.durationMs === undefined) return outcome;
-  const { durationMs: _internal, ...rest } = outcome;
-  return rest;
+  if (outcome === undefined) return undefined;
+  // `{} as Mutable<TaskOutcome>`: the loop copies the required fields
+  // from the input — `index`/`id`/`status`/`retries` are never
+  // undefined on a recorded outcome.
+  const projected = {} as Mutable<TaskOutcome>;
+  for (const key of TASK_OUTCOME_DETAILS_KEYS) {
+    copyIfDefined(outcome, projected, key);
+  }
+  if (outcome.integration !== undefined) {
+    projected.integration = publicIntegration(outcome.integration);
+  }
+  return projected;
+}
+
+/**
+ * `target[key] = source[key]` when defined — writing through a
+ * union-typed key directly would demand the intersection of every
+ * property type, so the write goes through a generic single-key helper.
+ * Absent optional fields stay absent keys: the strict emitted schema
+ * counts own keys regardless of value.
+ */
+function copyIfDefined<T, K extends keyof T>(
+  source: T,
+  target: Mutable<T>,
+  key: K,
+): void {
+  const value = source[key];
+  if (value !== undefined) target[key] = value;
+}
+
+function publicIntegration(integration: TaskIntegration): TaskIntegration {
+  const projected = {} as Mutable<TaskIntegration>;
+  for (const key of TASK_INTEGRATION_DETAILS_KEYS) {
+    copyIfDefined(integration, projected, key);
+  }
+  // `conflicts` entries are strict objects in the emitted schema and
+  // tolerant objects in the journal — project them through their own
+  // two fields rather than copying tolerated extras.
+  if (integration.conflicts !== undefined) {
+    projected.conflicts = integration.conflicts.map(({ path, reason }) => ({
+      path,
+      reason,
+    }));
+  }
+  return projected;
 }

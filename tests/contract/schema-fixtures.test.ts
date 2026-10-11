@@ -7,9 +7,13 @@ import { Check } from "typebox/value";
 // #51, Phase A — Pi's ToolDefinition has no result/details schema slot),
 // so pinning them is done by `Check`ing fixtures directly — the same
 // seam details.test.ts uses for real dispatch output.
-import { taskOutcomeDetailsSchema } from "../../src/details.ts";
+import {
+  taskOutcomeDetailsSchema,
+  ticketDetailsSchema,
+} from "../../src/details.ts";
 import {
   callDelegateTicket,
+  objectOf,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
 
@@ -71,12 +75,38 @@ describe("schema fixtures — strict emitted details vs tolerant journal records
     const record = minimalRecord(id);
     (record as Record<string, unknown>).legacyEnvelope = { from: "v0" };
     (record.outcomes[0] as Record<string, unknown>).futureProbe = "yes";
+    // Journal tolerance applies inside nested objects too: an unknown
+    // key on `integration` — and on a `conflicts` entry — survives load
+    // just like the top-level outcome key above.
+    (record.outcomes[0] as Record<string, unknown>).integration = {
+      status: "applied_unverified",
+      proposedFiles: ["a.ts"],
+      appliedFiles: ["a.ts"],
+      futureNested: 1,
+      conflicts: [{ path: "a.ts", reason: "diverged", futureConflict: true }],
+    };
     writeRecord(session, id, record);
 
     const polled = await callDelegateTicket(session, { action: "poll", ticket: id });
     expect(polled.isError).toBe(false);
     expect(polled.text).toContain("completed");
     expect(polled.text).toContain("FIXTURE-OUTPUT");
+
+    // Tolerant load must not leak into the strict emitted boundary: the
+    // cold-polled details Check against ticketDetailsSchema — which
+    // nests taskOutcomeDetailsSchema (additionalProperties: false) — and
+    // every tolerated unknown key is absent from the returned outcome,
+    // nested `integration`, and `conflicts` entries alike.
+    expect(Check(ticketDetailsSchema, polled.details)).toBe(true);
+    const results = objectOf(polled.details, "details").results as Record<
+      string,
+      unknown
+    >[];
+    expect("futureProbe" in results[0]!).toBe(false);
+    const integration = objectOf(results[0]!.integration, "integration");
+    expect("futureNested" in integration).toBe(false);
+    const conflicts = integration.conflicts as Record<string, unknown>[];
+    expect("futureConflict" in conflicts[0]!).toBe(false);
   });
 
   test("a record covering every task status, integration status, and verdict parses through the journal path", async () => {

@@ -1821,7 +1821,12 @@ journal open objects that tolerate additive evolution).
 
 - **Covered now:** `tests/contract/schema-fixtures.test.ts` — a
   pre-#127 journal record without newer optional fields and with
-  unknown keys round-trips through `delegate_ticket`; a record covering
+  unknown keys (outcome-level, nested inside `integration`, and inside
+  a `conflicts` entry) round-trips through `delegate_ticket`, with the
+  cold-polled details `Check`ing strictly against
+  `ticketDetailsSchema` and every tolerated key absent from the
+  returned outcome — `publicOutcome`'s allowlist projection is the
+  boundary between tolerant load and strict emit; a record covering
   every task status, integration status, and verdict parses through
   the real journal load path; an unknown enumeration value rejects at
   load; and a realistic emitted `details.results` entry `Check`s
