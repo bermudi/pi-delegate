@@ -575,7 +575,7 @@ whose worker could not be confirmed stopped is marked provisional and may later
 be superseded in the live ticket.
 
 It never stores prompt, system-prompt, output, or error text (**Overridden by SPEC.md, "Misfire rows":** misfire rows keep the caller-visible rejection message verbatim, by design); cwd or session
-paths; caller task IDs; operation IDs; or parent transcript content. Legacy v1
+paths (**Overridden by SPEC.md, "Misfire rows":** `misfires.parent_cwd` carries the parent's working directory as project-scope debugging signal; call/task path columns stay NULL); caller task IDs; operation IDs; or parent transcript content. Legacy v1
 rows may retain older values; v2 does not rewrite or delete them.
 
 Telemetry is fail-open: an open, schema, write, or close failure logs and

@@ -425,11 +425,19 @@ mid-flight the parent can steer. The grammar:
   dispatch that ends before execution — validation rejections
   (including unknown exact agent names and pre-schema rejections), config-load
   failures, and admission rejections. Each row carries the timestamp,
-  the phase, the caller-visible rejection message verbatim, and the
+  the phase, the caller-visible rejection message verbatim, the
   batch shape (task count, requested agents, workspace selections,
-  sync/async). Retention is identical to dispatch rows — one policy,
+  sync/async), and the parent's working directory (`parent_cwd`).
+  Retention is identical to dispatch rows — one policy,
   no extra knobs. Same-call shared writers that serialize (cross-phase
   batches, #126) keep riding normal completed rows.
+
+  `parent_cwd` is the single deliberate exception to the inherited
+  no-cwd-or-session-paths rule: misfire rows exist to diagnose
+  trained-reflex collisions per project, so the project scope is part
+  of the signal, and the database is owner-only. Call and task path
+  columns (`parent_session_file`, `session_file`, `calls.parent_cwd`)
+  stay NULL placeholders — the exception does not extend to them.
 
   Pre-schema errors carry paths and diagnostic messages only, never Pi's
   request-body dump. Caller-visible diagnostics are safe before persistence,
