@@ -1,8 +1,12 @@
 import { DiagnosticSink } from "./diagnostics.ts";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentSession,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import type { AdmissionController } from "./admission.ts";
 import { sanitizeText } from "./activity.ts";
+import { ensureSessionTranscript } from "./pi-compat.ts";
 import type { ResolvedTask, TaskStatus } from "./types.ts";
 
 
@@ -84,45 +88,45 @@ function incompatibleReuse(sessionId: string, diffs: readonly string[]): Error {
  * prompt/message lines) to its `.jsonl`.
  *
  * Pi's SessionManager intentionally does not write the file until the
- * first assistant message lands (its `_persist()` gates the first write
- * behind that check — an upstream contract). When a subagent's *first*
+ * first conversation message append (its `_persist()` gates the first
+ * write behind that check — an upstream contract). When a subagent's *first*
  * model call dies before producing one — e.g. a provider error — no file
  * is ever created, yet the planned path is already recorded. Reporting
  * that path as a resume target would send the caller to a nonexistent
  * file.
  *
- * The flush goes through upstream's `_rewriteFile()` — a private method,
- * the same seam upstream itself uses to recover empty/corrupt session
- * files — so the reported path becomes real on disk. Call this only on a
- * session that has wound down (never while a worker may still write, or
- * the rewrite could interleave with its appends). Idempotent: no-op when
- * the file already exists or the manager has no sessionFile.
+ * The flush goes through `ensureSessionTranscript` in pi-compat.ts, the
+ * only owner of the private `_rewriteFile()` reach — the same seam
+ * upstream itself uses to recover empty/corrupt session files — so the
+ * reported path becomes real on disk. Call this only on a session that
+ * has wound down (never while a worker may still write, or the rewrite
+ * could interleave with its appends). An already-regular file needs no
+ * flush; a non-regular entry at the claimed path is never a transcript.
  *
- * Returns true when a transcript file exists on return (whether this
- * call wrote it or it pre-existed), false otherwise.
+ * Returns true when a regular transcript file exists on return (whether
+ * this call wrote it or it pre-existed), false otherwise.
  */
 export function persistSessionHeader(diagnostics: DiagnosticSink, sm: unknown): boolean {
-  const inner = sm as {
-    getSessionFile?: () => string | undefined;
-    _rewriteFile?: () => void;
-  };
+  const inner = sm as { getSessionFile?: () => string | undefined };
   const file = inner.getSessionFile?.();
   if (file === undefined) return false;
-  if (existsSync(file)) return true;
   try {
-    inner._rewriteFile?.();
+    if (!existsSync(file)) {
+      ensureSessionTranscript(sm as SessionManager);
+    }
+    return statSync(file).isFile();
   } catch (error) {
     // Best effort — the caller reports no sessionFile when this fails,
     // but the failure itself must not vanish silently.
     diagnostics.log("error", "session transcript flush failed", {}, error);
+    return false;
   }
-  return existsSync(file);
 }
 
 /**
  * A transcript file's current byte size — 0 when it is absent or
  * unreadable. SessionManager appends whole lines synchronously once the
- * first assistant message lands, so a byte offset captured before the
+ * first conversation message append lands, so a byte offset captured before the
  * first prompt marks where a run's entries begin (delegate_ticket tail).
  */
 export function transcriptSize(file: string): number {
@@ -365,7 +369,13 @@ export class SessionPool {
     try {
       entry.session.agent.clearAllQueues();
     } catch (error) {
-      this.diagnostics.log("error", "session cleanup failed", { operation: `clearing message queues on pooled session '${task.sessionId}' failed` }, error);
+      this.entries.delete(task.sessionId);
+      this.dispose(entry.session, task.sessionId);
+      throw new Error(
+        `Session '${task.sessionId}' was evicted: clearing its leftover message queues before reuse failed, so no task was started. ` +
+          `A later dispatch with this session id opens a clean session.`,
+        { cause: error },
+      );
     }
     entry.checkedOut = true;
     return entry;
@@ -422,12 +432,18 @@ export class SessionPool {
       }
       // Insert-on-success requires a durable session file.
       const file = session.sessionFile;
-      if (typeof file === "string" && existsSync(file)) {
+      let durableFile: string | undefined;
+      if (typeof file === "string") {
+        try {
+          if (statSync(file).isFile()) durableFile = file;
+        } catch {}
+      }
+      if (durableFile !== undefined) {
         this.entries.set(sessionId, {
           sessionId,
           session,
           config: frozenConfig(task),
-          transcriptFile: file,
+          transcriptFile: durableFile,
           checkedOut: false,
           idleSeq: ++this.idleClock,
         });

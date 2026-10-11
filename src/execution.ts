@@ -1,5 +1,5 @@
 import { DiagnosticSink } from "./diagnostics.ts";
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -23,6 +23,7 @@ import {
   sleep,
 } from "./retry.ts";
 import { persistSessionHeader, transcriptSize, type PooledSession, type SessionPool } from "./sessions.ts";
+import { ensureSessionTranscript } from "./pi-compat.ts";
 import { parseVerdict } from "./format.ts";
 import { isWorkspaceGuardRefusal, toolPathTarget } from "./workspace-guard.ts";
 import {
@@ -250,8 +251,9 @@ function preferredReason(
  * The transcript path to report on an outcome, or undefined when none
  * exists on disk. `flushHeader` asks the session manager to write its
  * buffered entries first: a file-backed SessionManager defers the first
- * write until an assistant message lands, so a first-call failure leaves
- * the planned path uncreated — flushing makes the reported path real.
+ * write until the first conversation message append lands, so a
+ * first-call failure leaves the planned path uncreated — flushing makes
+ * the reported path real.
  * Only a file confirmed on disk is ever reported; the caller must never
  * chase a nonexistent resume target. Flush only once the session has
  * wound down — a still-live worker could interleave appends with the
@@ -266,7 +268,11 @@ function reportableTranscript(
   const file = session.sessionFile;
   if (typeof file !== "string") return undefined;
   if (flushHeader) persistSessionHeader(diagnostics, session.sessionManager);
-  return existsSync(file) ? file : undefined;
+  try {
+    return statSync(file).isFile() ? file : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -723,6 +729,7 @@ export class TaskExecution implements ExecutionHandle {
       // reloads transparently from its own transcript file.
       this.poolEntry = await this.controls.sessions.checkout(this.task, create);
       session = this.poolEntry?.session ?? (await create());
+      this.session = session;
       // Transcript exclusivity: claim the concrete file before the first
       // turn writes into it. resumeFrom paths were reserved at admission;
       // this also covers a pooled session's first run, whose file did not
@@ -752,7 +759,9 @@ export class TaskExecution implements ExecutionHandle {
             }
           });
       session.setActiveToolsByName([...this.task.tools, ...(this.controls.askQuestion ? ["ask_parent"] : [])]);
-      this.session = session;
+      if (this.task.workspace === "shared") {
+        ensureSessionTranscript(session.sessionManager);
+      }
       // Tail baseline: everything already in the file predates this run —
       // pooled and resumed transcripts carry earlier conversations. A
       // file that does not exist yet starts at 0.

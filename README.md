@@ -274,8 +274,8 @@ the packages configured for that provider (the shipped default gives
 `openai-codex` children a companion package, best-effort — see Configuration).
 No delegate tools are ever available to children — `delegate`,
 `delegate_ticket`, and `delegate_session` are stripped from every child toolset
-(explicit `tools`, profile frontmatter, and the mirrored parent set alike), so
-subagents never nest dispatches.
+(profile frontmatter and the mirrored parent set alike), so subagents never
+nest dispatches.
 
 ## Develop
 

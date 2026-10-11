@@ -372,15 +372,22 @@ describe("saved async ticket results (new v2 restart contract, issue #26)", () =
   test("a save failure after launch is disclosed; a cold reader never invents completion", async () => {
     const first = await openAt();
     const model = await installSubagentModel(first);
+    const dir = join(first.cwd, "delegate-tickets");
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
-    model.respond([async () => { await gate; return fauxAssistantMessage("LIVE-ONLY-OUTPUT"); }]);
+    // The transcript claim is a required pre-prompt save; blocking every
+    // save would fail the task before the provider turn instead of
+    // exercising the post-launch path. Chmod once the provider is entered
+    // so the claim lands and only the outcome save fails.
+    model.respond([async () => {
+      chmodSync(dir, 0o500);
+      await gate;
+      return fauxAssistantMessage("LIVE-ONLY-OUTPUT");
+    }]);
     const dispatched = await callDelegate(first, {
       tasks: [{ prompt: "finish after the disk stops accepting writes" }], async: true,
     });
     const ticket = ticketIdOf(dispatched.text);
-    const dir = join(first.cwd, "delegate-tickets");
-    chmodSync(dir, 0o500);
     try {
       release();
       const live = await callDelegateTicket(first, { action: "wait", ticket });

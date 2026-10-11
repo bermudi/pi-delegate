@@ -1,0 +1,69 @@
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  statSync,
+} from "node:fs";
+import { dirname } from "node:path";
+import type { SessionManager } from "@earendil-works/pi-coding-agent";
+
+interface SessionFileAccess {
+  getSessionFile(): string | undefined;
+  setSessionFile(file: string): void;
+}
+
+export function ensureSessionTranscript(
+  sessionManager: SessionManager,
+): string {
+  const access = sessionManager as unknown as SessionFileAccess & {
+    _rewriteFile?: unknown;
+  };
+  const file = access.getSessionFile();
+  if (typeof file !== "string" || file === "") {
+    throw new Error(
+      "delegate cannot persist the session transcript: the host session manager exposes no file-backed session path (unsupported host capability)",
+    );
+  }
+  const created = !existsSync(file);
+  if (created && typeof access._rewriteFile !== "function") {
+    throw new Error(
+      "delegate cannot persist the session transcript before its first turn: this Pi's SessionManager lacks the header-write capability (unsupported host capability)",
+    );
+  }
+  try {
+    if (created) {
+      (access._rewriteFile as () => void).call(sessionManager);
+    }
+    if (!statSync(file).isFile()) {
+      throw new Error(
+        `the claimed session transcript ${file} is not a regular file`,
+      );
+    }
+    access.setSessionFile(file);
+    if (created) {
+      chmodSync(file, 0o600);
+    }
+    let fd: number | undefined;
+    let dirFd: number | undefined;
+    try {
+      fd = openSync(file, "r");
+      fsyncSync(fd);
+      // Windows cannot open a directory handle for fsync.
+      if (process.platform !== "win32") {
+        dirFd = openSync(dirname(file), "r");
+        fsyncSync(dirFd);
+      }
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+      if (dirFd !== undefined) closeSync(dirFd);
+    }
+  } catch (error) {
+    throw new Error(
+      `persisting the claimed session transcript ${file} failed`,
+      { cause: error },
+    );
+  }
+  return file;
+}

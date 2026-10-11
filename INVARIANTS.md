@@ -81,6 +81,10 @@ use any design that makes these properties true and testable.
   Cancellation before prompting may leave it intact and MUST record no usage.
 - Ordinary provider/task failure on an existing pooled session remains
   reusable and its attempt usage is recorded.
+- A pooled session whose pre-checkout queue clearing fails MUST be evicted
+  and MUST NOT be handed to the run; it MUST be disposed independently — a
+  disposal failure is logged, not fatal — and the dispatch MUST fail,
+  making clear a later dispatch opens a clean session.
 - A late materialization after cancellation MUST NOT be prompted or pooled.
 - Shutdown MUST reject new reusable sessions, request termination of active
   sessions, avoid racing their state updates, attempt every cleanup, and surface
@@ -97,8 +101,11 @@ use any design that makes these properties true and testable.
   ordinary failure. A worker's claimed transcript MUST be journaled before
   its first turn (#123) so the interrupted outcome can name the durable
   file for a deliberate `resumeFrom` — an affordance, never an automatic
-  resume; records without the pointer render without it. Completed
-  outcomes remain visible; unfinished effects
+  resume; records without the pointer render without it. The claimed
+  transcript file itself MUST exist durably before the first provider
+  turn; required persistence failure MUST prevent that turn. Post-launch
+  publication failure MUST remain visible without pretending effects were
+  undone. Completed outcomes remain visible; unfinished effects
   are unknown. A recovered cancelled ticket with an unconfirmed worker MUST
   warn in the roster even if every task has an outcome. Persistence failures
   MUST be visible, not swallowed.

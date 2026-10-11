@@ -16,16 +16,13 @@ bump, in order; a failed seam here is a silent contract break (#15).
    - The event mirror honors `result.isError` (`session.js`) — Pi sets
      `tool_execution_end.isError` only for THROWN errors; delegate
      reports errors as returned results.
-2. **`SessionManager._rewriteFile()`** (private) — failed-run
-   transcript persistence force-flushes a header-only session file
-   (`src/sessions.ts` `persistSessionHeader`). Upstream gates the
-   first write behind the first assistant message. Optional-chained
-   and fail-soft: if the method disappears, failed fresh runs report
-   no transcript (logged). Verify existence and semantics. Also verify
-   INVARIANTS.md's separate pre-first-turn transcript-claim durability
-   requirement (#140); a pointer to a file not yet created is not durable
-   recovery. A pre-turn header flush must preserve Pi's next append
-   behavior, not just create a file.
+2. **`SessionManager._rewriteFile()`** (private) — The private
+   header-write capability lives in src/pi-compat.ts. Required
+   pre-first-turn persistence fails dispatch on a missing/broken
+   capability; post-effect transcript reporting remains best-effort.
+   Reopening the identical newly persisted file through public
+   setSessionFile must preserve the next append; verify real host death
+   before its first assistant event and subsequent successful append.
 3. **`Agent.steer()` / follow-up queues** — steering rides
    `AgentSession.steer(text)` → queue drained at run start and every
    `turn_end` (`pi-agent-core/dist/agent-loop.js:85,186`); a queued

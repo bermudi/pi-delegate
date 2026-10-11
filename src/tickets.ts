@@ -865,10 +865,20 @@ export class TicketStore {
     const writable = this.entry(ticket).record as Writable<Ticket>;
     const tasks = writable.tasks as Writable<Ticket["tasks"][number]>[];
     const task = tasks[index];
-    if (task === undefined) return;
+    if (task === undefined) {
+      throw new Error(
+        `internal: ticket '${writable.id}' has no task at index ${index}`,
+      );
+    }
     task.sessionFile = file;
     task.transcriptStart = start;
-    this.save(writable);
+    const journal = this.journal;
+    if (journal === undefined) {
+      throw new Error(
+        `Ticket '${writable.id}' transcript claim cannot be journaled: ticket storage is not initialized.`,
+      );
+    }
+    journal.save(writable);
     this.changed();
   }
 

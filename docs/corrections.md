@@ -86,6 +86,8 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 - 2026-10-10 — #132 inspection found abort acknowledgement documented as stop proof and per-worker `fullyQuiesced` sounding dispatch-wide despite pending phase reconciliation. Name scoped outcome/worker/tail/body signals, clarify abort custody, and pin cancellation-before-stop plus shutdown-through-real-Git-cleanup at public boundaries.
 - 2026-10-10 — #133/#134 preservation coverage exposed pre-existing #135: an early terminal poll froze text before deferred Git evidence, despite enriched journal/details. Invalidate the document on every outcome publication, retain per-outcome spill caches, and enforce with a held native Git probe plus text/details agreement.
 - 2026-10-10 — new prototype regression included unsolicited commentary despite the no-new-comments constraint; removed only the new file's comments (tests/regression/prototype-dictionaries.test.ts). Enforcement: authoring brief and independent diff review.
+- 2026-10-10 — an issue progress comment named an unobserved commit hash; replaced it immediately with the actual git commit result (GitHub #137). Enforcement: capture commit output before publishing references.
+- 2026-10-10 — prerequisite verification treated session.dispose as shutdown and missed directory-as-transcript reporting; require actual shutdown events/managed warning assertions and regular-file recovery pointers (required-prerequisites.test.ts, sessions.ts, execution.ts). Enforcement: public fault regressions.
 
 ## Enforcement map (surveyed 2026-10-04 @ d030bfd, v0.3.3)
 

@@ -1647,6 +1647,32 @@ external input indexed into plain dictionaries, and names colliding with
   provider bound — start counts asserted through the faux provider's live
   state before releasing the response gate.
 
+### Required prerequisites before worker effects (#140/#141, under #138)
+
+Hardening, not migrated v1 evidence: a journaled transcript claim must
+name a durable file before the first provider turn, and a pooled
+session's leftover queues must clear before reuse.
+
+- **Covered now:** `tests/regression/required-prerequisites.test.ts` —
+  public-boundary cases using native filesystem and SDK-method fault
+  injection (never production internals): a directory planted at the
+  planned transcript path fails the shared task before any provider call
+  and readmits after repair; a native `renameSync` boundary swap fails
+  the required transcript-claim journal save so the ticket settles failed
+  with zero provider calls while a post-effect save failure stays a
+  stale-save notice on the successful outcome; a real spawned fixture
+  host (`tests/support/transcript-prerequisite-child.ts`) is SIGKILLed
+  after its provider call entered but before the first assistant event —
+  the claimed transcript exists on disk (mode 0600, session header, no
+  assistant messages) and a fresh boundary polls the interrupted ticket
+  with the named file; a `clearAllQueues` fault on a resident or
+  reloaded (`sessions.maxIdle: 0`) pooled session evicts instead of
+  reusing (no provider call, `delegate_session list` omits the entry,
+  disposal attempted/logged), an explicit later dispatch opens a clean
+  session with no stale queue content, and an independent explore sibling
+  still completes; shared, pooled, and `resumeFrom` transcripts all
+  append prompt+assistant entries after the durable header.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |
