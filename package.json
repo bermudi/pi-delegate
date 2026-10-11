@@ -45,6 +45,8 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "check": "bun scripts/checks.ts",
+    "check:pack": "bun scripts/pack-smoke.ts",
     "verify:dogfood": "bun scripts/dogfood.ts",
     "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=.build/delegate.bundle.ts"
   },

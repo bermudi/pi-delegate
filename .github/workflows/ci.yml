@@ -16,9 +16,11 @@ jobs:
           fetch-tags: true
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: latest
+          bun-version: "1.4.2"
 
-      - run: bun install
+      - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      - run: bun run check
       - run: bun test
       - run: bun run build
+      - run: bun run check:pack
