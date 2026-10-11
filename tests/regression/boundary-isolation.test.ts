@@ -11,13 +11,11 @@ import {
 } from "../support/pi-boundary.ts";
 
 // #122: enforce diagnostic ownership without importing production internals.
-// Worker stdout is the framed protocol, not a diagnostic destination.
 test("production console and output-stream writes stay at their owned boundaries", () => {
   const root = join(import.meta.dirname, "../..");
   const paths = ["delegate.ts", ...readdirSync(join(root, "src"), { recursive: true, encoding: "utf8" })
     .filter((path) => path.endsWith(".ts")).map((path) => `src/${path}`)];
   const violations: string[] = [];
-  let protocolWrites = 0;
   for (const path of paths) {
     const source = ts.createSourceFile(path, readFileSync(join(root, path), "utf8"), ts.ScriptTarget.Latest, true);
     const walk = (node: ts.Node): void => {
@@ -31,12 +29,7 @@ test("production console and output-stream writes stay at their owned boundaries
           violations.push(`${path}: console.${property}`);
         }
         if (property === "write" && /\b(?:stdout|stderr)\b/.test(object)) {
-          const call = node.parent;
-          const framed = path === "src/worker/host.ts" && node.getText(source) === "io.stdout.write"
-            && ts.isCallExpression(call) && call.arguments.length === 1
-            && call.arguments[0]?.getText(source) === "encodeFrame(message)";
-          if (framed) protocolWrites += 1;
-          else violations.push(`${path}: ${node.getText(source)}`);
+          violations.push(`${path}: ${node.getText(source)}`);
         }
       }
       ts.forEachChild(node, walk);
@@ -44,7 +37,6 @@ test("production console and output-stream writes stay at their owned boundaries
     walk(source);
   }
   expect(violations).toEqual([]);
-  expect(protocolWrites).toBe(1);
 });
 
 // V2 review regression: opening a second boundary used to redirect the first

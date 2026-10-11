@@ -18,7 +18,7 @@ ticket registry and pool, no reconnect to surviving work, no
 rematerialized sessions after restart. It proposed a staged fix
 (journal → worker reconnect → lazy pooled rematerialization) gated on
 #96's subprocess-worker boundary (v2 numbering: #43; stage-A scaffolding
-survives dormant in `src/worker/`).
+retired 2026-10-11 — git history preserves the implementation).
 
 The motivating user incident (2026-09-18, recorded on #44): an
 accidental `/reload` cancelled a background task; polling the same
@@ -65,5 +65,6 @@ and it remains open — do not read this ADR as settling it.
 - The approved sequencing's "restart recovery" phase reduces to its
   record-level half (landed: #79, #107, #123, #124) plus the live
   browser (#48). No execution-level recovery work is pending.
-- `src/worker/` stays dormant scaffolding; nothing in dispatch may
-  call it without reopening this ADR.
+- `src/worker/` is retired; nothing in dispatch may reintroduce
+  process-backed workers without reopening this ADR (revisit trigger
+  above).

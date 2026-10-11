@@ -34,7 +34,6 @@ interface ChildMarker {
   readonly startupRecovery?: boolean;
   readonly unsupported?: boolean;
   readonly safeCauses?: boolean;
-  readonly workerNoninterference?: boolean;
   readonly retryDiagnostic?: boolean;
   readonly tty: boolean;
   readonly pid: number;
@@ -331,8 +330,6 @@ describe("diagnostic routing at public tool boundary", () => {
     "failure-no-follow",
     "failure-foreign",
     "failure-safe-causes",
-    "failure-worker-default",
-    "failure-worker-observer",
     "failure-retry",
   ]) {
     ttyTest(
@@ -358,16 +355,6 @@ describe("diagnostic routing at public tool boundary", () => {
                 r.error?.code === "ECONNRESET",
             ),
           ).toBe(true);
-        } else if (scenario.startsWith("failure-worker-")) {
-          expect(outcome.workerNoninterference).toBe(true);
-          expect(
-            observed.records.find(
-              (r) => r.event === "worker startup timeout; killing",
-            )?.level,
-          ).toBe("error");
-          expect(
-            observed.records.find((r) => r.event === "worker fatal")?.level,
-          ).toBe("error");
         } else if (scenario === "failure-retry") {
           expect(outcome.retryDiagnostic).toBe(true);
           const retry = observed.records.find(

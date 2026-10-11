@@ -98,8 +98,7 @@ both; the record's date is the tell when in doubt.
   cursor; the older duplicate pending tool header is a separate native Pi bug.
 - **Static coverage:** `tests/regression/boundary-isolation.test.ts` reads
   production sources without importing implementation helpers and restricts
-  console/output-stream writes to the diagnostic router and framed worker
-  stdout respectively.
+  console/output-stream writes to the diagnostic router.
 - **Public boundary coverage:** `tests/regression/diagnostics-routing.test.ts`
   uses real piped streams and Linux pseudo-terminals, registered dispatch/wait/
   answer/steer tools, and faux child models. It verifies no attached-terminal
@@ -121,9 +120,10 @@ both; the record's date is the tell when in doubt.
   covers missing getuid/no-follow and a foreign-platform flag; this does not verify macOS or any foreign filesystem.
   Bounded Error.cause codes survive while hostile error accessors never run.
   PTY cases skip on hosts without Linux `script`; no helper-only diagnostic tests
-  are introduced here. Dormant worker supervision uses its existing stage-A real
-  process boundary (no public dispatch exists), checking logging failures never
-  escape stream handlers or change exit classification.
+  are introduced here. The dormant-worker coverage retired with the machinery
+  under E2 (2026-10-11): the worker-boundary suite, its stub fixture, and the
+  failure-worker-* scenarios exercised #43's stage-A supervisor, which no
+  dispatch path ever called; git history preserves both.
 - **Runtime exclusion regression:** `tests/regression/diagnostic-workspaces.test.ts`
   uses synthetic source Git and real PTYs with default Pi diagnostics inside
   source (fixture HOME, distinct inferred engine agentDir) and blocked-primary

@@ -110,7 +110,7 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 **Enforced on every change:**
 
 - `bun run typecheck` (strict `tsc --noEmit`); `bun test` — public-tool
-  regressions, with the documented dormant-worker protocol boundary waiver.
+  regressions.
 - `boundary-isolation.test.ts`: production `any` and direct console/terminal
   writes are rejected; private diagnostic routing owns the stderr exception.
 - Real-PTY diagnostic fault tests preserve answers, shutdown and startup;

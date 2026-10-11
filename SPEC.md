@@ -78,8 +78,6 @@ operation/ticket results. All three tool renderers show it collapsed and expande
 including recorded-history views with no live store. A repaired operation replay
 must not retain an earlier return's warning. Notice failures remain explicitly visible in that warning;
 they never recurse into the unavailable logger. Original tool errors stand.
-A standalone dormant worker supervisor reports diagnostic failures on its exit
-result without changing its worker exit classification.
 
 Directory components exactly named `delegate-diagnostics` or
 `pi-delegate-diagnostics-<numeric uid>-<numeric pid>` are reserved runtime

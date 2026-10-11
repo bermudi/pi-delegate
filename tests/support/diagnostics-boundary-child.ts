@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import {
   fauxAssistantMessage,
@@ -182,7 +182,6 @@ try {
     let admissionReleased = false;
     let noticeFailure = false;
     let safeCauses = false;
-    let workerNoninterference = false;
     let retryDiagnostic = false;
     if (scenario === "failure-startup") {
       model.respond([
@@ -295,108 +294,6 @@ try {
         "Internal diagnostic cause escaped public result",
       );
       retryDiagnostic = true;
-    } else if (
-      scenario === "failure-worker-default" ||
-      scenario === "failure-worker-observer"
-    ) {
-      // #43's dormant stage-A supervisor has no registered dispatch surface.
-      // Exercise its existing real-process boundary, not logger helpers.
-      const { spawnWorker } = await import("../../src/worker/spawn.ts");
-      blockBoth();
-      const spec = {
-        taskId: "safe-worker-id",
-        label: "stub",
-        prompt: "PRIVATE_WORKER_PROMPT",
-        cwd: agentDir,
-        agentDir,
-        model: "faux/faux",
-        tools: [],
-      };
-      const legacyLog =
-        scenario === "failure-worker-observer"
-          ? () => {
-              throw new Error("PRIVATE_OBSERVER");
-            }
-          : undefined;
-      const successfulCode =
-        'process.stdout.write(JSON.stringify({type:"hello",protocol:1,pid:process.pid})+"\\n"); process.stderr.write("PRIVATE_STDERR"); setTimeout(()=>{ for(const m of [{type:"result",outcome:{status:"ok"}},{type:"quiescent",reason:"PRIVATE_QUIESCENT"}]) process.stdout.write(JSON.stringify(m)+"\\n"); process.exit(0); }, 50)';
-      const successful = spawnWorker({
-        command: [process.execPath, "-e", successfulCode],
-        spec,
-        log: legacyLog,
-        startupTimeoutMs: 1000,
-      });
-      const exit = await successful.settled;
-      assert(
-        exit.class === "aborted" &&
-          exit.diagnosticWarning?.includes("diagnostic"),
-        "Default logging changed worker settlement",
-      );
-      assert(
-        !JSON.stringify(exit.diagnosticWarning).includes("PRIVATE_"),
-        "Worker warning leaked payload",
-      );
-      for (const [mode, expected] of [
-        ["wrong-version", "protocol-failed"],
-        ["silent", "startup-failed"],
-        ["wedged", "killed"],
-      ]) {
-        let hello!: () => void;
-        const ready = new Promise<void>((r) => {
-          hello = r;
-        });
-        const worker = spawnWorker({
-          command: [
-            process.execPath,
-            resolve(import.meta.dirname, "stub-worker.ts"),
-          ],
-          spec,
-          env: { ...process.env, STUB_WORKER_MODE: mode },
-          graceMs: 40,
-          killGraceMs: 40,
-          startupTimeoutMs: 500,
-          onMessage: () => hello(),
-          log: legacyLog,
-        });
-        if (mode === "wedged") {
-          await ready;
-          void worker.requestStop();
-        }
-        const outcome = await worker.settled;
-        assert(
-          outcome.class === expected && outcome.diagnosticWarning,
-          "Logger broke worker " + mode,
-        );
-      }
-      const badSpawn = spawnWorker({
-        command: ["/no/delegate/executable"],
-        spec,
-        log: legacyLog,
-      });
-      const failed = await badSpawn.settled;
-      assert(
-        failed.class === "startup-failed" && failed.diagnosticWarning,
-        "Logger escaped worker error event",
-      );
-      recoverRouting();
-      // Healthy routing retains operational levels after failure recovery.
-      const timeout = spawnWorker({
-        command: [
-          process.execPath,
-          resolve(import.meta.dirname, "stub-worker.ts"),
-        ],
-        spec,
-        env: { ...process.env, STUB_WORKER_MODE: "silent" },
-        startupTimeoutMs: 200,
-      });
-      await timeout.settled;
-      const fatalCode = `for(const m of [{type:"hello",protocol:1,pid:process.pid},{type:"fatal",class:"crashed",message:"PRIVATE_FATAL"}]) process.stdout.write(JSON.stringify(m)+String.fromCharCode(10)); setTimeout(()=>process.exit(1),20)`;
-      const fatal = spawnWorker({
-        command: [process.execPath, "-e", fatalCode],
-        spec,
-      });
-      await fatal.settled;
-      workerNoninterference = true;
     } else if (
       ["failure-no-getuid", "failure-no-follow", "failure-foreign"].includes(
         scenario,
@@ -668,7 +565,6 @@ try {
           admissionReleased,
           noticeFailure,
           safeCauses,
-          workerNoninterference,
           retryDiagnostic,
         }),
     );
