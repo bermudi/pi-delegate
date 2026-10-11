@@ -166,6 +166,35 @@ question expiry assertions are retired. `recovery.test.ts` verifies historical
 saved deadline failures remain pollable/waitable without replay. Historical
 v1 deadline scenarios are superseded, not a coverage gap.
 
+## Workspace process cleanup through the boundary (D4 hardening)
+
+- **Contract:** a worker-spawned process left cwd'd inside a scratch copy
+  or isolated worktree is terminated by reconcile-time cleanup
+  (`stopWorkspaceProcesses`: SIGTERM, a 500ms grace window, SIGKILL)
+  without deciding the task's outcome — integrations proceed on their own
+  merits, and the "terminating N process(es) left in delegated workspace"
+  record is observable on stderr. A quarantined worker's
+  discarded-retained integration keeps an honest `worktreePath` (a real
+  directory on disk) until the deferred post-quiescence cleanup tail
+  stops its strays and removes the tree; a conflict keeps durable
+  pointers — `patchPath` parses and re-applies onto `baselineRef`,
+  `proposalRef`/`baselineRef` resolve in the source repository.
+- **Covered now:** `tests/contract/workspace-cleanup.test.ts` — plain
+  strays terminated in isolated and scratch workspaces (stderr record,
+  real /proc death, outcome on merits); a `trap '' TERM` stray proven
+  SIGTERM-immune via `/proc/<pid>/status` SigIgn while live and dead after
+  settle while its proposal still applies; a quarantined worker's
+  discarded `worktreePath` exists while retained and its stray dies with
+  the deferred cleanup tail; a conflict's `patchPath`/`proposalRef`/
+  `baselineRef` physically recover the proposal in a detached baseline
+  worktree.
+- **Unpinnable cell:** a stray surviving SIGKILL (stop-failure →
+  integration `discarded` "Could not quiesce…", deferred "could not stop
+  processes … retaining it") cannot be induced honestly through the
+  public boundary — nothing a test may legally spawn is immune to
+  SIGKILL, and stubbing /proc or the internal stop helper is forbidden.
+  Documented, not faked.
+
 ## Migration policy (moved from COMPATIBILITY.md, 2026-10-10)
 
 Do **not** port the v1 test suite wholesale. Its regression knowledge is useful;
@@ -824,7 +853,10 @@ gaps.
   subtracted from drift, and a shell-capable shared sibling de-scopes
   pinning for the overlapped root entirely (unattributable, logged); a
   shell-less worker is never pinned; non-Git sources get no evidence and
-  log once.
+  log once. A leftover stray process in the copy is terminated during
+  discard (stderr record + real /proc death + outcome on merits;
+  `tests/contract/workspace-cleanup.test.ts`, see "Workspace process
+  cleanup through the boundary (D4 hardening)").
 - **Copy-admission regressions (#50, literal repository issue):**
   `scratch-copy-admission.test.ts` covers active shared/isolated writers,
   the actual canonical Git top-level through a cwd symlink, concurrent
@@ -893,7 +925,13 @@ gaps.
   (regression guard); an agent dir nested inside the repo under a
   gitignore never provisions (worker probes absence while the ignored
   dependency still arrives — the pre-fix behavior failed the whole
-  group on fs.cp's copy-into-self EINVAL).
+  group on fs.cp's copy-into-self EINVAL). Workspace process cleanup
+  (D4, `tests/contract/workspace-cleanup.test.ts`): a plain stray and a
+  `trap '' TERM` stray are terminated before proposal handling while
+  `applied_unverified` still applies; a quarantined worker's discarded
+  `worktreePath` stays an honest on-disk pointer until deferred cleanup
+  stops its strays; a conflict's `patchPath`/`proposalRef`/`baselineRef`
+  are physically verified to recover the proposal.
 - **Gap:** binary-content proposals end-to-end — patches always carry
   `--binary` and the failed-apply tests fault that invocation, but no test
   pushes actual non-text content through a live proposal; index/branch
@@ -903,7 +941,10 @@ gaps.
   mid-flight edits, drift between check and write, partial duplicates),
   symlink/mode reconciliation, and abandoned-worker cleanup are covered
   above and under "Invariant hardening"; worker termination itself is
-  cooperative by contract (see "Cancellation and quiescence").
+  cooperative by contract (see "Cancellation and quiescence"). A stray
+  surviving SIGKILL (stop-failure → `discarded`, deferred retain) is
+  unpinnable through the public boundary — no legal inducement exists;
+  documented under "Workspace process cleanup through the boundary (D4)".
 
 ### Failure propagation and retries
 
