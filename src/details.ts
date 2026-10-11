@@ -17,6 +17,12 @@
  * field renames, no shape changes.
  */
 import { Type, type Static, type TSchema, type TUnsafe } from "typebox";
+import {
+  TASK_INTEGRATION_STATUS_VALUES,
+  TASK_STATUS_VALUES,
+  TASK_VERDICT_VALUES,
+  usageSchema,
+} from "./schema-primitives.ts";
 import type { TaskOutcome } from "./types.ts";
 
 /**
@@ -42,49 +48,13 @@ function readonlyArray<T extends TSchema>(
   return Type.Unsafe<readonly Static<T>[]>({ ...Type.Array(schema) });
 }
 
-const taskStatusSchema = literalUnion([
-  "ok",
-  "failed",
-  "cancelled",
-  "blocked",
-  "interrupted",
-  "budget-exhausted",
-] as const);
+const taskStatusSchema = literalUnion(TASK_STATUS_VALUES);
 
-const taskVerdictSchema = literalUnion([
-  "PASS",
-  "FAIL",
-  "AMBIGUOUS",
-] as const);
-
-/** pi-ai `Usage`, mirrored — a provider-emitted shape, pinned loosely. */
-const usageSchema = Type.Object({
-  input: Type.Number(),
-  output: Type.Number(),
-  cacheRead: Type.Number(),
-  cacheWrite: Type.Number(),
-  cacheWrite1h: Type.Optional(Type.Number()),
-  reasoning: Type.Optional(Type.Number()),
-  totalTokens: Type.Number(),
-  cost: Type.Object({
-    input: Type.Number(),
-    output: Type.Number(),
-    cacheRead: Type.Number(),
-    cacheWrite: Type.Number(),
-    total: Type.Number(),
-  }),
-});
+const taskVerdictSchema = literalUnion(TASK_VERDICT_VALUES);
 
 const taskIntegrationSchema = Type.Object(
   {
-    status: literalUnion([
-      "applied_unverified",
-      "conflict",
-      "retained",
-      "no_changes",
-      "discarded",
-      "apply_failed",
-    ] as const),
+    status: literalUnion(TASK_INTEGRATION_STATUS_VALUES),
     reason: Type.Optional(Type.String()),
     proposedFiles: readonlyArray(Type.String()),
     appliedFiles: readonlyArray(Type.String()),

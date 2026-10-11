@@ -1774,6 +1774,26 @@ ignored keys and the recognized set and never values or the file body.
   the next valid load. The `surface` removal rejection stays pinned in
   `tests/contract/surface.test.ts`.
 
+### Shared schema enumeration primitives (E1, under #138)
+
+Hardening, not migrated v1 evidence: `details.ts`'s strict emitted
+schemas and `ticket-journal.ts`'s tolerant journal schemas historically
+declared private copies of the task status, integration status, verdict,
+and usage primitives. The value sets are literally identical and now
+live in `src/schema-primitives.ts`, each `satisfies`-pinned to its
+canonical union so a drifted list fails typecheck; container strictness
+deliberately stays local (emitted `additionalProperties: false` vs
+journal open objects that tolerate additive evolution).
+
+- **Covered now:** `tests/contract/schema-fixtures.test.ts` — a
+  pre-#127 journal record without newer optional fields and with
+  unknown keys round-trips through `delegate_ticket`; a record covering
+  every task status, integration status, and verdict parses through
+  the real journal load path; an unknown enumeration value rejects at
+  load; and a realistic emitted `details.results` entry `Check`s
+  strictly while an internal `durationMs` key, an unknown status, and a
+  stray integration key each fail.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |

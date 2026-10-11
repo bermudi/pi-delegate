@@ -8,23 +8,18 @@ import { join } from "node:path";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { DELEGATE_TREES } from "./fsx.ts";
+import {
+  TASK_INTEGRATION_STATUS_VALUES,
+  TASK_STATUS_VALUES,
+  TASK_VERDICT_VALUES,
+  usageSchema,
+} from "./schema-primitives.ts";
 import type { Ticket } from "./types.ts";
 
-const usage = Type.Object({
-  input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(),
-  cacheWrite: Type.Number(), cacheWrite1h: Type.Optional(Type.Number()),
-  reasoning: Type.Optional(Type.Number()), totalTokens: Type.Number(),
-  cost: Type.Object({
-    input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(),
-    cacheWrite: Type.Number(), total: Type.Number(),
-  }),
-});
 const integration = Type.Object({
-  status: Type.Union([
-    Type.Literal("applied_unverified"), Type.Literal("conflict"),
-    Type.Literal("retained"), Type.Literal("no_changes"),
-    Type.Literal("discarded"), Type.Literal("apply_failed"),
-  ]),
+  status: Type.Union(
+    TASK_INTEGRATION_STATUS_VALUES.map((status) => Type.Literal(status)),
+  ),
   reason: Type.Optional(Type.String()),
   proposedFiles: Type.Array(Type.String()),
   appliedFiles: Type.Array(Type.String()),
@@ -39,13 +34,11 @@ const integration = Type.Object({
 });
 const outcome = Type.Object({
   index: Type.Integer({ minimum: 0 }), id: Type.String(),
-  status: Type.Union([
-    Type.Literal("ok"), Type.Literal("failed"),
-    Type.Literal("cancelled"), Type.Literal("blocked"),
-    Type.Literal("interrupted"), Type.Literal("budget-exhausted"),
-  ]),
+  status: Type.Union(
+    TASK_STATUS_VALUES.map((status) => Type.Literal(status)),
+  ),
   output: Type.Optional(Type.String()), error: Type.Optional(Type.String()),
-  retries: Type.Integer({ minimum: 0 }), usage: Type.Optional(usage),
+  retries: Type.Integer({ minimum: 0 }), usage: Type.Optional(usageSchema),
   integration: Type.Optional(integration),
   blockedBy: Type.Optional(Type.Array(Type.String())),
   quarantined: Type.Optional(Type.Boolean()),
@@ -65,9 +58,9 @@ const outcome = Type.Object({
   concurrentWriters: Type.Optional(Type.Array(Type.String())),
   // Verifier verdict (#49) — optional; only verifier-profile outcomes
   // with a parseable VERDICT: line carry it.
-  verdict: Type.Optional(Type.Union([
-    Type.Literal("PASS"), Type.Literal("FAIL"), Type.Literal("AMBIGUOUS"),
-  ])),
+  verdict: Type.Optional(Type.Union(
+    TASK_VERDICT_VALUES.map((verdict) => Type.Literal(verdict)),
+  )),
   // Admitted-span ms (#127) — optional; records written before task
   // durations carry none, and never-started tasks never carry one.
   durationMs: Type.Optional(Type.Number()),
