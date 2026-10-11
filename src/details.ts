@@ -60,7 +60,10 @@ const taskIntegrationSchema = Type.Object(
     appliedFiles: readonlyArray(Type.String()),
     conflicts: Type.Optional(
       readonlyArray(
-        Type.Object({ path: Type.String(), reason: Type.String() }),
+        Type.Object(
+          { path: Type.String(), reason: Type.String() },
+          { additionalProperties: false },
+        ),
       ),
     ),
     baselineRef: Type.Optional(Type.String()),
