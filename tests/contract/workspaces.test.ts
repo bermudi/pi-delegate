@@ -30,6 +30,7 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
+import { gitEnv } from "../../src/fsx.ts";
 
 function gitInit(dir: string): void {
   // An initial commit is required: isolated baselines are built on HEAD.
@@ -970,6 +971,18 @@ describe("delegate workspace and shared-write contract", () => {
     writeFileSync(join(dir, "b.txt"), "base\n");
     execSync("git add -A && git commit -qm base", { cwd: dir });
     chmodSync(join(dir, "a.txt"), 0o600);
+    // Refused-path invariance: a failed apply must leave the user's index
+    // and branch exactly as they were — capture them before the shim lands.
+    const headBefore = execSync("git rev-parse HEAD", {
+      cwd: dir,
+      env: gitEnv(),
+      encoding: "utf8",
+    }).trim();
+    const branchBefore = execSync("git symbolic-ref HEAD", {
+      cwd: dir,
+      env: gitEnv(),
+      encoding: "utf8",
+    }).trim();
     const shimDir = tempDir();
     const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
     // Only the source write is faulted; preparation, merge, checks and
@@ -999,6 +1012,30 @@ exec '${realGit}' "$@"
       expect(statSync(join(dir, "a.txt")).mode & 0o777).toBe(0o600);
       expect(readFileSync(join(dir, "b.txt"), "utf8")).toBe("human-mid-apply\n");
       expect(result.text).toMatch(/b\.txt/);
+      // The refused apply never touched the user's index or branch:
+      // nothing staged, HEAD unmoved, still on the same ref — delegate's
+      // private refs and detached worktrees stayed invisible to the user.
+      expect(
+        execSync("git diff --cached --name-only", {
+          cwd: dir,
+          env: gitEnv(),
+          encoding: "utf8",
+        }),
+      ).toBe("");
+      expect(
+        execSync("git rev-parse HEAD", {
+          cwd: dir,
+          env: gitEnv(),
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(headBefore);
+      expect(
+        execSync("git symbolic-ref HEAD", {
+          cwd: dir,
+          env: gitEnv(),
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(branchBefore);
     } finally {
       process.env.PATH = previousPath;
     }
@@ -1045,6 +1082,51 @@ exec '${realGit}' "$@"
       process.env.PATH = previousPath;
     }
   });
+
+  test(
+    "an isolated proposal carries binary file content to the source byte-identically",
+    async () => {
+      // Gap pin: patches always carry `--binary` and the failed-apply
+      // tests fault that invocation, but nothing pushed real non-text
+      // content through a live proposal. The worker decodes a base64
+      // payload through its real bash tool — every byte value including
+      // NUL and high bytes, no trailing newline — so the delta can only
+      // survive as a binary literal; a text-patch fallback would corrupt
+      // or refuse it. The source file must match byte-for-byte.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const payload = Buffer.from(
+        Array.from({ length: 256 }, (_, i) => i),
+      );
+      const step: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("DONE")
+          : fauxAssistantMessage([
+              fauxToolCall("bash", {
+                command: `echo '${payload.toString("base64")}' | base64 -d > payload.bin`,
+              }),
+            ]);
+      subagents.respond([step, step]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "write payload.bin",
+            cwd: dir,
+            workspace: "isolated",
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toMatch(/applied_unverified/);
+      // Buffer compare — a text comparison would hide byte corruption.
+      expect(readFileSync(join(dir, "payload.bin"))).toEqual(payload);
+    },
+  );
 
   test("an empty duplicate edge cannot unblock a dependent when the source lacks its effects", async () => {
     // Regression of v1 isolated-workspace identical proposal scenario:
@@ -1266,6 +1348,22 @@ exec '${realGit}' "$@"
       const target = join(dir, "conflict.txt");
       writeFileSync(target, "original");
       execSync("git add -A && git commit -qm init", { cwd: dir });
+      // Refused-path invariance needs an index worth preserving: a
+      // staged-but-uncommitted entry the reconcile machinery must leave
+      // staged, plus HEAD and the branch ref for "unmoved" to mean
+      // something — private refs and detached worktrees never reach either.
+      writeFileSync(join(dir, "staged.txt"), "staged\n");
+      execSync("git add staged.txt", { cwd: dir, env: gitEnv() });
+      const headBefore = execSync("git rev-parse HEAD", {
+        cwd: dir,
+        env: gitEnv(),
+        encoding: "utf8",
+      }).trim();
+      const branchBefore = execSync("git symbolic-ref HEAD", {
+        cwd: dir,
+        env: gitEnv(),
+        encoding: "utf8",
+      }).trim();
 
       // The first provider call is gated: once it is streaming, preparation
       // has finished and the baseline is captured, so the human edit below
@@ -1324,6 +1422,30 @@ exec '${realGit}' "$@"
       expect(readFileSync(target, "utf8")).toBe("human-change");
       expect(result.text).toMatch(/conflict|retained|recover/i);
       expect(readFileSync(join(dir, "ok.txt"), "utf8")).toBe("ok");
+      // Refused-path invariance: the conflict left the user's index and
+      // branch untouched — staged.txt still the only staged entry, HEAD
+      // and the branch ref exactly as before the dispatch.
+      expect(
+        execSync("git diff --cached --name-only", {
+          cwd: dir,
+          env: gitEnv(),
+          encoding: "utf8",
+        }).trim(),
+      ).toBe("staged.txt");
+      expect(
+        execSync("git rev-parse HEAD", {
+          cwd: dir,
+          env: gitEnv(),
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(headBefore);
+      expect(
+        execSync("git symbolic-ref HEAD", {
+          cwd: dir,
+          env: gitEnv(),
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(branchBefore);
     },
   );
 

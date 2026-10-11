@@ -952,15 +952,18 @@ gaps.
   `applied_unverified` still applies; a quarantined worker's discarded
   `worktreePath` stays an honest on-disk pointer until deferred cleanup
   stops its strays; a conflict's `patchPath`/`proposalRef`/`baselineRef`
-  are physically verified to recover the proposal.
-- **Gap:** binary-content proposals end-to-end — patches always carry
-  `--binary` and the failed-apply tests fault that invocation, but no test
-  pushes actual non-text content through a live proposal; index/branch
-  invariance asserted on refused paths — the success-path test asserts the
-  staged index survived, the conflict/failed-apply tests assert file bytes
-  only. Cancellation before apply, baseline-drift refusal (same-file
-  mid-flight edits, drift between check and write, partial duplicates),
-  symlink/mode reconciliation, and abandoned-worker cleanup are covered
+  are physically verified to recover the proposal. Binary content
+  end-to-end: a worker's base64-decoded file of all 256 byte values
+  reconciles `applied_unverified` and lands in the source byte-identical
+  (Buffer compare — the `--binary` delta carries it verbatim). Refused
+  paths pin index/branch invariance: the live conflict keeps the user's
+  staged index entry (`git diff --cached` unchanged) with HEAD and the
+  branch ref unmoved, and the shimmed failed apply leaves an empty index
+  and the same HEAD/branch.
+- **Gap:** none left in this file — cancellation before apply,
+  baseline-drift refusal (same-file mid-flight edits, drift between check
+  and write, partial duplicates), symlink/mode reconciliation, and
+  abandoned-worker cleanup are covered
   above and under "Invariant hardening"; worker termination itself is
   cooperative by contract (see "Cancellation and quiescence"). A stray
   surviving SIGKILL (stop-failure → `discarded`, deferred retain) is
