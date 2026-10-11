@@ -90,6 +90,8 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 - 2026-10-10 — prerequisite verification treated session.dispose as shutdown and missed directory-as-transcript reporting; require actual shutdown events/managed warning assertions and regular-file recovery pointers (required-prerequisites.test.ts, sessions.ts, execution.ts). Enforcement: public fault regressions.
 - 2026-10-11 — #142 RED pass first "passed" a contention test that checked recorded timer gaps immediately after the blocked call returned: the overdue interval callback had not run yet, so the 2 s gap was never sampled. Assert timer-gap instrumentation after a macrotask yield (`telemetry-contention.test.ts`); a RED that cannot fail proves nothing.
 - 2026-10-11 — a staged `README.md` meant to stay uncommitted was swept into b2626dd: the index carried it and a commit consumed the whole index. With unrelated staged changes present, commit by explicit pathspec (`git commit -- <paths>`) or unstage first — and confirm `git status` before publishing that the staged set is still what you believe it is.
+- 2026-10-11 — E1's first commit added `tests/contract/schema-fixtures.test.ts` without its TEST-MIGRATION coverage entry; the rule ("update the coverage map when migrating or promoting tests") applies to brand-new hardening files too, not just migrations. Caught pre-push and amended into 25ea643.
+- 2026-10-11 — `bun test tests/regression/quarantine.test.ts` silently ran 0 files: bun treats non-`./`-prefixed positionals as name filters, not paths, and two invented filenames went un-noticed behind a multi-file summary. Invoke `bun test ./<path>` and check the "Ran N tests across K files" count against the files passed.
 
 ## Enforcement map (surveyed 2026-10-04 @ d030bfd, v0.3.3)
 
@@ -121,18 +123,25 @@ move. This file is the ledger; the reasoning behind the ladder lives in
   from source-mutation completion; cancellation `wait` precedes worker stop.
 - The native delayed-Git regression requires terminal text to refresh after
   outcome publication, even when the execution map is already empty.
-- `.github/workflows/ci.yml`: install + typecheck + test + build on every
-  push/PR to main. Publishing separately gated (`publish-npm.yml`): tag must
+- `bun run check` (E3, 2026-10-11): seven static checks — no module-level
+  mutable state, private host-internal spellings contained to `pi-compat.ts`,
+  acyclic imports, every emitted details `Type.Object` strict with
+  `durationMs` absent, diagnostic context keys inside the `CONTEXT_KEYS`
+  allowlist, child auto-retry disabled in memory, and an incremental
+  unused-export ratchet against `scripts/unused-exports-baseline.txt`.
+- `bun run check:pack` (E3): the packed tarball carries exactly the `files`
+  manifest (no patches/tests/scripts/node_modules) and bundle-builds
+  standalone.
+- `.github/workflows/ci.yml`: pinned Bun + `--frozen-lockfile` install +
+  typecheck + check + test + build + pack smoke on every push/PR to main.
+  Publishing separately gated (`publish-npm.yml`): tag must
   equal `package.json` version, OIDC, no local npm auth.
 
 **Prose only (soft):**
 
 - `AGENTS.md`: zod at boundaries, issue-first sequencing, reviews
-  need fresh context, commit-often-no-push, no module-level mutable state,
+  need fresh context, commit-often-no-push,
   test-migration provenance rules.
-- Ladder candidate: "no module-level mutable state" is an architectural
-  invariant enforced only by review — nothing mechanical stops a module-level
-  `let` today.
 
 **Memory only:**
 
