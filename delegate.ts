@@ -28,7 +28,6 @@ import {
   publicOutcome,
   type AsyncDispatchDetails,
   type HelpDetails,
-  type LiveDispatchDetails,
   type QuestionNoticeDetails,
   type SessionDetails,
   type SyncDispatchDetails,
@@ -47,6 +46,7 @@ import {
 } from "./src/host.ts";
 import { parentModelRuntime } from "./src/pi-compat.ts";
 import { createActivityStore } from "./src/activity.ts";
+import { InlineBoard } from "./src/board.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
 import { currentBootId } from "./src/owner.ts";
 import { DispatchRegistry } from "./src/lifetime.ts";
@@ -1687,65 +1687,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
             // the pending tool row's heartbeat, ~1s plus each task settle.
             // Rows live in the activity store under this call's run id;
             // the partials are display-only (never the session file or the
-            // model's context). `boardNotices` fills when the pipeline
-            // returns; settle-driven emits cannot precede that point.
+            // model's context). Notices fill when the pipeline returns;
+            // settle-driven repaints cannot precede that point.
             const syncRunId =
               call.async === false ? `inline-${toolCallId}` : undefined;
-            let boardNotices: readonly string[] = [];
-            const emitBoard = (): void => {
-              if (onUpdate === undefined || syncRunId === undefined) return;
-              try {
-                const rows = activity.syncRunRows(syncRunId);
-                if (rows.length === 0) return;
-                onUpdate({
-                  content:
-                    boardNotices.length > 0
-                      ? [
-                          {
-                            type: "text" as const,
-                            text: boardNotices.join("\n"),
-                          },
-                        ]
-                      : [],
-                  details: ({
-                    mode: "dispatch" as const,
-                    async: false as const,
-                    live: {
-                      startedAt: rows[0]!.startedAt,
-                      tasks: rows.map((row) => {
-                        const inFlight = row.toolCalls.find(
-                          (callRow) => callRow.inFlight,
-                        );
-                        const last =
-                          inFlight ?? row.toolCalls[row.toolCalls.length - 1];
-                        return {
-                          id: row.taskId,
-                          label: row.label,
-                          status: row.status,
-                          startedAt: row.startedAt,
-                          lastEventAt: row.lastEventAt,
-                          ...(last !== undefined
-                            ? {
-                                tool: last.tool,
-                                preview:
-                                  inFlight !== undefined
-                                    ? last.argPreview
-                                    : last.preview,
-                              }
-                            : {}),
-                        };
-                      }),
-                    },
-                    ...(boardNotices.length > 0
-                      ? { notices: [...boardNotices] }
-                      : {}),
-                  } satisfies LiveDispatchDetails),
-                });
-              } catch {
-                // The board is display-only; a failed emit never
-                // reaches the batch.
-              }
-            };
+            const board = new InlineBoard({
+              onUpdate,
+              syncRunId,
+              rows: (runId) => activity.syncRunRows(runId),
+            });
             const { completion, ticket, notices, tasks, outputBounds } =
               await pipeline.run({
               requestedTasks: call.tasks,
@@ -1753,7 +1703,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               brief: call.brief,
               syncRunId,
               onTaskOutcomeRecorded:
-                syncRunId === undefined ? undefined : () => emitBoard(),
+                syncRunId === undefined ? undefined : board.repaint,
               // One signal source in the pipeline: the caller's host signal
               // for a sync batch, the ticket's cancellation for an async one.
               signal: call.async ? undefined : signal,
@@ -1858,22 +1808,15 @@ export default function delegateExtension(api: ExtensionAPI): void {
               };
             }
 
-            boardNotices = notices;
-            // The board's first frame paints every task row as tracked —
-            // by now coordinator.run's synchronous prefix registered them.
-            emitBoard();
-            // The heartbeat runs for the batch's life; `finally` clears it
-            // on settle, throw, or abort so no timer outlives the call.
-            const heartbeat =
-              onUpdate === undefined || syncRunId === undefined
-                ? undefined
-                : setInterval(emitBoard, 1000);
-            heartbeat?.unref?.();
+            board.setNotices(notices);
+            // The first frame plus the heartbeat — `finally` disposes on
+            // settle, throw, or abort so no timer outlives the call.
+            board.start();
             let result: DispatchOutcome;
             try {
               result = await completion;
             } finally {
-              if (heartbeat !== undefined) clearInterval(heartbeat);
+              board.dispose();
             }
             // SPEC: error-valued only when every task failed or was blocked —
             // cancelled and partially failed batches are normal results
