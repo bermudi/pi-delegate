@@ -3,7 +3,8 @@
 //
 // Each check prints one named pass/fail line; the script exits nonzero if
 // any check fails. Everything here is hand-rolled scanning over
-// `delegate.ts` + `src/*.ts` — no new dependencies.
+// `delegate.ts` + `src/*.ts` — the import graph additionally parses each
+// file with the TypeScript compiler API (an existing devDep, nothing new).
 //
 // Checks:
 //   1. module-mutability   no top-level `let`/`var` (AGENTS.md constraint,
@@ -24,6 +25,7 @@
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import ts from "typescript";
 
 const ROOT = resolve(join(import.meta.dir, ".."));
 const SRC_DIR = join(ROOT, "src");
@@ -271,90 +273,180 @@ interface ModuleGraph {
   /** files importing a target wholesale (`import * as`) */
   starImported: Set<string>;
 }
+interface ModuleSpecifier {
+  /** The `./x.ts` specifier text, unresolved. */
+  readonly spec: string;
+  /** Exported names the clause refers to ("default" for default bindings).
+   * Recorded for usage accounting even when the specifier is type-only —
+   * importing a type still uses the export. */
+  readonly names: readonly string[];
+  /** `export ... from` — names are consumed AND re-exported by this file. */
+  readonly reExport: boolean;
+  /** `import * as` / `export *` — consumes the target's whole surface. */
+  readonly star: boolean;
+  /** False for a wholly type-only declaration: it uses the module's exports
+   * (names still count) but produces no runtime edge, so it cannot take part
+   * in an import cycle. */
+  readonly runtime: boolean;
+}
+
+/**
+ * Every module specifier a file carries, via the TypeScript parser —
+ * default/named/namespace imports, side-effect imports, `export ... from`
+ * re-exports, `import = require()`, and dynamic `import()`. A declaration
+ * that is wholly type-only records its names but no runtime edge;
+ * per-element `type` modifiers inside a runtime clause still count as uses.
+ */
+function collectSpecifiers(source: string, fileName: string): ModuleSpecifier[] {
+  const sf = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const out: ModuleSpecifier[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      const spec = node.moduleSpecifier.text;
+      const clause = node.importClause;
+      if (clause === undefined) {
+        out.push({ spec, names: [], reExport: false, star: false, runtime: true });
+      } else {
+        const names: string[] = [];
+        let star = false;
+        if (clause.name !== undefined) names.push("default");
+        const bindings = clause.namedBindings;
+        if (bindings !== undefined) {
+          if (ts.isNamespaceImport(bindings)) {
+            star = true;
+          } else {
+            for (const el of bindings.elements) {
+              names.push((el.propertyName ?? el.name).text);
+            }
+          }
+        }
+        out.push({
+          spec,
+          names,
+          reExport: false,
+          star,
+          runtime: !clause.isTypeOnly,
+        });
+      }
+    } else if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      const spec = node.moduleSpecifier.text;
+      const clause = node.exportClause;
+      if (clause === undefined || ts.isNamespaceExport(clause)) {
+        out.push({
+          spec,
+          names: [],
+          reExport: true,
+          star: true,
+          runtime: !node.isTypeOnly,
+        });
+      } else {
+        const names = clause.elements.map(
+          (el) => (el.propertyName ?? el.name).text,
+        );
+        out.push({
+          spec,
+          names,
+          reExport: true,
+          star: false,
+          runtime: !node.isTypeOnly,
+        });
+      }
+    } else if (ts.isImportEqualsDeclaration(node)) {
+      const ref = node.moduleReference;
+      if (
+        ts.isExternalModuleReference(ref) &&
+        ref.expression !== undefined &&
+        ts.isStringLiteral(ref.expression)
+      ) {
+        out.push({
+          spec: ref.expression.text,
+          names: ["default"],
+          reExport: false,
+          star: false,
+          runtime: !node.isTypeOnly,
+        });
+      }
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteral(node.arguments[0]!)
+    ) {
+      out.push({
+        spec: node.arguments[0].text,
+        names: ["default"],
+        reExport: false,
+        star: false,
+        runtime: true,
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return out;
+}
+
 function buildGraph(): ModuleGraph {
   const edges = new Map<string, string[]>();
   const imported = new Map<string, Set<string>>();
   const reExported = new Map<string, Set<string>>();
   const starImported = new Set<string>();
   for (const [path] of sources) edges.set(path, []);
-  const namedImport =
-    /import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/g;
-  const starImport = /import\s+\*\s+as\s+[\w$]+\s*from\s*["']([^"']+)["']/g;
-  const reExport = /export\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/g;
-  const sideEffect = /import\s*["']([^"']+)["']/g;
   const resolveSpecifier = (from: string, spec: string): string | undefined => {
     if (!spec.startsWith("./") && !spec.startsWith("../")) return undefined;
     const target = resolve(join(dirname(from), spec));
     return sources.has(target) ? target : undefined;
   };
-  const noteSpecifierNames = (clause: string): string[] =>
-    clause
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0)
-      .map((entry) => {
-        const withoutType = entry.replace(/^type\s+/, "");
-        const aliasSplit = withoutType.split(/\s+as\s+/);
-        return aliasSplit[0]!.trim();
-      })
-      .filter((name) => name.length > 0);
-  for (const [path, source] of stripped) {
-    const recordEdge = (spec: string): string | undefined => {
-      const target = resolveSpecifier(path, spec);
-      if (target !== undefined) edges.get(path)!.push(target);
-      return target;
-    };
-    let match: RegExpExecArray | null;
-    namedImport.lastIndex = 0;
-    while ((match = namedImport.exec(source)) !== null) {
-      const target = recordEdge(match[2]!);
+  for (const [path, source] of sources) {
+    for (const entry of collectSpecifiers(source, path)) {
+      const target = resolveSpecifier(path, entry.spec);
       if (target === undefined) continue;
-      const set = imported.get(target) ?? new Set<string>();
-      for (const name of noteSpecifierNames(match[1]!)) set.add(name);
-      imported.set(target, set);
+      if (entry.runtime) edges.get(path)!.push(target);
+      if (entry.star) starImported.add(target);
+      if (entry.names.length > 0) {
+        const set = imported.get(target) ?? new Set<string>();
+        for (const name of entry.names) set.add(name);
+        imported.set(target, set);
+      }
+      if (entry.reExport && entry.names.length > 0) {
+        const own = reExported.get(path) ?? new Set<string>();
+        for (const name of entry.names) own.add(name);
+        reExported.set(path, own);
+      }
     }
-    starImport.lastIndex = 0;
-    while ((match = starImport.exec(source)) !== null) {
-      const target = recordEdge(match[1]!);
-      if (target !== undefined) starImported.add(target);
-    }
-    reExport.lastIndex = 0;
-    while ((match = reExport.exec(source)) !== null) {
-      const target = recordEdge(match[2]!);
-      if (target === undefined) continue;
-      const set = imported.get(target) ?? new Set<string>();
-      for (const name of noteSpecifierNames(match[1]!)) set.add(name);
-      imported.set(target, set);
-      const own = reExported.get(path) ?? new Set<string>();
-      for (const name of noteSpecifierNames(match[1]!)) own.add(name);
-      reExported.set(path, own);
-    }
-    sideEffect.lastIndex = 0;
-    while ((match = sideEffect.exec(source)) !== null) recordEdge(match[1]!);
   }
   return { edges, imported, reExported, starImported };
 }
 const graph = buildGraph();
 
-// ---------------------------------------------------------------------------
-// 3. Import-cycle check (DFS for back edges).
-// ---------------------------------------------------------------------------
-{
-  const failures: string[] = [];
+/** Depth-first cycle detection: returns each back-edge's cycle path. */
+function findCycles(edges: ReadonlyMap<string, readonly string[]>): string[][] {
   const WHITE = 0;
   const GRAY = 1;
   const BLACK = 2;
   const color = new Map<string, number>();
-  for (const [path] of graph.edges) color.set(path, WHITE);
+  for (const [path] of edges) color.set(path, WHITE);
   const stack: string[] = [];
+  const cycles: string[][] = [];
   const visit = (node: string): void => {
     color.set(node, GRAY);
     stack.push(node);
-    for (const next of graph.edges.get(node) ?? []) {
+    for (const next of edges.get(node) ?? []) {
       if (color.get(next) === GRAY) {
-        const cycleStart = stack.indexOf(next);
-        const cycle = [...stack.slice(cycleStart), next].map(rel).join(" -> ");
-        failures.push(`import cycle: ${cycle}`);
+        cycles.push([...stack.slice(stack.indexOf(next)), next]);
       } else if (color.get(next) === WHITE) {
         visit(next);
       }
@@ -362,8 +454,67 @@ const graph = buildGraph();
     stack.pop();
     color.set(node, BLACK);
   };
-  for (const [path] of graph.edges) if (color.get(path) === WHITE) visit(path);
+  for (const [path] of edges) if (color.get(path) === WHITE) visit(path);
+  return cycles;
+}
+
+
+// ---------------------------------------------------------------------------
+// 3. Import-cycle check (DFS for back edges).
+// ---------------------------------------------------------------------------
+{
+  const failures = findCycles(graph.edges).map(
+    (cycle) => `import cycle: ${cycle.map(rel).join(" -> ")}`,
+  );
   record("import-cycles", "static import graph must be acyclic", failures);
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Self-test: the cycle detector must catch the specifier forms the old
+// regex set missed — a default-import edge and an `export *` edge — while a
+// type-only declaration and an acyclic chain produce no cycle. A check that
+// cannot fail on a planted cycle proves nothing.
+// ---------------------------------------------------------------------------
+{
+  const fixturePaths = new Set(["/f/a.ts", "/f/b.ts", "/f/c.ts", "/f/d.ts", "/f/g.ts", "/f/h.ts"]);
+  const fixtureSources = new Map<string, string>([
+    // a↔b two-file cycle through a DEFAULT import (the regex set's miss).
+    ["/f/a.ts", `import B from "./b.ts";\nexport const a = 1;\n`],
+    ["/f/b.ts", `import { a } from "./a.ts";\nexport default a;\n`],
+    // c↔d cycle through `export *` re-export edges (also missed before).
+    ["/f/c.ts", `export * from "./d.ts";\n`],
+    ["/f/d.ts", `export * from "./c.ts";\n`],
+    // g←h is a real edge, g→h is type-only: no runtime cycle.
+    ["/f/g.ts", `import type { H } from "./h.ts";\nexport const g = 2;\n`],
+    ["/f/h.ts", `import { g } from "./g.ts";\nexport type H = typeof g;\n`],
+  ]);
+  const fixtureEdges = new Map<string, string[]>();
+  for (const path of fixturePaths) fixtureEdges.set(path, []);
+  for (const [path, source] of fixtureSources) {
+    for (const entry of collectSpecifiers(source, path)) {
+      const target = resolve(join(dirname(path), entry.spec));
+      if (fixturePaths.has(target) && entry.runtime) {
+        fixtureEdges.get(path)!.push(target);
+      }
+    }
+  }
+  const failures: string[] = [];
+  const found = findCycles(fixtureEdges).map((cycle) => cycle.join(" -> "));
+  const expectCycle = (mustContain: string): void => {
+    if (!found.some((cycle) => cycle.includes(mustContain))) {
+      failures.push(`self-test fixture missing expected cycle through ${mustContain}`);
+    }
+  };
+  expectCycle("/f/a.ts");
+  expectCycle("/f/c.ts");
+  if (found.some((cycle) => cycle.includes("/f/g.ts"))) {
+    failures.push("self-test: a type-only import produced a runtime edge");
+  }
+  record(
+    "self-test",
+    `cycle detector sees default-import and export-* edges (${found.length} fixture cycles found)`,
+    failures,
+  );
 }
 
 // ---------------------------------------------------------------------------
