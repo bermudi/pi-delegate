@@ -9,8 +9,12 @@ mechanisms are explicitly not requirements.
 > (v3, ratified 2026-09-27) is the sole behavioral authority, and this file is the
 > engine-as-built contract it inherits. Where SPEC.md states a different rule,
 > SPEC.md wins. Known overrides are marked **Overridden** in place, with their
-> source. The marks are not exhaustive: where this file and SPEC.md disagree,
-> SPEC.md controls.
+> source. The section-by-section override sweep was completed for the
+> 2026-10-10 contract state (#137), including ADR 0001, ADR 0002 and the
+> current INVARIANTS.md. Marks describe that audited state, not a guarantee
+> against future changes: where this file and SPEC.md disagree, SPEC.md
+> always controls. Historical signatures, examples and quoted prompts do
+> not authorize fields or capabilities explicitly removed by current rules.
 
 ## Operations
 
@@ -30,6 +34,11 @@ right tool. Validation happens before any task starts.
 ```ts
 delegate({ tasks: [task, ...], async?: boolean, workspace?: "shared" | "scratch" | "isolated", operationId?: string }) // operationId removed by #130
 ```
+
+**Current surface (SPEC.md, "Canonical surface", #130):** the signature
+above is the historical v2 shape. Dispatch now advertises `tasks`,
+`async`, `workspace` and `brief`; `operationId` rejects. The task table
+below is also historical where its rows are marked overridden.
 
 Dispatch is synchronous by default. **Overridden (SPEC.md, #61):** an omitted `async` now backgrounds nonempty work for one task as well as many; add `async: false` for inline results. `async: true` applies to the whole batch,
 returns a ticket immediately, and later auto-delivers the batch result.
@@ -73,6 +82,12 @@ Omitting `agent` creates an `inline` task with `*` by default. The built-ins are
   checks, and admission treats it as a writer: it serializes with other
   writers on the same roots.
 
+**Overridden (SPEC.md, #126):** same-phase unordered overlapping shared
+writers reject; only ordered cross-phase writers serialize. This applies
+to reviewer tasks too. **Added (SPEC.md, "Completion evidence", #49):**
+`verifier` is also a built-in, with the reviewer's capabilities and a
+reporting-only parsed verdict.
+
 **Child base prompt.** A child without an authored prompt — an inline task or
 any built-in profile — composes its base prompt from the parent's
 user-authored prompt inputs: the parent's custom base prompt (when one
@@ -90,6 +105,11 @@ the fixed subagent framing:
 > your final message is the only result returned to the caller. Complete the
 > task in your brief, then stop. Use only the tools provided.
 
+**Qualification (SPEC.md, "Interaction grammar"; inherited worker
+questions below):** the historical framing does not forbid the async
+worker's child-only `ask_parent` capability. It asks the parent, not a
+human watching the child; inline workers still have no question tool.
+
 The framing carries no parent identity — never a model name. An explicit
 task `systemPrompt` (removed by #130) or a Markdown profile body is authored prompt text and
 is used verbatim: no inheritance, no framing appended. When an extension
@@ -103,6 +123,10 @@ The failure is logged and returned with its cause and guidance to restore the
 parent inventory or use a named profile that carries its own tools. Profile-selected tools (task `tools` was removed by #130),
 `explore` (formerly `scout`, #40), `coder`, `reviewer`, and inline tasks do not require that probe;
 inline tasks retain their writer default.
+
+**Overridden (SPEC.md, #130):** task-level `tools` is removed, so a
+`default` task cannot bypass this inventory probe with a caller override.
+Other profiles retain their profile-owned capabilities.
 
 Children never inherit the parent conversation: no parent transcript is extracted
 or injected. Supply a self-contained task brief. The obsolete `context` field
@@ -119,6 +143,14 @@ Verified live against real providers 2026-09-26 (issue #5). **Superseded by
 #59:** an allowlisted provider's children load its listed user-scope extensions,
 and the shipped default allowlists `openai-codex` (SPEC.md, provider-scoped
 extensions); the two sentences above describe the 2026-09-26 state.
+
+**Overridden (SPEC.md, "Profiles own capability and base prompts", #130):**
+the task-over-profile statement does not authorize task `tools` or
+`systemPrompt`; both reject. Models and effort remain operator/profile-owned
+under the model-selection rules below. The default profile's eligible
+parent tool mirror and provider-scoped extension capabilities are governed
+by SPEC.md's #59 and #130 rules, not the historical blanket extension
+statement.
 
 Named agents also come from user-authored Markdown profiles, discovered per
 dispatch — edits take effect without a reload — in first-definition-wins
@@ -207,6 +239,12 @@ naming the offending key. There is no keep-last-good fallback: dispatch
 does not proceed on a partially valid `delegate.json` (deliberate — see
 `COMPATIBILITY.md`).
 
+**Overridden (SPEC.md, "Unknown configuration keys", #136):** unknown
+top-level keys warn once per changed file content through `DiagnosticSink`;
+they do not reject an otherwise valid configuration. Recognized-value
+validation and per-call reload are unchanged. Explicitly removed `surface`
+continues to reject with teaching.
+
 Tasks run concurrently subject to a global bound and per-model bounds.
 `maxConcurrent` (positive integer, default 8; it was 3 before #41) caps the total number of
 tasks executing at once. The `concurrency` block holds the per-model
@@ -289,6 +327,12 @@ and no exactly-once crash guarantee.
   successful proposals into the source tree in task order. It cannot use
   `sessionId` or `resumeFrom`.
 
+**Strengthened (SPEC.md, "Scratch-copy admission"; INVARIANTS.md, "Shared
+writes", this repository's #50):** scratch copying holds a temporary source
+read reservation until copying stops on every exit. Scratch worker
+execution still holds no source write reservation; the historical sentence
+above does not exempt the copy from admission.
+
 Scratch and isolated workspaces protect against ordinary relative writes; they
 are not security sandboxes.
 
@@ -301,6 +345,12 @@ delegate_ticket({ action: "pause" | "resume", ticket }) // removed from the mode
 delegate_ticket({ action: "cancel", ticket, force? })
 delegate_ticket({ action: "answer", ticket, taskId, questionId, answer })
 ```
+
+**Current surface (SPEC.md, "Interaction grammar" and "Canonical
+surface"):** the examples above retain the v2 record. The model-facing
+actions are `poll`, `wait`, `cancel`, `answer`, `steer` and `interrupt`;
+wait is unbounded. `pause`/`resume` are dashboard-only, and removed wait
+fields reject rather than becoming optional legacy inputs.
 
 - `poll` returns one ticket or the ticket roster.
 - `wait` blocks until settlement (`timeoutMs` was removed by #130). Parent abort detaches the
@@ -347,6 +397,14 @@ Recovered tickets cannot be
 paused, resumed, answered, or cancelled; new tickets use fresh opaque ids.
 No live write reservation is recovered: an orphaned subprocess may still be
 mutating a shared tree after a process crash. Inspect it before new writes.
+
+**Qualified (ADR 0001):** Delegate workers are permanently in-process and
+do not survive host death or reconnect. The subprocess warning concerns
+external commands/effects a worker may have launched, not a recoverable
+Delegate worker. Recovered records own no live resources or delivery
+rights (INVARIANTS.md, "Ticket state"). Roster listing is additionally
+session-scoped by SPEC.md's #64 rule; an explicit ticket id still reaches
+another owner's saved record.
 
 If storage cannot be initialized or the ticket creation record cannot be
 written, async dispatch fails before workers start. Ticket RPCs also fail
@@ -396,6 +454,11 @@ A naturally settled batch is `completed` only when every task succeeded. It is
 `cancelled` when every task was cancelled, and `failed` when no task succeeded
 and at least one failed. Forced ticket cancellation remains authoritative and
 settles the ticket as `cancelled` regardless of late worker outcomes.
+
+**Added (SPEC.md, "Interrupt"):** a naturally settled batch whose tasks
+all ended `interrupted` is `interrupted`. The historical summary above
+does not collapse that state into failure or cancellation; forced ticket
+cancellation still wins over later worker truth.
 
 A singular ticket RPC (poll with a ticket id, wait, cancel; pause and resume are dashboard-only since #130)
 for an unknown id returns a tool error naming the missing ticket. Roster
@@ -502,7 +565,7 @@ first finishes, the unfinished span is dropped rather than reopening or
 writing the obsolete destination.
 
 Rows are written only for dispatches that reach a completed batch outcome;
-rejected calls and failed admission or preparation record nothing. **Overridden by #61:** a call rejected before execution writes a misfire row (see SPEC.md, misfire telemetry). For each
+rejected calls and failed admission or preparation record nothing. **Overridden by SPEC.md, "Misfire rows":** a call rejected before execution writes a misfire row (see SPEC.md, misfire telemetry). For each
 such dispatch it records the batch start timestamp and wall duration,
 sync/async mode, task count, terminal call status, caller-visible task status,
 agent/model/thinking/tools/workspace selections, integration status, retry
@@ -511,7 +574,7 @@ at batch finish; v2 leaves the legacy per-task duration field NULL. A task row
 whose worker could not be confirmed stopped is marked provisional and may later
 be superseded in the live ticket.
 
-It never stores prompt, system-prompt, output, or error text (**Overridden by #61:** misfire rows keep the caller-visible rejection message verbatim, by design); cwd or session
+It never stores prompt, system-prompt, output, or error text (**Overridden by SPEC.md, "Misfire rows":** misfire rows keep the caller-visible rejection message verbatim, by design); cwd or session
 paths; caller task IDs; operation IDs; or parent transcript content. Legacy v1
 rows may retain older values; v2 does not rewrite or delete them.
 
@@ -532,6 +595,11 @@ delegate_session({ action: "close", sessionId })
 `list` reports live pooled sessions. `close` aborts, disposes, and removes the
 named session. Session controls are top-level only.
 
+**Qualified (SPEC.md, "Resident idle bound"; INVARIANTS.md, "Session
+reuse"):** `list` also includes unloaded records. `close` rejects while a
+live or quarantined task owns the session; it does not authorize disposal
+of possibly mutating work.
+
 ## Input recovery and errors
 
 For compatibility with imperfect tool callers, Delegate silently repairs only
@@ -545,6 +613,14 @@ unambiguous shapes:
 - a blank (`""` or whitespace-only) optional identifier, treated as absent:
   `operationId` (removed by #130), `ticket`, `sessionId`, `taskId`, `questionId`, and a task's
   `sessionId`, `cwd`, `resumeFrom`, or `agent`.
+
+**Overridden (SPEC.md, "Canonical surface", #61/#118/#129/#130):** null
+stripping and blank recovery apply only after removed/foreign field
+presence guards. Null does not legalize a forbidden model/effort selector,
+removed field or alias. A supplied malformed non-array `tasks` value
+cannot be discarded in favor of flat recovery. Removed task
+`tools`/`systemPrompt`, `operationId`, wait fields and `steerId` have no
+recovery path.
 
 It does not merge flat fields into an existing non-empty task array. A `tasks`
 field that stays absent becomes `[]`, so `{}` still returns the manual. Blank

@@ -21,17 +21,25 @@ bump, in order; a failed seam here is a silent contract break (#15).
    (`src/sessions.ts` `persistSessionHeader`). Upstream gates the
    first write behind the first assistant message. Optional-chained
    and fail-soft: if the method disappears, failed fresh runs report
-   no transcript (logged). Verify existence and semantics.
+   no transcript (logged). Verify existence and semantics. Also verify
+   INVARIANTS.md's separate pre-first-turn transcript-claim durability
+   requirement (#140); a pointer to a file not yet created is not durable
+   recovery. A pre-turn header flush must preserve Pi's next append
+   behavior, not just create a file.
 3. **`Agent.steer()` / follow-up queues** — steering rides
    `AgentSession.steer(text)` → queue drained at run start and every
    `turn_end` (`pi-agent-core/dist/agent-loop.js:85,186`); a queued
    steer during the final turn forces one more provider turn. Follow-up
    drains only at would-stop — the wrong seam for steering. Verify
    drain points and durability (drained steering → session messages).
-4. **`api.sendMessage(message, { deliverAs: "followUp", triggerTurn })`**
-   — wake delivery, question wakes, moved-leaf appends. Verify both
-   flag semantics (followUp queues behind a busy parent's tool calls;
-   `triggerTurn: false` appends durably without waking).
+4. **`api.sendMessage(message, { deliverAs: "steer", triggerTurn: true })`**
+   — same-leaf result and worker-question wakes. On a busy parent, verify
+   delivery at the next turn boundary after the current tool calls and
+   before the next model call; on an idle parent, verify a new turn.
+   Moved-leaf messages instead use `triggerTurn: false`, appending durably
+   without waking. `followUp` is historical here (replaced 2026-10-02): it
+   drains only when the whole parent run would stop. Verify navigation
+   cancellation, descendant branches, and exact-view consumption too.
 5. **Session lifecycle asymmetry** — `session.dispose()` does NOT fire
    `session_shutdown` (learned 2026-09-27: a delivery flush computing
    leaf routing against a disposed session's branch throws). Any code
@@ -43,11 +51,16 @@ bump, in order; a failed seam here is a silent contract break (#15).
    turn gaps; `steer()` on a non-streaming session sits until the next
    `prompt()` and never starts a turn itself. Our `activated` receipt
    depends on this. Verify.
-8. **Schema enforcement at the host layer** — `additionalProperties:
-   false` rejects unknown fields BEFORE extension code runs (misfire
-   rows cannot see these). Compat spellings must live in the schema,
-   not the handler. Verify the host still enforces TypeBox
-   additionalProperties.
+8. **Prepared validation and host event ownership** — Delegate's
+   `prepareArguments` validates before Pi's schema diagnostic can append
+   a full received-arguments dump. The one strict schema remains
+   `additionalProperties: false`; removed fields reject with teaching, not
+   hidden compatibility acceptance. Verify prepare/schema failures emit
+   execution start/end even when no tool result is emitted, so sanitized
+   misfires remain observable. Preflight metadata must stay owned until
+   actual execute entry: a later tool-call handler can still block after
+   an earlier approval. Run surface and telemetry contracts with
+   private-body sentinels; no error or row may copy those bodies.
 9. **Provider-extension loading (`#59`)** — child resource loaders run
    `noExtensions: true` plus `additionalExtensionPaths` for verified
    user-scope roots (`src/host.ts` `createChildResourceLoader` /
@@ -63,7 +76,7 @@ bump, in order; a failed seam here is a silent contract break (#15).
    exports via `src/pi-package-source.ts` — verify those signatures
    too.
 10. **`pi.events` bus (`#60`)** — `delegate:usage` emits on the
-    extension-shared event bus (`ExtensionContext.events.emit/on`).
+    extension-shared event bus (`ExtensionAPI.events.emit/on`).
     Verify the channel name is free-form namespaced and `emit`/`on`
     signatures are unchanged; a listener throw must not propagate.
 

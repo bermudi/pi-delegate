@@ -279,6 +279,7 @@ V1 is evidence for behavior, never a design source. When consulting it:
   and the `pause`/`resume`/`tail` actions (all #130, ADR 0002's prune
   verdicts). Never silently discard a removed field; historical
   telemetry/journal records stay readable.
+- Unknown top-level delegate.json keys warn once per changed file content through the extension-owned DiagnosticSink (#136); values never enter diagnostics. Explicitly removed surface keeps its teaching rejection. Manual-only discovery stays silent and does not consume dispatch warning state.
 - Markdown profiles (#7): `<project>/.pi/agents` then `<agentDir>/agents`,
   first definition wins, built-ins win name collisions, `.claude/agents`
   never imported. Frontmatter `model:`/`thinking`/`tools` are profile

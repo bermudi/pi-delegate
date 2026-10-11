@@ -647,7 +647,7 @@ function rejectAmbiguousShapes(args: Record<string, unknown>): void {
  * "not given", blanks mean "not given" for optional identifiers, fields
  * owned by the sibling tools reject with migration guidance (selector
  * fields first), then the authorized repairs — stringified tasks, flat
- * task fields, string tools, blank agent — run. An absent `tasks` becomes
+ * task fields, blank agent — run. An absent `tasks` becomes
  * `[]`, so `{}` still returns the manual.
  */
 function prepareDispatchArguments(value: unknown): DelegateArguments {

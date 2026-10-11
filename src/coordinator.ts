@@ -142,8 +142,9 @@ export class DispatchCoordinator {
    * Run a batch to completion. Resolves with index-aligned outcomes; a task
    * failure never rejects the batch and never destroys sibling results.
    *
-   * `finalize` runs after every task has a caller-visible outcome but inside
-   * the admission-reservation window — isolated reconciliation lives there.
+   * WorkspacePlan.reconcilePhase owns scratch drift capture, isolated
+   * application, then scratch finalization, inside the phase/admission
+   * window.
    * `cleanupStoppedWorker` runs after a provisionally-recorded worker's
    * workerStopped signal fulfills, before its retained reservation releases.
    */
@@ -218,9 +219,9 @@ export class DispatchCoordinator {
        * work into it, synchronously, before its first await. The batch is
        * covered once EVERY task's quiescence is confirmed, every late worker
        * has finished its deferred cleanup and retained-reservation release,
-       * AND the batch itself has finished — `finalize` (isolated
-       * reconciliation, scratch finalization) plus the admission-reservation
-       * release. Worker quiescence alone is not full quiescence: the source
+       * AND the batch itself has finished — phase reconciliation
+       * (isolated application, scratch finalization) plus the
+       * admission-reservation release. Worker quiescence alone is not full quiescence: the source
        * tree is still mutated after the last worker stops. This call never
        * resolves the lifetime itself; the dispatch pipeline closes it.
        */
@@ -242,8 +243,8 @@ export class DispatchCoordinator {
       workersStopped.set(task.index, new Deferred());
       workerTailsStopped.set(task.index, new Deferred());
     }
-    // Resolves once the run body itself has finished: `finalize` (isolated
-    // reconciliation applying to or retaining against the source tree,
+    // Resolves once the run body itself has finished: phase reconciliation
+    // (isolated application to or retention against the source tree,
     // scratch disposal) and admission-reservation release attempts in the
     // finally below.
     const batchBodyStopped = new Deferred();
@@ -323,8 +324,9 @@ export class DispatchCoordinator {
             }
           }
         }
-        // An infrastructure exception escaping runOne must not finalize the
-        // batch while sibling run bodies are still active. Wait for them all,
+        // An infrastructure exception escaping runOne must not run the
+        // batch's final cleanup while sibling run bodies are still
+        // active. Wait for them all,
         // then surface the failures; unknown workers remain quarantined.
         const runFailures: unknown[] = runs.flatMap((run) =>
           run.status === "rejected" ? [run.reason as unknown] : [],

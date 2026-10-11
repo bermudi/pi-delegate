@@ -29,6 +29,24 @@ shutdown bounds remain unchanged. This removes only task deadlines, not
 unrelated internal timer bounds. (#130 later removed the wait bound; #129
 removed batch token budgets entirely.)
 
+## Unknown configuration keys (#136, owner-approved 2026-10-10)
+
+Unknown top-level `delegate.json` keys do not reject an otherwise valid
+configuration. They warn through the extension-owned `DiagnosticSink` once
+per changed file content, independently for each configuration path and
+extension instance. The warning names the ignored keys and the recognized
+set: `maxConcurrent`, `concurrency`, `stallTimeoutMs`, `models`,
+`modelsByParent`, `telemetry`, `output`, `providerExtensions`, and `sessions`.
+It never includes configuration values or the file body. Re-reading unchanged
+content does not repeat the warning; removing or correcting the configuration
+and later reintroducing unknown keys may warn again. Manual-only profile
+discovery remains silent and does not consume dispatch's warning state.
+
+This overrides SPEC-V2's silent-ignore rule, not its validation of recognized
+values or its per-call reload. Explicitly removed keys retain their specific
+teaching rejection: a supplied `surface` still fails at config load.
+Diagnostic failure cannot prevent dispatch or weaken any safety invariant.
+
 ## Operational diagnostics (#122, user-authorized)
 
 Delegate diagnostics never write to an attached terminal: routing depends only
@@ -214,7 +232,7 @@ mid-flight the parent can steer. The grammar:
   and `details.brief` carries it on dispatch results. The brief
   persists on the ticket record so a recovered view still names
   it. A whitespace-only brief is absent; `prompt` stays required
-  per task.
+  per task unless `resumeFrom` continues a transcript.
 - **Batch token budget — removed (#129, owner ruling 2026-10-07).** The
   caller-controlled `tokenBudget` field and its machinery are gone;
   the concept dies entirely. A model-set spend ceiling is the party

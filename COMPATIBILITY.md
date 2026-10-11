@@ -1,4 +1,23 @@
-# Delegate v2 compatibility contract
+# Delegate compatibility contract — current v3 overrides and v1/v2 history
+
+Current amendments below govern the inherited migration lists. Historical
+signatures and examples preserve the migration record; they do not
+authorize removed fields or override SPEC.md, the sole behavioral
+authority.
+
+## Unknown top-level configuration keys (#136, owner-approved 2026-10-10)
+
+Unknown keys now warn once per changed file content through
+`DiagnosticSink` instead of disappearing silently. They remain ignored for
+configuration semantics: stale v1 keys still cannot enable a retired
+capability, and an otherwise valid file still loads. Warnings name keys
+and the recognized set, never values or file contents. Recognized
+malformed values still fail the call; explicitly removed `surface` still
+rejects with teaching.
+
+Migration: remove the reported typo or stale key. Repeated dispatches with
+unchanged content do not repeat the warning. Manual-only profile discovery
+stays silent. Normative rule: SPEC.md, "Unknown configuration keys".
 
 ## Call row shows labels, not prompts (user-approved 2026-10-10)
 
@@ -40,10 +59,12 @@ largest legitimate recorded prompt 7,983 chars), and inlined-content
 prompts both bloat accepted-call context and stretch the tool-argument
 stream that the upstream pi-ai parser bug feeds on. Reference files by
 path instead of inlining contents — subagents read the working tree
-themselves. The cap is identical on compact and full surfaces and for
+themselves. At ratification the cap was identical on compact and full
+surfaces (ADR 0002 has since removed the split), and remains identical for
 async and inline calls; it is a constant with no config escape. Other
-fields are unchanged (`systemPrompt` uncapped in v1; `description` keeps
-its 200-character display-label bound). Rejections ride semantic
+fields were unchanged at that decision (`systemPrompt` uncapped in v1;
+`description` then kept its 200-character display-label bound); #130 has
+since removed both task fields. Rejections ride semantic
 validation — diagnostics name field, task, limit, and count only, never
 request-body dumps — and record `validation`-phase misfire rows.
 
@@ -308,7 +329,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 - `default`, `explore`, `coder`, and `reviewer` semantics; task-over-profile
   precedence; Markdown discovery order and first-definition wins — subject to
   the model-selection, parent-history, and composed-child-base-prompt
-  departures below.
+  departures below and #130's removal of caller capability/base-prompt
+  overrides. `verifier` was subsequently added under SPEC.md's
+  completion-evidence rules.
 - User-global `delegate.json` configuration. Project files do not become
   delegate configuration.
 - Parent model inheritance and project instructions and extension isolation, with children
@@ -428,6 +451,11 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   Existing databases migrate in place and existing rows are preserved; legacy
   sensitive fields are not continued on new v2 rows, and v2 leaves the legacy
   per-task duration column NULL.
+  **Current override (SPEC.md, "Misfire rows"):** the
+  completed-dispatch-only description is historical. Pre-execution
+  rejections also record sanitized batch metadata and the caller-visible
+  rejection message verbatim. That explicit message exception does not
+  authorize arbitrary prompt, output, credential, or path payloads.
 
 ## v2 deliberate breaking changes
 
@@ -485,6 +513,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   empty or populated list.
   Migration: handle singular misses as tool errors; do not rely on
   scanning response text for "not found".
+  **Current surface:** `pause` and `resume` in this historical entry are
+  no longer RPC actions (#130); the model-facing set is SPEC.md's
+  `poll`/`wait`/`cancel`/`answer`/`steer`/`interrupt`.
 
 Departures from the preserve list above. Each must carry its own motivation
 and migration guidance; none may arrive as silent rewrite drift.
@@ -498,6 +529,9 @@ and migration guidance; none may arrive as silent rewrite drift.
   own tools). Named-profile, explore/coder/reviewer, and inline dispatches
   do not probe the inventory;
   their existing capabilities are unchanged.
+  **Current ownership (#130):** the task `tools` field is removed, so
+  every `default` task uses the parent's inventory probe; callers cannot
+  bypass it. Named profiles own their tools.
 
 - **Markdown profile discovery is narrower and cannot reshape built-ins
   (#7).** V1 searched more locations — including `.claude/agents` under both
@@ -562,6 +596,9 @@ and migration guidance; none may arrive as silent rewrite drift.
   silently ignores unknown top-level config keys, so leaving it changes
   nothing — but the warn-while-active unguarded mode it enabled is no
   longer possible at all.
+  **Overridden by #136:** leaving the stale key still changes no
+  capability, but now warns once per changed configuration; the
+  silent-ignore wording above is the v2 migration record.
 
 - **V1 per-agent override maps and housekeeping config keys are not read
   (2026-09-21 reconciliation).**
@@ -584,6 +621,8 @@ and migration guidance; none may arrive as silent rewrite drift.
   `modelsByParent` entries and per-agent tools as Markdown profile
   frontmatter (task fields removed — #130); drop the stale keys; rely on concurrency bounds and
   polling rather than a ticket cap or TTL sweep.
+  **Overridden by #136:** these stale entries remain semantically ignored,
+  but warn once per changed configuration through `DiagnosticSink`.
 
 - **Malformed numeric configuration fails loudly instead of keeping the
   last good snapshot (§3d item 4, recorded 2026-09-27).** V1 re-read
@@ -671,7 +710,8 @@ from v1.
   the non-waking append at the current leaf), the quit/reload abort
   traces, and the live subagent browser (`/subagents`, Ctrl+Shift+B).
   Deliberate divergences recorded here, not planned work: live rows for
-  in-flight sync dispatches (finished sync calls are retained), and agent
+  in-flight sync dispatches (finished sync calls are retained; **shipped
+  by #119**, including the display-only heartbeat board), and agent
   names in the shutdown summary (ids only today).
   The #128 browser is a two-pane fleet dashboard: a ticket-grouped roster
   owning the full panel height (live tickets expanded, settled tickets

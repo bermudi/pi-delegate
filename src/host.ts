@@ -407,9 +407,9 @@ export async function resolveTasks(
 
     const prompt = task.prompt ?? (task.resumeFrom ? RESUME_DEFAULT_PROMPT : "");
 
-    // Child base prompt (SPEC "Child base prompt"). Authored text — an
-    // explicit task systemPrompt or a Markdown profile body — is used
-    // verbatim with nothing appended. Everything else (inline tasks and
+    // Child base prompt (SPEC "Child base prompt"). Authored text — a
+    // Markdown profile body — is used verbatim with nothing appended.
+    // Everything else (inline tasks and
     // built-in profiles) composes: the parent's user-authored prompt inputs
     // (custom base prompt replacing the stock prefix, plus user-appended
     // text), the built-in role line, and the fixed framing. Extension-

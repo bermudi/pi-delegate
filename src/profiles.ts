@@ -69,9 +69,9 @@ export interface AgentProfile {
 
 /**
  * The fixed subagent framing appended to every composed child base prompt
- * (inline tasks and built-in profiles). Authored prompts — an explicit task
- * `systemPrompt` or a Markdown profile body — never receive it. Carries no
- * parent identity: never a model name.
+ * (inline tasks and built-in profiles). Authored prompts — Markdown
+ * profile bodies — never receive it. Carries no parent identity: never a
+ * model name.
  */
 export const SUBAGENT_FRAMING =
   "You are a subagent spawned by the delegate extension on behalf of a parent " +
