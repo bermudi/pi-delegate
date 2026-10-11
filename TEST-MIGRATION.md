@@ -195,6 +195,27 @@ v1 deadline scenarios are superseded, not a coverage gap.
   SIGKILL, and stubbing /proc or the internal stop helper is forbidden.
   Documented, not faked.
 
+## Session teardown step independence (C2 hardening)
+
+- **Contract:** `session_shutdown` runs one owned, ordered procedure — the
+  dispatch latch, the delivery drain, the quit/reload trace, the per-ticket
+  forced cancels, the session pool shutdown, the quiescence barrier, and
+  telemetry close — each an independent attempt: a throwing step is logged
+  by name and the sequence continues. The barrier's budget timer is scoped
+  to its race (unref'd, cleared when the race resolves).
+- **Covered now:** `tests/regression/shutdown-teardown.test.ts` — a
+  chmod-blocked ticket journal makes the cancel step's settle save fail
+  while a synchronously throwing `AgentSession.prototype.abort` on a
+  resident, checked-out pooled session makes the pool-shutdown step throw
+  for real; the pinned outcome is the step failure recorded by name
+  beside the barrier's waiting and budget-expiry records still firing
+  (i.e. steps behind the throw still ran) and the latch rejecting a
+  post-shutdown dispatch. A second test pins the barrier's verbatim
+  waiting/expiry notify and diagnostic text for an abort-ignoring worker
+  without the awaited emit hanging.
+- **Unpinned:** the cleared/unref'd budget timer itself — no public
+  boundary observation exists; review-verified.
+
 ## Migration policy (moved from COMPATIBILITY.md, 2026-10-10)
 
 Do **not** port the v1 test suite wholesale. Its regression knowledge is useful;

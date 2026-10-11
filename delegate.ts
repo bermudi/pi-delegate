@@ -61,6 +61,7 @@ import {
 } from "./src/render.ts";
 import { VisibilitySignals } from "./src/visibility.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
+import { SessionTeardown } from "./src/teardown.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
 import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
 import type { Ticket } from "./src/types.ts";
@@ -1243,7 +1244,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     }
   }, (ticket, question) => {
     const ctx = questionContexts.get(ticket.id);
-    if (ctx === undefined || shuttingDown) return;
+    if (ctx === undefined || teardown.isLatched()) return;
     const message = {
       customType: "delegate-question",
       content: `Worker "${ticket.id}#${question.taskId}" asks: ${question.question}\nAnswer with delegate_ticket({ action: "answer", taskId: "${ticket.id}#${question.taskId}", questionId: "${question.id}", answer: "..." }). Do not wait on this ticket while it needs your answer.`,
@@ -1276,14 +1277,16 @@ export default function delegateExtension(api: ExtensionAPI): void {
   const sessions = new SessionPool(diagnostics);
   const coordinator = new DispatchCoordinator(diagnostics, tickets, activity);
   const telemetry = new TelemetryStore(diagnostics);
-  // Shutdown latch: once the host begins teardown, new dispatches reject and
-  // pending results are never delivered.
-  let shuttingDown = false;
-  const delivery = new WakeDelivery(
+  // The explicit annotation breaks the delivery ↔ teardown inference
+  // cycle the deferred latch adapter below creates.
+  const delivery: WakeDelivery = new WakeDelivery(
     diagnostics,
     (message, options) => api.sendMessage(message, options),
     (ticket) => tickets.view(ticket),
-    () => shuttingDown,
+    // The teardown latch is declared below; the adapter defers the read
+    // until a delivery decision needs it, long after construction (same
+    // deferred pattern as `onQuestion` → delivery and `sessions` at #57).
+    () => teardown.isLatched(),
   );
 
   // Owned by this closure: the `delegate:usage` throttle stamp (#60).
@@ -1345,6 +1348,20 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // label in the window before either exists.
   const dispatches = new DispatchRegistry();
 
+  // The session_shutdown procedure (ordered, step-independent); it owns
+  // the shutdown latch every dispatch/delivery check reads through
+  // `teardown.isLatched()`.
+  const teardown = new SessionTeardown({
+    diagnostics,
+    delivery,
+    visibility,
+    tickets,
+    sessions,
+    dispatches,
+    telemetry,
+    budgetMs: shutdownQuiescenceBudgetMs,
+  });
+
   /**
    * Misfire telemetry (SPEC v3 "Observability"): one row per dispatch
    * that ends before execution — validation rejections (including
@@ -1395,7 +1412,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     attributionWindows,
     parentPrompt,
     getActiveTools: () => api.getActiveTools(),
-    isShuttingDown: () => shuttingDown,
+    isShuttingDown: () => teardown.isLatched(),
     shutdownQuiescenceBudgetMs,
     noteMisfire,
     emitUsage,
@@ -1540,71 +1557,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
 
   api.on("session_shutdown", async (event, ctx) => {
     captureDiagnosticContext(ctx);
-    shuttingDown = true;
-    delivery.suppressPending();
-    // v1's quit/reload traces: name the live work being killed before the
-    // force-cancel makes it invisible (quit → stderr; reload → notify).
-    visibility.shutdownTrace(
-      event.reason,
-      ctx,
-      tickets
-        .list()
-        .filter(
-          (ticket) => ticket.status === "running" && ticket.recovered !== true,
-        ),
-    );
-    // Forced cancellation settles every ticket immediately and resolves its
-    // waiters; delivery is suppressed by the latch above. Checked-out pooled
-    // sessions must get their abort requests before the quiescence wait —
-    // their runs own disposal through settle, and the barrier below is what
-    // confirms they actually stopped (a worker that ignores the abort holds
-    // shutdown for as long as it runs, per COMPATIBILITY.md).
-    for (const ticket of tickets.list()) {
-      // Recovered records project a sibling session's journal — nothing
-      // here can cancel them, and a settle would overwrite that entry.
-      if (ticket.recovered === true) continue;
-      tickets.cancel(ticket, true);
-    }
-    sessions.shutdown();
-    const pending = dispatches.pending();
-    if (pending.length > 0) {
-      // The visible status names what is being waited on, so a worker that
-      // ignores its abort is identifiable (its ticket id, or the sync call
-      // label) without guessing from a bare count.
-      const names = pending.map(({ label }) => label).join(", ");
-      try {
-        ctx.ui.notify(
-          `Delegate: waiting for ${pending.length} dispatch(es) to stop before shutdown (${names})…`,
-          "info",
-        );
-      } catch {
-        // The UI may already be gone; the log line below still reports it.
-      }
-      diagnostic("info", "shutdown waiting for dispatches to reach quiescence", { count: pending.length });
-      const budgetMs = shutdownQuiescenceBudgetMs();
-      const resourcesStopped = await Promise.race([
-        Promise.all(pending.map(({ resourcesStopped }) => resourcesStopped)).then(() => true),
-        new Promise<false>((resolve) =>
-          setTimeout(() => resolve(false), budgetMs),
-        ),
-      ]);
-      if (!resourcesStopped) {
-        // The invariant holds in the only direction it can: reservations
-        // are never released without confirmed quiescence, so nothing is
-        // unblocked by proceeding — the host simply stops waiting on work
-        // that may never stop.
-        diagnostic("error", "shutdown quiescence budget expired; workers may still be mutating", { budgetMs, count: pending.length });
-        try {
-          ctx.ui.notify(
-            `Delegate: exiting with ${pending.length} dispatch(es) still stopping (${names}); they may still be mutating.`,
-            "warning",
-          );
-        } catch {
-          // The UI may already be gone; the diagnostic above carries it.
-        }
-      }
-    }
-    telemetry.close();
+    await teardown.run(event.reason, ctx);
   });
 
   function registerTools(): void {
@@ -1654,7 +1607,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           // likewise read here: stamping at ticket creation would name the
           // branch navigated to mid-preparation and wake the wrong
           // conversation on settlement.
-          const shutdownRejected = shuttingDown;
+          const shutdownRejected = teardown.isLatched();
           const dispatchLeafId = ctx.sessionManager.getLeafId();
           const dispatchEpoch = delivery.epoch();
           // Call-shape validation is the earliest rejection phase; its
