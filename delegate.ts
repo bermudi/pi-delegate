@@ -41,10 +41,10 @@ import {
 import { AttributionWindows } from "./src/git-attribution.ts";
 import { briefNote, formatDispatchResult } from "./src/format.ts";
 import {
-  parentModelRuntime,
   type ParentPromptInputs,
   type ParentPromptService,
 } from "./src/host.ts";
+import { parentModelRuntime } from "./src/pi-compat.ts";
 import { createActivityStore } from "./src/activity.ts";
 import { registerSubagentBrowser } from "./src/browser.ts";
 import { currentBootId } from "./src/owner.ts";

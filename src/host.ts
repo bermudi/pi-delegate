@@ -35,35 +35,12 @@ import {
   resolveProviderExtensionPaths,
   type ProviderExtensionCache,
 } from "./provider-extensions.ts";
+import { parentModelRuntime } from "./pi-compat.ts";
 import { resumeTagOf } from "./format.ts";
 import { resolveDependencyGraph } from "./graph.ts";
 import type { TaskInput } from "./validation.ts";
 import type { ResolvedTask, Workspace } from "./types.ts";
 import { workspaceGuardFactory } from "./workspace-guard.ts";
-
-/**
- * The parent session's ModelRuntime. `ExtensionContext` exposes only the
- * ModelRegistry facade; the wrapped runtime is the same object the parent
- * streams through, and subagents must share it so runtime-registered
- * providers (and their auth) apply to child sessions. The field is
- * TypeScript-private; the guard proves the grabbed value is the real
- * `ModelRuntime` class — not merely present — so an upstream reshuffle
- * fails loudly here instead of mis-wiring child sessions. Tracked upstream
- * as earendil-works/pi#8791 (expose the model runtime to extensions); when
- * it lands, delete the grab. Patching pi-coding-agent locally via
- * patchedDependencies was deliberately rejected: patch rot on every Pi
- * release outweighs one loud, contained failure.
- */
-export function parentModelRuntime(ctx: ExtensionContext): ModelRuntime {
-  const runtime = (ctx.modelRegistry as unknown as { runtime?: unknown })
-    .runtime;
-  if (!(runtime instanceof ModelRuntime)) {
-    throw new Error(
-      "delegate cannot reach the parent session's model runtime; subagent dispatch is unavailable.",
-    );
-  }
-  return runtime;
-}
 
 /** Everything task resolution and child construction need from the host. */
 /** The parent's user-authored prompt inputs, captured at each turn start. */

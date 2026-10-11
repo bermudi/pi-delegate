@@ -28,7 +28,6 @@
  * URL grammar, no npm spec regex, and no `npm:`/`git:` prefix matching of
  * its own.
  */
-import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -41,7 +40,7 @@ import {
   getSubagentProviderExtensionSourcesForProvider,
   type DelegateConfig,
 } from "./config.ts";
-import { gitProbeEnv } from "./fsx.ts";
+import { exec, gitProbeEnv } from "./fsx.ts";
 import {
   parseGitOriginIdentity,
   parsePackageSource,
@@ -162,8 +161,10 @@ function isTrustedManagedTarget(agentDir: string, userPath: string): boolean {
  * intentional: callers then require a canonical managed target to remain
  * under the trusted user agent directory.
  */
-function findExtensionProjectRoot(cwd: string): string | undefined {
-  const root = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
+async function findExtensionProjectRoot(
+  cwd: string,
+): Promise<string | undefined> {
+  const root = await gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
   if (root) return trustedCanonicalPath(root);
 
   let directory = trustedCanonicalPath(cwd);
@@ -190,15 +191,16 @@ function findExtensionProjectRoot(cwd: string): string | undefined {
  * scrubbed per this repo's Git convention so a polluted environment
  * cannot redirect the probe).
  */
-function gitOutput(cwd: string, args: string[]): string {
+async function gitOutput(cwd: string, args: string[]): Promise<string> {
   try {
-    return execFileSync("git", args, {
-      cwd,
-      env: gitProbeEnv(),
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 5000,
-    }).trim();
+    return (
+      await exec("git", args, {
+        cwd,
+        env: gitProbeEnv(),
+        timeoutMs: 5_000,
+        maxBuffer: 4 * 1024 * 1024,
+      })
+    ).stdout.trim();
   } catch {
     // Not every path is a Git worktree, and a missing ref is a normal
     // answer here. A timeout or non-zero exit is also treated as "no
@@ -218,23 +220,31 @@ function gitOutput(cwd: string, args: string[]): string {
  * unpinned share one directory. Reading the checkout's own origin and
  * HEAD is what makes the pin mean something.
  */
-function verifyGitCheckout(
+async function verifyGitCheckout(
   packageManager: DefaultPackageManager,
   configured: GitPackageSource,
   installedPath: string,
-): void {
+): Promise<void> {
   try {
     const origin = parseGitOriginIdentity(
       packageManager,
-      gitOutput(installedPath, ["config", "--get", "remote.origin.url"]),
+      await gitOutput(installedPath, [
+        "config",
+        "--get",
+        "remote.origin.url",
+      ]),
     );
     if (!origin || !sameRepository(origin, configured)) {
       throw new Error("checkout has a different origin");
     }
 
     if (!configured.ref) return;
-    const head = gitOutput(installedPath, ["rev-parse", "--verify", "HEAD"]);
-    const target = gitOutput(installedPath, [
+    const head = await gitOutput(installedPath, [
+      "rev-parse",
+      "--verify",
+      "HEAD",
+    ]);
+    const target = await gitOutput(installedPath, [
       "rev-parse",
       "--verify",
       "--end-of-options",
@@ -346,7 +356,7 @@ async function verifyInstalledSource(
   }
 
   if (configured.type === "git") {
-    verifyGitCheckout(packageManager, configured, installedPath);
+    await verifyGitCheckout(packageManager, configured, installedPath);
   }
   if (configured.type === "npm") {
     await verifyNpmVersion(configured, installedPath);
@@ -441,7 +451,10 @@ async function resolveProviderExtensionPathsUncached(
       projectTrusted: false,
     }),
   });
-  const trust = { agentDir, projectRoot: findExtensionProjectRoot(cwd) };
+  const trust = {
+    agentDir,
+    projectRoot: await findExtensionProjectRoot(cwd),
+  };
 
   const installedPaths = new Map<string, string>();
   const missing: string[] = [];

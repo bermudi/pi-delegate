@@ -7,7 +7,40 @@ import {
   statSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import type { SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+  ModelRuntime,
+  type ExtensionContext,
+  type SessionManager,
+} from "@earendil-works/pi-coding-agent";
+
+/**
+ * The parent session's ModelRuntime. `ExtensionContext` exposes only the
+ * ModelRegistry facade; the wrapped runtime is the same object the parent
+ * streams through, and subagents must share it so runtime-registered
+ * providers (and their auth) apply to child sessions. The field is
+ * TypeScript-private; the guard proves the grabbed value is the real
+ * `ModelRuntime` class — not merely present — so an upstream reshuffle
+ * fails loudly here instead of mis-wiring child sessions. Tracked upstream
+ * as earendil-works/pi#8791 (expose the model runtime to extensions); when
+ * it lands, delete the grab. Patching pi-coding-agent locally via
+ * patchedDependencies was deliberately rejected: patch rot on every Pi
+ * release outweighs one loud, contained failure.
+ *
+ * Failure policy: fail dispatch loudly. The runtime is a hard dispatch
+ * prerequisite — an unrecognized value rejects the dispatch rather than
+ * falling back to a fresh ModelRuntime, which would silently drop the
+ * parent's registered providers and auth.
+ */
+export function parentModelRuntime(ctx: ExtensionContext): ModelRuntime {
+  const runtime = (ctx.modelRegistry as unknown as { runtime?: unknown })
+    .runtime;
+  if (!(runtime instanceof ModelRuntime)) {
+    throw new Error(
+      "delegate cannot reach the parent session's model runtime; subagent dispatch is unavailable.",
+    );
+  }
+  return runtime;
+}
 
 interface SessionFileAccess {
   getSessionFile(): string | undefined;
