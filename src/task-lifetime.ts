@@ -27,6 +27,11 @@ export class TaskLifetime {
   private liveExecutions = 0;
   private runEnded = false;
   private disposed = false;
+  // #127: the monotonic instant the run body began — both concurrency
+  // slots held, every pre-run gate passed. Undefined while the task has
+  // only ever been queued, so a never-started settlement stamps no
+  // duration.
+  private admittedAt: number | undefined;
   // The composed signal propagates the (long-lived) dispatch and ticket
   // cancellation signals to this task's controls. Its listeners on those
   // sources are removed once the task is fully done: every created
@@ -57,6 +62,26 @@ export class TaskLifetime {
     return this.workerCreated;
   }
 
+  /**
+   * The admission stamp (#127): called once both concurrency slots are
+   * held and the run body begins. Dependency, pause, predecessor, and
+   * slot waits before this point are queueing, not task duration; the
+   * first call wins so a reacquired slot never restarts the span.
+   */
+  markAdmitted(): void {
+    if (this.admittedAt === undefined) this.admittedAt = performance.now();
+  }
+
+  /**
+   * Milliseconds inside the admitted span, or undefined when the task
+   * was never admitted. Monotonic — wall-clock jumps cannot move it.
+   */
+  private admittedElapsed(): number | undefined {
+    return this.admittedAt === undefined
+      ? undefined
+      : performance.now() - this.admittedAt;
+  }
+
   attachSignal(combined: { signal: AbortSignal; dispose(): void }): AbortSignal {
     this.combined = combined;
     return combined.signal;
@@ -78,7 +103,17 @@ export class TaskLifetime {
       workerStoppedProof, workerTailStoppedProof,
     } = options;
     if (this.workerTruthRecorded) return;
-    outcomes[task.index] = outcome;
+    // Visible settlement ends the admitted span (#127): the duration is
+    // stamped on the outcome being recorded, once — a later worker-truth
+    // merge keeps this first measurement. The key is only set with a
+    // real stamp: an own `durationMs: undefined` would survive into
+    // details.results and trip the strict additionalProperties schema.
+    const elapsed = this.admittedElapsed();
+    const recorded: TaskOutcome =
+      outcome.durationMs === undefined && elapsed !== undefined
+        ? { ...outcome, durationMs: elapsed }
+        : outcome;
+    outcomes[task.index] = recorded;
     // Live-activity feed: ticket rows update status; sync tasks become
     // retained browser rows. Best-effort — the browser is diagnostics,
     // never a dispatch dependency: a throwing sink must not skip the
@@ -86,30 +121,30 @@ export class TaskLifetime {
     if (options.activity !== undefined) {
       try {
         if (ticket !== undefined) {
-          options.activity.setTicketTaskStatus(ticket.id, task.id, outcome.status);
+          options.activity.setTicketTaskStatus(ticket.id, task.id, recorded.status);
         } else if (options.syncRunId !== undefined) {
           // A tracked inline row settles in place — it IS the retained
           // row, keeping its tool-call history and observed tail.
           options.activity.setSyncTaskStatus(
             options.syncRunId,
             task.id,
-            outcome.status,
-            outcome.status === "ok"
-              ? (outcome.output ?? "")
-              : (outcome.error ?? outcome.output ?? "no output"),
+            recorded.status,
+            recorded.status === "ok"
+              ? (recorded.output ?? "")
+              : (recorded.error ?? recorded.output ?? "no output"),
           );
         } else {
           options.activity.retainSyncRun({
             taskId: task.id,
             label: task.agent,
             prompt: task.prompt,
-            status: outcome.status,
+            status: recorded.status,
             startedAt: taskStartedAt,
             endedAt: Date.now(),
             summary:
-              outcome.status === "ok"
-                ? (outcome.output ?? "")
-                : (outcome.error ?? outcome.output ?? "no output"),
+              recorded.status === "ok"
+                ? (recorded.output ?? "")
+                : (recorded.error ?? recorded.output ?? "no output"),
           });
         }
       } catch (error) {
@@ -119,21 +154,21 @@ export class TaskLifetime {
     // A non-quarantined outcome confirms the worker stopped (or never
     // started), with no late-worker cleanup tail. Phase reconciliation
     // can still be pending; the batch-body proof holds shutdown through it.
-    if (!outcome.quarantined) {
+    if (!recorded.quarantined) {
       workerStoppedProof.resolve();
       workerTailStoppedProof.resolve();
     }
     if (ticket) {
       // The store owns lifecycle; recording can settle the ticket but
       // never un-settles it.
-      options.tickets.recordOutcome(ticket, outcome);
+      options.tickets.recordOutcome(ticket, recorded);
     }
     // Usage reporting (#60): the settled outcome's recorded usage is
     // what the event carries — emit at the settlement point itself,
     // not at batch end, so a long-running ticket reports as it goes.
     if (options.onTaskOutcomeRecorded !== undefined) {
       try {
-        options.onTaskOutcomeRecorded(task, outcome);
+        options.onTaskOutcomeRecorded(task, recorded);
       } catch (error) {
         options.diagnostics.log("error", "usage settlement sink failed", { taskId: task.id }, error);
       }
@@ -166,9 +201,20 @@ export class TaskLifetime {
     // Reconciliation may already have annotated the provisional entry;
     // worker truth replaces the run outcome but keeps its integration —
     // and the Git window's evidence folds over its own observed set.
+    // #127: the first visible settlement owns the duration — a
+    // provisional's stamp survives truth, never re-measured. When
+    // truth itself is the first record (its stop raced the
+    // provisional's write), it is stamped here instead. Omitted when
+    // no side ever ran — an own undefined key would trip the strict
+    // details schema the same way.
+    const durationMs =
+      outcomes[task.index]?.durationMs ??
+      late.durationMs ??
+      this.admittedElapsed();
     const merged: TaskOutcome = {
       ...options.decorateLateOutcome(late),
       integration: outcomes[task.index]?.integration ?? late.integration,
+      ...(durationMs !== undefined ? { durationMs } : {}),
     };
     outcomes[task.index] = merged;
     if (ticket) {

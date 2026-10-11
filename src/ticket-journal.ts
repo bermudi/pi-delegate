@@ -68,6 +68,9 @@ const outcome = Type.Object({
   verdict: Type.Optional(Type.Union([
     Type.Literal("PASS"), Type.Literal("FAIL"), Type.Literal("AMBIGUOUS"),
   ])),
+  // Admitted-span ms (#127) — optional; records written before task
+  // durations carry none, and never-started tasks never carry one.
+  durationMs: Type.Optional(Type.Number()),
 });
 const savedTicket = Type.Object({
   version: Type.Literal(1),

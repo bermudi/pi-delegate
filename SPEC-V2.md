@@ -570,7 +570,9 @@ such dispatch it records the batch start timestamp and wall duration,
 sync/async mode, task count, terminal call status, caller-visible task status,
 agent/model/thinking/tools/workspace selections, integration status, retry
 count, and numeric token/cost usage. Task records capture metadata and outcomes
-at batch finish; v2 leaves the legacy per-task duration field NULL. A task row
+at batch finish; v2 leaves the legacy per-task duration field NULL.
+**Overridden by SPEC.md, "Task durations":** v3 records the admitted
+span there. A task row
 whose worker could not be confirmed stopped is marked provisional and may later
 be superseded in the live ticket.
 

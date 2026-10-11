@@ -451,6 +451,8 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   Existing databases migrate in place and existing rows are preserved; legacy
   sensitive fields are not continued on new v2 rows, and v2 leaves the legacy
   per-task duration column NULL.
+  **Current override (SPEC.md, "Task durations"):** v3 records each
+  task's admitted span in `duration_ms`; never-started tasks keep NULL.
   **Current override (SPEC.md, "Misfire rows"):** the
   completed-dispatch-only description is historical. Pre-execution
   rejections also record sanitized batch metadata and the caller-visible

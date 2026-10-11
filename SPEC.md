@@ -474,6 +474,22 @@ mid-flight the parent can steer. The grammar:
   pending ones to their deadlines; jobs pinned to a stale destination
   generation drop loudly rather than write to the wrong file.
 
+- **Task durations (#127).** A `tasks` row's `duration_ms` is the
+  admitted span on a monotonic clock: from admission — both
+  concurrency slots held and the run body entered — to the
+  caller-visible settlement. Dependency, pause, predecessor, and
+  capacity waits before that point are queueing, never duration;
+  question waits, retry backoff, session loading, and capacity
+  reacquisition inside the span count. A provisional outcome ends the
+  span at its first record, and a later worker-truth merge keeps that
+  first measurement rather than re-measuring to real quiescence.
+  Tasks that never started — dependency-blocked, cancelled before a
+  slot, pre-worker failure — keep NULL, distinct from a zero-length
+  run. The field is internal evidence: it never appears in tool
+  results, details, or rendered views. This fills the column v2 kept
+  NULL, making `sum(duration_ms)` vs `wall_ms` the serialization-cost
+  signal.
+
 ## Substrate inheritance
 
 The engine is inherited as-built; v2's contracts become its historical

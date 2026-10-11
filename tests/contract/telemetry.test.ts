@@ -67,9 +67,10 @@ const CALLS_LEGACY_COLUMNS = [
   "parent_cwd",
 ];
 
+// #127: duration_ms left this list — an admitted task's row now carries
+// its admitted-span milliseconds; only never-started rows stay NULL.
 const TASKS_LEGACY_COLUMNS = [
   "failure_kind",
-  "duration_ms",
   "tool_uses",
   "prompt_chars",
   "output_chars",
@@ -201,6 +202,9 @@ describe("delegate telemetry contract", () => {
           expect(task.async).toBe(0);
           expect(task.provisional).toBe(0);
           expect(typeof task.retries).toBe("number");
+          // #127: an admitted task carries its admitted-span duration.
+          expect(task.duration_ms).not.toBeNull();
+          expect(task.duration_ms as number).toBeGreaterThanOrEqual(0);
           expect(JSON.parse(String(task.tools))).toBeInstanceOf(Array);
           expect(task.version).toBe(EXTENSION_VERSION);
           expect(task.pi_version).toBe(PI_VERSION);
@@ -519,6 +523,8 @@ describe("delegate telemetry contract", () => {
         expect(newTask).toBeDefined();
         expect(newTask?.version).toBe(EXTENSION_VERSION);
         expect(newTask?.pi_version).toBe(PI_VERSION);
+        // #127: v3 rows populate the duration v1 rows already carried.
+        expect(typeof newTask?.duration_ms).toBe("number");
         for (const column of TASKS_LEGACY_COLUMNS) {
           expect(newTask?.[column]).toBeNull();
         }
@@ -913,6 +919,175 @@ describe("delegate telemetry contract", () => {
         db.close();
       }
       release();
+    },
+  );
+
+  test(
+    "a settled task records its admitted-span duration while a never-started task stays NULL",
+    async () => {
+      // #127: duration_ms is the admitted span — admission (both slots
+      // held, run body entered) to the caller-visible settlement. A
+      // dependency-blocked task never ran: NULL, distinct from a
+      // zero-length run.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "usage.db");
+      configureDelegate(session, {
+        telemetry: { enabled: true, dbPath },
+      });
+      const turn: FauxResponseFactory = async (context) => {
+        if (JSON.stringify(context.messages).includes("SLOW")) {
+          await new Promise((r) => setTimeout(r, 60));
+          return fauxAssistantMessage("SLOW-DONE");
+        }
+        return fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "usage limit exceeded; upgrade your plan",
+        });
+      };
+      subagents.respond([turn, turn]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          { id: "slow", prompt: "SLOW task", agent: "explore" },
+          { id: "failer", prompt: "FAILER task", agent: "explore" },
+          {
+            id: "dependent",
+            prompt: "depends",
+            dependsOn: ["failer"],
+            agent: "explore",
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(subagents.state.callCount).toBe(2);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const tasks = rowsOf(db, "tasks").sort(
+          (a, b) => Number(a.idx) - Number(b.idx),
+        );
+        expect(tasks).toHaveLength(3);
+        const slowRow = tasks[0];
+        expect(slowRow?.outcome).toBe("ok");
+        expect(typeof slowRow?.duration_ms).toBe("number");
+        // The faux step itself slept ~60ms inside the admitted span.
+        expect(slowRow?.duration_ms as number).toBeGreaterThan(0);
+        const failerRow = tasks[1];
+        expect(failerRow?.outcome).toBe("failed");
+        expect(typeof failerRow?.duration_ms).toBe("number");
+        const blockedRow = tasks[2];
+        expect(blockedRow?.outcome).toBe("blocked");
+        expect(blockedRow?.duration_ms).toBeNull();
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test(
+    "a queued task's duration excludes the capacity wait",
+    async () => {
+      // #127: pre-admission waits are not task duration — sum(duration_ms)
+      // vs wall_ms is the serialization-cost signal. With maxConcurrent 1
+      // the second task waits out the first's whole run for a slot, but
+      // its row must measure only its own admitted span.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "usage.db");
+      configureDelegate(session, {
+        maxConcurrent: 1,
+        telemetry: { enabled: true, dbPath },
+      });
+      const turn: FauxResponseFactory = async (context) => {
+        if (JSON.stringify(context.messages).includes("HOLDER")) {
+          await new Promise((r) => setTimeout(r, 1500));
+          return fauxAssistantMessage("HOLDER-DONE");
+        }
+        return fauxAssistantMessage("QUEUED-DONE");
+      };
+      subagents.respond([turn, turn]);
+
+      const startedAt = Date.now();
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          { id: "holder", prompt: "HOLDER", agent: "explore" },
+          { id: "queued", prompt: "QUICK", agent: "explore" },
+        ],
+      });
+      const wall = Date.now() - startedAt;
+      expect(result.isError).toBe(false);
+      // Serialization actually happened: the holder's sleep alone
+      // bounds the call's wall time.
+      expect(wall).toBeGreaterThanOrEqual(1400);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const tasks = rowsOf(db, "tasks");
+        const holder = tasks.find((row) => Number(row.idx) === 0);
+        const queued = tasks.find((row) => Number(row.idx) === 1);
+        expect(holder?.outcome).toBe("ok");
+        expect(queued?.outcome).toBe("ok");
+        expect(holder?.duration_ms as number).toBeGreaterThanOrEqual(1200);
+        expect(typeof queued?.duration_ms).toBe("number");
+        // Queueing time is excluded: if the slot wait counted, the
+        // queued task's span would meet or exceed the holder's.
+        expect(queued?.duration_ms as number).toBeLessThan(1000);
+        expect(queued?.duration_ms as number).toBeLessThan(
+          holder?.duration_ms as number,
+        );
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test(
+    "a provisional task's duration ends at its visible settlement, not worker stop",
+    async () => {
+      // #127: the stall's provisional record is the first visible
+      // settlement — duration is stamped there. When worker truth lands
+      // later the merged outcome keeps that stamp rather than
+      // re-measuring to real quiescence.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "usage.db");
+      configureDelegate(session, {
+        stallTimeoutMs: 300,
+        telemetry: { enabled: true, dbPath },
+      });
+      let release!: () => void;
+      const hold = new Promise<void>((r) => (release = r));
+      const gated: FauxResponseFactory = async () => {
+        await hold;
+        return fauxAssistantMessage("TOO-LATE");
+      };
+      subagents.respond([gated]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [{ prompt: "hang" }],
+      });
+      expect(result.text).toMatch(/stall/i);
+      // Keep the worker alive well past the visible settlement: a
+      // duration measured at worker truth would include this hold.
+      await new Promise((r) => setTimeout(r, 1500));
+      release();
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const tasks = rowsOf(db, "tasks");
+        expect(tasks).toHaveLength(1);
+        expect(tasks[0]?.provisional).toBe(1);
+        const duration = tasks[0]?.duration_ms;
+        expect(typeof duration).toBe("number");
+        expect(duration as number).toBeGreaterThanOrEqual(250);
+        expect(duration as number).toBeLessThan(1500);
+      } finally {
+        db.close();
+      }
     },
   );
 

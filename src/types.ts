@@ -243,6 +243,18 @@ export interface TaskOutcome {
    * no verdict line — reporting only, never gating.
    */
   readonly verdict?: TaskVerdict;
+  /**
+   * The admitted span in milliseconds (#127): from admission — both
+   * concurrency slots held and the run body entered — to the
+   * caller-visible settlement, on a monotonic clock. A provisional
+   * outcome is stamped at its first record and a later worker-truth
+   * merge keeps that stamp rather than re-measuring to real quiescence.
+   * Tasks that never started (dependency-blocked, cancelled before a
+   * slot, pre-worker failure) carry none — distinct from a zero-length
+   * run. Internal evidence for the telemetry task row only; never
+   * rendered to callers.
+   */
+  readonly durationMs?: number;
 }
 
 export type TicketStatus =

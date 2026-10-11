@@ -660,6 +660,11 @@ export class DispatchCoordinator {
               lifetime.recordOutcome({ index: task.index, id: task.id, status: "cancelled", retries: 0 });
               return;
             }
+            // #127: the admitted span begins here — both slots held and
+            // the run body starts. Dependency, pause, predecessor, and
+            // slot waits above are queueing, not task duration; the span
+            // ends at the visible settlement (TaskLifetime).
+            lifetime.markAdmitted();
             const controls: RunControls = {
               env: options.env,
               sessions: options.sessions,

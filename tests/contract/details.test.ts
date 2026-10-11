@@ -75,6 +75,39 @@ describe("details schemas (SPEC v3 Observability, issue #51)", () => {
   });
 
   test(
+    "a never-started outcome enters details without an internal duration key",
+    async () => {
+      // #127 review: a dependency-blocked outcome is recorded without
+      // ever being admitted. durationMs must stay an absent key, not an
+      // own `undefined` — the strict additionalProperties schema counts
+      // own keys regardless of value.
+      session = await openDelegateBoundary();
+      const model = await installSubagentModel(session);
+      model.respond([
+        fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "usage limit exceeded; upgrade your plan",
+        }),
+      ]);
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          { id: "failer", prompt: "fail" },
+          { id: "dependent", prompt: "never runs", dependsOn: ["failer"] },
+        ],
+      });
+      expect(Check(syncDispatchDetailsSchema, result.details)).toBe(true);
+      const results = (result.details as { results?: unknown }).results;
+      expect(Array.isArray(results)).toBe(true);
+      const blocked = (results as Record<string, unknown>[]).find(
+        (entry) => entry.status === "blocked",
+      );
+      expect(blocked).toBeDefined();
+      expect("durationMs" in blocked!).toBe(false);
+    },
+  );
+
+  test(
     "a sync dispatch's details satisfy syncDispatchDetailsSchema — brief, notices, results, attributedFiles, verdict",
     async () => {
       // Issue #51: the whole sync result envelope is pinned — including

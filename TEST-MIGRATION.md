@@ -946,7 +946,11 @@ gaps.
   retries after the identity changes; isolated integration status records only
   after reconciliation; an unfinished span is dropped when the destination
   changes before its batch finishes; task rows whose workers have unconfirmed
-  quiescence are marked provisional; a dispatch rejected before execution —
+  quiescence are marked provisional; a completed task's `duration_ms` is its
+  admitted span — positive for a settled run, NULL for a never-started
+  (dependency-blocked) task, excluding a serialized sibling's capacity
+  wait, and stamped at the provisional record's first visible settlement
+  rather than the later worker truth (#127); a dispatch rejected before execution —
   config load, call-shape/semantic validation (exact requested agent names recorded),
   or admission — writes a `misfires` row with the phase, the verbatim
   caller-visible message, and the batch shape, and a completed dispatch

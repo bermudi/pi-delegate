@@ -62,7 +62,7 @@ import { VisibilitySignals } from "./src/visibility.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
 import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
-import type { Ticket } from "./src/types.ts";
+import type { TaskOutcome, Ticket } from "./src/types.ts";
 import {
   MODEL_FIELD_REJECTION,
   PROMPT_CHAR_LIMIT,
@@ -377,6 +377,23 @@ function parseArray(value: string): unknown[] | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * #127: `durationMs` is internal telemetry evidence only — never a
+ * caller-visible field, and the strict `details.results` outcome schema
+ * would reject it. Strip it where recorded outcomes enter details.
+ */
+function publicOutcome(outcome: TaskOutcome): TaskOutcome;
+function publicOutcome(
+  outcome: TaskOutcome | undefined,
+): TaskOutcome | undefined;
+function publicOutcome(
+  outcome: TaskOutcome | undefined,
+): TaskOutcome | undefined {
+  if (outcome?.durationMs === undefined) return outcome;
+  const { durationMs: _internal, ...rest } = outcome;
+  return rest;
 }
 
 const TICKET_ACTIONS = ["poll", "wait", "cancel", "answer", "steer", "interrupt"];
@@ -1396,12 +1413,16 @@ export default function delegateExtension(api: ExtensionAPI): void {
         ? {
             ticket: group[0]!.ticket.id,
             originLeafId: group[0]!.ticket.originLeafId,
-            results: group[0]!.ticket.outcomes,
+            results: group[0]!.ticket.outcomes.map((outcome) =>
+              publicOutcome(outcome),
+            ),
           }
         : {
             tickets: group.map(({ ticket }) => ticket.id),
             originLeafIds: group.map(({ ticket }) => ticket.originLeafId),
-            results: group.flatMap(({ ticket }) => ticket.outcomes),
+            results: group.flatMap(({ ticket }) =>
+              ticket.outcomes.map((outcome) => publicOutcome(outcome)),
+            ),
           };
     const notices = group.flatMap(({ ticket }) => ticket.notices);
     if (notices.length > 0) details.notices = notices;
@@ -2210,7 +2231,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 ...(call.brief !== undefined ? { brief: call.brief } : {}),
                 // The rendered content is spill-bounded; details keep the
                 // complete outcomes for the expanded view and recovery.
-                results: result.outcomes,
+                results: result.outcomes.map((outcome) =>
+                  publicOutcome(outcome),
+                ),
                 // SPEC v3 "Observability — Completion evidence": the
                 // machine-readable half of the per-task `files:` lines —
                 // absolute paths, the unknown-shell flag, and the names
@@ -2314,7 +2337,9 @@ export default function delegateExtension(api: ExtensionAPI): void {
               // their action response text, not the ticket document.
               results:
                 call.action === "poll" || call.action === "wait"
-                  ? result.ticket?.outcomes
+                  ? result.ticket?.outcomes.map((outcome) =>
+                      publicOutcome(outcome),
+                    )
                   : undefined,
               // SPEC v3 "Observability — Completion evidence":
               // machine-readable attribution per task — recorded outcomes,

@@ -161,6 +161,13 @@ export interface MisfireShape {
 interface TaskRowSnapshot {
   readonly index: number;
   readonly status: TaskStatus;
+  /**
+   * The admitted span in whole ms (#127) — admission to the
+   * caller-visible settlement; null for tasks that never started
+   * (dependency-blocked, cancelled before a slot, pre-worker failure),
+   * distinct from a zero-length run.
+   */
+  readonly durationMs: number | null;
   readonly totalTokens: number | null;
   readonly costTotal: number | null;
   readonly retries: number;
@@ -666,7 +673,7 @@ export class TelemetryStore {
           row.workspace,
           row.status,
           null,
-          null,
+          row.durationMs,
           row.totalTokens,
           row.costTotal,
           null,
@@ -726,6 +733,10 @@ export class TelemetryStore {
       return {
         index: outcome.index,
         status: outcome.status,
+        durationMs:
+          outcome.durationMs === undefined
+            ? null
+            : Math.round(outcome.durationMs),
         totalTokens: outcome.usage?.totalTokens ?? null,
         costTotal: outcome.usage?.cost.total ?? null,
         retries: outcome.retries,
