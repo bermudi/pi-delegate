@@ -1239,7 +1239,11 @@ bash-using worker had reported only `files: uncertain (bash)`.
   `01a0fdba`, 2026-10-02): bash-created files reported by path, a
   pre-dirty file reported only when the run rewrote it (its untouched
   pre-dirty sibling excluded), a no-change window showing no files
-  line, committed paths via a moved `HEAD`, non-Git shells falling
+  line, committed paths via a moved `HEAD`, a first commit reported
+  through the empty tree in a sha256 repository (the empty-tree id
+  derives from the repo's own object format), a committed newline
+  filename attributed verbatim rather than C-quoted (`-z` on the
+  committed-diff probe), non-Git shells falling
   back to the unknown mark, a snapshot failure logging to stderr and
   degrading without failing the task, overlapping mutating tasks on
   one repository naming each other with no false overlap line, the

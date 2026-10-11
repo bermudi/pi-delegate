@@ -45,11 +45,38 @@ function errorText(error: unknown): string {
 }
 
 /**
- * The universal empty-tree hash: diffing it against a new HEAD reports
- * the files a first commit introduced — the window where a repo had no
- * HEAD before and has one after.
+ * The empty tree's object id — `git mktree </dev/null>` — per object
+ * format: diffing it against a new HEAD reports the files a first
+ * commit introduced, the window where a repo had no HEAD before and
+ * has one after (or lost it, head→unborn). The id is format-dependent —
+ * the sha1 value does not exist as an object in a sha256 repository —
+ * so it is derived from the repo's own `rev-parse --show-object-format`
+ * answer, never assumed.
  */
-const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const EMPTY_TREE_IDS: Readonly<Record<string, string>> = {
+  sha1: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+  sha256:
+    "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+};
+
+/**
+ * This repository's empty-tree id in its own object format. An
+ * unrecognized format throws: like every Git failure it propagates to
+ * the caller's `covered: false` fallback — it must never silently skip
+ * attribution.
+ */
+async function emptyTreeId(root: string): Promise<string> {
+  const format = (
+    await gitProbe(["-C", root, "rev-parse", "--show-object-format"])
+  ).trim();
+  const id = EMPTY_TREE_IDS[format];
+  if (id === undefined) {
+    throw new Error(
+      `git attribution: unrecognized object format "${format}" in ${root}`,
+    );
+  }
+  return id;
+}
 
 /** lstat facts compared between snapshots; a missing path carries undefined. */
 interface FileStat {
@@ -180,18 +207,24 @@ export async function changedRelPaths(
     if (!after.files.has(rel)) changed.add(rel);
   }
   if (before.head !== after.head) {
-    const base = before.head ?? EMPTY_TREE;
-    const tip = after.head ?? EMPTY_TREE;
+    // A side with no HEAD (unborn→first commit, or head→unborn) stands
+    // in as the empty tree — resolved in this repo's object format, and
+    // only probed lazily when a side actually lacks one: a plain
+    // moved-HEAD diff pays no extra probe.
+    const base = before.head ?? (await emptyTreeId(after.root));
+    const tip = after.head ?? (await emptyTreeId(after.root));
     if (base !== tip) {
       const committed = await gitProbe([
         "-C",
         after.root,
         "diff",
         "--name-only",
+        "-z",
+        "--no-renames",
         base,
         tip,
       ]);
-      for (const rel of committed.split("\n")) {
+      for (const rel of committed.split("\0")) {
         if (rel !== "") changed.add(rel);
       }
     }

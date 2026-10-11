@@ -16,6 +16,7 @@ import {
   when,
   type TestSession,
 } from "@marcfargas/pi-test-harness";
+import { gitEnv } from "../../src/fsx.ts";
 import {
   callDelegate,
   callDelegateTicket,
@@ -822,6 +823,82 @@ exec ${quote(realGit)} "$@"
     expect(result.text).toContain("files: committed.txt");
     const attributed = attributedOf(result.details);
     expect(attributed[0]!.files).toEqual([inRepo(repo, "committed.txt")]);
+    expect(attributed[0]!.uncertain).toBe(false);
+  });
+
+  test("a worker's first commit is reported through the empty tree in a sha256 repository", async () => {
+    // Contract: SPEC "Completion evidence" — the unborn→first-commit
+    // window diffs the empty tree against the new HEAD, and the empty
+    // tree's object id is format-dependent: the universal sha1 value
+    // does not exist in a sha256 repository, so the diff must resolve
+    // the repo's own object format. Like the unborn-repo drift test
+    // (workspaces.test.ts), evidence must not depend on prior history
+    // — nor on sha1 being the hash.
+    const session = await openAt();
+    const repo = join(session.cwd, "repo-sha256");
+    mkdirSync(repo, { recursive: true });
+    execSync(
+      "git init -q --object-format=sha256 && git config user.email t@t && git config user.name t",
+      { cwd: repo, env: gitEnv() },
+    );
+    const model = await installSubagentModel(session);
+    model.respond([
+      fauxAssistantMessage([
+        fauxToolCall("bash", {
+          command:
+            "echo NEW > first.txt && git add first.txt && git commit -qm first",
+        }),
+      ]),
+      fauxAssistantMessage("COMMITTED"),
+    ]);
+    const result = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "make the first commit", cwd: repo }],
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("files: first.txt");
+    const attributed = attributedOf(result.details);
+    expect(attributed[0]!.files).toEqual([inRepo(repo, "first.txt")]);
+    expect(attributed[0]!.uncertain).toBe(false);
+  });
+
+  test("a committed file whose name contains a newline is attributed verbatim, not C-quoted", async () => {
+    // Contract: SPEC "Completion evidence" — the committed-diff probe
+    // must report real paths: `git diff --name-only` C-quotes unusual
+    // names under core.quotePath, so `-z` (verbatim, NUL-separated) is
+    // required — same as the status probe and the workspace diff.
+    const session = await openAt();
+    const repo = join(session.cwd, "repo-newline");
+    mkdirSync(repo, { recursive: true });
+    execSync(
+      "git init -q && git config user.email t@t && git config user.name t",
+      { cwd: repo, env: gitEnv() },
+    );
+    writeFileSync(join(repo, "base.txt"), "BASE\n");
+    execSync("git add -A && git commit -qm base", { cwd: repo, env: gitEnv() });
+    const model = await installSubagentModel(session);
+    model.respond([
+      fauxAssistantMessage([
+        fauxToolCall("bash", {
+          // printf builds the literal-newline name portably; `git add
+          // -A` stages it whatever its bytes are.
+          command:
+            "printf 'x\\n' > \"$(printf 'a\\nb.txt')\" && git add -A && git commit -qm newline",
+        }),
+      ]),
+      fauxAssistantMessage("COMMITTED"),
+    ]);
+    const result = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "commit an oddly-named file", cwd: repo }],
+    });
+    expect(result.isError).toBe(false);
+    // The reported path is the real name with its literal newline —
+    // never the C-quoted `"a\nb.txt"` form Git prints without -z.
+    const attributed = attributedOf(result.details);
+    expect(attributed[0]!.files).toEqual([inRepo(repo, "a\nb.txt")]);
+    expect(result.text).toContain("files: a\nb.txt");
+    expect(result.text).not.toContain('"a\\nb.txt"');
     expect(attributed[0]!.uncertain).toBe(false);
   });
 
