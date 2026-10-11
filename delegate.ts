@@ -24,16 +24,17 @@ import {
   type DelegateConfig,
   type TelemetryConfig,
 } from "./src/config.ts";
-import type {
-  AsyncDispatchDetails,
-  DeliveredDetails,
-  HelpDetails,
-  LiveDispatchDetails,
-  QuestionNoticeDetails,
-  SessionDetails,
-  SyncDispatchDetails,
-  TicketDetails,
+import {
+  publicOutcome,
+  type AsyncDispatchDetails,
+  type HelpDetails,
+  type LiveDispatchDetails,
+  type QuestionNoticeDetails,
+  type SessionDetails,
+  type SyncDispatchDetails,
+  type TicketDetails,
 } from "./src/details.ts";
+import { DELIVERED_MESSAGE_TYPE, WakeDelivery } from "./src/delivery.ts";
 import {
   DispatchCoordinator,
   type DispatchOutcome,
@@ -62,7 +63,7 @@ import { VisibilitySignals } from "./src/visibility.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
 import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
-import type { TaskOutcome, Ticket } from "./src/types.ts";
+import type { Ticket } from "./src/types.ts";
 import {
   MODEL_FIELD_REJECTION,
   PROMPT_CHAR_LIMIT,
@@ -262,18 +263,6 @@ type SessionToolArguments = Static<typeof sessionSchema>;
 type DelegateDetails = Record<string, unknown>;
 type DelegateResult = AgentToolResult<DelegateDetails>;
 
-/** customType of the custom message that delivers a settled async batch. */
-const DELIVERED_MESSAGE_TYPE = "delegate-result";
-/**
- * SPEC v3 "Interaction grammar — Wake delivery": "simultaneous
- * settlements batch into one wake." Settled tickets enqueue here and the
- * first enqueue arms one flush — this window trades a small delivery
- * delay for one wake per settlement cluster instead of one turn per
- * ticket. Deliberately not configurable: SPEC "Surface rules" keeps
- * internal timing out of caller reach.
- */
-const DELIVERY_FLUSH_MS = 100;
-
 /**
  * Issue #60: namespaced usage signal on `pi.events` — settled subagent
  * work emits `delegate:usage` so listeners (provider-balance) can refresh
@@ -377,23 +366,6 @@ function parseArray(value: string): unknown[] | undefined {
   } catch {
     return undefined;
   }
-}
-
-/**
- * #127: `durationMs` is internal telemetry evidence only — never a
- * caller-visible field, and the strict `details.results` outcome schema
- * would reject it. Strip it where recorded outcomes enter details.
- */
-function publicOutcome(outcome: TaskOutcome): TaskOutcome;
-function publicOutcome(
-  outcome: TaskOutcome | undefined,
-): TaskOutcome | undefined;
-function publicOutcome(
-  outcome: TaskOutcome | undefined,
-): TaskOutcome | undefined {
-  if (outcome?.durationMs === undefined) return outcome;
-  const { durationMs: _internal, ...rest } = outcome;
-  return rest;
 }
 
 const TICKET_ACTIONS = ["poll", "wait", "cancel", "answer", "steer", "interrupt"];
@@ -1283,10 +1255,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       } satisfies QuestionNoticeDetails),
     };
     try {
-      const sameLeaf =
-        navigationEpoch === ticket.originEpoch &&
-        (ticket.originLeafId === null ||
-          ctx.sessionManager.getBranch().some((entry) => entry.id === ticket.originLeafId));
+      const sameLeaf = delivery.sameLeaf(ticket, ctx);
       // Same leaf: steer — on a busy parent the notice merges at the
       // next turn boundary (after the in-flight tool calls, before the
       // next model call); on an idle one it starts a turn.
@@ -1310,9 +1279,12 @@ export default function delegateExtension(api: ExtensionAPI): void {
   // Shutdown latch: once the host begins teardown, new dispatches reject and
   // pending results are never delivered.
   let shuttingDown = false;
-  // Bumped on every observed tree transition — including a vetoed or
-  // cancelled navigation attempt, which conservatively downgrades delivery.
-  let navigationEpoch = 0;
+  const delivery = new WakeDelivery(
+    diagnostics,
+    (message, options) => api.sendMessage(message, options),
+    (ticket) => tickets.view(ticket),
+    () => shuttingDown,
+  );
 
   // Owned by this closure: the `delegate:usage` throttle stamp (#60).
   // One emission per interval across task and batch settlement alike —
@@ -1333,43 +1305,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
   };
 
   /**
-   * SPEC v3 "Interaction grammar — Wake delivery": settled results
-   * inject as steering wakes, leaf-aware, and simultaneous settlements
-   * batch into one wake. `deliver` used to send one message per ticket
-   * the moment it settled — a fan-out produced one parent turn per
-   * ticket. Now settlement enqueues here; the first enqueue arms one
-   * flush timer (DELIVERY_FLUSH_MS), and the flush groups the queued
-   * tickets by routing decision and emits one DELIVERED_MESSAGE_TYPE
-   * message per group.
-   *
-   * Once-ness: `enqueuedDeliveries` makes enqueue idempotent for the
-   * extension's lifetime — settlement, not delivery, is the source of
-   * truth, and a settled ticket stays pollable regardless of what
-   * delivery did with it. Entries are never removed: a ticket must
-   * never enqueue twice, even across a flush boundary.
-   *
-   * Consumption: `consumedDeliveries` records the exact terminal view a
-   * wait/poll already returned to the model. The flush suppresses the
-   * wake per ticket only when the view it would send now is identical —
-   * a render taken while the ticket was still finalizing (the settled
-   * wait races the batch's own `markBatchFinished` by a few microtasks) still
-   * suppresses, while a record that gained content since the render
-   * (late outcomes, budget account, notices) still delivers. An
-   * unconsumed sibling in the same window delivers normally.
-   */
-  interface QueuedDelivery {
-    readonly ticket: Ticket;
-    /** The dispatch's own ctx — owner of the leaf check and UI notify. */
-    readonly ctx: ExtensionContext;
-  }
-  const deliveryQueue: QueuedDelivery[] = [];
-  const enqueuedDeliveries = new Set<string>();
-  const consumedDeliveries = new Map<
-    string,
-    { readonly by: "wait" | "poll"; readonly view: string }
-  >();
-  let deliveryFlushTimer: ReturnType<typeof setTimeout> | undefined;
-  /**
    * The session's Git evidence-window registry (SPEC v3 "Observability —
    * Completion evidence"; user decision 2026-10-02): every dispatch hands
    * it to the coordinator, which opens one window per task before its
@@ -1378,202 +1313,6 @@ export default function delegateExtension(api: ExtensionAPI): void {
    * open window via the tool-event hooks below.
    */
   const attributionWindows = new AttributionWindows(diagnostics);
-
-  /**
-   * "Same leaf" means same branch: the parent's own turn appends entries
-   * after dispatch, so the current leaf is a descendant of the origin
-   * leaf — the origin must still lie on the current branch (a null origin
-   * is the root, which every branch descends from). The epoch separately
-   * rules out any observed transition, cancelled or not. Both are read
-   * from the ticket, which latched them at dispatch (see execute's
-   * synchronous prefix). Computed per ticket at flush time, exactly as
-   * the old per-ticket deliver did at settle time.
-   */
-  const sameLeaf = ({ ticket, ctx }: QueuedDelivery): boolean =>
-    navigationEpoch === ticket.originEpoch &&
-    (ticket.originLeafId === null ||
-      ctx.sessionManager
-        .getBranch()
-        .some((entry) => entry.id === ticket.originLeafId));
-
-  /**
-   * The delivered message for one settlement group: content is the
-   * concatenation of the group's ticket views (each names its ticket and
-   * carries its own spill-bounded sections), details merge the per-ticket
-   * ids, the complete outcomes, and the notices. A single-ticket group
-   * keeps the historical `ticket`/`originLeafId` shape so the expanded
-   * renderer can serve the live `fullView`.
-   */
-  const deliveredMessage = (group: readonly QueuedDelivery[]) => {
-    const anyCancelled = group.some(
-      ({ ticket }) => ticket.status === "cancelled",
-    );
-    const details: DeliveredDetails =
-      group.length === 1
-        ? {
-            ticket: group[0]!.ticket.id,
-            originLeafId: group[0]!.ticket.originLeafId,
-            results: group[0]!.ticket.outcomes.map((outcome) =>
-              publicOutcome(outcome),
-            ),
-          }
-        : {
-            tickets: group.map(({ ticket }) => ticket.id),
-            originLeafIds: group.map(({ ticket }) => ticket.originLeafId),
-            results: group.flatMap(({ ticket }) =>
-              ticket.outcomes.map((outcome) => publicOutcome(outcome)),
-            ),
-          };
-    const notices = group.flatMap(({ ticket }) => ticket.notices);
-    if (notices.length > 0) details.notices = notices;
-    // Verifier verdicts (#49) — {verdict, taskId} per outcome that parsed
-    // one, flattened across the delivered group.
-    const verdict = group.flatMap(({ ticket }) =>
-      ticket.outcomes.flatMap((outcome) =>
-        outcome?.verdict !== undefined
-          ? [{ verdict: outcome.verdict, taskId: outcome.id }]
-          : [],
-      ),
-    );
-    if (verdict.length > 0) details.verdict = verdict;
-    return {
-      customType: DELIVERED_MESSAGE_TYPE,
-      content:
-        group.map(({ ticket }) => tickets.view(ticket)).join("\n\n") +
-        (anyCancelled
-          ? "\nCancellation is cooperative; worker cleanup may still be pending."
-          : ""),
-      display: true,
-      details,
-    };
-  };
-
-  /**
-   * api.sendMessage is fire-and-forget on the stock ExtensionAPI (returns
-   * void): async send rejections surface through the host's
-   * extension-error channel, never here. Only synchronous throws — e.g.
-   * a torn-down runtime failing assertActive — reach the catch below.
-   * Either way, settlement stands and the results stay pollable.
-   */
-  const flushDeliveries = (): void => {
-    deliveryFlushTimer = undefined;
-    const batch = deliveryQueue.splice(0);
-    if (batch.length === 0) return;
-    if (shuttingDown) {
-      for (const { ticket } of batch) {
-        diagnostic("error", "delivery suppressed during shutdown (result remains pollable)", { ticketId: ticket.id });
-      }
-      return;
-    }
-    // A wait/poll that already showed this exact view makes the wake
-    // redundant — drop it per ticket and say so. A ticket whose record
-    // changed since that render still delivers: the wake carries
-    // content the caller never saw.
-    const pending = batch.filter(({ ticket }) => {
-      const consumed = consumedDeliveries.get(ticket.id);
-      if (consumed === undefined || tickets.view(ticket) !== consumed.view) {
-        return true;
-      }
-      diagnostic("info", "delivery skipped: result already returned", { ticketId: ticket.id, by: consumed.by });
-      return false;
-    });
-    const wake: QueuedDelivery[] = [];
-    const moved: QueuedDelivery[] = [];
-    for (const queued of pending) {
-      try {
-        (sameLeaf(queued) ? wake : moved).push(queued);
-      } catch {
-        // The leaf check reads guarded ctx accessors; a stale ctx means
-        // the owning session was replaced or disposed between settlement
-        // and flush — every replacement path that keeps the extension
-        // alive fires session_shutdown first, which drains this queue, so
-        // reaching here means the session is gone outright. Delivering a
-        // computed-wrong or dead message is worse than none: the settled
-        // result stays pollable (and journal-recoverable) either way.
-        diagnostic("error", "delivery skipped: dispatch context no longer active (result remains pollable)", { ticketId: queued.ticket.id });
-      }
-    }
-    if (wake.length === 0 && moved.length === 0) return;
-    const ids = (group: readonly QueuedDelivery[]) =>
-      group.map(({ ticket }) => `"${ticket.id}"`).join(", ");
-    // Delivery failure never undoes settlement: the tickets stay
-    // terminal and pollable. Each group's send is isolated so one
-    // failure neither skips nor misreports the other — and only the
-    // failed group's tickets are named (the stale-ctx branch's skips
-    // already logged their own line and own no working ctx).
-    const reportFailure = (
-      group: readonly QueuedDelivery[],
-      error: unknown,
-    ): void => {
-      diagnostic("error", "delivering tickets failed (results remain pollable)", {
-        ticketId: group.map(({ ticket }) => ticket.id).join(", "), count: group.length,
-      }, error);
-      try {
-        group[0]!.ctx.ui.notify(
-          `Delegate ticket(s) ${ids(group)} settled but their results could not be delivered; poll them for the results.`,
-          "error",
-        );
-      } catch {
-        // A stale ctx cannot show the notice; the log line stands.
-      }
-    };
-    if (wake.length > 0) {
-      try {
-        // Same leaf, no transition observed: a steering message merges
-        // at the busy parent's next turn boundary — after the in-flight
-        // assistant turn's tool calls, before the next model call — and
-        // starts a turn on an idle one. One wake per settlement group,
-        // not per ticket (SPEC "Wake delivery").
-        api.sendMessage(deliveredMessage(wake), {
-          deliverAs: "steer",
-          triggerTurn: true,
-        });
-      } catch (error) {
-        reportFailure(wake, error);
-      }
-    }
-    if (moved.length > 0) {
-      try {
-        // Leaf moved or a transition is in flight: append durably at the
-        // current leaf without triggering a turn — it enters model
-        // context on the next user turn.
-        api.sendMessage(deliveredMessage(moved), { triggerTurn: false });
-        try {
-          moved[0]!.ctx.ui.notify(
-            moved.length === 1
-              ? `Delegate ticket ${ids(moved)} settled on a different branch; its result was appended to the current branch for the next turn.`
-              : `Delegate tickets ${ids(moved)} settled on a different branch; their results were appended to the current branch for the next turn.`,
-            "info",
-          );
-        } catch {
-          // The UI may already be gone; the append itself landed.
-        }
-      } catch (error) {
-        reportFailure(moved, error);
-      }
-    }
-  };
-
-  /**
-   * Settlement → delivery edge: enqueue and arm the one flush timer.
-   * A shutdown already latched suppresses at enqueue (the queued-at-
-   * shutdown case is handled by the shutdown path draining the queue
-   * and by the flush's own re-check).
-   */
-  const enqueueDelivery = (ticket: Ticket, ctx: ExtensionContext): void => {
-    if (shuttingDown) {
-      diagnostic("error", "delivery suppressed during shutdown (result remains pollable)", { ticketId: ticket.id });
-      return;
-    }
-    if (enqueuedDeliveries.has(ticket.id)) return;
-    enqueuedDeliveries.add(ticket.id);
-    deliveryQueue.push({ ticket, ctx });
-    if (deliveryFlushTimer === undefined) {
-      deliveryFlushTimer = setTimeout(flushDeliveries, DELIVERY_FLUSH_MS);
-      // The flush must never hold a dying process open.
-      deliveryFlushTimer.unref?.();
-    }
-  };
 
   // Owned by this closure: the parent's latest base system-prompt inputs,
   // captured at each turn start. `before_agent_start` carries the normalized
@@ -1739,7 +1478,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     parentPromptOptions = { ...event.systemPromptOptions };
   });
   api.on("session_before_tree", (_event, ctx) => {
-    navigationEpoch += 1;
+    delivery.noteTransition();
     return visibility.guardTreeNavigation(ctx, () => {
       for (const ticket of tickets.list()) {
         // A recovered `running` record belongs to a live sibling — this
@@ -1751,7 +1490,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     });
   });
   api.on("session_tree", () => {
-    navigationEpoch += 1;
+    delivery.noteTransition();
   });
 
   // ── Operator-visibility signals (issue #24) ─────────────────────────────
@@ -1802,17 +1541,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
   api.on("session_shutdown", async (event, ctx) => {
     captureDiagnosticContext(ctx);
     shuttingDown = true;
-    // A delivery flush armed before the latch must not fire after
-    // teardown: cancel the timer and drain the queue with the same
-    // suppression log the flush itself would have emitted — settlement
-    // is the source of truth, and those results stay pollable.
-    if (deliveryFlushTimer !== undefined) {
-      clearTimeout(deliveryFlushTimer);
-      deliveryFlushTimer = undefined;
-    }
-    for (const { ticket } of deliveryQueue.splice(0)) {
-      diagnostic("error", "delivery suppressed during shutdown (result remains pollable)", { ticketId: ticket.id });
-    }
+    delivery.suppressPending();
     // v1's quit/reload traces: name the live work being killed before the
     // force-cancel makes it invisible (quit → stderr; reload → notify).
     visibility.shutdownTrace(
@@ -1927,7 +1656,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
           // conversation on settlement.
           const shutdownRejected = shuttingDown;
           const dispatchLeafId = ctx.sessionManager.getLeafId();
-          const dispatchEpoch = navigationEpoch;
+          const dispatchEpoch = delivery.epoch();
           // Call-shape validation is the earliest rejection phase; its
           // misfire row uses the salvaged telemetry hint because no config
           // has been loaded yet (SPEC v3 "Observability"). The recording
@@ -1987,7 +1716,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
             // results rather than a bare status. This does not wait for the
             // dispatch's resourcesStopped proof: quarantined work can still
             // be active. Delivery itself is the
-            // closure-level coalescing queue (SPEC v3 "Wake delivery"):
+            // WakeDelivery coalescing queue (SPEC v3 "Wake delivery"):
             // the ticket joins the current flush window rather than
             // sending alone.
             const armDelivery = (ticket: Ticket): void => {
@@ -1995,7 +1724,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                 tickets.terminalStatusAvailable(ticket),
                 tickets.batchFinished(ticket),
               ])
-                .then(() => enqueueDelivery(ticket, ctx))
+                .then(() => delivery.enqueue(ticket, ctx))
                 .catch((error: unknown) => {
                   diagnostic("error", "delivering ticket crashed (result remains pollable)", { ticketId: ticket.id }, error);
                 });
@@ -2320,10 +2049,11 @@ export default function delegateExtension(api: ExtensionAPI): void {
             result.consumedView !== undefined &&
             result.ticket !== undefined
           ) {
-            consumedDeliveries.set(result.ticket.id, {
-              by: call.action === "poll" ? "poll" : "wait",
-              view: result.consumedView,
-            });
+            delivery.noteConsumed(
+              result.ticket.id,
+              call.action === "poll" ? "poll" : "wait",
+              result.consumedView,
+            );
           }
           return {
             content: [{ type: "text" as const, text: result.text }],

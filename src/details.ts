@@ -17,6 +17,7 @@
  * field renames, no shape changes.
  */
 import { Type, type Static, type TSchema, type TUnsafe } from "typebox";
+import type { TaskOutcome } from "./types.ts";
 
 /**
  * A required string enum, like delegate.ts's `stringEnum` helper — a
@@ -455,3 +456,20 @@ export const questionNoticeDetailsSchema = Type.Object(
 export type QuestionNoticeDetails = Static<
   typeof questionNoticeDetailsSchema
 >;
+
+/**
+ * #127: `durationMs` is internal telemetry evidence only — never a
+ * caller-visible field, and the strict `details.results` outcome schema
+ * would reject it. Strip it where recorded outcomes enter details.
+ */
+export function publicOutcome(outcome: TaskOutcome): TaskOutcome;
+export function publicOutcome(
+  outcome: TaskOutcome | undefined,
+): TaskOutcome | undefined;
+export function publicOutcome(
+  outcome: TaskOutcome | undefined,
+): TaskOutcome | undefined {
+  if (outcome?.durationMs === undefined) return outcome;
+  const { durationMs: _internal, ...rest } = outcome;
+  return rest;
+}
