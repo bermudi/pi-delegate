@@ -13,7 +13,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import type { TestSession } from "@marcfargas/pi-test-harness";
+import type {
+  TestSession,
+  ToolResultRecord,
+} from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -61,6 +64,27 @@ function journalModeOf(db: DatabaseSync): string {
     | { journal_mode?: string }
     | undefined;
   return row?.journal_mode ?? "";
+}
+
+/**
+ * Probe admission until a dispatch is accepted or the budget expires —
+ * the same public-boundary quiescence witness cancellation.test.ts
+ * uses: rejection for a still-retained reservation fails inside
+ * admission before any task starts, so only an admitted attempt
+ * consumes a scripted provider response.
+ */
+async function dispatchUntilAdmitted(
+  session: TestSession,
+  arguments_: Record<string, unknown>,
+  timeoutMs = 5000,
+): Promise<ToolResultRecord> {
+  const deadline = Date.now() + timeoutMs;
+  let result = await callDelegate(session, arguments_);
+  while (result.isError && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+    result = await callDelegate(session, arguments_);
+  }
+  return result;
 }
 
 const CALLS_LEGACY_COLUMNS = [
@@ -1058,6 +1082,10 @@ describe("delegate telemetry contract", () => {
       const dbPath = join(trackedTempDir(), "usage.db");
       configureDelegate(session, {
         stallTimeoutMs: 300,
+        // maxConcurrent 1 makes the probe dispatch below contend for the
+        // stalled worker's retained reservation: it stays rejected until
+        // confirmed quiescence plus the cleanup tail release the slot.
+        maxConcurrent: 1,
         telemetry: { enabled: true, dbPath },
       });
       let release!: () => void;
@@ -1066,7 +1094,7 @@ describe("delegate telemetry contract", () => {
         await hold;
         return fauxAssistantMessage("TOO-LATE");
       };
-      subagents.respond([gated]);
+      subagents.respond([gated, () => fauxAssistantMessage("probe done")]);
 
       const result = await callDelegate(session, {
         async: false,
@@ -1078,12 +1106,27 @@ describe("delegate telemetry contract", () => {
       await new Promise((r) => setTimeout(r, 1500));
       release();
 
+      // Wait for confirmed worker quiescence through the public boundary
+      // before reading the row — the probe's rejection turns to
+      // admission only after worker truth merged and the reservation
+      // released. Reading earlier would observe the provisional stamp
+      // even from an implementation that re-measured at worker truth.
+      const admitted = await dispatchUntilAdmitted(session, {
+        async: false,
+        tasks: [{ prompt: "probe" }],
+      });
+      expect(admitted.isError).toBe(false);
+
       const db = new DatabaseSync(dbPath);
       try {
         const tasks = rowsOf(db, "tasks");
-        expect(tasks).toHaveLength(1);
-        expect(tasks[0]?.provisional).toBe(1);
-        const duration = tasks[0]?.duration_ms;
+        // The stalled task's row keeps its first-visible-settlement
+        // stamp even after worker truth landed; the probe's admitted
+        // run adds its own non-provisional row.
+        const stalledRows = tasks.filter((t) => t.provisional === 1);
+        expect(stalledRows).toHaveLength(1);
+        const stalled = stalledRows[0]!;
+        const duration = stalled?.duration_ms;
         expect(typeof duration).toBe("number");
         expect(duration as number).toBeGreaterThanOrEqual(250);
         expect(duration as number).toBeLessThan(1500);
