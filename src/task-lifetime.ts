@@ -74,11 +74,15 @@ export class TaskLifetime {
   }
 
   /**
-   * Milliseconds inside the admitted span, or undefined when the task
-   * was never admitted. Monotonic — wall-clock jumps cannot move it.
+   * Milliseconds inside the admitted span, or undefined when no duration
+   * may be stamped. Two gates: the task must have been admitted AND a
+   * worker must exist — a task that dies between markAdmitted and
+   * executionCreated (resource loading, pre-session failures) is
+   * never-started despite holding slots, so SPEC's "Task durations"
+   * keeps it NULL. Monotonic — wall-clock jumps cannot move it.
    */
   private admittedElapsed(): number | undefined {
-    return this.admittedAt === undefined
+    return this.admittedAt === undefined || !this.workerCreated
       ? undefined
       : performance.now() - this.admittedAt;
   }
@@ -109,6 +113,9 @@ export class TaskLifetime {
     // merge keeps this first measurement. The key is only set with a
     // real stamp: an own `durationMs: undefined` would survive into
     // details.results and trip the strict additionalProperties schema.
+    // A task that was admitted but never produced a worker is
+    // never-started (SPEC "Task durations") — admittedElapsed() gates
+    // on workerCreated and returns undefined for it.
     const elapsed = this.admittedElapsed();
     const recorded: TaskOutcome =
       outcome.durationMs === undefined && elapsed !== undefined

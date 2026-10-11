@@ -1,6 +1,8 @@
 import { execSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -1085,6 +1087,85 @@ describe("delegate telemetry contract", () => {
         expect(typeof duration).toBe("number");
         expect(duration as number).toBeGreaterThanOrEqual(250);
         expect(duration as number).toBeLessThan(1500);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test(
+    "a task that fails after admission but before its worker exists keeps duration_ms NULL",
+    async () => {
+      // #127 regression: holding both admission slots is not having
+      // started — a task that dies during resource loading after
+      // admission but before any execution is created was
+      // never-started, so its row keeps NULL rather than an
+      // admission-to-failure span. The inducement is honest: the
+      // required provider-extension root passes the dispatch-time load
+      // probe, the first task's own turn deletes it, and the dependent
+      // task's per-attempt reload then fails fatally — after admission,
+      // before worker creation, with zero provider calls. The dependent
+      // runs from a second cwd: Pi caches extension factories
+      // per-process keyed by the loading cwd, and the cwd change is
+      // what makes its reload re-import the deleted file rather than
+      // reuse the earlier load.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "usage.db");
+      const extensionDir = join(session.cwd, "user-ext", "web-search");
+      mkdirSync(extensionDir, { recursive: true });
+      const extensionFile = join(extensionDir, "index.ts");
+      copyFileSync(
+        join(
+          import.meta.dirname,
+          "..",
+          "fixtures",
+          "web-search-ext",
+          "index.ts",
+        ),
+        extensionFile,
+      );
+      const lateCwd = join(session.cwd, "late-cwd");
+      mkdirSync(lateCwd, { recursive: true });
+      configureDelegate(session, {
+        telemetry: { enabled: true, dbPath },
+        providerExtensions: { "delegate-faux": [extensionDir] },
+      });
+      const turn: FauxResponseFactory = async () => {
+        rmSync(extensionFile);
+        return fauxAssistantMessage("FIRST-DONE");
+      };
+      subagents.respond([turn]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          { id: "first", prompt: "FIRST task", agent: "explore" },
+          {
+            id: "late",
+            prompt: "LATE task",
+            agent: "explore",
+            cwd: lateCwd,
+            dependsOn: ["first"],
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      // Exactly one provider call: the dependent died before any worker.
+      expect(subagents.state.callCount).toBe(1);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const tasks = rowsOf(db, "tasks").sort(
+          (a, b) => Number(a.idx) - Number(b.idx),
+        );
+        expect(tasks).toHaveLength(2);
+        const firstRow = tasks[0];
+        expect(firstRow?.outcome).toBe("ok");
+        expect(typeof firstRow?.duration_ms).toBe("number");
+        const lateRow = tasks[1];
+        expect(lateRow?.outcome).toBe("failed");
+        expect(lateRow?.duration_ms).toBeNull();
       } finally {
         db.close();
       }

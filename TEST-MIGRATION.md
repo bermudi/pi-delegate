@@ -1013,7 +1013,8 @@ gaps.
   changes before its batch finishes; task rows whose workers have unconfirmed
   quiescence are marked provisional; a completed task's `duration_ms` is its
   admitted span — positive for a settled run, NULL for a never-started
-  (dependency-blocked) task, excluding a serialized sibling's capacity
+  (dependency-blocked, or admitted-but-failed-before-worker-creation)
+  task, excluding a serialized sibling's capacity
   wait, and stamped at the provisional record's first visible settlement
   rather than the later worker truth (#127); a dispatch rejected before execution —
   config load, call-shape/semantic validation (exact requested agent names recorded),
