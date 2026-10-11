@@ -2,10 +2,12 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AdmissionController, AdmissionGrant } from "./admission.ts";
 import {
-  loadDelegateConfig,
+  loadDelegateConfigDetailed,
+  RECOGNIZED_CONFIG_KEYS,
   resolveAgentDir,
   telemetryConfigHint,
   type DelegateConfig,
+  type DelegateConfigLoad,
   type TelemetryConfig,
 } from "./config.ts";
 import type { DispatchCoordinator, DispatchOutcome } from "./coordinator.ts";
@@ -125,8 +127,65 @@ export class DispatchPipeline {
   // Discovery re-reads disk per dispatch; a broken profile warns once per
   // extension instance, not once per run (see discoverProfiles).
   private readonly warnedProfilePaths = new Set<string>();
+  // #136: unknown delegate.json keys warn once per changed file content —
+  // config path → content fingerprints already warned about. Each path's
+  // set is bounded (oldest evicted past 64) and the path map itself is
+  // bounded the same way; in practice one path per project or
+  // DELEGATE_AGENT_DIR override, but nothing structural pins that.
+  private readonly warnedConfigContents = new Map<string, Set<string>>();
 
   constructor(private readonly dependencies: DispatchPipelineDependencies) {}
+
+  /**
+   * #136 warn-once for unknown top-level delegate.json keys: one
+   * diagnostic per changed file content, per config path, per extension
+   * instance. The event leads with the ignored key names — they are the
+   * actionable part and must lead because the sink bounds events to 192
+   * chars. The complete ignored list and the recognized set ride in
+   * context (bounded at 512 per value), so a long unknown-key list clips
+   * the event's skim view without ever dropping names or the recognized
+   * set from the record — key names only, never values or the file body.
+   * Emission order matters little since DiagnosticSink.log is
+   * non-throwing by contract, but the fingerprint is recorded after the
+   * emission so a hypothetically throwing sink could not silently eat
+   * the warning forever.
+   */
+  private warnOnUnknownConfigKeys(
+    path: string,
+    load: DelegateConfigLoad,
+  ): void {
+    if (load.unknownKeys.length === 0 || load.fingerprint === "") return;
+    let warned = this.warnedConfigContents.get(path);
+    if (warned === undefined) {
+      warned = new Set<string>();
+      this.warnedConfigContents.set(path, warned);
+      // Map preserves insertion order; evict the oldest path past the
+      // bound so a distinct path per dispatch cannot grow it forever.
+      while (this.warnedConfigContents.size > 128) {
+        const oldest = this.warnedConfigContents.keys().next().value;
+        if (oldest === undefined) break;
+        this.warnedConfigContents.delete(oldest);
+      }
+    }
+    if (warned.has(load.fingerprint)) return;
+    const keys = load.unknownKeys.join(", ");
+    this.dependencies.diagnostics.log(
+      "warn",
+      `delegate.json unknown keys: ${keys}`,
+      {
+        path,
+        keys,
+        recognized: RECOGNIZED_CONFIG_KEYS.join(", "),
+      },
+    );
+    warned.add(load.fingerprint);
+    // Set preserves insertion order; evict the oldest past the bound.
+    while (warned.size > 64) {
+      const oldest = warned.values().next().value;
+      if (oldest === undefined) break;
+      warned.delete(oldest);
+    }
+  }
 
   // Register before any preparation can throw or await. Close on every exit:
   // adopted coordinator proofs retain the shutdown hold beyond the handoff.
@@ -213,9 +272,9 @@ export class DispatchPipeline {
       // file — the load itself just failed); task-resolution and
       // pooled-session reuse rejections record under "validation";
       // admission rejections record under "admission".
-      let config: DelegateConfig;
+      let configLoad: DelegateConfigLoad;
       try {
-        config = loadDelegateConfig(
+        configLoad = loadDelegateConfigDetailed(
           agentDirResolution.dir,
           catalog.globalNames,
         );
@@ -228,6 +287,8 @@ export class DispatchPipeline {
         );
         throw error;
       }
+      const config = configLoad.config;
+      this.warnOnUnknownConfigKeys(configLoad.path, configLoad);
       let tasks: readonly ResolvedTask[];
       try {
         tasks = await resolveTasks(requestedTasks, env, config, catalog);

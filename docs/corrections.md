@@ -89,6 +89,7 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 - 2026-10-10 — an issue progress comment named an unobserved commit hash; replaced it immediately with the actual git commit result (GitHub #137). Enforcement: capture commit output before publishing references.
 - 2026-10-10 — prerequisite verification treated session.dispose as shutdown and missed directory-as-transcript reporting; require actual shutdown events/managed warning assertions and regular-file recovery pointers (required-prerequisites.test.ts, sessions.ts, execution.ts). Enforcement: public fault regressions.
 - 2026-10-11 — #142 RED pass first "passed" a contention test that checked recorded timer gaps immediately after the blocked call returned: the overdue interval callback had not run yet, so the 2 s gap was never sampled. Assert timer-gap instrumentation after a macrotask yield (`telemetry-contention.test.ts`); a RED that cannot fail proves nothing.
+- 2026-10-11 — a staged `README.md` meant to stay uncommitted was swept into b2626dd: the index carried it and a commit consumed the whole index. With unrelated staged changes present, commit by explicit pathspec (`git commit -- <paths>`) or unstage first — and confirm `git status` before publishing that the staged set is still what you believe it is.
 
 ## Enforcement map (surveyed 2026-10-04 @ d030bfd, v0.3.3)
 

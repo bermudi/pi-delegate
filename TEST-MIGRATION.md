@@ -1700,6 +1700,31 @@ bounded retry queue instead of sleeping inline.
   in-flight span guard — and `wall_ms` excluding writer backlog is
   implied by the `finishedAt` snapshot but never asserted.
 
+### Unknown configuration keys warn-once (#136, under #138)
+
+Hardening, not migrated v1 evidence: SPEC.md "Unknown configuration
+keys" overrides SPEC-V2's silent-ignore rule — unknown top-level
+`delegate.json` keys warn once per changed file content through the
+`DiagnosticSink`, per config path and extension instance, naming the
+ignored keys and the recognized set and never values or the file body.
+
+- **Covered now:** `tests/contract/config-keys.test.ts` — public-boundary
+  cases observing `console.warn` diagnostics through
+  `tests/support/diagnostic-records.ts`: a typo key beside a valid config
+  warns once while the dispatch still runs (the event names the ignored
+  keys; the record's context carries the complete ignored list and the
+  full recognized set, no values, nothing in the tool result);
+  unchanged content does not re-warn while an edited file does;
+  correction ends the warnings; `__proto__`/`constructor` keys warn
+  without crashing; the manual's profile-discovery load stays silent and
+  spends none of the warn-once budget; two `DELEGATE_AGENT_DIR` config
+  paths warn independently inside one extension instance; a long
+  unknown-key list clips only the event's skim view while the record
+  still names every key and the recognized set; and a malformed
+  recognized value still rejects at load with no diagnostic, warning on
+  the next valid load. The `surface` removal rejection stays pinned in
+  `tests/contract/surface.test.ts`.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |

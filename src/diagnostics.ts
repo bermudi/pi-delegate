@@ -106,6 +106,8 @@ const CONTEXT_KEYS = Object.freeze([
   "pid",
   "code",
   "category",
+  "keys",
+  "recognized",
 ] as const);
 type Context = Readonly<
   Partial<

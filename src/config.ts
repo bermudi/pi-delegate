@@ -347,29 +347,108 @@ export function telemetryConfigHint(agentDir: string): TelemetryConfig {
 }
 
 /**
- * Load `delegate.json` from a resolved agent directory. A missing file
- * yields defaults; malformed JSON, a non-positive `maxConcurrent`, or a
- * negative `stallTimeoutMs` fails loudly — a half-applied limit is worse
- * than an error.
+ * The recognized top-level `delegate.json` keys (#136). Any other
+ * top-level key is ignored with a once-per-content warning on the
+ * dispatch path — never a rejection. `surface` is deliberately absent:
+ * it is a removed key, not an unknown one, and keeps its own teaching
+ * rejection at load.
+ */
+export const RECOGNIZED_CONFIG_KEYS: readonly string[] = Object.freeze([
+  "maxConcurrent",
+  "concurrency",
+  "stallTimeoutMs",
+  "models",
+  "modelsByParent",
+  "telemetry",
+  "output",
+  "providerExtensions",
+  "sessions",
+]);
+
+/** A successful `delegate.json` load plus its #136 warn-once evidence. */
+export interface DelegateConfigLoad {
+  readonly config: DelegateConfig;
+  /** The file that was read — the warn-once path key, identical by construction. */
+  readonly path: string;
+  /**
+   * sha256 of the file bytes that were parsed — the warn-once content
+   * identity. "" when no file exists (nothing could be warned about).
+   */
+  readonly fingerprint: string;
+  /** Sorted own-enumerable top-level keys outside RECOGNIZED_CONFIG_KEYS. */
+  readonly unknownKeys: readonly string[];
+}
+
+/**
+ * Load `delegate.json` from a resolved agent directory, returning the
+ * parsed config plus the facts the dispatch path needs to warn once per
+ * changed file content (#136). A missing file yields defaults with an
+ * empty fingerprint and no unknown keys; malformed JSON, a non-positive
+ * `maxConcurrent`, or a negative `stallTimeoutMs` fails loudly with the
+ * same throws as `loadDelegateConfig` — no fingerprint surfaces to the
+ * caller when the throw propagates.
  *
  * `additionalAgentNames` extends the valid `models`/`modelsByParent` key
  * set beyond the built-ins — pass the globally defined Markdown profile
  * names (project-scoped names are not portable config keys).
  */
-export function loadDelegateConfig(
+export function loadDelegateConfigDetailed(
   agentDir: string,
   additionalAgentNames: readonly string[] = [],
-): DelegateConfig {
+): DelegateConfigLoad {
   const path = configPathOf(agentDir);
-  if (!existsSync(path)) return DEFAULT_CONFIG;
+  if (!existsSync(path)) {
+    return { config: DEFAULT_CONFIG, path, fingerprint: "", unknownKeys: [] };
+  }
+  let body: string;
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(path, "utf8"));
+    body = readFileSync(path, "utf8");
+    raw = JSON.parse(body);
   } catch (error) {
     throw new Error(
       `Failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  // The fingerprint is computed from the bytes actually parsed — never a
+  // second read, which could race an edit and warn against different
+  // content than the config that was applied.
+  const fingerprint = createHash("sha256").update(body, "utf8").digest("hex");
+  const config = configFromParsed(raw, path, additionalAgentNames);
+  return {
+    config,
+    path,
+    fingerprint,
+    // Own enumerable keys only; JSON.parse creates "__proto__" as an own
+    // data property, so it lists here like any other unknown key.
+    unknownKeys: Object.keys(raw as Record<string, unknown>)
+      .filter((key) => !RECOGNIZED_CONFIG_KEYS.includes(key))
+      .sort(),
+  };
+}
+
+/**
+ * The manual-path loader: same file, same validation, no warn-once
+ * evidence. Thin wrapper so profile discovery for the manual trailer
+ * stays silent and never touches dispatch's warned-content state.
+ */
+export function loadDelegateConfig(
+  agentDir: string,
+  additionalAgentNames: readonly string[] = [],
+): DelegateConfig {
+  return loadDelegateConfigDetailed(agentDir, additionalAgentNames).config;
+}
+
+/**
+ * Post-parse validation and construction shared by both loaders. `raw`
+ * must be the parsed `delegate.json` body at `path`; every malformed
+ * shape fails loudly — a half-applied limit is worse than an error.
+ */
+function configFromParsed(
+  raw: unknown,
+  path: string,
+  additionalAgentNames: readonly string[],
+): DelegateConfig {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`${path}: expected a JSON object.`);
   }
