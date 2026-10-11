@@ -1128,6 +1128,98 @@ exec '${realGit}' "$@"
     },
   );
 
+  test(
+    "an isolated proposal carries invalid-UTF-8 text-classified content byte-identically",
+    async () => {
+      // The binary fixture above survives as a `GIT binary patch` base85
+      // literal, which is ASCII-safe — it cannot expose a UTF-8 decode in
+      // the patch pipeline. This payload has no NUL bytes, so Git
+      // classifies it as text and emits a raw-byte text patch (verified:
+      // `git diff --binary` writes the 0xff bytes verbatim in `+` lines).
+      // A string round-trip anywhere between `git diff` and `git apply`
+      // rewrites them to U+FFFD and the apply still reports success.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+
+      const payload = Buffer.concat([
+        Buffer.from("line one\n"),
+        Buffer.from([0xff, 0xfe, 0xa1, 0x0a, 0xff, 0x80, 0x81]),
+        Buffer.from("b\nend\n"),
+      ]);
+      const step: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("DONE")
+          : fauxAssistantMessage([
+              fauxToolCall("bash", {
+                command: `echo '${payload.toString("base64")}' | base64 -d > utf8ish.dat`,
+              }),
+            ]);
+      subagents.respond([step, step]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "write utf8ish.dat",
+            cwd: dir,
+            workspace: "isolated",
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toMatch(/applied_unverified/);
+      expect(readFileSync(join(dir, "utf8ish.dat"))).toEqual(payload);
+    },
+  );
+
+  test(
+    "an isolated proposal touching colon-prefixed filenames applies without a false conflict",
+    async () => {
+      // `:` opens pathspec magic: `git ls-tree <commit> -- :evil.txt`
+      // reports nothing even when the file is committed. A tracked colon
+      // file a proposal modifies then misclassifies as a creation, its
+      // live blob fails the must-be-absent check, and the proposal reports
+      // a spurious "source tree changed" conflict while a colon file the
+      // same proposal creates never lands. Every filename-typed git arg
+      // must run under literal pathspecs.
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dir = tempDir();
+      gitInit(dir);
+      writeFileSync(join(dir, ":evil.txt"), "base\n");
+      execSync("git add -A && git commit -qm base", { cwd: dir, env: gitEnv() });
+
+      const step: FauxResponseFactory = async (context) =>
+        context.messages.some((m) => m.role === "toolResult")
+          ? fauxAssistantMessage("DONE")
+          : fauxAssistantMessage([
+              fauxToolCall("bash", {
+                command:
+                  "printf 'worker\\n' > ':evil.txt' && printf 'new\\n' > ':fresh.txt'",
+              }),
+            ]);
+      subagents.respond([step, step]);
+
+      const result = await callDelegate(session, {
+        async: false,
+        tasks: [
+          {
+            prompt: "edit colon files",
+            cwd: dir,
+            workspace: "isolated",
+          },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toMatch(/applied_unverified/);
+      expect(result.text).not.toMatch(/conflict/);
+      expect(readFileSync(join(dir, ":evil.txt"), "utf8")).toBe("worker\n");
+      expect(readFileSync(join(dir, ":fresh.txt"), "utf8")).toBe("new\n");
+    },
+  );
+
   test("an empty duplicate edge cannot unblock a dependent when the source lacks its effects", async () => {
     // Regression of v1 isolated-workspace identical proposal scenario:
     // even an empty chain edge needs verification against the live source.

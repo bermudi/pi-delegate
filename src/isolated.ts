@@ -615,7 +615,7 @@ async function applyToSource(
     // state) standing as a false success: mark apply_failed honestly and
     // keep the recovery artifacts.
     let deltaPaths: string[];
-    let delta: string;
+    let delta: Buffer;
     try {
       deltaPaths = await changedFiles(
         group.sourceRoot,
@@ -839,9 +839,15 @@ async function applyToSource(
       for (const relative of deltaPaths) {
         const expected = proposal.expectedBlobs.get(relative);
         const parentEntry = (
-          await git(["ls-tree", proposal.parent, "--", relative], {
-            cwd: group.sourceRoot,
-          })
+          // Proposal-derived names are data: a leading `:` in a real
+          // filename must not become pathspec magic that misreports the
+          // path as absent and manufactures a false conflict.
+          await git(
+            ["--literal-pathspecs", "ls-tree", proposal.parent, "--", relative],
+            {
+              cwd: group.sourceRoot,
+            },
+          )
         ).stdout.trim();
         const parentMatch = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(parentEntry);
         const parentSha =

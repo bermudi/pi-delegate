@@ -953,14 +953,23 @@ gaps.
   `worktreePath` stays an honest on-disk pointer until deferred cleanup
   stops its strays; a conflict's `patchPath`/`proposalRef`/`baselineRef`
   are physically verified to recover the proposal. Binary content
-  end-to-end: a worker's base64-decoded file of all 256 byte values
-  reconciles `applied_unverified` and lands in the source byte-identical
-  (Buffer compare — the `--binary` delta carries it verbatim). Refused
+  end-to-end: two corruption classes land byte-identical through a live
+  proposal — a base64-decoded file of all 256 byte values (survives as a
+  `GIT binary patch` base85 literal) and a NUL-free invalid-UTF-8 payload
+  Git classifies as text, whose raw-byte text patch a UTF-8 decode
+  anywhere in the pipeline would silently rewrite to U+FFFD while still
+  reporting `applied_unverified` (both Buffer-compared at the source).
+  Pathspec safety: a proposal modifying a tracked `:evil.txt` and creating
+  `:fresh.txt` applies without a false conflict — filename-typed git args
+  run under `--literal-pathspecs` so a leading `:` cannot misclassify a
+  committed file as absent. Refused
   paths pin index/branch invariance: the live conflict keeps the user's
   staged index entry (`git diff --cached` unchanged) with HEAD and the
   branch ref unmoved, and the shimmed failed apply leaves an empty index
   and the same HEAD/branch.
-- **Gap:** none left in this file — cancellation before apply,
+- **Gap:** none left in this file — both patch-corruption classes (binary
+  literal, text-classified invalid UTF-8), the colon-pathspec cell, and
+  cancellation before apply,
   baseline-drift refusal (same-file mid-flight edits, drift between check
   and write, partial duplicates), symlink/mode reconciliation, and
   abandoned-worker cleanup are covered

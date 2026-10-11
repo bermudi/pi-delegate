@@ -337,7 +337,13 @@ export async function trackedBlobs(
   const blobs = new Map<string, string>();
   for (const filePath of paths) {
     const entry = (
-      await git(["ls-tree", commit, "--", filePath], { cwd: root })
+      // Proposal-derived names are data, not pathspec magic: a leading
+      // `:` (e.g. a file literally named ':evil.txt') must still resolve
+      // to itself or the lookup misclassifies it as absent.
+      await git(
+        ["--literal-pathspecs", "ls-tree", commit, "--", filePath],
+        { cwd: root },
+      )
     ).stdout.trim();
     const match = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(entry);
     if (match?.[2] === "blob") blobs.set(filePath, match[3]!);
@@ -372,18 +378,24 @@ export async function worktreeBlob(
   }
 }
 
-/** Full binary patch text for `from → to`, suitable for `git apply` on stdin. */
+/**
+ * Full binary patch bytes for `from → to`, suitable for `git apply` on
+ * stdin. Must stay a Buffer end to end: Git classifies NUL-free content
+ * as text even when it is not valid UTF-8 and emits a raw-byte text
+ * patch — decoding that to a string would silently rewrite the bytes to
+ * U+FFFD while the result still reports a clean apply.
+ */
 export async function diffPatch(
   root: string,
   from: string,
   to: string,
-): Promise<string> {
+): Promise<Buffer> {
   return (
     await git(
       ["diff", "--binary", "--full-index", "--no-renames", from, to],
-      { cwd: root },
+      { cwd: root, buffer: true },
     )
-  ).stdout;
+  ).stdoutBuffer;
 }
 
 export async function writePatch(
@@ -449,7 +461,12 @@ export function sameTrackedEntry(a: SourceEntry, b: SourceEntry): boolean {
 }
 
 export async function commitEntry(root: string, commit: string, relative: string): Promise<SourceEntry> {
-  const entry = (await git(["ls-tree", commit, "--", relative], { cwd: root })).stdout.trim();
+  const entry = (
+    await git(
+      ["--literal-pathspecs", "ls-tree", commit, "--", relative],
+      { cwd: root },
+    )
+  ).stdout.trim();
   if (/^040000 tree [0-9a-f]+\t/.test(entry)) return { kind: "dir", mode: 0o755 };
   const match = /^(100644|100755|120000) blob ([0-9a-f]+)\t/.exec(entry);
   if (!match) return { kind: "absent" };

@@ -119,8 +119,12 @@ export interface ExecOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
-  /** Stdin payload; the child's stdin is closed after writing it. */
-  input?: string;
+  /**
+   * Stdin payload; the child's stdin is closed after writing it. Buffers
+   * carry raw bytes — patches may hold invalid-UTF-8 content verbatim and
+   * a string round-trip would mangle them into U+FFFD.
+   */
+  input?: string | Buffer;
   /** Collect stdout as raw bytes instead of eager UTF-8 decoding. */
   buffer?: boolean;
   /**
