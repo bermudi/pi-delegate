@@ -22,6 +22,7 @@ import {
 } from "./graph.ts";
 import { briefPreamble } from "./format.ts";
 import type { HostEnvironment } from "./host.ts";
+import { OutcomeLedger } from "./outcomes.ts";
 import type { ActivityStore } from "./activity.ts";
 import type { SessionPool } from "./sessions.ts";
 import { Deferred, Semaphore } from "./types.ts";
@@ -228,7 +229,10 @@ export class DispatchCoordinator {
       lifetime: DispatchLifetime;
     },
   ): Promise<DispatchOutcome> {
-    const outcomes: (TaskOutcome | undefined)[] = new Array(tasks.length);
+    const ledger = new OutcomeLedger(tasks.length, {
+      ticket: options.ticket,
+      tickets: this.tickets,
+    });
     // A serialized successor must wait for its predecessor's confirmed
     // quiescence — not merely a recorded outcome. A provisional
     // (quarantined) predecessor may still be mutating the shared root.
@@ -291,7 +295,7 @@ export class DispatchCoordinator {
               options,
               grant,
               loaders,
-              outcomes,
+              ledger,
               workersStopped,
               workerTailsStopped,
               tasks,
@@ -308,7 +312,7 @@ export class DispatchCoordinator {
         // quiescence barrier while the reservation stays held, so the task
         // must be visible.
         for (const task of phaseTasks) {
-          if (outcomes[task.index] === undefined) {
+          if (ledger.read(task.index) === undefined) {
             this.diagnostics.log("error", "internal dispatch error: no outcome recorded; quarantining write scope and holding shutdown quiescence", { taskId: task.id, index: task.index });
             const outcome: TaskOutcome = {
               index: task.index,
@@ -318,10 +322,7 @@ export class DispatchCoordinator {
               retries: 0,
               quarantined: true,
             };
-            outcomes[task.index] = outcome;
-            if (options.ticket) {
-              this.tickets.recordOutcome(options.ticket, outcome);
-            }
+            ledger.publish(task.index, outcome);
           }
         }
         // An infrastructure exception escaping runOne must not run the
@@ -335,28 +336,17 @@ export class DispatchCoordinator {
           throw aggregateFailure("task infrastructure failed", runFailures);
         }
         if (options.reconcilePhase !== undefined) {
-          const ticket = options.ticket;
           try {
-            await options.reconcilePhase(phase, outcomes as TaskOutcome[]);
+            await options.reconcilePhase(phase, ledger.snapshot() as TaskOutcome[]);
           } catch (error) {
             // Stop later phases. The outer failure boundary settles their
             // never-started tasks after this phase's final annotations land.
             this.diagnostics.log("error", "workspace reconciliation failed", { phase }, error);
             throw error;
           } finally {
-            if (ticket) {
-              // The reconciled (integration-annotated) outcomes are the
-              // ticket's terminal record; settlement is held until they
-              // land.
-              const phaseIndexes = new Set(
-                phaseTasks.map((task) => task.index),
-              );
-              for (const outcome of outcomes) {
-                if (outcome && phaseIndexes.has(outcome.index)) {
-                  this.tickets.recordOutcome(ticket, outcome);
-                }
-              }
-            }
+            ledger.republishPhase(
+              new Set(phaseTasks.map((task) => task.index)),
+            );
           }
         }
         // Reconciliation has finished, but late worker truth may already have
@@ -381,12 +371,12 @@ export class DispatchCoordinator {
           error: `dispatch infrastructure failed: ${error instanceof Error ? error.message : String(error)}`,
           retries: 0,
         };
-        outcomes[task.index] = outcome;
+        ledger.write(task.index, outcome);
         // Proof comes from never entering runOne, not successful reporting.
         workersStopped.get(task.index)!.resolve();
         workerTailsStopped.get(task.index)!.resolve();
         try {
-          if (options.ticket) this.tickets.recordOutcome(options.ticket, outcome);
+          ledger.publishToTicket(outcome);
         } catch (recordError) {
           failures.push(recordError);
           this.diagnostics.log("error", "recording unstarted task failure failed", { taskId: task.id }, recordError);
@@ -431,8 +421,8 @@ export class DispatchCoordinator {
       throw aggregateFailure("dispatch infrastructure and finalization failed", failures);
     }
     return {
-      outcomes: outcomes as TaskOutcome[],
-      usage: outcomes.reduce<Usage | undefined>(
+      outcomes: ledger.snapshot() as TaskOutcome[],
+      usage: ledger.snapshot().reduce<Usage | undefined>(
         (total, outcome) => addUsage(total, outcome?.usage),
         undefined,
       ),
@@ -456,7 +446,7 @@ export class DispatchCoordinator {
     },
     grant: AdmissionGrant,
     loaders: Map<string, Promise<DefaultResourceLoader>>,
-    outcomes: (TaskOutcome | undefined)[],
+    ledger: OutcomeLedger,
     workersStopped: Map<number, Deferred>,
     workerTailsStopped: Map<number, Deferred>,
     tasks: readonly ResolvedTask[],
@@ -494,7 +484,7 @@ export class DispatchCoordinator {
     let windowEvidence: WindowEvidence | undefined;
     const lifetime = new TaskLifetime({
       task,
-      outcomes,
+      ledger,
       workerStoppedProof,
       workerTailStoppedProof,
       diagnostics: this.diagnostics,
@@ -533,7 +523,7 @@ export class DispatchCoordinator {
           // Waiting on it would park the dependent (and the batch's
           // Promise.all) on a worker that may still be mutating; skip the
           // wait and let the gate below record the block with its reason.
-          const recorded = outcomes[depIndex];
+          const recorded = ledger.read(depIndex);
           const unsatisfiable =
             recorded !== undefined &&
             recorded.quarantined === true &&
@@ -551,7 +541,7 @@ export class DispatchCoordinator {
         }
         const blockers = task.dependsOn.filter(
           (depIndex) =>
-            !prerequisiteSatisfied(outcomes[depIndex]!, tasks[depIndex]!),
+            !prerequisiteSatisfied(ledger.read(depIndex)!, tasks[depIndex]!),
         );
         if (blockers.length > 0) {
           lifetime.recordOutcome({
@@ -562,7 +552,7 @@ export class DispatchCoordinator {
               `blocked by ${blockers
                 .map(
                   (depIndex) =>
-                    `'${tasks[depIndex]!.id}' — it ${blockingReason(outcomes[depIndex], tasks[depIndex]!)}`,
+                    `'${tasks[depIndex]!.id}' — it ${blockingReason(ledger.read(depIndex), tasks[depIndex]!)}`,
                 )
                 .join("; ")}`,
             blockedBy: blockers.map((depIndex) => tasks[depIndex]!.id),
@@ -605,7 +595,7 @@ export class DispatchCoordinator {
                 handoffAppendix(
                   briefed.dependsOn.map((depIndex) => ({
                     task: tasks[depIndex]!,
-                    outcome: outcomes[depIndex]!,
+                    outcome: ledger.read(depIndex)!,
                   })),
                   options.config.output,
                 ),
@@ -802,17 +792,7 @@ export class DispatchCoordinator {
                       }
                       const evidence = await attribution.settle(openWindow);
                       windowEvidence = evidence;
-                      // Worker truth's record is already on file — fold
-                      // the window's evidence over it so its files line
-                      // reflects what the worker actually did.
-                      const current = outcomes[task.index];
-                      if (current !== undefined) {
-                        const enriched = withGitEvidence(current, evidence);
-                        outcomes[task.index] = enriched;
-                        if (ticket) {
-                          this.tickets.recordOutcome(ticket, enriched);
-                        }
-                      }
+                      ledger.enrichWithEvidence(task.index, evidence);
                     } catch (error) {
                       attribution.abandon(openWindow);
                       this.diagnostics.log("error", "deferred git evidence settle failed", { taskId: task.id }, error);

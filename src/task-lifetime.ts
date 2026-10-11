@@ -1,6 +1,7 @@
 import type { ActivityStore } from "./activity.ts";
 import type { AdmissionGrant } from "./admission.ts";
 import type { DiagnosticSink } from "./diagnostics.ts";
+import type { OutcomeLedger } from "./outcomes.ts";
 import type { TicketStore } from "./tickets.ts";
 import type {
   Deferred,
@@ -42,7 +43,7 @@ export class TaskLifetime {
 
   constructor(private readonly options: {
     task: ResolvedTask;
-    outcomes: (TaskOutcome | undefined)[];
+    ledger: OutcomeLedger;
     workerStoppedProof: Deferred;
     workerTailStoppedProof: Deferred;
     diagnostics: DiagnosticSink;
@@ -99,7 +100,7 @@ export class TaskLifetime {
   recordOutcome(outcome: TaskOutcome): void {
     const options = this.options;
     const {
-      task, ticket, outcomes, taskStartedAt,
+      task, ticket, ledger, taskStartedAt,
       workerStoppedProof, workerTailStoppedProof,
     } = options;
     if (this.workerTruthRecorded) return;
@@ -113,7 +114,7 @@ export class TaskLifetime {
       outcome.durationMs === undefined && elapsed !== undefined
         ? { ...outcome, durationMs: elapsed }
         : outcome;
-    outcomes[task.index] = recorded;
+    ledger.write(task.index, recorded);
     // Live-activity feed: ticket rows update status; sync tasks become
     // retained browser rows. Best-effort — the browser is diagnostics,
     // never a dispatch dependency: a throwing sink must not skip the
@@ -158,11 +159,7 @@ export class TaskLifetime {
       workerStoppedProof.resolve();
       workerTailStoppedProof.resolve();
     }
-    if (ticket) {
-      // The store owns lifecycle; recording can settle the ticket but
-      // never un-settles it.
-      options.tickets.recordOutcome(ticket, recorded);
-    }
+    ledger.publishToTicket(recorded);
     // Usage reporting (#60): the settled outcome's recorded usage is
     // what the event carries — emit at the settlement point itself,
     // not at batch end, so a long-running ticket reports as it goes.
@@ -187,7 +184,7 @@ export class TaskLifetime {
   executionStopped(handle: ExecutionHandle, late: TaskOutcome | undefined): void {
     const options = this.options;
     const {
-      task, ticket, outcomes, workerStoppedProof, workerTailStoppedProof, grant,
+      task, ticket, ledger, workerStoppedProof, workerTailStoppedProof, grant,
     } = options;
     // The worker's true settlement: it can no longer observe the composed
     // signal, so this attempt's propagation listeners become droppable.
@@ -198,28 +195,14 @@ export class TaskLifetime {
     }
     if (late === undefined) return;
     this.workerTruthRecorded = true;
-    // Reconciliation may already have annotated the provisional entry;
-    // worker truth replaces the run outcome but keeps its integration —
-    // and the Git window's evidence folds over its own observed set.
-    // #127: the first visible settlement owns the duration — a
-    // provisional's stamp survives truth, never re-measured. When
-    // truth itself is the first record (its stop raced the
-    // provisional's write), it is stamped here instead. Omitted when
-    // no side ever ran — an own undefined key would trip the strict
-    // details schema the same way.
-    const durationMs =
-      outcomes[task.index]?.durationMs ??
-      late.durationMs ??
-      this.admittedElapsed();
-    const merged: TaskOutcome = {
-      ...options.decorateLateOutcome(late),
-      integration: outcomes[task.index]?.integration ?? late.integration,
-      ...(durationMs !== undefined ? { durationMs } : {}),
-    };
-    outcomes[task.index] = merged;
-    if (ticket) {
-      options.tickets.recordOutcome(ticket, merged);
-    } else if (
+    const merged = ledger.mergeWorkerTruth(
+      task.index,
+      late,
+      options.decorateLateOutcome,
+      this.admittedElapsed(),
+    );
+    if (
+      ticket === undefined &&
       options.syncRunId !== undefined &&
       options.activity !== undefined
     ) {
