@@ -449,6 +449,25 @@ mid-flight the parent can steer. The grammar:
   extension instance, listener errors can never break settlement, and
   tickets remain the durable usage record.
 
+- **Deferred telemetry writes (#142).** Every row the store writes is
+  snapshotted into an immutable job at finish/record time — timestamps,
+  statuses, usage totals, and destination generation freeze where the
+  caller's clock stops, so queue backlog never inflates `wall_ms` and
+  post-settle outcome enrichment cannot leak into a queued row. The
+  calling thread never waits on the database (`busy_timeout = 0`, no
+  synchronous lock waits or retry sleeps): a job attempts once inline
+  when the queue is empty — keeping an uncontended write
+  durable-before-settle — and otherwise joins a bounded FIFO drained on
+  store-owned timers with backoff. Each job retries until its
+  enqueue-time busy window (`DELEGATE_TELEMETRY_BUSY_MS`, default 500 ms)
+  expires; expiry or a non-busy failure reports `telemetry failed` once
+  and latches the destination failed until the destination identity
+  changes. Overflow drops the incoming job with a
+  `telemetry write queue overflow` warning, once per overflow stretch.
+  Closing the store stops accepting new writes but keeps draining the
+  pending ones to their deadlines; jobs pinned to a stale destination
+  generation drop loudly rather than write to the wrong file.
+
 ## Substrate inheritance
 
 The engine is inherited as-built; v2's contracts become its historical

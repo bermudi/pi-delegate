@@ -817,14 +817,10 @@ describe("delegate telemetry contract", () => {
       });
       expect(waited.isError).toBe(false);
 
-      expect(existsSync(pathA)).toBe(true);
-      const dbA = new DatabaseSync(pathA);
-      try {
-        expect(rowsOf(dbA, "calls")).toHaveLength(0);
-        expect(rowsOf(dbA, "tasks")).toHaveLength(0);
-      } finally {
-        dbA.close();
-      }
+      // The obsolete span is dropped without ever reopening its
+      // destination — under the deferred writer (#142) the dispatch path
+      // does not even touch the database, so the file was never created.
+      expect(existsSync(pathA)).toBe(false);
       const dbB = new DatabaseSync(pathB);
       try {
         const calls = rowsOf(dbB, "calls");

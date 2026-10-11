@@ -1673,6 +1673,33 @@ session's leftover queues must clear before reuse.
   still completes; shared, pooled, and `resumeFrom` transcripts all
   append prompt+assistant entries after the durable header.
 
+### Telemetry write contention (#142, under #138)
+
+Hardening, not migrated v1 evidence: telemetry must never stall the
+calling thread on a SQLite lock — writes defer onto the store's owned,
+bounded retry queue instead of sleeping inline.
+
+- **Covered now:** `tests/regression/telemetry-contention.test.ts` —
+  public-boundary cases that hold an independent write lock via a spawned
+  fixture (`tests/support/telemetry-lock-holder.ts`, `BEGIN IMMEDIATE` on
+  the real `DatabaseSync`): a ~2 s held lock defers the span write while
+  the inline dispatch returns and 20 ms timer gaps stay under 400 ms,
+  with rows landing exactly once after release; a `delegate_ticket`
+  cancel+wait resolves inside the lock window while a span write sits
+  deferred; a short busy window under a longer hold reports
+  `telemetry failed` and latches the destination so later dispatches
+  write nothing; `session_shutdown` stays non-blocking while queued
+  writes keep draining to their deadlines and land after the lock
+  releases; and a misfire flood past the queue cap emits
+  `telemetry write queue overflow`, drops the excess, and persists only
+  the bounded remainder once contention clears.
+
+  Known thin spots: no case yet observes the counted stale-drop
+  diagnostic (`telemetry writes dropped (obsolete destination)`) on a
+  queued job — the destination-change contract test covers only the
+  in-flight span guard — and `wall_ms` excluding writer backlog is
+  implied by the `finishedAt` snapshot but never asserted.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |

@@ -244,3 +244,20 @@ use any design that makes these properties true and testable.
   and worker cleanup.
 - A clean apply is `applied_unverified`; it MUST NOT assert semantic correctness
   or successful tests.
+
+## Telemetry
+
+- Telemetry writes MUST NOT stall dispatch: the calling thread MUST NOT wait
+  on a SQLite lock or perform synchronous retry sleeps — no `Atomics.wait`,
+  no `SharedArrayBuffer`, `busy_timeout` stays zero. An uncontended write MAY
+  attempt once inline so rows stay durable-before-settle; contention MUST
+  defer to the store's own retry timers.
+- A deferred write MUST retry on owned timers bounded by its enqueue-time
+  busy window. Window expiry or a non-busy failure MUST report the loss and
+  latch the destination failed — never a silent drop, never an unbounded
+  retry.
+- The deferred queue MUST be bounded; overflow MUST drop the incoming job
+  and warn, never grow without limit or block the caller.
+- Closing the store MUST keep draining pending writes to their per-job
+  deadlines — never truncate them — while close itself stays non-blocking
+  and shutdown is never held open-ended.

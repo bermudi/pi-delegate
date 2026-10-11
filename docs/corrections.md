@@ -88,6 +88,7 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 - 2026-10-10 — new prototype regression included unsolicited commentary despite the no-new-comments constraint; removed only the new file's comments (tests/regression/prototype-dictionaries.test.ts). Enforcement: authoring brief and independent diff review.
 - 2026-10-10 — an issue progress comment named an unobserved commit hash; replaced it immediately with the actual git commit result (GitHub #137). Enforcement: capture commit output before publishing references.
 - 2026-10-10 — prerequisite verification treated session.dispose as shutdown and missed directory-as-transcript reporting; require actual shutdown events/managed warning assertions and regular-file recovery pointers (required-prerequisites.test.ts, sessions.ts, execution.ts). Enforcement: public fault regressions.
+- 2026-10-11 — #142 RED pass first "passed" a contention test that checked recorded timer gaps immediately after the blocked call returned: the overdue interval callback had not run yet, so the 2 s gap was never sampled. Assert timer-gap instrumentation after a macrotask yield (`telemetry-contention.test.ts`); a RED that cannot fail proves nothing.
 
 ## Enforcement map (surveyed 2026-10-04 @ d030bfd, v0.3.3)
 

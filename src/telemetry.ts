@@ -7,7 +7,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import type { TelemetryConfig } from "./config.ts";
 import type { DispatchOutcome } from "./coordinator.ts";
-import type { ResolvedTask, TaskOutcome, TicketStatus } from "./types.ts";
+import type { ResolvedTask, TaskStatus, TicketStatus } from "./types.ts";
 
 const require = createRequire(import.meta.url);
 // The extension's own package.json — npm always ships it in the tarball
@@ -20,20 +20,21 @@ const EXTENSION_VERSION =
     : "unknown";
 
 const SCHEMA_VERSION = 6;
-const BUSY_TIMEOUT_MS = 100;
 const BUSY_WINDOW_MS = 500;
 const BUSY_RETRY_BASE_MS = 10;
 const BUSY_RETRY_MAX_MS = 50;
+const MAX_PENDING_JOBS = 256;
+const DRAIN_PASS_BUDGET_MS = 8;
 const TELEMETRY_DB_ENV_VAR = "DELEGATE_TELEMETRY_DB";
 const BUSY_WINDOW_ENV_VAR = "DELEGATE_TELEMETRY_BUSY_MS";
 
 /**
- * The busy-retry window bounds how long telemetry waits on a contended
- * database before giving up loudly — telemetry must never stall a
- * dispatch unboundedly, but a fixed 500ms loses under first-open WAL
- * contention on slow hosts (#53: 8 simultaneous openers each doing
- * schema work exhausted it in CI). `DELEGATE_TELEMETRY_BUSY_MS` widens
- * it where contention is expected.
+ * The busy window bounds how long one deferred write job may keep retrying
+ * a contended database before giving up loudly. It is a per-job deadline on
+ * owned timers — the calling thread never waits on the lock (#142).
+ * `DELEGATE_TELEMETRY_BUSY_MS` widens it where contention is expected
+ * (#53: 8 simultaneous openers each doing schema work need longer than
+ * the default on slow hosts).
  */
 function busyWindowMs(): number {
   const raw = process.env[BUSY_WINDOW_ENV_VAR];
@@ -152,6 +153,70 @@ export interface MisfireShape {
   readonly parentCwd: string;
 }
 
+/**
+ * One task row's content, frozen at finish() time. Outcomes may be
+ * enriched after settle (worker truth folding attribution over a
+ * provisional record), so no live references may ride the queue.
+ */
+interface TaskRowSnapshot {
+  readonly index: number;
+  readonly status: TaskStatus;
+  readonly totalTokens: number | null;
+  readonly costTotal: number | null;
+  readonly retries: number;
+  readonly integrationStatus: string | null;
+  readonly quarantined: boolean;
+  readonly agent: string | null;
+  readonly model: string | null;
+  readonly thinking: string | null;
+  readonly toolsJson: string | null;
+  readonly workspace: string | null;
+}
+
+interface SpanJobData {
+  readonly op: "span";
+  readonly callId: string;
+  readonly async: boolean;
+  readonly startedAt: number;
+  readonly taskCount: number;
+  /** Captured before any write attempt so queue backlog never inflates wall_ms. */
+  readonly finishedAt: number;
+  readonly status: TicketStatus;
+  readonly totalTokens: number | null;
+  readonly costTotal: number | null;
+  readonly taskRows: readonly TaskRowSnapshot[];
+}
+
+interface MisfireJobData {
+  readonly op: "misfire";
+  readonly id: string;
+  /** Captured at recordMisfire call time, not at drain. */
+  readonly ts: number;
+  readonly phase: MisfireShape["phase"];
+  readonly message: string;
+  readonly taskCount: number;
+  readonly agentsJson: string;
+  readonly workspacesJson: string;
+  readonly async: boolean;
+  readonly parentCwd: string;
+}
+
+/**
+ * One unit of deferred telemetry work. The payload is immutable; only the
+ * scheduling fields (nextAttemptAt, backoffMs) move as retries elapse.
+ */
+interface WriteJob {
+  readonly destination: string;
+  readonly generation: number;
+  /** Enqueue time + busy window: past it a busy error is final, not retried. */
+  readonly deadline: number;
+  nextAttemptAt: number;
+  backoffMs: number;
+  readonly data: SpanJobData | MisfireJobData;
+}
+
+type AttemptOutcome = "done" | "busy" | "failed";
+
 function report(diagnostics: DiagnosticSink, operation: string, destination: string, error: unknown): void {
   diagnostics.log("error", "telemetry failed", { operation, path: destination }, error);
 }
@@ -173,28 +238,9 @@ function isBusy(error: unknown): boolean {
   return /SQLITE_BUSY|SQLITE_LOCKED|database(?: table)? is locked/i.test(message);
 }
 
-const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
-
-function sleepSync(ms: number): void {
-  Atomics.wait(sleepBuffer, 0, 0, ms);
-}
-
-function withBusyRetry<T>(fn: () => T): T {
-  const deadline = Date.now() + busyWindowMs();
-  let delay = BUSY_RETRY_BASE_MS;
-  for (;;) {
-    try {
-      return fn();
-    } catch (error) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0 || !isBusy(error)) throw error;
-      sleepSync(Math.min(delay, remaining));
-      delay = Math.min(delay * 2, BUSY_RETRY_MAX_MS);
-    }
-  }
-}
-
 function transact(db: DatabaseSync, fn: () => void): void {
+  // Outside the try: a failed BEGIN owns no transaction, so a ROLLBACK
+  // there would be meaningless noise.
   db.exec("BEGIN IMMEDIATE");
   try {
     fn();
@@ -202,7 +248,18 @@ function transact(db: DatabaseSync, fn: () => void): void {
   } catch (error) {
     try {
       db.exec("ROLLBACK");
-    } catch {}
+    } catch (rollbackError) {
+      // The rollback failure must surface too — attach it to the primary
+      // error already propagating rather than swallowing it.
+      if (error instanceof Error && error.cause === undefined) {
+        error.cause = rollbackError;
+      } else {
+        throw new AggregateError(
+          [error, rollbackError],
+          "transaction failed and rollback failed",
+        );
+      }
+    }
     throw error;
   }
 }
@@ -266,7 +323,9 @@ function ensureSchema(db: DatabaseSync): void {
   });
 }
 
-function batchStatus(outcomes: readonly TaskOutcome[]): TicketStatus {
+function batchStatus(
+  outcomes: readonly { readonly status: TaskStatus }[],
+): TicketStatus {
   if (outcomes.every((outcome) => outcome.status === "ok")) return "completed";
   if (outcomes.every((outcome) => outcome.status === "cancelled")) {
     return "cancelled";
@@ -293,6 +352,13 @@ export class TelemetryStore {
   private generation = 0;
   private closed = false;
   private failedDestination: string | undefined;
+  // The deferred-write queue: FIFO, capped, drained on owned (ref'd)
+  // timers. Jobs are attempted inline only when the queue is empty, so a
+  // contended database never stalls the calling thread — a busy attempt
+  // defers instead of sleeping (#142).
+  private pendingJobs: WriteJob[] = [];
+  private drainTimer: ReturnType<typeof setTimeout> | undefined;
+  private overflowWarned = false;
 
   beginDispatch(
     config: TelemetryConfig,
@@ -310,17 +376,14 @@ export class TelemetryStore {
       destination === undefined
         ? []
         : [destination, `${destination}-wal`, `${destination}-shm`];
-    if (destination !== this.destination) {
-      this.closeBackend();
-      this.destination = destination;
-      this.failedDestination = undefined;
-      this.generation += 1;
-    }
+    this.selectDestination(destination);
+    // Deliberately no open attempt: the dispatch path must not even touch
+    // the database. The backend opens lazily inside the first job's write
+    // attempt, where a failure defers instead of stalling preparation.
     if (
       destination === undefined ||
       this.closed ||
-      destination === this.failedDestination ||
-      this.backend(destination) === undefined
+      destination === this.failedDestination
     ) {
       return { ownedPaths, finish() {} };
     }
@@ -333,11 +396,16 @@ export class TelemetryStore {
           this.closed ||
           generation !== this.generation ||
           destination !== this.destination ||
-          this.db === undefined
+          destination === this.failedDestination
         ) {
           return;
         }
-        this.writeSpan(destination, callId, input, result, ticketStatus);
+        // Wall time ends at settle — a queued writer's backlog must never
+        // inflate the recorded duration.
+        const finishedAt = Date.now();
+        this.submit(destination, this.spanData(
+          callId, input, result, ticketStatus, finishedAt,
+        ));
       },
     };
   }
@@ -362,108 +430,285 @@ export class TelemetryStore {
     // spans, silently dropping their rows.
     if (!config.enabled) return;
     const destination = destinationOf(config, agentDir);
-    if (destination !== this.destination) {
-      this.closeBackend();
-      this.destination = destination;
-      this.failedDestination = undefined;
-      this.generation += 1;
-    }
+    this.selectDestination(destination);
     if (this.closed || destination === this.failedDestination) {
       return;
     }
-    const db = this.backend(destination);
-    if (db === undefined) return;
-    const generation = this.generation;
-    try {
-      withBusyRetry(() => {
-        transact(db, () => {
-          db.prepare(
-            `INSERT INTO misfires(id, ts, version, pi_version, phase,
-               message, task_count, agents, workspaces, async, parent_cwd)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-          ).run(
-            randomUUID(),
-            Date.now(),
-            EXTENSION_VERSION,
-            PI_VERSION,
-            row.phase,
-            row.message,
-            row.taskCount,
-            JSON.stringify(row.agents),
-            JSON.stringify(row.workspaces),
-            row.async ? 1 : 0,
-            row.parentCwd,
-          );
-        });
-      });
-    } catch (error) {
-      this.fail(destination, "write", error);
-      return;
-    }
-    // Same owner-only hardening as dispatch rows — best-effort after the
-    // rows already landed.
-    if (generation === this.generation) {
-      try {
-        tightenPermissions(destination);
-      } catch (error) {
-        report(this.diagnostics, "chmod", destination, error);
-      }
-    }
+    this.submit(destination, {
+      op: "misfire",
+      id: randomUUID(),
+      ts: Date.now(),
+      phase: row.phase,
+      message: row.message,
+      taskCount: row.taskCount,
+      agentsJson: JSON.stringify(row.agents),
+      workspacesJson: JSON.stringify(row.workspaces),
+      async: row.async,
+      parentCwd: row.parentCwd,
+    });
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.closeBackend();
+    // Pending jobs are never dropped at close: a child that finished a
+    // dispatch under contention has a queued write the busy-window policy
+    // promised to persist. The drain keeps its timers and writes each job
+    // out to its own deadline; only an already-empty queue closes the
+    // backend now. close() itself stays non-blocking.
+    if (this.pendingJobs.length === 0) this.closeBackend();
   }
 
-  private backend(destination: string): DatabaseSync | undefined {
-    if (this.db !== undefined) return this.db;
-    try {
-      this.db = withBusyRetry(() => {
-        const { DatabaseSync: Database } = require("node:sqlite") as {
-          DatabaseSync: new (path: string) => DatabaseSync;
-        };
-        mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
-        const fd = openSync(destination, "a", 0o600);
-        try {
-          chmodSync(destination, 0o600);
-        } finally {
-          closeSync(fd);
-        }
-        const handle = new Database(destination);
-        try {
-          handle.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-          // journal_mode = WAL needs an exclusive lock (no readers), unlike
-          // BEGIN IMMEDIATE which only waits on the active writer — under
-          // simultaneous first opens it is the contention point (#47). When
-          // the database is already WAL a read confirms it under a shared
-          // lock and the exclusive transition is skipped entirely.
-          const mode = handle.prepare("PRAGMA journal_mode").get() as
-            | { journal_mode?: unknown }
-            | undefined;
-          if (mode?.journal_mode !== "wal") {
-            handle.exec("PRAGMA journal_mode = WAL");
-          }
-          ensureSchema(handle);
-        } catch (error) {
-          try {
-            handle.close();
-          } catch {}
-          throw error;
-        }
-        tightenPermissions(destination);
-        return handle;
+  /**
+   * One destination-selection rule for both entry points: on a change the
+   * live backend closes, the failed latch resets, and the generation bumps
+   * so in-flight spans and queued jobs pinned to the old destination are
+   * dropped rather than written to it.
+   */
+  private selectDestination(destination: string | undefined): void {
+    // A closed store never retargets: a generation bump here would orphan
+    // the pending jobs close() promised to drain to their deadlines.
+    if (this.closed || destination === this.destination) return;
+    this.closeBackend();
+    this.destination = destination;
+    this.failedDestination = undefined;
+    this.generation += 1;
+  }
+
+  /**
+   * The fast path attempts once inline — settled dispatches keep their
+   * "rows durable before settle is visible" property on an uncontended
+   * database. A busy attempt defers onto the queue's timers; anything
+   * behind a non-empty queue simply joins the tail (FIFO, no jumping).
+   */
+  private submit(
+    destination: string,
+    data: SpanJobData | MisfireJobData,
+  ): void {
+    const job: WriteJob = {
+      destination,
+      generation: this.generation,
+      deadline: Date.now() + busyWindowMs(),
+      nextAttemptAt: 0,
+      backoffMs: BUSY_RETRY_BASE_MS,
+      data,
+    };
+    if (this.pendingJobs.length === 0 && this.attempt(job) !== "busy") {
+      return;
+    }
+    this.enqueue(job);
+  }
+
+  private enqueue(job: WriteJob): void {
+    if (this.pendingJobs.length >= MAX_PENDING_JOBS) {
+      // Bounded loss, said once per overflow stretch — the flag clears
+      // when the queue drains below the cap.
+      if (!this.overflowWarned) {
+        this.overflowWarned = true;
+        this.diagnostics.log("warn", "telemetry write queue overflow", {
+          count: this.pendingJobs.length,
+          path: job.destination,
+        });
+      }
+      return;
+    }
+    this.pendingJobs.push(job);
+    this.scheduleDrain();
+  }
+
+  private scheduleDrain(): void {
+    if (this.drainTimer !== undefined || this.pendingJobs.length === 0) {
+      return;
+    }
+    const delay = Math.max(
+      0,
+      this.pendingJobs[0]!.nextAttemptAt - Date.now(),
+    );
+    // Deliberately ref'd: a dispatched child may dispose the session and
+    // exit while writes are still deferred — pending rows must keep the
+    // process alive until they land or their deadlines pass, or the
+    // exactly-once persistence contract loses them.
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = undefined;
+      this.drain();
+    }, delay);
+  }
+
+  /**
+   * Head-of-line order only: the head job is attempted when due; a busy
+   * outcome halts the pass behind it (never reordered), successes shift
+   * and continue until the pass budget runs out. Stale-generation and
+   * failed-destination jobs are dropped with one counted diagnostic per
+   * pass. An emptied queue closes the backend when the store is closed.
+   */
+  private drain(): void {
+    const passEnds = Date.now() + DRAIN_PASS_BUDGET_MS;
+    let dropped = 0;
+    let lastDroppedDestination: string | undefined;
+    for (;;) {
+      const head = this.pendingJobs[0];
+      if (head === undefined) break;
+      if (
+        head.destination !== this.destination ||
+        head.generation !== this.generation ||
+        head.destination === this.failedDestination
+      ) {
+        this.pendingJobs.shift();
+        dropped += 1;
+        lastDroppedDestination = head.destination;
+        continue;
+      }
+      if (Date.now() < head.nextAttemptAt) break;
+      if (this.attempt(head) === "busy") break;
+      this.pendingJobs.shift();
+      if (Date.now() >= passEnds) break;
+    }
+    if (dropped > 0) {
+      this.diagnostics.log("warn", "telemetry writes dropped (obsolete destination)", {
+        count: dropped,
+        ...(lastDroppedDestination === undefined
+          ? {}
+          : { path: lastDroppedDestination }),
       });
-      return this.db;
-    } catch (error) {
-      this.fail(destination, "open", error);
-      return undefined;
+    }
+    if (this.pendingJobs.length < MAX_PENDING_JOBS) {
+      this.overflowWarned = false;
+    }
+    if (this.pendingJobs.length > 0) {
+      this.scheduleDrain();
+    } else if (this.closed) {
+      this.closeBackend();
     }
   }
 
-  private writeSpan(
-    destination: string,
+  /**
+   * One write attempt: ensure the backend (lazy open), transact the job's
+   * rows, then the best-effort post-write chmod. A busy error inside the
+   * job's deadline arms the next timer retry; anything else — or a busy
+   * error past the deadline — reports and latches the destination failed.
+   */
+  private attempt(job: WriteJob): AttemptOutcome {
+    let operation = "open";
+    try {
+      const db = this.ensureBackend(job.destination);
+      operation = "write";
+      this.writeJob(db, job.data);
+    } catch (error) {
+      if (isBusy(error) && Date.now() < job.deadline) {
+        job.nextAttemptAt = Date.now() + job.backoffMs;
+        job.backoffMs = Math.min(job.backoffMs * 2, BUSY_RETRY_MAX_MS);
+        return "busy";
+      }
+      this.fail(job.destination, operation, error);
+      return "failed";
+    }
+    // Owner-only hardening is best-effort: a chmod hiccup must not disable
+    // telemetry permanently when the rows already landed.
+    try {
+      tightenPermissions(job.destination);
+    } catch (error) {
+      report(this.diagnostics, "chmod", job.destination, error);
+    }
+    return "done";
+  }
+
+  private writeJob(db: DatabaseSync, data: SpanJobData | MisfireJobData): void {
+    if (data.op === "misfire") {
+      transact(db, () => {
+        db.prepare(
+          `INSERT INTO misfires(id, ts, version, pi_version, phase,
+             message, task_count, agents, workspaces, async, parent_cwd)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        ).run(
+          data.id,
+          data.ts,
+          EXTENSION_VERSION,
+          PI_VERSION,
+          data.phase,
+          data.message,
+          data.taskCount,
+          data.agentsJson,
+          data.workspacesJson,
+          data.async ? 1 : 0,
+          data.parentCwd,
+        );
+      });
+      return;
+    }
+    transact(db, () => {
+      const insertCall = db.prepare(
+        `INSERT INTO calls(id, ts, version, pi_version, mode, parent_model,
+           task_count, wall_ms, status, total_tokens, total_cost,
+           parent_session_file, parent_cwd,
+           budget_limit, budget_consumed, budget_exhausted_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      );
+      const insertTask = db.prepare(
+        `INSERT INTO tasks(id, call_id, ts, version, pi_version, idx,
+           agent, model, thinking, tools, workspace, outcome,
+           failure_kind, duration_ms, tokens, cost, tool_uses, retries,
+           prompt_chars, output_chars, session_file, async,
+           error_snippet, integration, provisional)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      );
+      for (const row of data.taskRows) {
+        insertTask.run(
+          `${data.callId}:${row.index}`,
+          data.callId,
+          data.startedAt,
+          EXTENSION_VERSION,
+          PI_VERSION,
+          row.index,
+          row.agent,
+          row.model,
+          row.thinking,
+          row.toolsJson,
+          row.workspace,
+          row.status,
+          null,
+          null,
+          row.totalTokens,
+          row.costTotal,
+          null,
+          row.retries,
+          null,
+          null,
+          null,
+          data.async ? 1 : 0,
+          null,
+          row.integrationStatus,
+          row.quarantined ? 1 : 0,
+        );
+      }
+      insertCall.run(
+        data.callId,
+        data.startedAt,
+        EXTENSION_VERSION,
+        PI_VERSION,
+        data.async ? "async" : "sync",
+        null,
+        data.taskCount,
+        data.finishedAt - data.startedAt,
+        data.status,
+        data.totalTokens,
+        data.costTotal,
+        null,
+        null,
+        null,
+        null,
+        null,
+      );
+    });
+  }
+
+  /**
+   * Freeze everything the rows need at finish() time: per-outcome status/
+   * usage/retries/integration/quarantine, batch usage totals, the settled
+   * ticket status, and per-task agent/model/thinking/tools/workspace.
+   * Outcomes are enriched after settle, so no live references may ride
+   * the queue.
+   */
+  private spanData(
     callId: string,
     input: {
       readonly async: boolean;
@@ -472,92 +717,88 @@ export class TelemetryStore {
     },
     result: DispatchOutcome,
     ticketStatus: TicketStatus | undefined,
-  ): void {
-    const db = this.db;
-    if (db === undefined) return;
+    finishedAt: number,
+  ): SpanJobData {
+    const taskRows = result.outcomes.map((outcome): TaskRowSnapshot => {
+      const task = input.tasks.find(
+        (candidate) => candidate.index === outcome.index,
+      );
+      return {
+        index: outcome.index,
+        status: outcome.status,
+        totalTokens: outcome.usage?.totalTokens ?? null,
+        costTotal: outcome.usage?.cost.total ?? null,
+        retries: outcome.retries,
+        integrationStatus: outcome.integration?.status ?? null,
+        quarantined: outcome.quarantined === true,
+        agent: task?.agent ?? null,
+        model: task ? `${task.model.provider}/${task.model.id}` : null,
+        thinking: task?.thinking ?? null,
+        toolsJson: task ? JSON.stringify(task.tools) : null,
+        workspace: task?.workspace ?? null,
+      };
+    });
+    return {
+      op: "span",
+      callId,
+      async: input.async,
+      startedAt: input.startedAt,
+      taskCount: input.tasks.length,
+      finishedAt,
+      status:
+        ticketStatus !== undefined && ticketStatus !== "running"
+          ? ticketStatus
+          : batchStatus(taskRows),
+      totalTokens: result.usage?.totalTokens ?? null,
+      costTotal: result.usage?.cost.total ?? null,
+      taskRows,
+    };
+  }
+
+  /**
+   * Open the destination lazily — same sequence the eager opener used,
+   * minus the synchronous busy retry: mkdir, owner-only create+chmod, the
+   * DatabaseSync handle, `busy_timeout = 0` (the caller thread never waits
+   * on the lock — contention defers to the queue), the WAL transition
+   * when needed, schema ensure, and sidecar permission tightening.
+   */
+  private ensureBackend(destination: string): DatabaseSync {
+    const existing = this.db;
+    if (existing !== undefined) return existing;
+    const { DatabaseSync: Database } = require("node:sqlite") as {
+      DatabaseSync: new (path: string) => DatabaseSync;
+    };
+    mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+    const fd = openSync(destination, "a", 0o600);
     try {
-      withBusyRetry(() => {
-        transact(db, () => {
-          const insertCall = db.prepare(
-            `INSERT INTO calls(id, ts, version, pi_version, mode, parent_model,
-               task_count, wall_ms, status, total_tokens, total_cost,
-               parent_session_file, parent_cwd,
-               budget_limit, budget_consumed, budget_exhausted_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          );
-          const insertTask = db.prepare(
-            `INSERT INTO tasks(id, call_id, ts, version, pi_version, idx,
-               agent, model, thinking, tools, workspace, outcome,
-               failure_kind, duration_ms, tokens, cost, tool_uses, retries,
-               prompt_chars, output_chars, session_file, async,
-               error_snippet, integration, provisional)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          );
-          for (const outcome of result.outcomes) {
-            const task = input.tasks.find(
-              (candidate) => candidate.index === outcome.index,
-            );
-            insertTask.run(
-              `${callId}:${outcome.index}`,
-              callId,
-              input.startedAt,
-              EXTENSION_VERSION,
-              PI_VERSION,
-              outcome.index,
-              task?.agent ?? null,
-              task ? `${task.model.provider}/${task.model.id}` : null,
-              task?.thinking ?? null,
-              task ? JSON.stringify(task.tools) : null,
-              task?.workspace ?? null,
-              outcome.status,
-              null,
-              null,
-              outcome.usage?.totalTokens ?? null,
-              outcome.usage?.cost.total ?? null,
-              null,
-              outcome.retries,
-              null,
-              null,
-              null,
-              input.async ? 1 : 0,
-              null,
-              outcome.integration?.status ?? null,
-              outcome.quarantined ? 1 : 0,
-            );
-          }
-          insertCall.run(
-            callId,
-            input.startedAt,
-            EXTENSION_VERSION,
-            PI_VERSION,
-            input.async ? "async" : "sync",
-            null,
-            input.tasks.length,
-            Date.now() - input.startedAt,
-            ticketStatus !== undefined && ticketStatus !== "running"
-              ? ticketStatus
-              : batchStatus(result.outcomes),
-            result.usage?.totalTokens ?? null,
-            result.usage?.cost.total ?? null,
-            null,
-            null,
-            null,
-            null,
-            null,
-          );
-        });
-      });
-    } catch (error) {
-      this.fail(destination, "write", error);
-      return;
+      chmodSync(destination, 0o600);
+    } finally {
+      closeSync(fd);
     }
-    // Owner-only hardening is best-effort: a chmod hiccup must not disable
-    // telemetry permanently when the rows already landed.
+    const handle = new Database(destination);
     try {
-      tightenPermissions(destination);
+      handle.exec("PRAGMA busy_timeout = 0");
+      // journal_mode = WAL needs an exclusive lock (no readers), unlike
+      // BEGIN IMMEDIATE which only waits on the active writer — under
+      // simultaneous first opens it is the contention point (#47). When
+      // the database is already WAL a read confirms it under a shared
+      // lock and the exclusive transition is skipped entirely.
+      const mode = handle.prepare("PRAGMA journal_mode").get() as
+        | { journal_mode?: unknown }
+        | undefined;
+      if (mode?.journal_mode !== "wal") {
+        handle.exec("PRAGMA journal_mode = WAL");
+      }
+      ensureSchema(handle);
     } catch (error) {
-      report(this.diagnostics, "chmod", destination, error);
+      try {
+        handle.close();
+      } catch {}
+      throw error;
     }
+    tightenPermissions(destination);
+    this.db = handle;
+    return handle;
   }
 
   private fail(destination: string, operation: string, error: unknown): void {
