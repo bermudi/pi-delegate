@@ -137,7 +137,7 @@ export async function snapshotTree(
   // give add only literal NUL-separated names (no recursive directory pathspec).
   const visible = (await git([
     "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", ".",
-    ...excludePaths.map((exclude) => `:(exclude)${exclude}`),
+    ...excludePaths.map((exclude) => `:(exclude,literal)${exclude}`),
     ...runtimeExcludes.map((exclude) => `:(exclude,literal)${exclude}`),
   ], { cwd: root, env, signal })).stdout.split("\0");
   const files = new Set<string>();
