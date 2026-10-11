@@ -90,9 +90,16 @@ export const DEFAULT_CONFIG: DelegateConfig = {
   // 8 stays moderate. `concurrency.models`/`providers` per-model maps
   // remain the real rate-limit guard for providers that need one.
   maxConcurrent: 8,
-  concurrency: { default: undefined, providers: {}, models: {} },
-  models: {},
-  modelsByParent: {},
+  concurrency: {
+    default: undefined,
+    providers: Object.create(null) as Record<string, number>,
+    models: Object.create(null) as Record<string, number>,
+  },
+  models: Object.create(null) as Record<string, ModelAssignment>,
+  modelsByParent: Object.create(null) as Record<
+    string,
+    Record<string, ModelAssignment>
+  >,
   stallTimeoutMs: 15 * 60 * 1000,
   telemetry: { enabled: false, dbPath: undefined },
   // Idle residency bound 4 (#46): codex unloads idle agents to their
@@ -204,12 +211,21 @@ export function configuredModelFor(
   config: DelegateConfig,
 ): ResolvedModelAssignment | undefined {
   if (agent === undefined || agent === "default") return undefined;
+  const scopedMap =
+    parentKey !== undefined &&
+    Object.hasOwn(config.modelsByParent, parentKey)
+      ? config.modelsByParent[parentKey]
+      : undefined;
   const scoped =
-    parentKey === undefined ? undefined : config.modelsByParent[parentKey]?.[agent];
+    scopedMap !== undefined && Object.hasOwn(scopedMap, agent)
+      ? scopedMap[agent]
+      : undefined;
   if (scoped) {
     return { ...scoped, origin: `modelsByParent.${parentKey}.${agent}` };
   }
-  const entry = config.models[agent];
+  const entry = Object.hasOwn(config.models, agent)
+    ? config.models[agent]
+    : undefined;
   return entry === undefined
     ? undefined
     : { ...entry, origin: `models.${agent}` };
@@ -220,10 +236,14 @@ export function modelConcurrencyLimit(
   modelKey: string,
   config: DelegateConfig,
 ): number {
-  const perModel = config.concurrency.models[modelKey];
+  const perModel = Object.hasOwn(config.concurrency.models, modelKey)
+    ? config.concurrency.models[modelKey]
+    : undefined;
   if (perModel !== undefined) return perModel;
   const provider = modelKey.split("/")[0] ?? modelKey;
-  const perProvider = config.concurrency.providers[provider];
+  const perProvider = Object.hasOwn(config.concurrency.providers, provider)
+    ? config.concurrency.providers[provider]
+    : undefined;
   if (perProvider !== undefined) return perProvider;
   return config.concurrency.default ?? config.maxConcurrent;
 }
@@ -574,7 +594,9 @@ function parseModels(
   path: string,
   additionalAgentNames: readonly string[],
 ): Record<string, ModelAssignment> {
-  if (value === undefined) return {};
+  if (value === undefined) {
+    return Object.create(null) as Record<string, ModelAssignment>;
+  }
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(
       `${path}: ${name} must be an object mapping a named agent to a model reference.`,
@@ -584,7 +606,7 @@ function parseModels(
     ...knownAgentNames().filter((n) => n !== "default"),
     ...additionalAgentNames,
   ];
-  const out: Record<string, ModelAssignment> = {};
+  const out = Object.create(null) as Record<string, ModelAssignment>;
   for (const [agent, entry] of Object.entries(value as Record<string, unknown>)) {
     if (agent === "default") {
       throw new Error(
@@ -627,13 +649,21 @@ function parseModelsByParent(
   path: string,
   additionalAgentNames: readonly string[],
 ): Record<string, Record<string, ModelAssignment>> {
-  if (value === undefined) return {};
+  if (value === undefined) {
+    return Object.create(null) as Record<
+      string,
+      Record<string, ModelAssignment>
+    >;
+  }
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(
       `${path}: modelsByParent must be an object mapping a parent provider/model-id to per-agent model references.`,
     );
   }
-  const out: Record<string, Record<string, ModelAssignment>> = {};
+  const out = Object.create(null) as Record<
+    string,
+    Record<string, ModelAssignment>
+  >;
   for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
     const normalized = key.trim().toLowerCase();
     // Keys are provider + "/" + full model id; the id itself may contain
@@ -694,16 +724,17 @@ function parseConcurrency(value: unknown, path: string): ConcurrencyConfig {
     return v;
   };
   const table = (name: string, v: unknown): Record<string, number> => {
-    if (v === undefined) return {};
+    if (v === undefined) {
+      return Object.create(null) as Record<string, number>;
+    }
     if (v === null || typeof v !== "object" || Array.isArray(v)) {
       throw new Error(`${path}: concurrency.${name} must be an object.`);
     }
-    return Object.fromEntries(
-      Object.entries(v as Record<string, unknown>).map(([key, entry]) => [
-        key,
-        bound(`${name}.${key}`, entry),
-      ]),
-    );
+    const out = Object.create(null) as Record<string, number>;
+    for (const [key, entry] of Object.entries(v as Record<string, unknown>)) {
+      out[key] = bound(`${name}.${key}`, entry);
+    }
+    return out;
   };
   return {
     default:

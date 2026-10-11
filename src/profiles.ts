@@ -161,7 +161,9 @@ export function expandTools(
     // A trained caller may pass the dispatch family through — children
     // never nest, so the entry drops silently rather than erroring (#45).
     if (DELEGATE_TOOL_NAMES.has(entry)) continue;
-    const group = TOOL_GROUPS[entry];
+    const group = Object.hasOwn(TOOL_GROUPS, entry)
+      ? TOOL_GROUPS[entry]
+      : undefined;
     if (group) {
       expanded.push(...group);
       continue;
@@ -261,7 +263,7 @@ const FRONTMATTER_FENCE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
 function frontmatterToData(
   fm: Record<string, unknown>,
 ): Record<string, string> {
-  const data: Record<string, string> = {};
+  const data = Object.create(null) as Record<string, string>;
   for (const [k, v] of Object.entries(fm)) {
     if (v === null || v === undefined) continue;
     if (Array.isArray(v)) data[k] = v.map(String).join(", ");
@@ -299,7 +301,12 @@ function parseProfileFrontmatter(
   // so the fence, YAML sanitization, and body all follow the LF path.
   const normalized = content.replace(/\r\n/g, "\n");
   const m = normalized.match(FRONTMATTER_FENCE);
-  if (!m) return { data: {}, body: normalized.trim() };
+  if (!m) {
+    return {
+      data: Object.create(null) as Record<string, string>,
+      body: normalized.trim(),
+    };
+  }
   const body = m[2]!.trim();
   // A bare `*` is an invalid YAML alias, so `tools: *` must be quoted first.
   const sanitized = sanitizeYamlScalars(
@@ -322,7 +329,7 @@ function parseProfileFrontmatter(
       "malformed agent frontmatter",
       error,
     );
-    return { data: {}, body };
+    return { data: Object.create(null) as Record<string, string>, body };
   }
 }
 

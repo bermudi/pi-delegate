@@ -1627,6 +1627,26 @@ resolves on the first ticket to settle, the watcher's `Promise.any`.
   `delegate_session` are pinned in
   `tests/contract/input-normalization.test.ts`.
 
+### Prototype-named external keys (#139, under #138)
+
+Hardening, not migrated v1 evidence: authored names and config keys are
+external input indexed into plain dictionaries, and names colliding with
+`Object.prototype` members must behave like any other name.
+
+- **Covered now:** `tests/regression/prototype-dictionaries.test.ts` —
+  across `constructor`/`toString`/`__proto__`/`ordinary-unknown` (control):
+  an unresolvable name rejects with the enumerated unknown-agent error and
+  no provider call; a global Markdown profile under the name runs on the
+  parent model; `models` and parent-scoped `modelsByParent` pins resolve
+  with scoped precedence; a prototype-named `tools` entry drops only that
+  profile through the ordinary unknown-tool teaching while a sibling
+  profile and an inline task still dispatch; and provider ids
+  `constructor`/`toString`/`__proto__` fall through to the global bound
+  with no provider-specific config, serialize under
+  `concurrency.providers`, and take the `concurrency.models` key over the
+  provider bound — start counts asserted through the faux provider's live
+  state before releasing the response gate.
+
 ## First tranche
 
 | V1 evidence | Class | V2 treatment |
