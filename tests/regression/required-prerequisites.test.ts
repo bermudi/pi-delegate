@@ -35,7 +35,7 @@ import {
   ticketIdOf,
 } from "../support/pi-boundary.ts";
 import { diagnosticRecords } from "../support/diagnostic-records.ts";
-import { gitEnv } from "../../src/fsx.ts";
+import { gitFixtureEnv } from "../support/git-fixture.ts";
 
 const root = resolve(import.meta.dirname, "../..");
 const childScript = resolve(
@@ -249,7 +249,7 @@ describe("required prerequisites before worker effects (#140/#141 under #138)", 
       mkdirSync(siblingCwd);
       execSync(
         "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-        { cwd: siblingCwd, env: gitEnv() },
+        { cwd: siblingCwd, env: gitFixtureEnv() },
       );
       const sibling = await callDelegate(session, {
         async: false,

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { callDelegate, installSubagentModel, openDelegateBoundary } from "../support/pi-boundary.ts";
-import { gitEnv } from "../../src/fsx.ts";
+import { gitFixtureEnv } from "../support/git-fixture.ts";
 
 // Literal repository #51: fail-closed admission errors must teach repair/retry,
 // never suggest scratch as an unconditional workaround for ambiguous scope.
@@ -30,7 +30,7 @@ describe("Git scope discovery repair advice (#51)", () => {
       session = await openDelegateBoundary();
       const model = await installSubagentModel(session);
       const source = tempDir(), shim = tempDir();
-      execSync("git init -q", { cwd: source, env: gitEnv() });
+      execSync("git init -q", { cwd: source, env: gitFixtureEnv() });
       const configPath = join(source, ".git", "config");
       const originalConfig = readFileSync(configPath);
       if (failure === "empty Git root") {

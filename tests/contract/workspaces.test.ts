@@ -30,7 +30,7 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
-import { gitEnv } from "../../src/fsx.ts";
+import { gitFixtureEnv } from "../support/git-fixture.ts";
 
 function gitInit(dir: string): void {
   // An initial commit is required: isolated baselines are built on HEAD.
@@ -975,12 +975,12 @@ describe("delegate workspace and shared-write contract", () => {
     // and branch exactly as they were — capture them before the shim lands.
     const headBefore = execSync("git rev-parse HEAD", {
       cwd: dir,
-      env: gitEnv(),
+      env: gitFixtureEnv(),
       encoding: "utf8",
     }).trim();
     const branchBefore = execSync("git symbolic-ref HEAD", {
       cwd: dir,
-      env: gitEnv(),
+      env: gitFixtureEnv(),
       encoding: "utf8",
     }).trim();
     const shimDir = tempDir();
@@ -1018,21 +1018,21 @@ exec '${realGit}' "$@"
       expect(
         execSync("git diff --cached --name-only", {
           cwd: dir,
-          env: gitEnv(),
+          env: gitFixtureEnv(),
           encoding: "utf8",
         }),
       ).toBe("");
       expect(
         execSync("git rev-parse HEAD", {
           cwd: dir,
-          env: gitEnv(),
+          env: gitFixtureEnv(),
           encoding: "utf8",
         }).trim(),
       ).toBe(headBefore);
       expect(
         execSync("git symbolic-ref HEAD", {
           cwd: dir,
-          env: gitEnv(),
+          env: gitFixtureEnv(),
           encoding: "utf8",
         }).trim(),
       ).toBe(branchBefore);
@@ -1189,7 +1189,7 @@ exec '${realGit}' "$@"
       const dir = tempDir();
       gitInit(dir);
       writeFileSync(join(dir, ":evil.txt"), "base\n");
-      execSync("git add -A && git commit -qm base", { cwd: dir, env: gitEnv() });
+      execSync("git add -A && git commit -qm base", { cwd: dir, env: gitFixtureEnv() });
 
       const step: FauxResponseFactory = async (context) =>
         context.messages.some((m) => m.role === "toolResult")
@@ -1445,15 +1445,15 @@ exec '${realGit}' "$@"
       // staged, plus HEAD and the branch ref for "unmoved" to mean
       // something — private refs and detached worktrees never reach either.
       writeFileSync(join(dir, "staged.txt"), "staged\n");
-      execSync("git add staged.txt", { cwd: dir, env: gitEnv() });
+      execSync("git add staged.txt", { cwd: dir, env: gitFixtureEnv() });
       const headBefore = execSync("git rev-parse HEAD", {
         cwd: dir,
-        env: gitEnv(),
+        env: gitFixtureEnv(),
         encoding: "utf8",
       }).trim();
       const branchBefore = execSync("git symbolic-ref HEAD", {
         cwd: dir,
-        env: gitEnv(),
+        env: gitFixtureEnv(),
         encoding: "utf8",
       }).trim();
 
@@ -1520,21 +1520,21 @@ exec '${realGit}' "$@"
       expect(
         execSync("git diff --cached --name-only", {
           cwd: dir,
-          env: gitEnv(),
+          env: gitFixtureEnv(),
           encoding: "utf8",
         }).trim(),
       ).toBe("staged.txt");
       expect(
         execSync("git rev-parse HEAD", {
           cwd: dir,
-          env: gitEnv(),
+          env: gitFixtureEnv(),
           encoding: "utf8",
         }).trim(),
       ).toBe(headBefore);
       expect(
         execSync("git symbolic-ref HEAD", {
           cwd: dir,
-          env: gitEnv(),
+          env: gitFixtureEnv(),
           encoding: "utf8",
         }).trim(),
       ).toBe(branchBefore);

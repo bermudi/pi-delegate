@@ -24,7 +24,7 @@ import {
   ticketIdOf,
 } from "../support/pi-boundary.ts";
 import { diagnosticRecords } from "../support/diagnostic-records.ts";
-import { gitEnv } from "../../src/fsx.ts";
+import { gitFixtureEnv } from "../support/git-fixture.ts";
 
 // Workspace process cleanup's /proc scan is Linux-only; the stray-process
 // tests are gated on it. The retained-artifact recovery test is plain git
@@ -34,7 +34,7 @@ const linuxTest = process.platform === "linux" ? test : test.skip;
 function gitInit(dir: string): void {
   execSync(
     "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-    { cwd: dir, env: gitEnv() },
+    { cwd: dir, env: gitFixtureEnv() },
   );
 }
 
@@ -485,7 +485,7 @@ describe("delegate workspace process cleanup contract", () => {
           execSync("git status --porcelain", {
             cwd: dir,
             encoding: "utf8",
-            env: gitEnv(),
+            env: gitFixtureEnv(),
           }),
         ).toBe("");
       } finally {
@@ -509,7 +509,7 @@ describe("delegate workspace process cleanup contract", () => {
       gitInit(dir);
       const target = join(dir, "conflict.txt");
       writeFileSync(target, "original\n");
-      execSync("git add -A && git commit -qm init", { cwd: dir, env: gitEnv() });
+      execSync("git add -A && git commit -qm init", { cwd: dir, env: gitFixtureEnv() });
 
       // First provider call gated: once it is streaming, preparation has
       // finished and the baseline is captured — the edit below is genuine
@@ -564,15 +564,15 @@ describe("delegate workspace process cleanup contract", () => {
       expect(existsSync(integration!.patchPath!)).toBe(true);
       execSync(`git rev-parse --verify "${integration!.baselineRef}"`, {
         cwd: dir,
-        env: gitEnv(),
+        env: gitFixtureEnv(),
       });
       execSync(`git rev-parse --verify "${integration!.proposalRef}"`, {
         cwd: dir,
-        env: gitEnv(),
+        env: gitFixtureEnv(),
       });
       execSync(`git apply --stat "${integration!.patchPath}"`, {
         cwd: dir,
-        env: gitEnv(),
+        env: gitFixtureEnv(),
       });
       // Full recovery proof: a detached worktree at the recorded baseline
       // accepts the retained patch and yields exactly the proposal.
@@ -580,15 +580,15 @@ describe("delegate workspace process cleanup contract", () => {
       try {
         execSync(
           `git worktree add --detach "${recovery}" "${integration!.baselineRef}"`,
-          { cwd: dir, env: gitEnv() },
+          { cwd: dir, env: gitFixtureEnv() },
         );
         execSync(`git apply --check "${integration!.patchPath}"`, {
           cwd: recovery,
-          env: gitEnv(),
+          env: gitFixtureEnv(),
         });
         execSync(`git apply "${integration!.patchPath}"`, {
           cwd: recovery,
-          env: gitEnv(),
+          env: gitFixtureEnv(),
         });
         expect(readFileSync(join(recovery, "conflict.txt"), "utf8")).toBe(
           "worker-change\n",
@@ -597,7 +597,7 @@ describe("delegate workspace process cleanup contract", () => {
         if (existsSync(recovery)) {
           execSync(`git worktree remove --force "${recovery}"`, {
             cwd: dir,
-            env: gitEnv(),
+            env: gitFixtureEnv(),
           });
         }
       }

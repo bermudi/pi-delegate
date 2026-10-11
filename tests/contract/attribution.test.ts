@@ -16,7 +16,7 @@ import {
   when,
   type TestSession,
 } from "@marcfargas/pi-test-harness";
-import { gitEnv } from "../../src/fsx.ts";
+import { gitFixtureEnv } from "../support/git-fixture.ts";
 import {
   callDelegate,
   callDelegateTicket,
@@ -613,10 +613,7 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
     const realGit = Bun.which("git")!;
     // Like Delegate's real Git probes, fixture setup strips inherited Git
     // redirection. No synthetic repository responses or production imports.
-    const gitEnv = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
-    );
-    execFileSync(realGit, ["-C", repo, "init", "-q"], { env: gitEnv });
+    execFileSync(realGit, ["-C", repo, "init", "-q"], { env: gitFixtureEnv() });
     const entered = join(scratch, "entered");
     const exited = join(scratch, "exited");
     const releaseGit = join(scratch, "release");
@@ -839,7 +836,7 @@ exec ${quote(realGit)} "$@"
     mkdirSync(repo, { recursive: true });
     execSync(
       "git init -q --object-format=sha256 && git config user.email t@t && git config user.name t",
-      { cwd: repo, env: gitEnv() },
+      { cwd: repo, env: gitFixtureEnv() },
     );
     const model = await installSubagentModel(session);
     model.respond([
@@ -872,10 +869,10 @@ exec ${quote(realGit)} "$@"
     mkdirSync(repo, { recursive: true });
     execSync(
       "git init -q && git config user.email t@t && git config user.name t",
-      { cwd: repo, env: gitEnv() },
+      { cwd: repo, env: gitFixtureEnv() },
     );
     writeFileSync(join(repo, "base.txt"), "BASE\n");
-    execSync("git add -A && git commit -qm base", { cwd: repo, env: gitEnv() });
+    execSync("git add -A && git commit -qm base", { cwd: repo, env: gitFixtureEnv() });
     const model = await installSubagentModel(session);
     model.respond([
       fauxAssistantMessage([
