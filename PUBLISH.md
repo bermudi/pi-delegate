@@ -30,12 +30,25 @@ auth is not needed and `npm publish` should not be run by hand.
 
     git tag pi-delegate-v<version> && git push origin main pi-delegate-v<version>
 
-Watch the workflow run; `npm view @bermudi/pi-delegate version` should list
-`<version>` when it finishes.
+Watch the workflow run. Publish acceptance (`+ pkg@version` in the step
+log, provenance signed) is NOT availability: the registry can index the
+packument (version metadata) minutes before the tarball blob is served
+(observed 2026-10-12 on 0.6.0 — metadata ~+5 min, tarball ~+8 min; the
+operator's `pi update` 404ed twice inside that window because npm resolves
+`@latest` from metadata, then fetches a blob that isn't there yet). The
+release is done only when BOTH return 200:
+
+    curl -s -o /dev/null -w "%{http_code}\n" \
+      https://registry.npmjs.org/@bermudi/pi-delegate/<version>
+    curl -s -o /dev/null -w "%{http_code}\n" -I \
+      https://registry.npmjs.org/@bermudi/pi-delegate/-/pi-delegate-<version>.tgz
+
+`npm view @bermudi/pi-delegate version` listing `<version>` is not
+sufficient — it reads the packument only.
 
 ## Post-publish verification
 
-1. `npm view @bermudi/pi-delegate version` → `<version>`.
+1. Both curls above → 200 (packument AND tarball).
 2. On the operator machine, `pi update --extensions` picks the release
    up — the `~/.pi/agent/settings.json` entry is the **unversioned**
    `npm:@bermudi/pi-delegate`. An exact `@x.y.z` pin makes `pi update`
