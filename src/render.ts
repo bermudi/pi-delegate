@@ -702,19 +702,56 @@ function collapsedRoster(text: string, theme: Theme): string {
 
 /** Braille frames for a live board's running rows (#119). */
 const LIVE_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/** Per-row tail budget: `tool: preview` stays inside ~one line. */
+/** Per-row preview budget; tool names stay intact, even when they're long. */
 const LIVE_PREVIEW_LIMIT = 60;
 /** Row labels truncate so the tail keeps its budget. */
 const LIVE_LABEL_LIMIT = 22;
+/** Longest task status in the live-details schema (`budget-exhausted`). */
+const LIVE_STATUS_WIDTH = "budget-exhausted".length;
 
 interface LiveTaskView {
   readonly id: string;
   readonly label: string;
-  readonly status: string;
+  readonly status: LiveTaskStatus;
   readonly startedAt: number;
   readonly lastEventAt: number;
   readonly tool?: string;
   readonly preview?: string;
+  readonly recent?: readonly LiveToolCall[];
+}
+
+type LiveTaskStatus = TaskStatus | "queued" | "running" | "paused";
+
+interface LiveToolCall {
+  readonly tool: string;
+  readonly preview: string;
+  readonly inFlight: boolean;
+}
+
+function isLiveTaskStatus(status: string): status is LiveTaskStatus {
+  switch (status) {
+    case "queued":
+    case "running":
+    case "paused":
+    case "ok":
+    case "failed":
+    case "cancelled":
+    case "blocked":
+    case "interrupted":
+    case "budget-exhausted":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isLiveToolCall(value: unknown): value is LiveToolCall {
+  return (
+    isRecord(value) &&
+    typeof value.tool === "string" &&
+    typeof value.preview === "string" &&
+    typeof value.inFlight === "boolean"
+  );
 }
 
 function isLiveTask(value: unknown): value is LiveTaskView {
@@ -723,19 +760,16 @@ function isLiveTask(value: unknown): value is LiveTaskView {
     typeof value.id === "string" &&
     typeof value.label === "string" &&
     typeof value.status === "string" &&
+    isLiveTaskStatus(value.status) &&
     typeof value.startedAt === "number" &&
     typeof value.lastEventAt === "number" &&
     (value.tool === undefined || typeof value.tool === "string") &&
-    (value.preview === undefined || typeof value.preview === "string")
+    (value.preview === undefined || typeof value.preview === "string") &&
+    (value.recent === undefined ||
+      (Array.isArray(value.recent) && value.recent.every(isLiveToolCall)))
   );
 }
 
-/**
- * The pending tool row's live board for a running inline batch (#119):
- * `delegate — 3 tasks · running 12m27s · 1 done` over one line per task —
- * glyph, label, duration, and the current/last `tool: preview` tail. The
- * partial's `live` details are display-only and never settle-model data.
- */
 /**
  * clean-tui's global flag (bermudis-pi-goodies, `clean-tui-active.ts`). Read
  * by its symbol key, so delegate never imports goodies. Read at render time:
@@ -747,48 +781,21 @@ function cleanTuiActive(): boolean {
   return (globalThis as Record<symbol, unknown>)[CLEAN_TUI_KEY] === true;
 }
 
-interface LiveBoardTask {
-  readonly id: string;
-  readonly label: string;
-  readonly status: string;
-  readonly startedAt: number;
-  readonly lastEventAt: number;
-  readonly tool?: string;
-  readonly preview?: string;
-  readonly recent?: readonly LiveBoardCall[];
-}
-
-interface LiveBoardCall {
-  readonly tool: string;
-  readonly preview: string;
-  readonly inFlight: boolean;
-}
-
-function isLiveCall(value: unknown): value is LiveBoardCall {
-  return (
-    isRecord(value) &&
-    typeof value.tool === "string" &&
-    typeof value.preview === "string" &&
-    typeof value.inFlight === "boolean"
-  );
-}
-
 /** A task is settled once it has left queued/running/paused. */
-function isSettledStatus(status: string): boolean {
+function isSettledStatus(status: LiveTaskStatus): boolean {
   return status !== "queued" && status !== "running" && status !== "paused";
 }
 
 /** Status word and glyph for one live row: spinner while running, hollow dot while queued. */
 function liveGlyph(
-  status: string,
+  status: LiveTaskStatus,
   spinner: string,
-  theme: Theme,
 ): { glyph: string; color: "success" | "error" | "warning" | "muted" | "accent" } {
   if (status === "running") return { glyph: spinner, color: "accent" };
   if (status === "queued" || status === "paused") {
     return { glyph: "○", color: "muted" };
   }
-  return collapsedGlyph(status as TaskStatus);
+  return collapsedGlyph(status);
 }
 
 /**
@@ -818,9 +825,7 @@ function liveBoard(
   }
   const live = details.live;
   if (!isRecord(live) || typeof live.startedAt !== "number") return undefined;
-  const tasks = (Array.isArray(live.tasks) ? live.tasks : []).filter(
-    isLiveTask,
-  ) as readonly LiveBoardTask[];
+  const tasks = (Array.isArray(live.tasks) ? live.tasks : []).filter(isLiveTask);
   if (tasks.length === 0) return undefined;
   const now = Date.now();
   const done = tasks.filter((task) => isSettledStatus(task.status)).length;
@@ -844,48 +849,54 @@ function liveBoard(
     ? tasks.filter((task) => task.status !== "queued")
     : tasks;
   const queuedCount = tasks.length - shownTasks.length;
-  const width = Math.max(
-    LIVE_LABEL_LIMIT,
-    ...shownTasks.map(
-      (task) => truncateLine(displaySafe(task.label || task.id), LIVE_LABEL_LIMIT).length,
-    ),
+  const elapsedFor = (task: LiveTaskView): string =>
+    task.status === "queued"
+      ? "—"
+      : formatDuration(
+          Math.max(
+            0,
+            (isSettledStatus(task.status) ? task.lastEventAt : now) -
+              task.startedAt,
+          ),
+        );
+  const elapsedWidth = Math.max(
+    8,
+    ...shownTasks.map((task) => elapsedFor(task).length),
   );
 
   const rows: string[] = [];
   for (const task of shownTasks) {
-    const settled = isSettledStatus(task.status);
-    const { glyph, color } = liveGlyph(task.status, spinner, theme);
-    // A queued task has not started, so it has no elapsed time to show.
-    const elapsed =
-      task.status === "queued"
-        ? "—"
-        : formatDuration(
-            Math.max(0, (settled ? task.lastEventAt : now) - task.startedAt),
-          );
+    const { glyph, color } = liveGlyph(task.status, spinner);
+    const elapsed = elapsedFor(task);
     const label = truncateLine(displaySafe(task.label || task.id), LIVE_LABEL_LIMIT);
     const tool = task.tool !== undefined ? displaySafe(task.tool) : "";
     const preview =
       task.preview !== undefined
         ? displaySafe(task.preview).replace(/\s+/g, " ").trim()
         : "";
-    const status = settled ? task.status : task.status === "queued" ? "queued" : "running";
+    const status = task.status;
     rows.push(
       theme.fg(color, glyph) +
         " " +
         theme.fg(
-          task.status === "queued" ? "muted" : "toolOutput",
-          status.padEnd(7),
+          task.status === "queued" || task.status === "paused"
+            ? "muted"
+            : "toolOutput",
+          truncateLine(status, LIVE_STATUS_WIDTH).padEnd(LIVE_STATUS_WIDTH),
         ) +
         " " +
-        theme.fg("toolTitle", label.padEnd(width)) +
+        theme.fg("toolTitle", label.padEnd(LIVE_LABEL_LIMIT)) +
         " " +
-        theme.fg("muted", elapsed.padStart(8)) +
+        theme.fg("muted", elapsed.padStart(elapsedWidth)) +
         (tool !== ""
-          ? "  " + theme.fg("toolOutput", tool.padEnd(5)) + " " + theme.fg("muted", truncateLine(preview, LIVE_PREVIEW_LIMIT))
+          ? "  " +
+            theme.fg("toolOutput", tool) +
+            " " +
+            theme.fg("muted", truncateLine(preview, LIVE_PREVIEW_LIMIT))
           : ""),
     );
     if (expanded) {
-      for (const call of (task.recent ?? []).filter(isLiveCall)) {
+      for (const call of task.recent ?? []) {
         const callPreview = displaySafe(call.preview).replace(/\s+/g, " ").trim();
         rows.push(
           theme.fg("muted", "      ") +

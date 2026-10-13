@@ -131,11 +131,49 @@ describe("inline live board layouts", () => {
     expect(lines[0]).toMatch(/^delegate · 6 tasks · running \S+ · 2 done$/);
     expect(lines).toHaveLength(7);
     // The row shows the task's latest call (fixture: docs read memory-queue.ts last).
-    expect(lines[1]).toMatch(/^ {2}✓ ok {6}logging +9\.4s {2}read {2}memory-queue\.ts$/);
-    expect(lines[5]).toMatch(/^ {2}○ queued {2}hindsight +— *$/);
+    expect(lines[1]).toMatch(/^ {2}✓ ok {15}logging {15} +9\.4s {2}read memory-queue\.ts$/);
+    expect(lines[5]).toMatch(/^ {2}○ queued +hindsight +— *$/);
     // Labels pad to one width, so the tool-name column lines up on every row.
     const toolColumns = lines.slice(1, 5).map((line) => line.search(/(read|grep) /));
     expect(new Set(toolColumns).size).toBe(1);
+  });
+
+  test("long legal statuses and tool names preserve the columns; paused is named", async () => {
+    session = await openDelegateBoundary();
+    setCleanTui(false);
+    const frame = fixedFrame();
+    const statuses = [
+      "budget-exhausted",
+      "paused",
+      "interrupted",
+      "cancelled",
+    ];
+    const toolNames = ["vision", "mcp__lookup", "web_search", "read"];
+    const tasks = frame.live.tasks.slice(0, statuses.length).map((task, index) => ({
+      ...task,
+      status: statuses[index]!,
+      tool: toolNames[index]!,
+      preview: `preview-${index}`,
+    }));
+    const lines = render(
+      session,
+      { ...frame, live: { ...frame.live, tasks } },
+      false,
+    ).slice(1);
+
+    expect(lines[0]).toContain("budget-exhausted");
+    expect(lines[1]).toContain("paused");
+    expect(lines[1]).not.toContain("running");
+    expect(lines[2]).toContain("interrupted");
+    expect(lines[3]).toContain("cancelled");
+
+    const labelColumns = lines.map((line) => line.search(/logging|tests|docs|code-health/));
+    const toolColumns = lines.map((line, index) =>
+      line.indexOf(toolNames[index]!),
+    );
+    expect(new Set(labelColumns).size).toBe(1);
+    expect(new Set(toolColumns).size).toBe(1);
+    expect(lines[1]).toContain("mcp__lookup preview-1");
   });
 
   test("expanded: each task carries its recent calls, newest last", async () => {
@@ -167,7 +205,7 @@ describe("inline live board layouts", () => {
     setCleanTui(true);
     const lines = render(session, fixedFrame(), true);
     expect(lines[0]).toMatch(/^delegate · 6 tasks/);
-    expect(lines.some((line) => /^ {2}○ queued {2}hindsight/.test(line))).toBe(true);
+    expect(lines.some((line) => /^ {2}○ queued +hindsight/.test(line))).toBe(true);
   });
 
   test("clean-tui with no queued tasks shows no queued line", async () => {

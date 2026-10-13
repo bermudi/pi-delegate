@@ -50,6 +50,11 @@ interface LiveTask {
   readonly lastEventAt: number;
   readonly tool?: string;
   readonly preview?: string;
+  readonly recent?: {
+    readonly tool: string;
+    readonly preview: string;
+    readonly inFlight: boolean;
+  }[];
 }
 
 interface LiveDetails {
@@ -222,11 +227,130 @@ describe("inline dispatch live board (#119)", () => {
               (task) =>
                 task.id === "tooling" &&
                 task.tool === "bash" &&
-                task.preview?.includes("HELLO-BOARD") === true,
+                task.preview?.includes("HELLO-BOARD") === true &&
+                task.recent?.some(
+                  (call) =>
+                    call.tool === "bash" &&
+                    call.preview.includes("HELLO-BOARD") &&
+                    call.inFlight === false,
+                ) === true,
             ),
           ),
         "a board frame carrying the worker's bash tail",
       );
+      const task = boardUpdates(session)
+        .flatMap((update) => update.details.live.tasks)
+        .find(
+          (row) =>
+            row.id === "tooling" &&
+            row.recent?.some(
+              (call) =>
+                call.tool === "bash" &&
+                call.preview.includes("HELLO-BOARD") &&
+                call.inFlight === false,
+            ) === true,
+        )!;
+      expect(task.recent).toHaveLength(1);
+      expect(task.recent![0]).toMatchObject({
+        tool: "bash",
+        inFlight: false,
+      });
+      expect(task.recent![0]!.preview).toContain("HELLO-BOARD");
+    } finally {
+      release();
+    }
+    const result = await dispatched;
+    expect(result.isError).toBe(false);
+  });
+
+  test("recent live calls are capped to the newest five and use arg previews in flight", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const { release, step } = gate();
+    subagents.respond([
+      ...[1, 2, 3, 4, 5].map((number) =>
+        fauxAssistantMessage([
+          fauxToolCall("bash", { command: `echo RECENT-${number}` }),
+        ]),
+      ),
+      fauxAssistantMessage([
+        fauxToolCall("bash", { command: "sleep 2; echo RECENT-6" }),
+      ]),
+      step,
+    ]);
+
+    const dispatched = callDelegate(session, {
+      async: false,
+      tasks: [{ id: "recent-calls", prompt: "run several tools" }],
+    });
+    try {
+      await waitFor(
+        () =>
+          boardUpdates(session!).some((update) => {
+            const task = update.details.live.tasks.find(
+              (row) => row.id === "recent-calls",
+            );
+            return (
+              task?.recent?.length === 5 &&
+              task.recent.at(-1)?.inFlight === true &&
+              task.recent.at(-1)?.preview.includes("RECENT-6") === true
+            );
+          }),
+        "an in-flight frame with the newest five recent calls",
+      );
+      const runningTask = boardUpdates(session)
+        .map((update) =>
+          update.details.live.tasks.find((row) => row.id === "recent-calls"),
+        )
+        .find(
+          (task) =>
+            task?.recent?.at(-1)?.inFlight === true &&
+            task.recent.at(-1)?.preview.includes("RECENT-6") === true,
+        )!;
+      expect(runningTask.recent).toHaveLength(5);
+      expect(runningTask.recent!.map((call) => call.preview)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("RECENT-2"),
+          expect.stringContaining("RECENT-3"),
+          expect.stringContaining("RECENT-4"),
+          expect.stringContaining("RECENT-5"),
+          expect.stringContaining("RECENT-6"),
+        ]),
+      );
+      expect(runningTask.recent!.at(-1)).toMatchObject({
+        tool: "bash",
+        inFlight: true,
+      });
+      expect(runningTask.recent!.at(-1)!.preview).toBe(
+        "$ sleep 2; echo RECENT-6",
+      );
+      expect(runningTask.recent!.at(-1)!.preview).not.toContain("→");
+
+      await waitFor(
+        () =>
+          boardUpdates(session!).some((update) => {
+            const task = update.details.live.tasks.find(
+              (row) => row.id === "recent-calls",
+            );
+            return (
+              task?.recent?.at(-1)?.inFlight === false &&
+              task.recent.at(-1)?.preview.includes("RECENT-6") === true
+            );
+          }),
+        "the last tool's completed result preview",
+      );
+      const settledCall = boardUpdates(session)
+        .map((update) =>
+          update.details.live.tasks.find((row) => row.id === "recent-calls"),
+        )
+        .find(
+          (task) =>
+            task?.recent?.at(-1)?.inFlight === false &&
+            task.recent.at(-1)?.preview.includes("RECENT-6") === true,
+        )!
+        .recent!.at(-1)!;
+      expect(settledCall.preview).toContain("→");
+      expect(settledCall.inFlight).toBe(false);
     } finally {
       release();
     }
