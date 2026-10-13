@@ -66,6 +66,18 @@ on the model-facing surface answers to this first:
 Origin story (2026-09-27, a `general` first-call error colliding with our
 registry) and the candidate-application ledger: docs/history/guiding-principle-origin.md.
 
+## Second principle: the main thread is the customer
+
+Any delegation design that optimizes for "more workers" over "main thread
+stays legible" optimizes the wrong thing. The product is not the fleet —
+it is a parent that can still read its own context after the work lands.
+Everything else inherits from that: results are summaries with evidence
+pointers (`sessionFile`, owner-only outcome files), never dumps; admission
+and quiescence protect the parent's turn, not a scheduler's throughput;
+fan-out shape follows legibility, and a batch that floods the main thread
+was one task too wide. A proposal that gives workers more without a
+main-thread payoff is a bug in the proposal.
+
 ## Deployment reality (learned 2026-09-27, the hard way)
 
 Pi loads the published `npm:@bermudi/pi-delegate` tarball into
