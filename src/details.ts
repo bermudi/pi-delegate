@@ -302,6 +302,19 @@ export const liveDispatchDetailsSchema = Type.Object(
               lastEventAt: Type.Number(),
               tool: Type.Optional(Type.String()),
               preview: Type.Optional(Type.String()),
+              /** The task's newest tool calls, oldest first (expanded view). */
+              recent: Type.Optional(
+                readonlyArray(
+                  Type.Object(
+                    {
+                      tool: Type.String(),
+                      preview: Type.String(),
+                      inFlight: Type.Boolean(),
+                    },
+                    { additionalProperties: false },
+                  ),
+                ),
+              ),
             },
             { additionalProperties: false },
           ),

@@ -18,6 +18,9 @@ import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { ActivityRow } from "./activity.ts";
 import type { LiveDispatchDetails } from "./details.ts";
 
+/** Newest tool calls each task carries in a frame (expanded view). */
+const RECENT_CALLS = 5;
+
 /** One frame's partial result: notices as content, the live projection
  * as details — the `delegate` tool's partial-update shape. */
 export interface BoardFrame {
@@ -71,6 +74,11 @@ function liveDetailsOf(
                   inFlight !== undefined ? last.argPreview : last.preview,
               }
             : {}),
+          recent: row.toolCalls.slice(-RECENT_CALLS).map((call) => ({
+            tool: call.tool,
+            preview: call.inFlight ? call.argPreview : call.preview,
+            inFlight: call.inFlight,
+          })),
         };
       }),
     },

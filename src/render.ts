@@ -736,7 +736,78 @@ function isLiveTask(value: unknown): value is LiveTaskView {
  * glyph, label, duration, and the current/last `tool: preview` tail. The
  * partial's `live` details are display-only and never settle-model data.
  */
-function liveBoard(result: AgentToolResult<unknown>, theme: Theme): string | undefined {
+/**
+ * clean-tui's global flag (bermudis-pi-goodies, `clean-tui-active.ts`). Read
+ * by its symbol key, so delegate never imports goodies. Read at render time:
+ * the flag only changes after `/reload`, so the value is stable per session.
+ */
+const CLEAN_TUI_KEY = Symbol.for("bermudis-pi-goodies.clean-tui.active.v1");
+
+function cleanTuiActive(): boolean {
+  return (globalThis as Record<symbol, unknown>)[CLEAN_TUI_KEY] === true;
+}
+
+interface LiveBoardTask {
+  readonly id: string;
+  readonly label: string;
+  readonly status: string;
+  readonly startedAt: number;
+  readonly lastEventAt: number;
+  readonly tool?: string;
+  readonly preview?: string;
+  readonly recent?: readonly LiveBoardCall[];
+}
+
+interface LiveBoardCall {
+  readonly tool: string;
+  readonly preview: string;
+  readonly inFlight: boolean;
+}
+
+function isLiveCall(value: unknown): value is LiveBoardCall {
+  return (
+    isRecord(value) &&
+    typeof value.tool === "string" &&
+    typeof value.preview === "string" &&
+    typeof value.inFlight === "boolean"
+  );
+}
+
+/** A task is settled once it has left queued/running/paused. */
+function isSettledStatus(status: string): boolean {
+  return status !== "queued" && status !== "running" && status !== "paused";
+}
+
+/** Status word and glyph for one live row: spinner while running, hollow dot while queued. */
+function liveGlyph(
+  status: string,
+  spinner: string,
+  theme: Theme,
+): { glyph: string; color: "success" | "error" | "warning" | "muted" | "accent" } {
+  if (status === "running") return { glyph: spinner, color: "accent" };
+  if (status === "queued" || status === "paused") {
+    return { glyph: "○", color: "muted" };
+  }
+  return collapsedGlyph(status as TaskStatus);
+}
+
+/**
+ * The inline batch's live board (#119), in one of three layouts:
+ *
+ * - **clean-tui** (when clean-tui is on): one bordered panel. Queued tasks
+ *   have no row of their own; they fold into a `○ N queued` line.
+ * - **normal**: one row per task, columns aligned, queued rows shown.
+ * - **expanded** (the expand key): normal rows, each followed by its
+ *   recent tool calls, newest last.
+ *
+ * Partial frames are display-only. The partial's `live` details are never
+ * settle-model data.
+ */
+function liveBoard(
+  result: AgentToolResult<unknown>,
+  theme: Theme,
+  expanded: boolean,
+): string | undefined {
   const details = result.details;
   if (
     !isRecord(details) ||
@@ -747,68 +818,100 @@ function liveBoard(result: AgentToolResult<unknown>, theme: Theme): string | und
   }
   const live = details.live;
   if (!isRecord(live) || typeof live.startedAt !== "number") return undefined;
-  const tasks = (Array.isArray(live.tasks) ? live.tasks : []).filter(isLiveTask);
+  const tasks = (Array.isArray(live.tasks) ? live.tasks : []).filter(
+    isLiveTask,
+  ) as readonly LiveBoardTask[];
   if (tasks.length === 0) return undefined;
   const now = Date.now();
-  const done = tasks.filter(
-    (task) =>
-      task.status !== "queued" &&
-      task.status !== "running" &&
-      task.status !== "paused",
-  ).length;
+  const done = tasks.filter((task) => isSettledStatus(task.status)).length;
   const spinner = LIVE_SPINNER[Math.floor(now / 160) % LIVE_SPINNER.length]!;
-  const lines = [
-    theme.fg("toolTitle", theme.bold("delegate")) +
-      theme.fg("muted", " — ") +
-      theme.fg("accent", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`) +
-      theme.fg("muted", ` · running ${formatDuration(now - live.startedAt)}`) +
-      (done > 0 ? theme.fg("muted", ` · ${done} done`) : ""),
-  ];
-  for (const task of tasks) {
-    const settled =
-      task.status !== "queued" &&
-      task.status !== "running" &&
-      task.status !== "paused";
-    const { glyph, color } = task.status === "running"
-      ? { glyph: spinner, color: "accent" as const }
-      : task.status === "queued" || task.status === "paused"
-        ? { glyph: "○", color: "muted" as const }
-        : collapsedGlyph(task.status as TaskStatus);
-    const elapsed = formatDuration(
-      Math.max(0, (settled ? task.lastEventAt : now) - task.startedAt),
-    );
-    const label = truncateLine(
-      displaySafe(task.label || task.id),
-      LIVE_LABEL_LIMIT,
-    );
-    const tail =
-      task.tool !== undefined
-        ? ` ${task.tool}${task.preview !== undefined ? `: ${displaySafe(task.preview).replace(/\s+/g, " ").trim()}` : ""}`
-        : "";
-    lines.push(
-      theme.fg("muted", "  ") +
-        theme.fg(color, glyph) +
-        " " +
-        theme.fg("toolTitle", label.padEnd(LIVE_LABEL_LIMIT)) +
-        " " +
-        theme.fg(
-          settled ? "muted" : "toolOutput",
-          settled ? `${task.status} ${elapsed}` : elapsed,
-        ) +
-        (tail !== ""
-          ? theme.fg("muted", truncateLine(tail, LIVE_PREVIEW_LIMIT))
-          : ""),
-    );
-  }
+  const clean = !expanded && cleanTuiActive();
   const notices = Array.isArray(details.notices)
     ? details.notices.filter(
         (notice): notice is string => typeof notice === "string",
       )
     : [];
-  for (const notice of notices) {
-    lines.push(theme.fg("muted", `  ${displaySafe(notice)}`));
+
+  const header =
+    theme.fg("toolTitle", theme.bold("delegate")) +
+    theme.fg("muted", " · ") +
+    theme.fg("accent", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`) +
+    theme.fg("muted", ` · running ${formatDuration(now - live.startedAt)}`) +
+    (done > 0 ? theme.fg("muted", ` · ${done} done`) : "");
+
+  // Rows that show a task: clean-tui hides queued tasks; the other modes show all.
+  const shownTasks = clean
+    ? tasks.filter((task) => task.status !== "queued")
+    : tasks;
+  const queuedCount = tasks.length - shownTasks.length;
+  const width = Math.max(
+    LIVE_LABEL_LIMIT,
+    ...shownTasks.map(
+      (task) => truncateLine(displaySafe(task.label || task.id), LIVE_LABEL_LIMIT).length,
+    ),
+  );
+
+  const rows: string[] = [];
+  for (const task of shownTasks) {
+    const settled = isSettledStatus(task.status);
+    const { glyph, color } = liveGlyph(task.status, spinner, theme);
+    // A queued task has not started, so it has no elapsed time to show.
+    const elapsed =
+      task.status === "queued"
+        ? "—"
+        : formatDuration(
+            Math.max(0, (settled ? task.lastEventAt : now) - task.startedAt),
+          );
+    const label = truncateLine(displaySafe(task.label || task.id), LIVE_LABEL_LIMIT);
+    const tool = task.tool !== undefined ? displaySafe(task.tool) : "";
+    const preview =
+      task.preview !== undefined
+        ? displaySafe(task.preview).replace(/\s+/g, " ").trim()
+        : "";
+    const status = settled ? task.status : task.status === "queued" ? "queued" : "running";
+    rows.push(
+      theme.fg(color, glyph) +
+        " " +
+        theme.fg(
+          task.status === "queued" ? "muted" : "toolOutput",
+          status.padEnd(7),
+        ) +
+        " " +
+        theme.fg("toolTitle", label.padEnd(width)) +
+        " " +
+        theme.fg("muted", elapsed.padStart(8)) +
+        (tool !== ""
+          ? "  " + theme.fg("toolOutput", tool.padEnd(5)) + " " + theme.fg("muted", truncateLine(preview, LIVE_PREVIEW_LIMIT))
+          : ""),
+    );
+    if (expanded) {
+      for (const call of (task.recent ?? []).filter(isLiveCall)) {
+        const callPreview = displaySafe(call.preview).replace(/\s+/g, " ").trim();
+        rows.push(
+          theme.fg("muted", "      ") +
+            theme.fg(call.inFlight ? "accent" : "muted", call.inFlight ? "▸ " : "· ") +
+            theme.fg("toolOutput", displaySafe(call.tool)) +
+            (callPreview !== "" ? " " + theme.fg("muted", truncateLine(callPreview, LIVE_PREVIEW_LIMIT)) : ""),
+        );
+      }
+    }
   }
-  return lines.join("\n");
+  if (clean && queuedCount > 0) {
+    rows.push(theme.fg("muted", `○ ${queuedCount} queued`));
+  }
+  for (const notice of notices) {
+    rows.push(theme.fg("muted", displaySafe(notice)));
+  }
+
+  if (!clean) {
+    return [header, ...rows.map((row) => "  " + row)].join("\n");
+  }
+  const border = (line: string): string => theme.fg("muted", "│ ") + line;
+  return [
+    theme.fg("muted", "╭ ") + header,
+    ...rows.map(border),
+    theme.fg("muted", "╰"),
+  ].join("\n");
 }
 
 /**
@@ -840,7 +943,7 @@ export function createResultRenderer(tickets: TicketStore) {
     // never the collapsed/expanded result views, which only apply to the
     // settled record.
     if (options.isPartial) {
-      const board = liveBoard(result, theme);
+      const board = liveBoard(result, theme, options.expanded);
       if (board !== undefined) {
         setText(board);
         return component;
