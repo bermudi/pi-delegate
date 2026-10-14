@@ -35,6 +35,7 @@ import {
   resumeTagOf,
   truncateLine,
 } from "./format.ts";
+import { TASK_STATUS_VALUES } from "./schema-primitives.ts";
 import { UNBOUNDED_OUTPUT } from "./spill.ts";
 import { recoveryWarning, type TicketStore } from "./tickets.ts";
 import type {
@@ -702,8 +703,8 @@ function collapsedRoster(text: string, theme: Theme): string {
 
 /** Braille frames for a live board's running rows (#119). */
 const LIVE_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/** Per-row preview budget; tool names stay intact, even when they're long. */
-const LIVE_PREVIEW_LIMIT = 60;
+/** Rows target the classic 80-column floor: past a row's fixed prefix, tool + preview share what's left. */
+const LIVE_ROW_TARGET = 80;
 /** Row labels truncate so the tail keeps its budget. */
 const LIVE_LABEL_LIMIT = 22;
 /** Longest task status in the live-details schema (`budget-exhausted`). */
@@ -728,21 +729,20 @@ interface LiveToolCall {
   readonly inFlight: boolean;
 }
 
+/**
+ * Live statuses = the settled set, single-sourced from `TASK_STATUS_VALUES`
+ * (the same array `details.ts` and the journal schemas derive from), plus
+ * the in-flight-only literals. A status the schemas don't know can't appear
+ * in emitted details, so this guard stays exactly as tolerant as they are —
+ * never a fourth hand-copy of the set that silently drops rows later.
+ */
 function isLiveTaskStatus(status: string): status is LiveTaskStatus {
-  switch (status) {
-    case "queued":
-    case "running":
-    case "paused":
-    case "ok":
-    case "failed":
-    case "cancelled":
-    case "blocked":
-    case "interrupted":
-    case "budget-exhausted":
-      return true;
-    default:
-      return false;
-  }
+  return (
+    (TASK_STATUS_VALUES as readonly string[]).includes(status) ||
+    status === "queued" ||
+    status === "running" ||
+    status === "paused"
+  );
 }
 
 function isLiveToolCall(value: unknown): value is LiveToolCall {
@@ -796,6 +796,22 @@ function liveGlyph(
     return { glyph: "○", color: "muted" };
   }
   return collapsedGlyph(status);
+}
+
+/**
+ * Tool + preview share one row's tail budget: the tool keeps its full name
+ * (even long MCP ones — identification beats context), the preview absorbs
+ * whatever width is left, and a tool that alone fills the budget drops the
+ * preview rather than wrapping the row past the target.
+ */
+function fitToolPreview(
+  tool: string,
+  preview: string,
+  budget: number,
+): { tool: string; preview: string } {
+  const limit = budget - tool.length - 1;
+  if (limit < 1) return { tool, preview: "" };
+  return { tool, preview: truncateLine(preview, limit) };
 }
 
 /**
@@ -863,6 +879,16 @@ function liveBoard(
     8,
     ...shownTasks.map((task) => elapsedFor(task).length),
   );
+  // Tail budgets: everything before the tool name is fixed-width (indent,
+  // glyph, status, label, elapsed, separators), so tool + preview share
+  // whatever remains up to LIVE_ROW_TARGET. clean-tui rows carry the
+  // panel's `│ ` border; recent-call rows only render expanded, never clean.
+  const taskTailBudget =
+    LIVE_ROW_TARGET -
+    (clean ? 2 : 0) - // clean-tui's panel border
+    (2 + 1 + 1 + LIVE_STATUS_WIDTH + 1 + LIVE_LABEL_LIMIT + 1 + 2) -
+    elapsedWidth;
+  const callTailBudget = LIVE_ROW_TARGET - (2 + 6 + 2) - 1;
 
   const rows: string[] = [];
   for (const task of shownTasks) {
@@ -875,6 +901,7 @@ function liveBoard(
         ? displaySafe(task.preview).replace(/\s+/g, " ").trim()
         : "";
     const status = task.status;
+    const tail = fitToolPreview(tool, preview, taskTailBudget);
     rows.push(
       theme.fg(color, glyph) +
         " " +
@@ -890,19 +917,25 @@ function liveBoard(
         theme.fg("muted", elapsed.padStart(elapsedWidth)) +
         (tool !== ""
           ? "  " +
-            theme.fg("toolOutput", tool) +
-            " " +
-            theme.fg("muted", truncateLine(preview, LIVE_PREVIEW_LIMIT))
+            theme.fg("toolOutput", tail.tool) +
+            (tail.preview !== ""
+              ? " " + theme.fg("muted", tail.preview)
+              : "")
           : ""),
     );
     if (expanded) {
       for (const call of task.recent ?? []) {
         const callPreview = displaySafe(call.preview).replace(/\s+/g, " ").trim();
+        const callTail = fitToolPreview(
+          displaySafe(call.tool),
+          callPreview,
+          callTailBudget,
+        );
         rows.push(
           theme.fg("muted", "      ") +
             theme.fg(call.inFlight ? "accent" : "muted", call.inFlight ? "▸ " : "· ") +
-            theme.fg("toolOutput", displaySafe(call.tool)) +
-            (callPreview !== "" ? " " + theme.fg("muted", truncateLine(callPreview, LIVE_PREVIEW_LIMIT)) : ""),
+            theme.fg("toolOutput", callTail.tool) +
+            (callTail.preview !== "" ? " " + theme.fg("muted", callTail.preview) : ""),
         );
       }
     }

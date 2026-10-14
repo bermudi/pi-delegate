@@ -176,6 +176,30 @@ describe("inline live board layouts", () => {
     expect(lines[1]).toContain("mcp__lookup preview-1");
   });
 
+  test("a long tool name budgets the preview so rows stay one line at 80 columns", async () => {
+    session = await openDelegateBoundary();
+    setCleanTui(false);
+    const frame = fixedFrame();
+    const tasks = [
+      {
+        ...frame.live.tasks[1]!, // the running "tests" task
+        tool: "mcp__github__search",
+        preview: "x".repeat(200),
+      },
+    ];
+    const lines = render(
+      session,
+      { ...frame, live: { ...frame.live, tasks } },
+      false,
+    );
+    const row = lines[1]!;
+    // The tool name stays intact (identification beats context); the
+    // preview absorbs the remaining tail budget so the row never wraps.
+    expect(row).toContain("mcp__github__search");
+    expect(row).toMatch(/x{5}…$/);
+    expect(row.length).toBeLessThanOrEqual(80);
+  });
+
   test("expanded: each task carries its recent calls, newest last", async () => {
     session = await openDelegateBoundary();
     setCleanTui(false);
