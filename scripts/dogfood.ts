@@ -15,8 +15,11 @@
 //      single surface (ADR 0002), scoped by DELEGATE_AGENT_DIR to an
 //      owner-only scratch dir, telemetry opted in.
 //   4. Asserts on hard evidence only — the marker file the inline task
-//      writes, the saved session transcript's delegate tool results, and
-//      telemetry rows (calls/tasks/misfires) — never the model's summary.
+//      writes, the saved session transcript's delegate tool results,
+//      telemetry rows (calls/tasks/misfires), and the `delegate_report`
+//      scenario's spooled record (mode bits, structure, and the fact that the
+//      model's prose reached the record and never the diagnostics channel) —
+//      never the model's summary.
 //
 // Usage:
 //   bun scripts/dogfood.ts [--dry-run] [--keep] [--timeout-secs N]
@@ -24,9 +27,11 @@
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -34,6 +39,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
+import { assertReportScenario } from "./dogfood-report.ts";
 
 const REPO = resolve(import.meta.dirname, "..");
 const CONFIG_PATH = join(REPO, "docs/verification/dogfood.config.json");
@@ -133,7 +139,9 @@ function planSurface(root: string, _modelId: string): SurfacePlan {
     "Use the delegate tool exactly twice in this turn:",
     `(1) one call with async:false, tasks: [{ prompt: "Write exactly ${marker} into ${markerPath} using the bash tool" }]`,
     `(2) one call with async omitted (background), tasks: [{ prompt: "Read ${markerPath} and reply with exactly its contents" }]`,
-    "Then use delegate_ticket action:\"wait\" on the background ticket. Keep your final reply under five short lines; no explanations.",
+    "Then use delegate_ticket action:\"wait\" on the background ticket.",
+    `(3) exactly one delegate_report call: its \"what\" field must contain the exact string ${marker} and say it is the dogfood's report-surface check; \"expected\" and \"observed\" are one short sentence each about what this run actually did. Do not call delegate_report again.`,
+    "Keep your final reply under five short lines; no explanations.",
   ].join("\n");
 
   return { scratch, agentDir, markerPath, marker, prompt };
@@ -187,10 +195,11 @@ function runSurface(plan: SurfacePlan, modelId: string, timeoutSecs: number): st
         .split("\n")
         .filter((line) => line.trim() !== "")
     : [];
+  let transcript = "";
   if (transcripts.length === 0) {
     failures.push(`no session transcript found under ${sessionDir}`);
   } else {
-    const transcript = readFileSync(transcripts[0]!, "utf8");
+    transcript = readFileSync(transcripts[0]!, "utf8");
     if (!transcript.includes('"delegate"')) {
       failures.push("session transcript shows no delegate tool execution");
     }
@@ -199,7 +208,21 @@ function runSurface(plan: SurfacePlan, modelId: string, timeoutSecs: number): st
     }
   }
 
-  // (c) Telemetry: opted-in scratch DB must show the dispatch, task rows on
+  // (c) The delegate_report scenario: one spooled record, owner-only, with
+  // the marker in the model's own field and the extension's ground truth
+  // beside it, the receipt in the transcript, and one allowlisted diagnostic.
+  // Asserted on files and channel records — never on the model's summary.
+  assertReportScenario(
+    {
+      agentDir: plan.agentDir,
+      marker: plan.marker,
+      transcript,
+      output: invocation.output,
+    },
+    failures,
+  );
+
+  // (d) Telemetry: opted-in scratch DB must show the dispatch, task rows on
   // the pinned model, and zero misfires for a clean run.
   const dbPath = join(plan.agentDir, "delegate-usage.db");
   if (!existsSync(dbPath)) {

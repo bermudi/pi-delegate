@@ -374,6 +374,29 @@ export const ticketDetailsSchema = Type.Object(
 );
 export type TicketDetails = Static<typeof ticketDetailsSchema>;
 
+/**
+ * `delegate_report` result details (SPEC v3 "Report surface"). `reportId`
+ * and `path` are undefined on a refusal that wrote nothing (unsupported
+ * routing, spool failure); `capped` carries no path because the cap is
+ * checked before any create.
+ */
+export const reportDetailsSchema = Type.Object(
+  {
+    mode: Type.Literal("report"),
+    status: literalUnion([
+      "filed",
+      "duplicate",
+      "capped",
+      "unsupported",
+      "failed",
+    ] as const),
+    reportId: Type.Union([Type.String(), Type.Undefined()]),
+    path: Type.Union([Type.String(), Type.Undefined()]),
+  },
+  { additionalProperties: false },
+);
+export type ReportDetails = Static<typeof reportDetailsSchema>;
+
 /** `delegate_session` result details. */
 export const sessionDetailsSchema = Type.Object(
   {

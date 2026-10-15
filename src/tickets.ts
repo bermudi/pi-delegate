@@ -452,9 +452,11 @@ function taskAddress(ticketId: string, taskId: string): string {
 /**
  * Unknown-ticket errors name this session's tickets (#64, same scoping
  * as the roster): other sessions' records stay readable by explicit id
- * but are not suggested as names this session can act on.
+ * but are not suggested as names this session can act on. Exported for
+ * `delegate_report`: its optional `ticketId` rejects against the same
+ * enumerable set rather than in free text (enumerate-or-inherit).
  */
-function knownTickets(store: TicketStore, sessionId: string | undefined): string {
+export function knownTickets(store: TicketStore, sessionId: string | undefined): string {
   const { mine, hidden } = ownTickets(store, sessionId);
   const suffix = hiddenTicketNote(hidden);
   const base =

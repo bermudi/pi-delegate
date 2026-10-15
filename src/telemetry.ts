@@ -14,7 +14,9 @@ const require = createRequire(import.meta.url);
 // even unlisted in `files`, so this resolves both in-tree and installed
 // under ~/.pi/agent/npm/.
 const pkg = require("../package.json") as { version?: unknown };
-const EXTENSION_VERSION =
+/** The extension's own version as shipped — telemetry rows and bug-report
+ * records must name the same build, so this is the one resolved value. */
+export const EXTENSION_VERSION =
   typeof pkg.version === "string" && pkg.version !== ""
     ? pkg.version
     : "unknown";

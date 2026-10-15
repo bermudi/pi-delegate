@@ -74,12 +74,13 @@ nonthrowing sink retains a bounded failure count and safe routing context
 through Pi-managed UI notices when available, and adds a warning to the next
 public tool result's content and per-return `details.diagnosticWarning`. This
 metadata is cloned, preserving the original typed fields without mutating cached
-operation/ticket results. All three tool renderers show it collapsed and expanded,
+operation/ticket results. All four tool renderers show it collapsed and expanded,
 including recorded-history views with no live store. A repaired operation replay
 must not retain an earlier return's warning. Notice failures remain explicitly visible in that warning;
 they never recurse into the unavailable logger. Original tool errors stand.
 
-Directory components exactly named `delegate-diagnostics` or
+Directory components exactly named `delegate-diagnostics`,
+`delegate-reports` (see "Report surface"), or
 `pi-delegate-diagnostics-<numeric uid>-<numeric pid>` are reserved runtime
 namespaces anywhere in a source tree, including retained other-process fallback
 trees. They and existing symlink aliases are excluded before scratch copying,
@@ -108,6 +109,74 @@ Caller-facing tool errors are unchanged. Manual profile discovery retains its
 intentional silent warning sink. Framed worker stdout remains protocol-only.
 No interception of global console, mutable global state, new configuration
 knobs, or persistent file handles are introduced.
+
+## Report surface (#147, operator-approved design review)
+
+Delegate registers a fourth tool, `delegate_report`, giving the parent model a
+bounded return channel for surface collisions only it can witness: behavior
+contradicting a tool description or a SPEC outcome, a misleading error message,
+a rejection that does not enumerate the resolvable set (or a failure that
+surfaces two layers late), or an untaught divergence from the incumbent harness
+idiom. Provider flakiness and Pi host bugs are explicitly not reportable, and
+the tool description carries the discriminators (no telemetry `calls` row plus
+an orphaned `tool_execution_start` means the host never ran the tool; see
+docs/diagnostics/pi-host-incidents.md).
+
+- **Input.** `what`, `expected`, and `observed` are required strings of at most
+  512 characters each; `ticketId` is optional. An unknown ticket id rejects
+  before any record is written and lists the tickets this session can resolve
+  (enumerate-or-inherit). No field selects machinery, and no new configuration
+  knob exists — the bounds and the cap are named constants.
+- **Output.** A terse receipt: report id, record path, the attached-evidence
+  pointer list, dedup status, and the sentence "This is a local record for the
+  operator; it changes nothing about running work." No promise of action and no
+  corrective guidance; a refusal (cap reached, unsupported platform, spool
+  failure) states the refusal and nothing else.
+- **Record.** One owner-only JSON file per report under
+  `<DELEGATE_AGENT_DIR>/delegate-reports/` — 0700 tree, 0600 single-link files —
+  written under the diagnostics sink's secure routing rules
+  (descriptor-relative traversal, `O_NOFOLLOW`, owner and mode checks on every
+  component, no persistent handle). Platforms without those capabilities answer
+  the call as unsupported — a refusal in the tool result, never a crash, and
+  never a fallback to an attached terminal or a shared temporary directory. The
+  record carries the model's three fields plus extension-attached ground truth:
+  extension version, host Pi version, session file path, the ticket ids this
+  session touched, and a telemetry pointer (session id + time window). Pointers
+  only — telemetry rows are never copied into a record.
+- **Dedup and abuse control.** The record's name is the first 12 hex characters
+  of sha256 over (what, expected, observed), so an identical resubmission finds
+  its own name taken and answers "duplicate of <id>, not re-filed" without
+  writing anything, without consuming budget, and even after the cap is
+  reached. At most 3 reports are accepted per session; further distinct reports
+  are refused with the ids already filed.
+- **Privacy.** Model prose reaches the record and the tool result, never the
+  diagnostic sink: filing emits exactly one info-level `bug report filed`
+  record carrying only existing allowlisted context keys (`path`, `count`), and
+  this contract changes nothing about the sink's own privacy rules. Reports
+  never leave the machine — no issue is filed automatically, no network request
+  is made, and no running work is affected.
+- **Reserved namespace.** `delegate-reports` is a reserved runtime namespace
+  exactly like `delegate-diagnostics`: it and its symlink aliases are excluded
+  before scratch copying, from every private Git snapshot (including seeded
+  tracked entries, and including runtime trees nested inside an ignored
+  directory a worker would otherwise be provisioned), and from
+  source-drift/completion-attribution evidence. Actual report destinations are
+  excluded even when not yet created.
+- **Workers never report.** `delegate_report` is stripped — silently — from
+  every child toolset exactly like the other three tools (#45). A worker that
+  hits a wall reports it in its result to its parent, never in a spooled record
+  with a child's evidence pointers.
+- **Intake, not backlog.** The spool is emptied deliberately: every record ends
+  up filed as an issue or explicitly discarded, and GitHub issues remain the
+  only backlog. `bun run reports:triage` lists untriaged records (structure
+  only, never the prose) and writes a disposition beside each marked record so
+  the byte record survives for the issue it was filed into.
+
+The design's open numbers are named constants rather than knobs —
+`REPORT_FIELD_LIMIT` (512) and `REPORT_SESSION_CAP` (3) in `src/reports.ts`,
+with the 12-hex record name derived there too — and each is restated for
+operator ratification in #147 alongside ADR 0003, which records the accepted
+standing cost of a fourth tool description.
 
 ## Axioms
 

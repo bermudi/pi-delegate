@@ -29,6 +29,7 @@ import {
   type AsyncDispatchDetails,
   type HelpDetails,
   type QuestionNoticeDetails,
+  type ReportDetails,
   type SessionDetails,
   type SyncDispatchDetails,
   type TicketDetails,
@@ -56,14 +57,22 @@ import {
   createMessageRenderer,
   createResultRenderer,
   renderDelegateCall,
+  renderReportCall,
   renderSessionCall,
   renderTicketCall,
 } from "./src/render.ts";
+import {
+  receiptOf,
+  REPORT_FIELD_LIMIT,
+  REPORT_SESSION_CAP,
+  ReportSpool,
+  type ReportGroundTruth,
+} from "./src/reports.ts";
 import { VisibilitySignals } from "./src/visibility.ts";
 import { handleSessionRpc, SessionPool } from "./src/sessions.ts";
 import { SessionTeardown } from "./src/teardown.ts";
 import { TelemetryStore } from "./src/telemetry.ts";
-import { handleTicketRpc, TicketStore } from "./src/tickets.ts";
+import { handleTicketRpc, knownTickets, TicketStore } from "./src/tickets.ts";
 import type { Ticket } from "./src/types.ts";
 import {
   MODEL_FIELD_REJECTION,
@@ -71,9 +80,11 @@ import {
   REASONING_EFFORT_FIELD_REJECTION,
   THINKING_FIELD_REJECTION,
   validateDispatchCall,
+  validateReportCall,
   validateSessionCall,
   validateTicketCall,
   type DispatchCall,
+  type ReportCall,
   type TaskInput,
 } from "./src/validation.ts";
 import { workspaceNeedsSettlementHold } from "./src/workspaces.ts";
@@ -236,6 +247,30 @@ const sessionSchema = Type.Object(
   { additionalProperties: false },
 );
 
+const reportSchema = Type.Object(
+  {
+    what: Type.String({
+      description:
+        `The call or description text that behaved differently, quoted exactly. At most ${REPORT_FIELD_LIMIT} characters.`,
+    }),
+    expected: Type.String({
+      description:
+        `What the tool description, SPEC outcome, or incumbent-harness expectation led you to expect. At most ${REPORT_FIELD_LIMIT} characters.`,
+    }),
+    observed: Type.String({
+      description:
+        `What actually happened, including the exact error or result text. At most ${REPORT_FIELD_LIMIT} characters.`,
+    }),
+    ticketId: Type.Optional(
+      Type.String({
+        description:
+          "Optional: the ticket this report is about. Unknown ids reject and list the tickets this session can resolve.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
 // One tool surface (ADR 0002): these declarations are the only schema
 // vocabulary, and advertised = accepted without qualification.
 
@@ -261,6 +296,7 @@ function validatePreparedArguments<T extends TSchema>(
 type DelegateArguments = Static<typeof delegateSchema>;
 type TicketToolArguments = Static<typeof ticketSchema>;
 type SessionToolArguments = Static<typeof sessionSchema>;
+type ReportToolArguments = Static<typeof reportSchema>;
 type DelegateDetails = Record<string, unknown>;
 type DelegateResult = AgentToolResult<DelegateDetails>;
 
@@ -881,6 +917,28 @@ function prepareTicketArguments(value: unknown): TicketToolArguments {
 }
 
 /**
+ * `delegate_report` normalization: nulls and blanks behave like absence, and
+ * a genuinely foreign field keeps its own teaching rather than being folded.
+ * Prose fields are never rewritten — a report quotes what actually happened,
+ * and trimming it would edit the witness.
+ */
+function prepareReportArguments(value: unknown): ReportToolArguments {
+  if (!isRecord(value)) return value as ReportToolArguments;
+
+  const args = { ...value };
+  rejectTaskDeadline(args);
+  rejectObsoleteContext(args);
+  rejectFieldAliases(args, false);
+  stripNulls(args);
+  stripBlank(args, ["ticketId"]);
+
+  if (args.model !== undefined) throw new Error(MODEL_FIELD_REJECTION);
+  if (args.thinking !== undefined) throw new Error(THINKING_FIELD_REJECTION);
+
+  return args as ReportToolArguments;
+}
+
+/**
  * `delegate_session` normalization: nulls and blanks as above, then
  * pre-split field names and dispatch/ticket fields get guidance to the
  * right tool.
@@ -1089,6 +1147,25 @@ const HELP_SESSIONS = `## delegate_session — sessions
   closes one.`;
 
 
+const HELP_REPORTS = `## delegate_report — bug reports
+
+- Reportable: behavior contradicting a tool description or a SPEC outcome;
+  a misleading error message; a rejection that does not list the resolvable
+  set, or a failure that surfaces two layers late; an untaught divergence
+  from the incumbent harness idiom.
+- Not reportable: provider flakiness, or a Pi host bug. A missing telemetry
+  \`calls\` row and/or an orphaned \`tool_execution_start\` means the host never
+  ran the tool — diagnosed cases live in the pi-delegate repository's
+  docs/diagnostics/pi-host-incidents.md.
+- \`{ what, expected, observed }\` are required and quoted verbatim (at most
+  ${REPORT_FIELD_LIMIT} characters each); optional \`ticketId\` names the ticket
+  the report is about, and an unknown id lists this session's tickets.
+- The record is a file under \`<agentDir>/delegate-reports/\`, readable only
+  by the owner of this machine. Nothing is sent anywhere, no issue is
+  opened, and running work is unaffected. Identical content is one record
+  (resubmission answers \`duplicate\`), and at most ${REPORT_SESSION_CAP} reports
+  are accepted per session.`;
+
 const HELP_TELEMETRY = `## Telemetry
 - Disabled by default; enable only via "telemetry" in delegate.json.
 - Local content-free metadata only: batch and task outcome records in a
@@ -1098,10 +1175,13 @@ const HELP_TELEMETRY = `## Telemetry
 function helpIntro(ticketActions: string): string {
   return `# Delegate Manual
 
-Three sibling tools share Delegate's machinery:
+Four sibling tools share Delegate's machinery:
 - \`delegate\` dispatches subagent tasks, synchronously or on an async ticket.
 - \`delegate_ticket\` operates on async tickets: ${ticketActions}.
-- \`delegate_session\` lists and closes pooled subagent sessions.`;
+- \`delegate_session\` lists and closes pooled subagent sessions.
+- \`delegate_report\` files a local bug report when this surface contradicts
+  itself — an outcome the description did not predict, a misleading error, a
+  rejection that does not list the resolvable set, or an untaught divergence.`;
 }
 
 const help = `${helpIntro("poll, wait, cancel, answer, steer, interrupt")}
@@ -1119,6 +1199,8 @@ ${helpWorkspaces()}
 ${HELP_TICKETS}
 
 ${HELP_SESSIONS}
+
+${HELP_REPORTS}
 
 ${HELP_TELEMETRY}
 `;
@@ -1228,7 +1310,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     // files to sessions/reloads and gives routing tests a deterministic
     // startup event (the former "surface selected" record's role).
     registerTools();
-    diagnostic("info", "delegate tools registered", { count: 3 });
+    diagnostic("info", "delegate tools registered", { count: 4 });
   });
 
   // TicketStore mutates first, visibility reads lazily — the observer arrow
@@ -1479,6 +1561,49 @@ export default function delegateExtension(api: ExtensionAPI): void {
       diagnostic("error", "preflight misfire telemetry failed", {}, error);
     }
   });
+
+  /**
+   * The parent model's bug-report spool (SPEC v3 "Report surface"): the
+   * fourth tool's intake. Instance-owned so the per-session budget dies with
+   * the session; records themselves are owner-only files under the agent
+   * directory, and no report ever leaves the machine.
+   */
+  const reports = new ReportSpool(diagnostics);
+
+  /**
+   * The extension-attached half of a report record: facts this process holds
+   * and the model cannot supply. The session file is read through the same
+   * duck-typed accessor every other transcript need uses (a host without one
+   * records the gap rather than inventing a path), and "tickets touched this
+   * session" is the store's own session scoping — the same set the roster
+   * shows.
+   */
+  const reportGroundTruth = (
+    ctx: ExtensionContext,
+    agentDir: string,
+  ): ReportGroundTruth => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    let sessionFile: string | undefined;
+    try {
+      const claimed = (
+        ctx.sessionManager as { getSessionFile?: () => unknown }
+      ).getSessionFile?.();
+      if (typeof claimed === "string" && claimed !== "") sessionFile = claimed;
+    } catch {
+      // A capability gap is a visible gap in the record, never a failure.
+    }
+    const mine = tickets
+      .list()
+      .filter((ticket) => ticket.owner?.sessionId === sessionId)
+      .sort((left, right) => left.createdAt - right.createdAt);
+    return {
+      agentDir,
+      sessionId,
+      sessionFile,
+      ticketsTouched: mine.map((ticket) => ticket.id),
+      windowStart: mine[0]?.createdAt,
+    };
+  };
 
   // Tree navigation is user-driven and not a session replacement: the
   // runtime and the tickets survive it. The epoch bumps unconditionally —
@@ -2031,6 +2156,81 @@ export default function delegateExtension(api: ExtensionAPI): void {
               sessionId: call.sessionId,
             } satisfies SessionDetails),
             isError: result.isError,
+          };
+        },
+      })),
+    );
+
+    api.registerTool(
+      managedTool(defineTool<TUnsafe<ReportToolArguments>, DelegateDetails>({
+        name: "delegate_report",
+        label: "Report a Delegate Bug",
+        description:
+          "File a bug report when a Delegate tool's behavior contradicts what its own description promised: " +
+          "an outcome that contradicts the advertised contract or a SPEC outcome, a misleading error message, " +
+          "a rejection that does not list the resolvable set (or fails two layers late), or a surface that " +
+          "diverges from the incumbent harness idiom without teaching the delta. " +
+          "Not reportable: provider flakiness, or a Pi host bug — a missing telemetry `calls` row and/or an " +
+          "orphaned tool_execution_start means the host never ran the tool (diagnosed cases: the pi-delegate " +
+          "repository's docs/diagnostics/pi-host-incidents.md). " +
+          "Records what/expected/observed verbatim; at most " + REPORT_SESSION_CAP + " reports per session, and " +
+          "identical content is one record. A report is a local file for the operator: nothing is sent anywhere, " +
+          "no issue is opened, and it changes nothing about running work.",
+        parameters: Type.Unsafe<ReportToolArguments>(reportSchema),
+        promptSnippet:
+          "Report Delegate behavior that contradicts its advertised contract (local operator record)",
+        promptGuidelines: [
+          "Report a collision, not a preference: name the call, what the description led you to expect, and what happened instead — quote error text verbatim.",
+          "Delegate bug reports are a local record for the operator; they never file an issue, never change running work, and never reach the network.",
+        ],
+        prepareArguments: (args) => validatePreparedArguments("delegate_report",
+          reportSchema, prepareReportArguments(args)),
+        renderCall: renderReportCall,
+        renderResult: createResultRenderer(tickets),
+
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+          const call: ReportCall = validateReportCall(params);
+          visibility.captureFooterCtx(ctx);
+          const agentDir = resolveAgentDir(ctx).dir;
+          // A broken journal must not cost the model its return channel: the
+          // evidence list degrades to this session's in-memory tickets, and
+          // only a supplied ticketId needs the store to answer.
+          try {
+            tickets.connect(agentDir);
+          } catch (error) {
+            if (call.ticketId !== undefined) throw error;
+          }
+          if (
+            call.ticketId !== undefined &&
+            tickets.get(call.ticketId) === undefined
+          ) {
+            // Enumerate-or-inherit: a rejected ticket id names the set this
+            // session can actually resolve, never a free-text miss.
+            throw new Error(
+              `unknown ticketId "${call.ticketId}" — no such ticket is resolvable here. ` +
+                knownTickets(tickets, ctx.sessionManager.getSessionId()),
+            );
+          }
+          const filing = reports.file(reportGroundTruth(ctx, agentDir), call);
+          return {
+            content: [{ type: "text" as const, text: receiptOf(filing) }],
+            details: ({
+              mode: "report" as const,
+              status: filing.status,
+              reportId:
+                filing.status === "filed" || filing.status === "duplicate"
+                  ? filing.id
+                  : undefined,
+              path:
+                filing.status === "capped" || filing.status === "unsupported"
+                  ? undefined
+                  : filing.path,
+            } satisfies ReportDetails),
+            // A refusal is an error result: nothing was recorded, and the
+            // model's intent did not land. A duplicate is not a failure —
+            // the content is already on record.
+            isError:
+              filing.status !== "filed" && filing.status !== "duplicate",
           };
         },
       })),

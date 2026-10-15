@@ -15,6 +15,22 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 /** Kept independent of fsx: fsx itself reports diagnostics. */
 export const DIAGNOSTIC_TREE = "delegate-diagnostics";
 
+/**
+ * The parent model's bug-report spool (SPEC v3 "Report surface"): another
+ * owner-only runtime tree under the same agent directory, with the same
+ * privacy and exclusion rules. Declared here so the reserved-namespace
+ * predicate below owns every Delegate runtime tree in one place.
+ */
+export const REPORT_TREE = "delegate-reports";
+
+/** Every Delegate-owned runtime directory name. A tree listed here is never
+ * source: it cannot be copied into a scratch/isolated workspace, hashed into
+ * a source Git snapshot, or attributed as completion evidence. */
+const RUNTIME_TREES: readonly string[] = Object.freeze([
+  DIAGNOSTIC_TREE,
+  REPORT_TREE,
+]);
+
 /** Reserved runtime namespaces, independent of engine agentDir and environment.
  * Match whole components only: ordinary names such as diagnostics.md remain
  * source. Resolve existing aliases too, without opening any record contents. */
@@ -25,7 +41,7 @@ export function isDiagnosticPath(path: string): boolean {
       .split(separator)
       .some(
         (component) =>
-          component === DIAGNOSTIC_TREE ||
+          RUNTIME_TREES.includes(component) ||
           /^pi-delegate-diagnostics-\d+-\d+$/.test(component),
       );
   if (reserved(path)) return true;
@@ -43,19 +59,21 @@ export function isDiagnosticPath(path: string): boolean {
   }
 }
 
-/** Actual destinations also cover directories not yet created by this process.
- * Existing other-process fallback trees are handled by the namespace predicate. */
-export function diagnosticRoots(
+/**
+ * Actual destinations for every reserved runtime tree — both cover
+ * directories not yet created by this process, and the namespace predicate
+ * above covers existing other-process fallback trees. Named for the surfaces
+ * it serves rather than for diagnostics alone: a tree added to
+ * `RUNTIME_TREES` without a root here would be copied into private Git
+ * baselines, which is exactly the leak class this function exists to close.
+ */
+export function runtimeRoots(
   diagnostics: DiagnosticSink,
 ): readonly string[] {
   const roots: string[] = [];
   try {
-    roots.push(
-      join(
-        process.env.DELEGATE_AGENT_DIR?.trim() || getAgentDir(),
-        DIAGNOSTIC_TREE,
-      ),
-    );
+    const base = process.env.DELEGATE_AGENT_DIR?.trim() || getAgentDir();
+    for (const tree of RUNTIME_TREES) roots.push(join(base, tree));
   } catch (error) {
     diagnostics.log(
       "warn",
@@ -469,19 +487,39 @@ function append(directory: number, record: string): void {
   }
 }
 
-function appendPrimary(agentDir: string, record: string): void {
-  const base = openDirectory(agentDir, true);
-  try {
-    const path = fdPath(base, DIAGNOSTIC_TREE);
+/**
+ * Open one reserved runtime tree under an already-open base, optionally
+ * creating it. The tree itself carries the strict privacy checks (owner-only
+ * 0700, no symlink anywhere on the path): a tree that already exists with any
+ * other shape is unsafe, never adopted.
+ */
+function openPrivateTree(base: number, tree: string, create: boolean): number {
+  const owner = uid();
+  const path = fdPath(base, tree);
+  if (create) {
     try {
       mkdirSync(path, { mode: 0o700 });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
-    const dir = openSync(
-      path,
-      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-    );
+  }
+  const dir = openSync(
+    path,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
+  try {
+    checkDirectory(fstatSync(dir), owner, true);
+  } catch (error) {
+    closeSync(dir);
+    throw error;
+  }
+  return dir;
+}
+
+function appendPrimary(agentDir: string, record: string): void {
+  const base = openDirectory(agentDir, true);
+  try {
+    const dir = openPrivateTree(base, DIAGNOSTIC_TREE, true);
     try {
       append(dir, record);
     } finally {
@@ -515,6 +553,166 @@ function appendFallback(record: string): void {
     }
   } finally {
     closeSync(base);
+  }
+}
+
+/**
+ * One owner-only record create under a reserved tree. `exists` is the
+ * content-addressed dedup signal: the name was already taken by a record of
+ * exactly the shape this process writes.
+ */
+type PrivateRecordWrite = "created" | "exists";
+
+function isMissingEntry(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/**
+ * An existing entry counts as a record only when it is exactly the shape
+ * written below: a regular, single-link, owner-owned 0600 file reached
+ * without following a symlink. Anything else — a planted link, a foreign
+ * file, a writable copy — is unsafe, never silently read as "already filed".
+ */
+function verifyPrivateRecord(directory: number, name: string): void {
+  const owner = uid();
+  let file: number;
+  try {
+    file = openSync(
+      fdPath(directory, name),
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (error) {
+    // A symlink at the record's own name is an attack, not a missing file.
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") unsafe();
+    throw error;
+  }
+  try {
+    const stat = fstatSync(file);
+    if (
+      !stat.isFile() ||
+      stat.uid !== owner ||
+      (stat.mode & 0o7777) !== 0o600 ||
+      stat.nlink !== 1
+    )
+      unsafe();
+  } finally {
+    closeSync(file);
+  }
+}
+
+/**
+ * True when a conforming record already occupies `<base>/<tree>/<name>`.
+ * A missing base, tree, or entry is `false` (nothing has been filed yet);
+ * an entry that exists with any other shape throws `DIAGNOSTIC_UNSAFE_PATH`.
+ * Ownership and capability gaps throw like every other secure route — the
+ * caller reports the gap instead of guessing.
+ */
+export function privateRecordExists(
+  base: string,
+  tree: string,
+  name: string,
+): boolean {
+  let root: number;
+  try {
+    root = openDirectory(base, false);
+  } catch (error) {
+    if (isMissingEntry(error)) return false;
+    throw error;
+  }
+  try {
+    let directory: number;
+    try {
+      directory = openPrivateTree(root, tree, false);
+    } catch (error) {
+      if (isMissingEntry(error)) return false;
+      throw error;
+    }
+    try {
+      try {
+        verifyPrivateRecord(directory, name);
+        return true;
+      } catch (error) {
+        if (isMissingEntry(error)) return false;
+        throw error;
+      }
+    } finally {
+      closeSync(directory);
+    }
+  } finally {
+    closeSync(root);
+  }
+}
+
+/**
+ * Create one owner-only record at `<base>/<tree>/<name>` with the diagnostic
+ * routing rules: descriptor-relative traversal, `O_NOFOLLOW` on every
+ * component, owner/mode checks on the base and the 0700 tree, an exclusive
+ * 0600 single-link create, a completed write, and no persistent handle.
+ * Throws `DIAGNOSTIC_UNSUPPORTED` where secure routing is unavailable
+ * (non-Linux, or a missing getuid/O_NOFOLLOW/O_DIRECTORY capability) — the
+ * caller reports that gracefully; there is deliberately no terminal or
+ * temporary-directory fallback for records the model authored.
+ */
+export function writePrivateRecord(
+  base: string,
+  tree: string,
+  name: string,
+  contents: string,
+): PrivateRecordWrite {
+  const root = openDirectory(base, true);
+  try {
+    const directory = openPrivateTree(root, tree, true);
+    try {
+      const owner = uid();
+      let file: number;
+      try {
+        file = openSync(
+          fdPath(directory, name),
+          constants.O_WRONLY |
+            constants.O_CREAT |
+            constants.O_EXCL |
+            constants.O_NOFOLLOW |
+            constants.O_NONBLOCK,
+          0o600,
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          verifyPrivateRecord(directory, name);
+          return "exists";
+        }
+        throw error;
+      }
+      try {
+        const stat = fstatSync(file);
+        if (
+          !stat.isFile() ||
+          stat.uid !== owner ||
+          (stat.mode & 0o7777) !== 0o600 ||
+          stat.nlink !== 1
+        )
+          unsafe();
+        // No persistent handles. A short write is completed rather than
+        // dropping the remainder.
+        const bytes = Buffer.from(contents);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const written = writeSync(file, bytes, offset, bytes.length - offset);
+          if (written === 0)
+            throw Object.assign(new Error("Report write made no progress"), {
+              code: "EIO",
+            });
+          offset += written;
+        }
+      } finally {
+        closeSync(file);
+      }
+      return "created";
+    } finally {
+      closeSync(directory);
+    }
+  } finally {
+    closeSync(root);
   }
 }
 

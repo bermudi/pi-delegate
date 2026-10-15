@@ -160,6 +160,7 @@ describe("regression: parent tool mirroring", () => {
       "delegate",
       "delegate_ticket",
       "delegate_session",
+      "delegate_report",
     ]);
     expect(observed).toEqual([]);
   });

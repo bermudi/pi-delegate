@@ -48,6 +48,7 @@
     "check": "bun scripts/checks.ts",
     "check:pack": "bun scripts/pack-smoke.ts",
     "verify:dogfood": "bun scripts/dogfood.ts",
+    "reports:triage": "bun scripts/report-triage.ts",
     "build": "esbuild delegate.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=.build/delegate.bundle.ts"
   },
   "type": "module"

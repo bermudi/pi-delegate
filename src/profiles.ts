@@ -20,11 +20,15 @@ export const CHILD_TOOLS = [
  * these are stripped — silently — from every inventory a subagent can be
  * given: profile `tools` and the parent's mirrored
  * active set (which already excludes them by construction, via CHILD_TOOLS).
+ * `delegate_report` is in the family for the same reason: the parent is the
+ * reporter, and a worker's wall belongs in its result to its parent — a
+ * child-authored record would arrive with a child's evidence pointers.
  */
 export const DELEGATE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "delegate",
   "delegate_ticket",
   "delegate_session",
+  "delegate_report",
 ]);
 
 /** Tools that cannot mutate the workspace, for shared-write admission. */
