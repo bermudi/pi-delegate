@@ -48,6 +48,40 @@ unchanged. Two visible consequences:
 
 SPEC.md has no call-row preview language, so it stays as is.
 
+## Report surface (#147)
+
+Delegate gains a fourth tool, `delegate_report`: a bounded, local, owner-only
+record of a surface collision, filed by the parent model and read by the
+operator. Normative text: SPEC.md, "Report surface (#147, operator-approved
+design review)". Nothing about the existing three tools, their schemas, their
+results, or their rendering changes.
+
+Residual points SPEC.md does not state:
+
+- **Additive surface, not a migration.** No v1/v2 spelling is being restored or
+  translated, and no earlier release ever advertised a report tool, so
+  `COMPATIBILITY.md`'s migration lists are untouched. A caller that never uses
+  the tool sees one more entry in the tool list and no behavior change.
+- **No telemetry schema change.** The record's telemetry half is a pointer
+  (session id + time window) into the existing store; `misfires`, `calls`, and
+  `tasks` keep their columns, and the schema version stays where it was.
+- **No backlog.** The spool is intake only: GitHub issues remain the only
+  backlog, and `bun run reports:triage` is the emptying step (list structure,
+  mark filed with an issue ref or discarded). Reports are never auto-filed,
+  never uploaded, and never referenced by an outbound request.
+- **Privacy boundary.** Model prose reaches two places and no others: the
+  spooled record and the tool result the model just asked for. It never reaches
+  the diagnostic sink, the TUI call row, the telemetry store, or the issue
+  tracker without a human doing it.
+- **Not verified off Linux.** Secure descriptor-relative routing (and therefore
+  filing) is a Linux capability; other platforms answer the call gracefully as
+  unsupported. That path is unexercised here by construction, exactly like the
+  diagnostics fallback it mirrors.
+- **Operational note.** Records accumulate until they are triaged, because a
+  pruned record would let an identical resubmission re-fill the spool; the
+  disposition file keeps every record's outcome discoverable. Removing records
+  is the operator's call, never the extension's.
+
 ## Terminal-safe operational diagnostics (#122)
 
 This supersedes the inherited stderr-only logging, including delivery-skip logs.
@@ -325,7 +359,8 @@ release notes and migration guidance; it must not arrive as rewrite drift.
 ### Calls and configuration
 
 - The three sibling tools — `delegate` (dispatch and manual),
-  `delegate_ticket`, and `delegate_session` — with their canonical fields,
+  `delegate_ticket`, and `delegate_session`; v3 adds the fourth,
+  `delegate_report`, which no earlier version had — with their canonical fields,
   dispatch-wide `async`, canonical task fields, closed enum values, and
   batch-before-start validation described in `SPEC.md`.
 - Defensive normalization of stringified tasks, flat task calls, string tools,

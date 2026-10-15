@@ -1,10 +1,12 @@
 # pi-delegate
 
 Subagent dispatch for the [Pi coding agent](https://github.com/earendil-works/pi).
-Delegate registers three tools: `delegate` runs one task or a batch of tasks;
+Delegate registers four tools: `delegate` runs one task or a batch of tasks;
 `delegate_ticket` operates the durable ticket a backgrounded dispatch returns
 (poll, wait, cancel, answer, steer, interrupt); `delegate_session` lists and
-closes pooled subagent sessions. Tasks run against the shared tree, a disposable
+closes pooled subagent sessions; `delegate_report` files an owner-only local
+record when the surface contradicts its own description (see `SPEC.md`,
+"Report surface"). Tasks run against the shared tree, a disposable
 copy, or a private Git worktree. `SPEC.md` is the v3 behavioral contract;
 `COMPATIBILITY.md` records deliberate breaks from earlier versions.
 

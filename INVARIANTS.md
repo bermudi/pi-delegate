@@ -245,6 +245,45 @@ use any design that makes these properties true and testable.
 - A clean apply is `applied_unverified`; it MUST NOT assert semantic correctness
   or successful tests.
 
+## Bug reports (`delegate_report`)
+
+- A report MUST stay on the machine it was filed on. No report, record field,
+  session path, or ticket id MAY be sent anywhere, filed as an issue, or
+  attached to an outbound request by Delegate. Filing is local by construction:
+  no auto-file and no upload path exists to disable.
+- A report MUST NOT promise or cause action. Filing MUST NOT affect admission,
+  tickets, workers, delivery, cleanup, recovery, models, or settings, and the
+  receipt MUST NOT instruct the model to change what it is doing.
+- The extension MUST NOT accept model prose into the diagnostic channel: filing
+  records one info-level operational event whose context is limited to existing
+  allowlisted keys (`path`, `count`). The sink's own privacy contract is
+  otherwise untouched — no new context keys, no new destinations, and no change
+  to the terminal-routing rule.
+- A record MUST be owner-only: a 0700 tree and 0600 single-link files under the
+  agent directory, reached without following symlinks, with owner and mode
+  checks on every component. Unsafe existing entries (symlink, foreign file,
+  wrong mode, hard link) MUST be refused, never adopted or overwritten. Where
+  the platform lacks secure routing, filing MUST report unsupported gracefully
+  and MUST NOT fall back to an attached terminal or to a shared temporary
+  directory.
+- A record MUST carry only the model's three bounded fields plus
+  extension-attached ground truth and pointers. Telemetry rows MUST NOT be
+  copied into a record.
+- An identical report MUST remain one record: resubmission MUST answer as a
+  duplicate without writing, without consuming the per-session budget, and
+  independently of the cap. The session budget MUST bound accepted reports.
+- Workers MUST NOT report. `delegate_report` MUST be stripped from every child
+  toolset like the other delegate-family tools; a worker's wall belongs in its
+  result to its parent.
+- The report tree is a reserved runtime namespace: it MUST be excluded from
+  scratch copies, private Git snapshots (seeded tracked state included, and
+  entries nested inside an ignored directory being provisioned into a
+  worktree), and source-drift/completion attribution, exactly like
+  `delegate-diagnostics`.
+- The spool MUST NOT become a backlog: triage lists records' structure without
+  their prose, and every record ends up either filed as an issue or explicitly
+  discarded.
+
 ## Telemetry
 
 - Telemetry writes MUST NOT stall dispatch: the calling thread MUST NOT wait
