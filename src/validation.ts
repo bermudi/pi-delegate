@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { resolveDependencyGraph } from "./graph.ts";
 import { expandTools } from "./profiles.ts";
+import { REPORT_FIELD_LIMIT } from "./reports.ts";
 
 export interface TaskInput {
   readonly id?: string;
@@ -84,6 +85,22 @@ export interface TicketCall {
 export interface SessionCall {
   readonly action: "list" | "close";
   readonly sessionId: string | undefined;
+}
+
+/** Post-schema delegate_report arguments: the model's bounded witness. */
+export interface ReportArguments {
+  readonly what: string;
+  readonly expected: string;
+  readonly observed: string;
+  readonly ticketId?: string;
+}
+
+/** A validated delegate_report call; a blank optional is absent. */
+export interface ReportCall {
+  readonly what: string;
+  readonly expected: string;
+  readonly observed: string;
+  readonly ticketId: string | undefined;
 }
 
 function fail(message: string): never {
@@ -232,6 +249,40 @@ export function validateTicketCall(args: TicketArguments): TicketCall {
     questionId,
     answer,
     message,
+  };
+}
+
+/**
+ * Within-tool rules for `delegate_report`: the three witness fields are
+ * required, nonblank, and bounded; `ticketId` is optional (its existence is
+ * checked against the ticket store, where the resolvable set lives).
+ */
+export function validateReportCall(args: ReportArguments): ReportCall {
+  const ticketId =
+    typeof args.ticketId === "string" && !isBlank(args.ticketId)
+      ? args.ticketId
+      : undefined;
+  const fields = [
+    ["what", args.what],
+    ["expected", args.expected],
+    ["observed", args.observed],
+  ] as const;
+  for (const [name, value] of fields) {
+    if (typeof value !== "string" || value.trim() === "") {
+      fail(`${name} is required: describe it in one nonempty string.`);
+    }
+    if (value.length > REPORT_FIELD_LIMIT) {
+      fail(
+        `${name} must be at most ${REPORT_FIELD_LIMIT} characters; got ${value.length}. ` +
+          `Name the exact call, error text, and observed result; a long narrative rejects rather than truncating silently.`,
+      );
+    }
+  }
+  return {
+    what: args.what,
+    expected: args.expected,
+    observed: args.observed,
+    ticketId,
   };
 }
 

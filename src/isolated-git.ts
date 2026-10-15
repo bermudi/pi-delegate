@@ -272,6 +272,12 @@ export async function provisionIgnoredEntries(
         mode: fs.constants.COPYFILE_FICLONE,
         preserveTimestamps: true,
         verbatimSymlinks: true,
+        // An ignored entry list collapses directories (`.gitignore`-listed
+        // `nested/` copies as one entry), so the per-entry namespace filter
+        // above cannot see a runtime tree nested inside one. Filter at the
+        // copy instead — the same predicate and the same reasoning as the
+        // scratch copy: reserved runtime trees never ride into a worker.
+        filter: (candidate) => !isDiagnosticPath(candidate),
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;

@@ -53,9 +53,13 @@ describe("the single delegate surface", () => {
     const actual = (session.session as AgentSession).getAllTools().find((tool) => tool.name === "delegate");
     expect(objectOf(actual?.parameters)).toEqual(objectOf(delegateTool(session).parameters));
     const names = (session.session as AgentSession).getAllTools().map((tool) => tool.name).filter((name) => name.startsWith("delegate"));
-    expect(names.sort()).toEqual(["delegate", "delegate_session", "delegate_ticket"]);
+    expect(names.sort()).toEqual([
+      "delegate", "delegate_report", "delegate_session", "delegate_ticket",
+    ]);
     // No mode-wall teaching remains on any description.
-    for (const tool of ["delegate", "delegate_ticket", "delegate_session"]) {
+    for (const tool of [
+      "delegate", "delegate_ticket", "delegate_session", "delegate_report",
+    ]) {
       expect(registeredTool(session, tool).description).not.toContain('"surface"');
     }
   });

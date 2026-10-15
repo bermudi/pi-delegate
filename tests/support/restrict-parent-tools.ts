@@ -4,7 +4,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export default function restrictParentTools(api: ExtensionAPI) {
   api.on("tool_call", (event) => {
     if (event.toolName === "delegate") {
-      api.setActiveTools(["delegate", "delegate_ticket", "delegate_session"]);
+      api.setActiveTools([
+      "delegate",
+      "delegate_ticket",
+      "delegate_session",
+      "delegate_report",
+    ]);
     }
   });
 }

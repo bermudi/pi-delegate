@@ -1,4 +1,4 @@
-import { DIAGNOSTIC_TREE, DiagnosticSink, diagnosticRoots, isDiagnosticPath } from "./diagnostics.ts";
+import { DIAGNOSTIC_TREE, DiagnosticSink, isDiagnosticPath, REPORT_TREE, runtimeRoots } from "./diagnostics.ts";
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import {
@@ -27,6 +27,8 @@ export const DELEGATE_TREES = Object.freeze({
   tickets: "delegate-tickets",
   /** Owner-only operational diagnostics (never part of worker copies). */
   diagnostics: DIAGNOSTIC_TREE,
+  /** Owner-only parent-model bug reports (never part of worker copies). */
+  reports: REPORT_TREE,
 } as const);
 
 /** Canonical path for admission comparisons (resolves symlinks). */
@@ -52,7 +54,7 @@ export function isWithin(root: string, candidate: string): boolean {
  * Used by every private Git snapshot, not just initial workspace preparation. */
 export async function diagnosticExclusions(diagnostics: DiagnosticSink, root: string): Promise<string[]> {
   const excluded = new Set<string>();
-  for (const destination of diagnosticRoots(diagnostics)) {
+  for (const destination of runtimeRoots(diagnostics)) {
     for (const candidate of [resolvePath(destination), canonicalPath(destination)]) {
       if (isWithin(root, candidate)) excluded.add(relative(root, candidate) || ".");
     }

@@ -1,6 +1,7 @@
 /**
- * Human-facing renderers for the `delegate`/`delegate_ticket`/`delegate_session`
- * tools' results and for the delivered `delegate-result` custom message.
+ * Human-facing renderers for the `delegate`/`delegate_ticket`/`delegate_session`/
+ * `delegate_report` tools' results and for the delivered `delegate-result`
+ * custom message.
  *
  * Pi's stock result rendering only ever displays the LLM-facing `content`
  * text, which spill-bounds large outputs to a tail plus a file pointer —
@@ -329,6 +330,29 @@ export function renderSessionCall(
   return component;
 }
 
+/**
+ * The `delegate_report` tool's call row: the static `delegate_report` title
+ * plus the optional ticket it names. The model's prose is deliberately not
+ * shown — the same rule dispatch rows follow for prompts, and the report body
+ * belongs in the spooled record, not in a transcript row.
+ */
+export function renderReportCall(
+  args: { readonly ticketId?: string },
+  theme: Theme,
+  context: { lastComponent: Component | undefined },
+): Component {
+  const component = textOf(context.lastComponent);
+  const target =
+    typeof args.ticketId === "string" && args.ticketId !== ""
+      ? ` #${shortTicket(displaySafe(args.ticketId))}`
+      : "";
+  component.setText(
+    theme.fg("toolTitle", theme.bold("delegate_report")) +
+      theme.fg("muted", target),
+  );
+  return component;
+}
+
 function contentText(result: AgentToolResult<unknown>): string {
   return result.content
     .filter(
@@ -583,6 +607,29 @@ function collapsedBody(
       theme.fg("muted", "ticket ") +
       theme.fg("accent", shortTicket(details.ticket)) +
       theme.fg("muted", " · dispatched to background") +
+      expandHint(theme)
+    );
+  }
+  if (
+    details.mode === "report" &&
+    typeof details.reportId === "string" &&
+    (details.status === "filed" || details.status === "duplicate")
+  ) {
+    // A recorded report collapses to its pointer line — the same shape an
+    // async dispatch receipt uses — so the transcript row carries the id a
+    // later triage or follow-up needs, and expanding reveals the receipt.
+    // Refusals (capped/unsupported/failed) have no pointer: they keep their
+    // one-sentence refusal through the generic first-line fallback below.
+    return (
+      theme.fg("accent", "↳ ") +
+      theme.fg("muted", "report ") +
+      theme.fg("accent", details.reportId) +
+      theme.fg(
+        "muted",
+        details.status === "filed"
+          ? " · filed to the spool"
+          : " · duplicate, not re-filed",
+      ) +
       expandHint(theme)
     );
   }

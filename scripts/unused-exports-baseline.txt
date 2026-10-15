@@ -25,6 +25,7 @@ src/details.ts:interruptDetailsSchema
 src/details.ts:liveDispatchDetailsSchema
 src/details.ts:noticesDetailsSchema
 src/details.ts:questionNoticeDetailsSchema
+src/details.ts:reportDetailsSchema
 src/details.ts:sessionDetailsSchema
 src/details.ts:steerDetailsSchema
 src/details.ts:syncDispatchDetailsSchema
@@ -68,6 +69,7 @@ src/telemetry.ts:MisfireShape
 src/ticket-journal.ts:SavedTicket
 src/tickets.ts:TicketRpcResult
 src/validation.ts:DispatchArguments
+src/validation.ts:ReportArguments
 src/validation.ts:SessionCall
 src/validation.ts:TicketCall
 src/visibility.ts:activeSummary

@@ -183,7 +183,7 @@ async function runChild(scenario: string, tty: boolean) {
     records.some(
       (entry) =>
         entry.event === "delegate tools registered" &&
-        entry.context.count === 3,
+        entry.context.count === 4,
     ),
   ).toBe(true);
   expect(

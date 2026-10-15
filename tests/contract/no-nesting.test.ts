@@ -27,7 +27,12 @@ import { mockParentTools } from "../support/parent-tools.ts";
  * tool-mirroring regression tests use.
  */
 
-const DELEGATE_FAMILY = ["delegate", "delegate_ticket", "delegate_session"];
+const DELEGATE_FAMILY = [
+  "delegate",
+  "delegate_ticket",
+  "delegate_session",
+  "delegate_report",
+];
 
 function writeProfile(
   dir: string,
@@ -74,7 +79,7 @@ describe("no nested dispatch and profile precedence (SPEC v3, issue #45)", () =>
     mkdirSync(join(session.cwd, "agents"), { recursive: true });
     writeFileSync(
       join(session.cwd, "agents", "nestfree.md"),
-      "---\nname: nestfree\ndescription: ro plus the family\ntools: read, grep, delegate, delegate_ticket, delegate_session\n---\nInvestigates.\n",
+      "---\nname: nestfree\ndescription: ro plus the family\ntools: read, grep, delegate, delegate_ticket, delegate_session, delegate_report\n---\nInvestigates.\n",
     );
     const subagents = await installSubagentModel(session);
     let observed: string[] | undefined;
