@@ -115,10 +115,13 @@ type ReportFiling =
       readonly evidence: readonly string[];
     }
   | {
+      /**
+       * No evidence list: nothing was attached to this call — the record it
+       * points at carries the evidence of the filing that created it.
+       */
       readonly status: "duplicate";
       readonly id: string;
       readonly path: string;
-      readonly evidence: readonly string[];
     }
   | {
       readonly status: "capped";
@@ -169,12 +172,7 @@ export class ReportSpool {
     const name = `${id}.json`;
     const path = reportPathOf(truth.agentDir, id);
     const now = Date.now();
-    const duplicate: ReportFiling = {
-      status: "duplicate",
-      id,
-      path,
-      evidence: evidenceOf(truth, now),
-    };
+    const duplicate: ReportFiling = { status: "duplicate", id, path };
     try {
       // Dedup before the cap: an identical resubmission is not new intake,
       // so it must answer (and must not consume budget) even at the cap.
@@ -263,17 +261,18 @@ function evidenceOf(truth: ReportGroundTruth, now: number): string[] {
  * is the whole point of the sentence the contract pins.
  */
 export function receiptOf(filing: ReportFiling): string {
-  if (filing.status === "filed" || filing.status === "duplicate") {
-    const head =
-      filing.status === "filed"
-        ? `Bug report filed: ${filing.id} — ${filing.path}`
-        : `Bug report duplicate of ${filing.id} — not re-filed; the record is at ${filing.path}`;
+  if (filing.status === "filed") {
     return [
-      head,
+      `Bug report filed: ${filing.id} — ${filing.path}`,
       `Attached evidence: ${filing.evidence.join(" · ")}`,
-      filing.status === "filed"
-        ? "Dedup: first filing of this content."
-        : "Dedup: identical content already recorded; no new record and no cap consumed.",
+      "Dedup: first filing of this content.",
+      "This is a local record for the operator; it changes nothing about running work.",
+    ].join("\n");
+  }
+  if (filing.status === "duplicate") {
+    return [
+      `Bug report duplicate of ${filing.id} — not re-filed; the recorded evidence is at ${filing.path}`,
+      "Dedup: identical content already recorded; no new record and no cap consumed.",
       "This is a local record for the operator; it changes nothing about running work.",
     ].join("\n");
   }
