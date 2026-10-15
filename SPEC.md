@@ -136,9 +136,9 @@ docs/diagnostics/pi-host-incidents.md).
   `<DELEGATE_AGENT_DIR>/delegate-reports/` — 0700 tree, 0600 single-link files —
   written under the diagnostics sink's secure routing rules
   (descriptor-relative traversal, `O_NOFOLLOW`, owner and mode checks on every
-  component, no persistent handle). Platforms without those capabilities report
-  the gap gracefully through the same managed warning path as diagnostics; a
-  report never falls back to an attached terminal or a temporary directory. The
+  component, no persistent handle). Platforms without those capabilities answer
+  the call as unsupported — a refusal in the tool result, never a crash, and
+  never a fallback to an attached terminal or a shared temporary directory. The
   record carries the model's three fields plus extension-attached ground truth:
   extension version, host Pi version, session file path, the ticket ids this
   session touched, and a telemetry pointer (session id + time window). Pointers
