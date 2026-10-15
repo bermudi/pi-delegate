@@ -35,7 +35,7 @@ import {
   resumeTagOf,
   truncateLine,
 } from "./format.ts";
-import { TASK_STATUS_VALUES } from "./schema-primitives.ts";
+import { LIVE_TASK_STATUS_VALUES } from "./schema-primitives.ts";
 import { UNBOUNDED_OUTPUT } from "./spill.ts";
 import { recoveryWarning, type TicketStore } from "./tickets.ts";
 import type {
@@ -707,8 +707,10 @@ const LIVE_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "�
 const LIVE_ROW_TARGET = 80;
 /** Row labels truncate so the tail keeps its budget. */
 const LIVE_LABEL_LIMIT = 22;
-/** Longest task status in the live-details schema (`budget-exhausted`). */
-const LIVE_STATUS_WIDTH = "budget-exhausted".length;
+/** Keep every accepted live status intact in the aligned status column. */
+const LIVE_STATUS_WIDTH = Math.max(
+  ...LIVE_TASK_STATUS_VALUES.map((status) => status.length),
+);
 
 interface LiveTaskView {
   readonly id: string;
@@ -718,10 +720,10 @@ interface LiveTaskView {
   readonly lastEventAt: number;
   readonly tool?: string;
   readonly preview?: string;
-  readonly recent?: readonly LiveToolCall[];
+  readonly recent?: unknown;
 }
 
-type LiveTaskStatus = TaskStatus | "queued" | "running" | "paused";
+type LiveTaskStatus = (typeof LIVE_TASK_STATUS_VALUES)[number];
 
 interface LiveToolCall {
   readonly tool: string;
@@ -730,19 +732,11 @@ interface LiveToolCall {
 }
 
 /**
- * Live statuses = the settled set, single-sourced from `TASK_STATUS_VALUES`
- * (the same array `details.ts` and the journal schemas derive from), plus
- * the in-flight-only literals. A status the schemas don't know can't appear
- * in emitted details, so this guard stays exactly as tolerant as they are —
- * never a fourth hand-copy of the set that silently drops rows later.
+ * The live-details schema, row validation, and column width share one set,
+ * including historical settled statuses and in-flight states.
  */
 function isLiveTaskStatus(status: string): status is LiveTaskStatus {
-  return (
-    (TASK_STATUS_VALUES as readonly string[]).includes(status) ||
-    status === "queued" ||
-    status === "running" ||
-    status === "paused"
-  );
+  return (LIVE_TASK_STATUS_VALUES as readonly string[]).includes(status);
 }
 
 function isLiveToolCall(value: unknown): value is LiveToolCall {
@@ -764,9 +758,7 @@ function isLiveTask(value: unknown): value is LiveTaskView {
     typeof value.startedAt === "number" &&
     typeof value.lastEventAt === "number" &&
     (value.tool === undefined || typeof value.tool === "string") &&
-    (value.preview === undefined || typeof value.preview === "string") &&
-    (value.recent === undefined ||
-      (Array.isArray(value.recent) && value.recent.every(isLiveToolCall)))
+    (value.preview === undefined || typeof value.preview === "string")
   );
 }
 
@@ -924,7 +916,17 @@ function liveBoard(
           : ""),
     );
     if (expanded) {
-      for (const call of task.recent ?? []) {
+      // Display-only boundary: invalid optional detail must not hide worker
+      // truth. Report bad history visibly; emitted details remain strict.
+      if (task.recent !== undefined && !Array.isArray(task.recent)) {
+        rows.push(theme.fg("warning", "      [invalid recent tool call data]"));
+      }
+      const recent: readonly unknown[] = Array.isArray(task.recent) ? task.recent : [];
+      for (const call of recent) {
+        if (!isLiveToolCall(call)) {
+          rows.push(theme.fg("warning", "      [invalid recent tool call data]"));
+          continue;
+        }
         const callPreview = displaySafe(call.preview).replace(/\s+/g, " ").trim();
         const callTail = fitToolPreview(
           displaySafe(call.tool),

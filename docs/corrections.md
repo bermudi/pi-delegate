@@ -9,6 +9,8 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 
 ## Correction log
 
+- 2026-10-15 — live-board review found optional recent-call validation hiding valid task rows and duplicated status definitions; isolate display-detail validation with visible warnings and derive schema/width/guard from shared statuses (render.ts, details.ts, schema-primitives.ts). Enforcement: registered-renderer regressions plus strict schema checks.
+
 - 2026-10-04 — put this repo's practice notes in the personal wiki
   (`~/Documents/AgenticWiki`) instead of the repo itself; operational state
   belongs where the operators read (bermudi).

@@ -8,6 +8,16 @@ transfer is a v2 number — add 53 to find the repo issue (v2 #55 is #108).
 Records written after the transfer cite repo numbers directly. This file mixes
 both; the record's date is the tell when in doubt.
 
+## Live-board optional details (review follow-up)
+
+- **Regression:** `tests/contract/live-board-modes.test.ts` checks malformed
+  optional recent arrays/entries through registered `renderResult`: task
+  counts, status, label, and elapsed survive in all layouts; expanded views
+  warn and retain valid calls in order. Strict emitted schemas still reject
+  those frames. Older frames without `recent` remain valid and warning-free.
+- Every schema-accepted live status renders in full with aligned columns.
+  No production helper exports or v1 implementation fixtures are involved.
+
 ## Single-owner dispatch shutdown lifetime (#131)
 
 - **Regression:** `tests/regression/dispatch-lifetime.test.ts` injects

@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { TestSession } from "@marcfargas/pi-test-harness";
+import { Check } from "typebox/value";
+import { liveDispatchDetailsSchema } from "../../src/details.ts";
 import {
   delegateTool,
+  objectOf,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
 
@@ -174,6 +177,92 @@ describe("inline live board layouts", () => {
     expect(new Set(labelColumns).size).toBe(1);
     expect(new Set(toolColumns).size).toBe(1);
     expect(lines[1]).toContain("mcp__lookup preview-1");
+  });
+
+  test("every schema-accepted status renders in full with aligned columns", async () => {
+    session = await openDelegateBoundary();
+    let statuses: unknown = liveDispatchDetailsSchema.properties.live.properties.tasks;
+    for (const key of ["items", "properties", "status", "enum"]) {
+      statuses = objectOf(statuses, `live status schema parent of ${key}`)[key];
+    }
+    if (!Array.isArray(statuses)) throw new Error("live statuses must be an enum");
+    const frame = fixedFrame();
+    const tasks = statuses.map((status: unknown, index) => {
+      if (typeof status !== "string") throw new Error("live status must be a string");
+      return {
+        ...frame.live.tasks[0],
+        id: `task-${index}`,
+        label: `task-${index}`,
+        status,
+      };
+    });
+    const liveFrame = { ...frame, live: { ...frame.live, tasks } };
+    expect(Check(liveDispatchDetailsSchema, liveFrame)).toBe(true);
+    const rows = render(session, liveFrame, true).filter((line) => /task-\d+/.test(line));
+    expect(rows).toHaveLength(tasks.length);
+    rows.forEach((row, index) => expect(row).toContain(` ${tasks[index]!.status} `));
+    expect(new Set(rows.map((row) => row.indexOf("task-"))).size).toBe(1);
+  });
+
+  test("invalid optional recent data keeps task rows and reports invalid expanded details", async () => {
+    session = await openDelegateBoundary();
+    const validBefore = { tool: "before_recent", preview: "before", inFlight: false };
+    const validAfter = { tool: "after_recent", preview: "after", inFlight: true };
+    const invalidCalls: readonly unknown[] = [
+      null,
+      "invalid",
+      { tool: "broken_recent", preview: 1, inFlight: false },
+      { tool: "broken_recent", preview: "bad" },
+      { preview: "bad", inFlight: false },
+    ];
+    const invalidRecent: readonly unknown[] = [
+      null,
+      {},
+      "not-an-array",
+      ...invalidCalls.map((call) => [validBefore, call, validAfter]),
+    ];
+    for (const recent of invalidRecent) {
+      const frame = fixedFrame();
+      const tasks = frame.live.tasks.map((task, index) =>
+        index === 0 ? { ...task, recent } : task,
+      );
+      const liveFrame = { ...frame, live: { ...frame.live, tasks } };
+      // Recovery belongs only to the display boundary, not emitted details.
+      expect(Check(liveDispatchDetailsSchema, liveFrame)).toBe(false);
+      for (const mode of ["normal", "expanded", "clean"] as const) {
+        setCleanTui(mode === "clean");
+        const lines = render(session, liveFrame, mode === "expanded");
+        expect(lines[0]).toContain("6 tasks");
+        expect(lines[0]).toContain("2 done");
+        expect(lines.find((line) => line.includes("logging"))).toMatch(
+          /✓ ok +logging +9\.4s {2}read memory-queue\.ts$/,
+        );
+        if (mode === "expanded") {
+          expect(lines.join("\n")).toContain("[invalid recent tool call data]");
+          expect(lines.join("\n")).not.toContain("broken_recent");
+          if (Array.isArray(recent)) {
+            const before = lines.findIndex((line) => line.includes("before_recent"));
+            const warning = lines.findIndex((line) => line.includes("[invalid recent"));
+            const after = lines.findIndex((line) => line.includes("after_recent"));
+            expect(before).toBeGreaterThan(0);
+            expect(warning).toBeGreaterThan(before);
+            expect(after).toBeGreaterThan(warning);
+          }
+        }
+      }
+    }
+  });
+
+  test("older frames without recent calls retain their task row without a warning", async () => {
+    session = await openDelegateBoundary();
+    const frame = fixedFrame();
+    const tasks = frame.live.tasks.map(({ recent: _recent, ...task }) => task);
+    const liveFrame = { ...frame, live: { ...frame.live, tasks } };
+    expect(Check(liveDispatchDetailsSchema, liveFrame)).toBe(true);
+    const lines = render(session, liveFrame, true);
+    expect(lines).toHaveLength(7);
+    expect(lines[0]).toContain("6 tasks");
+    expect(lines.join("\n")).not.toContain("[invalid recent");
   });
 
   test("a long tool name budgets the preview so rows stay one line at 80 columns", async () => {

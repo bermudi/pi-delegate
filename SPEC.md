@@ -364,6 +364,12 @@ mid-flight the parent can steer. The grammar:
 
 ## Observability
 
+- **Live-board display boundary.** Invalid optional recent-tool-call data
+  must not hide an otherwise valid task row or change its status/elapsed
+  display. Expanded views show an explicit warning for invalid detail data
+  and retain valid recent calls in order. This display-only tolerance does
+  not relax emitted-details schemas or dispatch validation.
+
 - **Completion evidence.** A settled task's record carries the file
   changes attributed to it: the union of paths observed in its
   write/edit tool calls and the changes a Git evidence window saw in

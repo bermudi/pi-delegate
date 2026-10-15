@@ -36,6 +36,14 @@ export const TASK_STATUS_VALUES = [
   "budget-exhausted",
 ] as const satisfies readonly TaskStatus[];
 
+/** Live rows include in-flight states as well as every settled status. */
+export const LIVE_TASK_STATUS_VALUES = [
+  "queued",
+  "running",
+  "paused",
+  ...TASK_STATUS_VALUES,
+] as const;
+
 /** Integration outcomes — one set, emitted and journaled alike. */
 export const TASK_INTEGRATION_STATUS_VALUES = [
   "applied_unverified",

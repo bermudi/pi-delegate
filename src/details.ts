@@ -18,6 +18,7 @@
  */
 import { Type, type Static, type TSchema, type TUnsafe } from "typebox";
 import {
+  LIVE_TASK_STATUS_VALUES,
   TASK_INTEGRATION_STATUS_VALUES,
   TASK_STATUS_VALUES,
   TASK_VERDICT_VALUES,
@@ -287,17 +288,7 @@ export const liveDispatchDetailsSchema = Type.Object(
             {
               id: Type.String(),
               label: Type.String(),
-              status: literalUnion([
-                "queued",
-                "running",
-                "paused",
-                "ok",
-                "failed",
-                "cancelled",
-                "blocked",
-                "interrupted",
-                "budget-exhausted",
-              ] as const),
+              status: literalUnion(LIVE_TASK_STATUS_VALUES),
               startedAt: Type.Number(),
               lastEventAt: Type.Number(),
               tool: Type.Optional(Type.String()),

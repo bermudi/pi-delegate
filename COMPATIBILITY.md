@@ -5,6 +5,14 @@ signatures and examples preserve the migration record; they do not
 authorize removed fields or override SPEC.md, the sole behavioral
 authority.
 
+## Live-board optional recent calls
+
+Malformed optional `recent` data no longer hides an otherwise valid task
+row. Expanded views retain valid calls in order and mark invalid data with
+a warning. Older frames without `recent` still render without warnings.
+This is display-boundary tolerance only: emitted details remain strict.
+Normative rule: SPEC.md, "Observability".
+
 ## Unknown top-level configuration keys (#136, owner-approved 2026-10-10)
 
 Unknown keys now warn once per changed file content through
