@@ -278,17 +278,20 @@ export interface TicketOwner {
 }
 
 /**
- * How caller-facing output text is bounded: at or under
- * `spillThresholdChars` it stays verbatim; over it, only a
- * `spillTailChars`-long tail stays in-context and the rest spills to an
- * owner-only temp file (or degrades to the full output when the write
- * fails). Snapshotted onto each ticket at creation so a poll of a
- * long-settled ticket renders under the bounds it ran with — a later
+ * How caller-facing output text is bounded: a successful task's output at
+ * or under `spillThresholdChars` stays verbatim; over it, only a
+ * `spillTailChars`-long tail stays in-context and the rest spills to a
+ * content-addressed owner-only file under the agent directory (or degrades
+ * to the full output when the write fails). A failed task's partial output
+ * never spills — it is capped at an `errorTailChars` tail plus a pointer to
+ * the durable copies. Snapshotted onto each ticket at creation so a poll of
+ * a long-settled ticket renders under the bounds it ran with — a later
  * config change must not retroactively reshape a rendered result.
  */
 export interface OutputBounds {
   readonly spillThresholdChars: number;
   readonly spillTailChars: number;
+  readonly errorTailChars: number;
 }
 
 /**

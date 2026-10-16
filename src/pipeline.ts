@@ -23,6 +23,7 @@ import {
 import type { DispatchLifetime, DispatchRegistry } from "./lifetime.ts";
 import { discoverProfiles } from "./profiles.ts";
 import type { SessionPool } from "./sessions.ts";
+import { spillDirOf, sweepSpills } from "./spill.ts";
 import type { TelemetryStore } from "./telemetry.ts";
 import type { TicketStore } from "./tickets.ts";
 import type { OutputBounds, ResolvedTask, TaskOutcome, Ticket } from "./types.ts";
@@ -96,6 +97,8 @@ export interface DispatchPipelineResult {
   readonly tasks: readonly ResolvedTask[];
   /** The loaded config's output bounds, for the sync result render. */
   readonly outputBounds: OutputBounds;
+  /** Spill directory under the resolved agent dir (#145). */
+  readonly spillDir: string;
 }
 
 /** One settled task's usage payload: the provider/model that burned it. */
@@ -124,6 +127,10 @@ export class DispatchPipeline {
   private callSeq = 0;
   // Once per extension instance, not per call (see resolveAgentDir).
   private warnedAgentDirFallback = false;
+  // Once per extension instance: the expired-spill sweep (#145) rides the
+  // first dispatch's agent-dir resolution — sync batches never connect the
+  // ticket store, so the pipeline is the one seam both modes share.
+  private sweptSpills = false;
   // Discovery re-reads disk per dispatch; a broken profile warns once per
   // extension instance, not once per run (see discoverProfiles).
   private readonly warnedProfilePaths = new Set<string>();
@@ -255,6 +262,10 @@ export class DispatchPipeline {
       if (agentDirResolution.source === "cwd" && !this.warnedAgentDirFallback) {
         this.warnedAgentDirFallback = true;
         diagnostic("warn", "Falling back to agent directory; config and workspace trees use this path. Set DELEGATE_AGENT_DIR explicitly. Diagnostics destination is independent", { path: agentDirResolution.dir });
+      }
+      if (!this.sweptSpills) {
+        this.sweptSpills = true;
+        sweepSpills(diagnostics, spillDirOf(agentDirResolution.dir));
       }
       const env = hostEnvironment(
         diagnostics,
@@ -466,6 +477,7 @@ export class DispatchPipeline {
         ticket,
         tasks,
         outputBounds: config.output,
+        spillDir: spillDirOf(agentDirResolution.dir),
       };
     } catch (error) {
       // The one pre-handoff failure routine. The wrapper closes the
@@ -500,6 +512,7 @@ export class DispatchPipeline {
           ticket: cancelledTicket,
           tasks: batch.tasks,
           outputBounds: batch.config.output,
+          spillDir: spillDirOf(resolveAgentDir(ctx).dir),
           completion: coordinator
             .run(batch.tasks, {
               env: batch.env,

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
@@ -18,11 +17,15 @@ import {
 } from "../support/pi-boundary.ts";
 
 /**
- * Output-bounding contract (issue #25): the LLM-facing result text keeps a
- * bounded tail of an over-threshold output and points at an owner-only temp
- * file holding the whole output; the complete record stays in `details`.
- * Everything here drives the registered `delegate` tool — spill I/O is
- * steered through TMPDIR, which `os.tmpdir()` reads per call.
+ * Output-bounding contract (issue #25, re-ruled by #145 on 2026-10-16):
+ * a successful task's output stays verbatim up to a high emergency valve
+ * (~25k tokens), over which the LLM-facing result keeps a bounded tail and
+ * points at a content-addressed owner-only file under the agent directory
+ * (never OS temp); a failed task's partial output caps at an error tail
+ * (~900 tokens, Codex parity) and points at the durable copies. The
+ * complete record always stays in `details`. Everything here drives the
+ * registered `delegate` tool — the session's temp cwd is its agent dir, so
+ * spills land in `<cwd>/delegate-spills`.
  */
 
 /** A scripted subagent stream that blocks until `release` is invoked. */
@@ -66,42 +69,22 @@ async function pollUntil(session: TestSession, ticket: string, needle: RegExp) {
 
 describe("delegate output bounding", () => {
   let session: TestSession | undefined;
-  let spillDir: string | undefined;
-  let savedTmpdir: string | undefined;
-  let tmpdirOverridden = false;
 
   afterEach(() => {
     session?.dispose();
     session = undefined;
-    if (tmpdirOverridden) {
-      if (savedTmpdir === undefined) {
-        delete process.env.TMPDIR;
-      } else {
-        process.env.TMPDIR = savedTmpdir;
-      }
-      savedTmpdir = undefined;
-      tmpdirOverridden = false;
-    }
-    if (spillDir !== undefined) {
-      fs.rmSync(spillDir, { recursive: true, force: true });
-      spillDir = undefined;
-    }
   });
 
-  /** Route spill writes into a fresh directory this test can inspect. */
-  function useSpillDir(): string {
-    spillDir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-spill-test-"));
-    savedTmpdir = process.env.TMPDIR;
-    tmpdirOverridden = true;
-    process.env.TMPDIR = spillDir;
-    return spillDir;
+  /** The session's temp cwd is its agent dir; spills live under it. */
+  function spillDirOf(s: TestSession): string {
+    return path.join(s.cwd, "delegate-spills");
   }
 
   test("under-threshold output passes through unchanged", async () => {
     // v1 evidence: spill.test.ts decideSpill "under threshold passes through
     // unchanged, no spill" and "exactly at threshold does NOT spill".
-    const dir = useSpillDir();
     session = await openDelegateBoundary();
+    const dir = spillDirOf(session);
     configureDelegate(session, {
       output: { spillThresholdChars: 100, spillTailChars: 20 },
     });
@@ -115,18 +98,38 @@ describe("delegate output bounding", () => {
     expect(result.isError).toBe(false);
     expect(result.text).toContain("SMALL-OUTPUT");
     expect(result.text).not.toContain("spilled to");
-    expect(spillFiles(dir)).toHaveLength(0);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  test("a realistic result renders verbatim under the shipped valve (#145)", async () => {
+    // The #145 incident class: 8-9k-char outputs used to spill at the old
+    // 8k threshold. The ruled default delivers successful finals verbatim
+    // (incumbent parity) until the ~25k-token emergency valve.
+    session = await openDelegateBoundary();
+    const dir = spillDirOf(session);
+    const subagents = await installSubagentModel(session);
+    const output = `FINDING-${"y".repeat(8500)}-END`;
+    subagents.respond([fauxAssistantMessage(output)]);
+
+    const result = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "research" }],
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain(output);
+    expect(result.text).not.toContain("spilled to");
+    expect(fs.existsSync(dir)).toBe(false);
   });
 
   test(
-    "over-threshold sync output keeps a tail, writes the whole output to an " +
-      "owner-only temp file, and leaves the complete record in details",
+    "over-valve sync output keeps a tail, writes the whole output to an " +
+      "owner-only file under the agent directory, and leaves the complete record in details",
     async () => {
       // v1 evidence: spill.test.ts renderOutputForLLM "over threshold returns
       // tail + pointer and writes a spill file", "file is created mode 0o600";
       // format.ts details.results carries the unbounded TaskResult.
-      const dir = useSpillDir();
       session = await openDelegateBoundary();
+      const dir = spillDirOf(session);
       configureDelegate(session, {
         output: { spillThresholdChars: 100, spillTailChars: 30 },
       });
@@ -145,17 +148,19 @@ describe("delegate output bounding", () => {
       expect(result.text).not.toContain("H".repeat(50));
       expect(result.text).toContain("spilled to");
       expect(result.text).toContain("above is the tail");
-      expect(result.text).toContain("retention follows OS temp policy");
+      expect(result.text).toContain("swept only after 30 days");
 
-      // The named file holds the complete output, owner-only.
+      // The named file holds the complete output, owner-only, under the
+      // agent directory — never OS temp (#145).
       const filePath = spilledPathOf(result.text);
       expect(filePath).toBeDefined();
       expect(path.dirname(filePath!)).toBe(dir);
       expect(path.basename(filePath!)).toMatch(
-        /^delegate-output-inline-[0-9a-f]{32}\.md$/,
+        /^delegate-output-inline-[0-9a-f]{16}\.md$/,
       );
       expect(fs.readFileSync(filePath!, "utf8")).toBe(output);
       expect(fs.statSync(filePath!).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
 
       // The recovery surface keeps the complete output.
       const details = objectOf(result.details, "details");
@@ -164,13 +169,37 @@ describe("delegate output bounding", () => {
     },
   );
 
-  test("a failed task's partial output is bounded the same way", async () => {
-    // v1 evidence: format.ts formatFailedTask renders partial output through
-    // renderOutputForLLM.
-    const dir = useSpillDir();
+  test("a successful outcome names its session transcript (#145)", async () => {
+    // The parent gets a durable pointer to the worker's full trajectory on
+    // every success — plain pointer, no resume hint (failure-recovery
+    // teaching).
     session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    subagents.respond([fauxAssistantMessage("SESSION-LINE-CHECK")]);
+
+    const result = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "anything" }],
+    });
+    expect(result.isError).toBe(false);
+    const line = /^session: (\S+)$/m.exec(result.text);
+    expect(line).not.toBeNull();
+    const sessionFile = line?.[1];
+    expect(sessionFile).toBeDefined();
+    expect(fs.existsSync(sessionFile!)).toBe(true);
+    // The resume hint stays failure-only.
+    expect(result.text).not.toContain("resumeFrom");
+  });
+
+  test("a failed task's partial output is capped at the error tail (#145)", async () => {
+    // v1 evidence: format.ts formatFailedTask renders partial output
+    // bounded; #145 ruling: error payloads cap at `errorTailChars` (Codex
+    // ~900-token parity) and never write a spill file — the complete text
+    // stays on the durable copies.
+    session = await openDelegateBoundary();
+    const dir = spillDirOf(session);
     configureDelegate(session, {
-      output: { spillThresholdChars: 50, spillTailChars: 20 },
+      output: { spillThresholdChars: 50, spillTailChars: 20, errorTailChars: 30 },
     });
     const subagents = await installSubagentModel(session);
     const partial = "P".repeat(300) + "PARTIAL-TAIL";
@@ -189,9 +218,14 @@ describe("delegate output bounding", () => {
     expect(result.text).toContain("provider blew up");
     expect(result.text).toContain("PARTIAL-TAIL");
     expect(result.text).not.toContain("P".repeat(50));
-    const filePath = spilledPathOf(result.text);
-    expect(filePath).toBeDefined();
-    expect(fs.readFileSync(filePath!, "utf8")).toBe(partial);
+    expect(result.text).toContain("partial output truncated");
+    expect(result.text).toContain("details and the session transcript");
+    // No spill file for an error payload.
+    expect(fs.existsSync(dir)).toBe(false);
+    // The complete text still rides the durable record.
+    const details = objectOf(result.details, "details");
+    const results = details.results as { output?: string }[] | undefined;
+    expect(results?.[0]?.output).toBe(partial);
   });
 
   test(
@@ -202,8 +236,8 @@ describe("delegate output bounding", () => {
       // returns the tail + a note, and writes NO file"; ticket-format.ts
       // formatSettledPollLines routes running-ticket output through
       // renderOutputForPoll.
-      const dir = useSpillDir();
       session = await openDelegateBoundary();
+      const dir = spillDirOf(session);
       configureDelegate(session, {
         output: { spillThresholdChars: 100, spillTailChars: 30 },
       });
@@ -228,7 +262,7 @@ describe("delegate output bounding", () => {
       expect(running.text).toContain("truncated in this poll");
       expect(running.text).not.toContain("Q".repeat(50));
       expect(running.text).not.toContain("spilled to");
-      expect(spillFiles(dir)).toHaveLength(0);
+      expect(fs.existsSync(dir)).toBe(false);
 
       blocked.release();
       const settled = await callDelegateTicket(session, {
@@ -245,14 +279,16 @@ describe("delegate output bounding", () => {
   test("a settled ticket's spill pointer is stable across polls", async () => {
     // v1 evidence: tickets.ts formatCompletedTicket memoizes
     // ticket.formattedResult once workersSettled — repeated polls name one
-    // path rather than writing a fresh file per render.
-    const dir = useSpillDir();
+    // path rather than writing a fresh file per render. #145: the file name
+    // is content-addressed, so the same output renders the same path.
     session = await openDelegateBoundary();
+    const dir = spillDirOf(session);
     configureDelegate(session, {
       output: { spillThresholdChars: 50, spillTailChars: 20 },
     });
     const subagents = await installSubagentModel(session);
-    subagents.respond([fauxAssistantMessage("R".repeat(300))]);
+    const output = "R".repeat(300);
+    subagents.respond([fauxAssistantMessage(output)]);
 
     const dispatched = await callDelegate(session, {
       tasks: [{ prompt: "big" }],
@@ -275,9 +311,6 @@ describe("delegate output bounding", () => {
     const firstPath = spilledPathOf(first.text);
     expect(firstPath).toBeDefined();
     expect(spilledPathOf(second.text)).toBe(firstPath);
-    // The wait's settle-time render may run before the view freezes
-    // (worker quiescence lands after caller settlement), but per-outcome
-    // memoization means every render of this outcome shares one file.
     expect(spillFiles(dir)).toHaveLength(1);
   });
 
@@ -288,7 +321,6 @@ describe("delegate output bounding", () => {
       // v1 evidence: format.ts formatCompletedTask's dispatch-scoped config
       // snapshot — "the bounds captured when the task started are the ones
       // the caller committed to".
-      const dir = useSpillDir();
       session = await openDelegateBoundary();
       configureDelegate(session, {
         output: { spillThresholdChars: 50, spillTailChars: 20 },
@@ -320,18 +352,15 @@ describe("delegate output bounding", () => {
   );
 
   test("a spill write failure returns the complete output in-context", async () => {
-    // v1 evidence: spill.test.ts renderOutputForLLM "write failure degrades
-    // to the full output unchanged (lossless)" — lossless always.
+    // v1 evidence: spill.ts renderOutputForLLM "write failure degrades to
+    // the full output unchanged (lossless)" — lossless always. An
+    // unwritable target: a regular file occupies the spill directory's
+    // path, so every spill create fails.
     session = await openDelegateBoundary();
     configureDelegate(session, {
       output: { spillThresholdChars: 50, spillTailChars: 20 },
     });
-    savedTmpdir = process.env.TMPDIR;
-    tmpdirOverridden = true;
-    spillDir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-spill-test-"));
-    // An unwritable target: os.tmpdir() resolves inside a directory that
-    // does not exist, so every spill create fails.
-    process.env.TMPDIR = path.join(spillDir, "nonexistent");
+    fs.writeFileSync(path.join(session.cwd, "delegate-spills"), "not a directory");
     const subagents = await installSubagentModel(session);
     const output = "F".repeat(300) + "FULL-FALLBACK";
     subagents.respond([fauxAssistantMessage(output)]);
@@ -345,10 +374,33 @@ describe("delegate output bounding", () => {
     expect(result.text).not.toContain("spilled to");
   });
 
+  test("expired spill files are swept when the ticket store connects", async () => {
+    // #145: spills live as long as the transcripts naming them (30 days),
+    // then go. The sweep runs at store connect — the first dispatch.
+    session = await openDelegateBoundary();
+    const dir = spillDirOf(session);
+    fs.mkdirSync(dir, { recursive: true });
+    const stale = path.join(dir, "delegate-output-stale-deadbeef.md");
+    const fresh = path.join(dir, "delegate-output-fresh-CAFEBABE.md");
+    fs.writeFileSync(stale, "old");
+    fs.writeFileSync(fresh, "new");
+    const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(stale, old, old);
+
+    const subagents = await installSubagentModel(session);
+    subagents.respond([fauxAssistantMessage("SWEEP-CHECK")]);
+    const result = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "trigger connect" }],
+    });
+    expect(result.isError).toBe(false);
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
+
   test("the kept tail never begins with a lone surrogate half", async () => {
     // v1 evidence: spill.test.ts "surrogate-pair-aware: cut does not begin
     // on a lone trailing surrogate".
-    useSpillDir();
     session = await openDelegateBoundary();
     configureDelegate(session, {
       output: { spillThresholdChars: 50, spillTailChars: 5 },
@@ -375,8 +427,8 @@ describe("delegate output bounding", () => {
   test("empty and placeholder outputs are never bounded", async () => {
     // v1 evidence: spill.test.ts "empty / placeholder outputs pass through
     // without spilling".
-    const dir = useSpillDir();
     session = await openDelegateBoundary();
+    const dir = spillDirOf(session);
     configureDelegate(session, {
       output: { spillThresholdChars: 1, spillTailChars: 1 },
     });
@@ -390,15 +442,15 @@ describe("delegate output bounding", () => {
     expect(result.isError).toBe(false);
     expect(result.text).toContain("(no output)");
     expect(result.text).not.toContain("spilled to");
-    expect(spillFiles(dir)).toHaveLength(0);
+    expect(fs.existsSync(dir)).toBe(false);
   });
 
   test("whitespace-only over-threshold output still spills", async () => {
     // Bug 9: a trim()-based emptiness exemption let 100000 spaces pass a
     // 100-char limit. Whitespace still consumes LLM context, so only bare
     // empty and the exact placeholder bypass bounding.
-    const dir = useSpillDir();
     session = await openDelegateBoundary();
+    const dir = spillDirOf(session);
     configureDelegate(session, {
       output: { spillThresholdChars: 100, spillTailChars: 20 },
     });
@@ -421,7 +473,8 @@ describe("delegate output bounding", () => {
   test("malformed output bounds fail the whole call before any task starts", async () => {
     // v1 evidence: config.ts validation — "output must be an object",
     // "output.spillThresholdChars must be a positive integer",
-    // "output.spillTailChars must be a non-negative integer".
+    // "output.spillTailChars must be a non-negative integer". #145 adds
+    // errorTailChars with the same teaching.
     session = await openDelegateBoundary();
     const subagents = await installSubagentModel(session);
     subagents.respond([fauxAssistantMessage("SHOULD-NOT-RUN")]);
@@ -443,6 +496,14 @@ describe("delegate output bounding", () => {
       [
         { spillTailChars: "x" },
         /output\.spillTailChars must be a non-negative integer/,
+      ],
+      [
+        { errorTailChars: -1 },
+        /output\.errorTailChars must be a non-negative integer/,
+      ],
+      [
+        { errorTailChars: "x" },
+        /output\.errorTailChars must be a non-negative integer/,
       ],
     ] as const) {
       configureDelegate(session, { output });

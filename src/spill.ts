@@ -1,13 +1,15 @@
 import { DiagnosticSink } from "./diagnostics.ts";
-import { randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { DELEGATE_TREES } from "./fsx.ts";
 import type { OutputBounds } from "./types.ts";
 
 const SPILL_PREFIX = "delegate-output-";
-const RANDOM_SUFFIX_BYTES = 16;
-const CREATE_ATTEMPTS = 5;
+const SPILL_HASH_CHARS = 16;
+
+// Spill files older than this are swept when the ticket store connects.
+const SPILL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 // ── Spill: keep subagent final-output bloat out of the LLM context ───────
 //
@@ -19,10 +21,18 @@ const CREATE_ATTEMPTS = 5;
 //
 // The spill is a greppable plain-text `.md` projection of the *final output*
 // only. The full transcript already lives in the session `.jsonl`; this does
-// not duplicate it. Delegate never deletes spills because their pointers can
-// persist in transcripts; lifecycle is left to the OS temp policy. Design:
-// lossless always — if the spill write fails, we degrade to full output
-// in-context rather than hard-truncate.
+// not duplicate it. Since #145 (ruled 2026-10-16) spills live under the
+// agent directory beside the ticket records, content-addressed so every
+// render of the same output names the same path across processes, and are
+// swept after SPILL_RETENTION_MS — a pointer in a transcript never names a
+// file the OS is about to delete. Design: lossless always — if the spill
+// write fails, we degrade to full output in-context rather than
+// hard-truncate.
+
+/** The spill directory for an agent directory (single derivation site). */
+export function spillDirOf(agentDir: string): string {
+  return path.join(agentDir, DELEGATE_TREES.spills);
+}
 
 /**
  * Bounds that never bound: `decideSpill` can never fire under them, so no
@@ -34,6 +44,7 @@ const CREATE_ATTEMPTS = 5;
 export const UNBOUNDED_OUTPUT: OutputBounds = {
   spillThresholdChars: Number.POSITIVE_INFINITY,
   spillTailChars: Number.POSITIVE_INFINITY,
+  errorTailChars: Number.POSITIVE_INFINITY,
 };
 
 /** Decision over an output string: spill or not, and what stays in-context. */
@@ -80,54 +91,101 @@ function errorCode(error: unknown): unknown {
     : undefined;
 }
 
+/** Deterministic spill path: same output content → same file name. */
+function spillFilePath(
+  dir: string,
+  label: string,
+  output: string,
+): string {
+  const safeLabel = label.replace(/[^\w.-]+/g, "_").slice(0, 64) || "agent";
+  const digest = createHash("sha256").update(output).digest("hex");
+  return path.join(
+    dir,
+    `${SPILL_PREFIX}${safeLabel}-${digest.slice(0, SPILL_HASH_CHARS)}.md`,
+  );
+}
+
 /**
- * Write the full output to a temp `.md` file and return its path, or `null`
- * on failure. Never throws — callers rely on the lossless-degrade guarantee.
+ * Write the full output under the agent directory and return its path, or
+ * `null` on failure. Never throws — callers rely on the lossless-degrade
+ * guarantee.
  *
- * Files are mode 0o600 and opened with `wx`: even an improbable collision
- * can never overwrite another spill. Names use 128 bits of randomness and
- * collisions retry.
+ * The name is content-addressed (sha256 of the output), so any renderer of
+ * the same output — this process or a cold restart — computes the same path.
+ * Files are mode 0o600 in a 0o700 owner-only directory and opened with
+ * `wx`: an existing name means identical content is already on disk, and no
+ * create can ever clobber another spill.
  */
-export function spillToTempFile(
+function writeSpill(
   diagnostics: DiagnosticSink,
+  dir: string,
   output: string,
   label: string,
 ): string | null {
-  const safeLabel = label.replace(/[^\w.-]+/g, "_").slice(0, 64) || "agent";
-  const dir = os.tmpdir();
-  let lastPath = path.join(dir, `${SPILL_PREFIX}${safeLabel}-unknown.md`);
-  let lastError: unknown;
-
-  for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt++) {
-    let fd: number | undefined;
+  let fd: number | undefined;
+  const target = spillFilePath(dir, label, output);
+  try {
     try {
-      const candidate = randomBytes(RANDOM_SUFFIX_BYTES).toString("hex");
-      lastPath = path.join(dir, `${SPILL_PREFIX}${safeLabel}-${candidate}.md`);
-      fd = fs.openSync(lastPath, "wx", 0o600);
-      fs.writeFileSync(fd, output);
-      fs.closeSync(fd);
-      return lastPath;
-    } catch (error) {
-      lastError = error;
-      if (fd !== undefined) {
-        try {
-          fs.closeSync(fd);
-        } catch {
-          // Continue to remove the incomplete file below.
-        }
-        try {
-          fs.rmSync(lastPath, { force: true });
-        } catch (cleanupError) {
-          diagnostics.log("warn", "spill partial-file cleanup failed", { path: lastPath }, cleanupError);
-        }
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    } catch (mkdirError) {
+      diagnostics.log("warn", "spill directory unavailable", { path: dir }, mkdirError);
+      return null;
+    }
+    fd = fs.openSync(target, "wx", 0o600);
+    fs.writeFileSync(fd, output);
+    fs.closeSync(fd);
+    return target;
+  } catch (error) {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Continue to remove the incomplete file below.
       }
-      if (errorCode(error) === "EEXIST") continue;
-      break;
+      try {
+        fs.rmSync(target, { force: true });
+      } catch (cleanupError) {
+        diagnostics.log("warn", "spill partial-file cleanup failed", { path: target }, cleanupError);
+      }
+    }
+    // A same-name file already on disk is the common success case
+    // (content-addressed re-render), not a failure.
+    if (errorCode(error) === "EEXIST") return target;
+    diagnostics.log("warn", "spill write failed", { path: target }, error);
+    return null;
+  }
+}
+
+/**
+ * Delete spill files older than SPILL_RETENTION_MS. Observation only —
+ * never throws, and the swept files are derived artifacts (the ticket
+ * records retain the complete outputs) so a failure to sweep is logged and
+ * forgotten.
+ */
+export function sweepSpills(diagnostics: DiagnosticSink, dir: string): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return; // No spills yet — nothing to sweep.
+  }
+  const cutoff = Date.now() - SPILL_RETENTION_MS;
+  let swept = 0;
+  for (const name of names) {
+    if (!name.startsWith(SPILL_PREFIX)) continue;
+    const file = path.join(dir, name);
+    try {
+      if (fs.statSync(file).mtimeMs < cutoff) {
+        fs.rmSync(file, { force: true });
+        swept++;
+      }
+    } catch (statError) {
+      diagnostics.log("warn", "spill sweep stat failed", { path: file }, statError);
     }
   }
-
-  diagnostics.log("warn", "spill write failed", { path: lastPath }, lastError);
-  return null;
+  if (swept > 0) {
+    diagnostics.log("info", "swept expired spill files", { path: dir, count: swept });
+  }
 }
 
 /**
@@ -143,6 +201,7 @@ export function renderOutputForLLM(
   output: string,
   label: string,
   bounds: OutputBounds,
+  spillDir: string | undefined,
 ): string {
   // Skip empty / placeholder — nothing to spill, nothing to bound. The
   // check is bare-empty plus the exact placeholder: a long whitespace-only
@@ -153,11 +212,29 @@ export function renderOutputForLLM(
   const decision = decideSpill(output, bounds);
   if (!decision.spill) return output;
 
-  const filePath = spillToTempFile(diagnostics, output, label);
+  // No resolved spill directory (no agent dir): the lossless degrade.
+  if (spillDir === undefined) return output;
+  const filePath = writeSpill(diagnostics, spillDir, output, label);
   // Lossless degrade: write failed → return full output, never hard-truncate.
   if (!filePath) return output;
 
   return spillPointer(decision.inContext, filePath, decision.fullChars);
+}
+
+/**
+ * Render a failed task's partial output for the LLM-facing content string:
+ * a bounded tail plus one line naming the durable copies — never a spill
+ * file (#145 ruling: error payloads cap at `errorTailChars`, Codex parity;
+ * the complete text is already retained on the record, in details, and in
+ * the session transcript the failure section names).
+ */
+export function renderPartialForLLM(
+  output: string,
+  errorTailChars: number,
+): string {
+  if (!output || output.length <= errorTailChars) return output;
+  const tail = tailOf(output, errorTailChars);
+  return `…${tail}\n[partial output truncated to its last ${errorTailChars} chars; the complete text is retained in this result's details and the session transcript]`;
 }
 
 /**
@@ -189,7 +266,7 @@ function spillPointer(
   filePath: string,
   fullChars: number,
 ): string {
-  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n retention follows OS temp policy; \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
+  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n retained with the ticket store and swept only after 30 days; \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
 }
 
 /**

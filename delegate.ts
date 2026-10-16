@@ -1696,7 +1696,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
               syncRunId,
               rows: (runId) => activity.syncRunRows(runId),
             });
-            const { completion, ticket, notices, tasks, outputBounds } =
+            const { completion, ticket, notices, tasks, outputBounds, spillDir } =
               await pipeline.run({
               requestedTasks: call.tasks,
               ctx,
@@ -1833,7 +1833,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
                   type: "text" as const,
                   text:
                     (textNotices.length > 0 ? `${textNotices.join("\n")}\n\n` : "") +
-                    formatDispatchResult(diagnostics, result.outcomes, tasks, outputBounds, call.brief),
+                    formatDispatchResult(diagnostics, result.outcomes, tasks, outputBounds, call.brief, spillDir),
                 },
               ],
               details: ({

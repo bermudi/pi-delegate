@@ -113,6 +113,9 @@ const savedTicket = Type.Object({
   outputBounds: Type.Object({
     spillThresholdChars: Type.Integer({ minimum: 0 }),
     spillTailChars: Type.Integer({ minimum: 0 }),
+    // Optional in the journal — records written before #145 carry none;
+    // recovery fills the shipped default.
+    errorTailChars: Type.Optional(Type.Integer({ minimum: 0 })),
   }),
   // The dispatching host's identity (#54) — optional; records written
   // before owner tracking carry none and are never owner-interrupted at

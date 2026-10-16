@@ -597,7 +597,6 @@ export class DispatchCoordinator {
                     task: tasks[depIndex]!,
                     outcome: ledger.read(depIndex)!,
                   })),
-                  options.config.output,
                 ),
             }
           : briefed;

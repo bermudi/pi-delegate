@@ -1,9 +1,5 @@
 import { tailOf } from "./spill.ts";
-import type {
-  OutputBounds,
-  ResolvedTask,
-  TaskOutcome,
-} from "./types.ts";
+import type { ResolvedTask, TaskOutcome } from "./types.ts";
 
 /**
  * The dependency graph for one dispatch. `dependsOn` entries are
@@ -172,12 +168,20 @@ export function blockingReason(
     : `its isolated proposal ended '${status}' — its changes are not in the tree`;
 }
 
+/**
+ * Worker-prompt tail budget for prerequisite outputs. Decoupled from the
+ * parent-facing result valve (#145): that valve widened to ~25k tokens for
+ * the calling model's context, but a dependent worker's prompt is a
+ * different budget — an 8k tail keeps the handoff bounded as before.
+ */
+const HANDOFF_TAIL_CHARS = 8000;
+
 /** A prerequisite's output projected into a dependent's prompt. */
-function handoffOutput(output: string, bounds: OutputBounds): string {
-  if (output.length <= bounds.spillThresholdChars) return output;
+function handoffOutput(output: string): string {
+  if (output.length <= HANDOFF_TAIL_CHARS) return output;
   return (
-    `…${tailOf(output, bounds.spillThresholdChars)}\n` +
-    `[prerequisite output truncated to its last ${bounds.spillThresholdChars} chars; ` +
+    `…${tailOf(output, HANDOFF_TAIL_CHARS)}\n` +
+    `[prerequisite output truncated to its last ${HANDOFF_TAIL_CHARS} chars; ` +
     `the complete output is on its task result]`
   );
 }
@@ -190,7 +194,6 @@ function handoffOutput(output: string, bounds: OutputBounds): string {
  */
 export function handoffAppendix(
   deps: readonly { task: ResolvedTask; outcome: TaskOutcome }[],
-  bounds: OutputBounds,
 ): string {
   const sections = deps.map(({ task, outcome }) => {
     let note = "";
@@ -213,7 +216,7 @@ export function handoffAppendix(
     }
     const output =
       outcome.output !== undefined && outcome.output.trim() !== ""
-        ? handoffOutput(outcome.output, bounds)
+        ? handoffOutput(outcome.output)
         : "(no output)";
     return `### '${outcome.id}' — completed${note}\n${output}`;
   });

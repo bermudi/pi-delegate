@@ -25,6 +25,8 @@ export const DELEGATE_TREES = Object.freeze({
   isolated: "delegate-isolated",
   /** Durable ticket journal — rewritten on every recorded outcome. */
   tickets: "delegate-tickets",
+  /** Content-addressed spill files for over-valve outputs (#145). */
+  spills: "delegate-spills",
   /** Owner-only operational diagnostics (never part of worker copies). */
   diagnostics: DIAGNOSTIC_TREE,
 } as const);

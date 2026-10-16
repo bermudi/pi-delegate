@@ -61,7 +61,6 @@ src/sessions.ts:SessionRpcResult
 src/sessions.ts:SessionSettle
 src/spill.ts:decideSpill
 src/spill.ts:SpillDecision
-src/spill.ts:spillToTempFile
 src/teardown.ts:SessionTeardownDependencies
 src/telemetry.ts:DispatchTelemetrySpan
 src/telemetry.ts:MisfireShape

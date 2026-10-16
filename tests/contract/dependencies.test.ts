@@ -517,14 +517,12 @@ describe("delegate dependency graph and handoffs", () => {
   test(
     "a handoff is bounded — only the prerequisite's output tail reaches the dependent",
     async () => {
-      // SPEC: the handoff projection is bounded by
-      // output.spillThresholdChars; the full output stays on the
-      // prerequisite's own result.
+      // SPEC: the handoff projection is bounded by the fixed worker-prompt
+      // tail budget (#145: 8000 chars, decoupled from the parent-facing
+      // result valve); the full output stays on the prerequisite's own
+      // result.
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
-      configureDelegate(session, {
-        output: { spillThresholdChars: 40, spillTailChars: 40 },
-      });
 
       const prompts: string[] = [];
       const turn: FauxResponseFactory = async (context) => {
@@ -533,7 +531,7 @@ describe("delegate dependency graph and handoffs", () => {
         if (messages.includes("DEPENDENT")) {
           return fauxAssistantMessage("DEPENDENT-DONE");
         }
-        return fauxAssistantMessage(`HEAD-${"x".repeat(200)}-TAIL`);
+        return fauxAssistantMessage(`HEAD-${"x".repeat(9000)}-TAIL`);
       };
       subagents.respond([turn, turn]);
 
@@ -549,8 +547,7 @@ describe("delegate dependency graph and handoffs", () => {
       // The tail survives; the truncated head does not.
       expect(dependentPrompt).toContain("-TAIL");
       expect(dependentPrompt).not.toContain("HEAD-x");
-      // The prerequisite's own outcome keeps the complete output even
-      // though its rendered section is spill-bounded too.
+      // The prerequisite's own outcome keeps the complete output.
       const details = objectOf(result.details, "details");
       const results = details.results as { output?: string }[] | undefined;
       expect(results?.[0]?.output).toContain("HEAD-");

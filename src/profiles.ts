@@ -68,9 +68,9 @@ export interface AgentProfile {
 }
 
 /**
- * The fixed subagent framing appended to every composed child base prompt
- * (inline tasks and built-in profiles). Authored prompts — Markdown
- * profile bodies — never receive it. Carries no parent identity: never a
+ * The fixed subagent framing appended to every child base prompt — inline
+ * tasks, built-in profiles, and (since the #145 ruling, 2026-10-16)
+ * authored Markdown profile bodies. Carries no parent identity: never a
  * model name.
  */
 export const SUBAGENT_FRAMING =

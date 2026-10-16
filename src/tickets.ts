@@ -27,10 +27,11 @@ import type {
   SteerStatus,
 } from "./details.ts";
 import { TicketJournal } from "./ticket-journal.ts";
+import { DEFAULT_CONFIG } from "./config.ts";
 import { DELEGATE_TREES } from "./fsx.ts";
 import { currentBootId, ownerIsDead } from "./owner.ts";
 import { assistantTextFromTranscript } from "./sessions.ts";
-import { renderOutputForLLM, renderOutputForPoll } from "./spill.ts";
+import { renderOutputForLLM, renderOutputForPoll, renderPartialForLLM, spillDirOf } from "./spill.ts";
 import type {
   ExecutionHandle,
   OutputBounds,
@@ -182,6 +183,7 @@ function taskSection(
   outcome: TaskOutcome,
   whole: boolean,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
+  spillDir?: string,
 ): string {
   const record = ticket.tasks[outcome.index];
   const tag = record?.resumeTag;
@@ -203,25 +205,28 @@ function taskSection(
     : "";
   // The ticket's lifecycle decides the renderer, not the outcome's: while
   // the ticket runs, even a finished task's output is bounded to a tail —
-  // a poll never writes a spill file. On a terminal ticket every recorded
+  // a poll never writes a spill file. On a terminal ticket a successful
   // outcome renders through the spill boundary under the bounds snapshotted
   // at creation, memoized per outcome so re-renders before the view freezes
-  // keep one stable spill path. `outcome.output` itself stays complete
-  // either way. A `whole` view (the human expanded render) skips bounding
-  // entirely.
+  // keep one stable spill path (the file name is content-addressed, so a
+  // cold restart re-derives the same path too); a failed outcome's partial
+  // output caps at the error tail and points at the durable copies.
+  // `outcome.output` itself stays complete either way. A `whole` view (the
+  // human expanded render) skips bounding entirely.
   const bounds = ticket.outputBounds;
   const label = ticket.tasks[outcome.index]?.agent ?? outcome.id;
-  const render = whole
-    ? (output: string) => output
-    : isTerminal(ticket.status)
-      ? (output: string) => {
-          const cached = renderedOutputs?.get(outcome);
-          if (cached !== undefined) return cached;
-          const rendered = renderOutputForLLM(diagnostics, output, label, bounds);
-          renderedOutputs?.set(outcome, rendered);
-          return rendered;
-        }
-      : (output: string) => renderOutputForPoll(output, bounds);
+  const renderOutput = (output: string): string => {
+    if (whole) return output;
+    if (!isTerminal(ticket.status)) return renderOutputForPoll(output, bounds);
+    if (outcome.status !== "ok") {
+      return renderPartialForLLM(output, bounds.errorTailChars);
+    }
+    const cached = renderedOutputs?.get(outcome);
+    if (cached !== undefined) return cached;
+    const rendered = renderOutputForLLM(diagnostics, output, label, bounds, spillDir);
+    renderedOutputs?.set(outcome, rendered);
+    return rendered;
+  };
   // Completion evidence rides beside the task's claim, between the status
   // head and its output (SPEC v3 "Observability"). The task's cwd
   // relativizes the display; records written before attribution have no
@@ -240,15 +245,21 @@ function taskSection(
     .join("\n");
   const files = evidence !== "" ? `\n${evidence}` : "";
   if (outcome.status === "ok") {
-    return `${head}${files}\n${render(outcome.output ?? "")}${quarantined}${integration}`;
+    // #145: a successful outcome names its session transcript — the
+    // durable full trajectory the parent can read on demand. Plain
+    // pointer only; the resume hint is failure-recovery teaching.
+    const session = outcome.sessionFile !== undefined
+      ? `\nsession: ${outcome.sessionFile}`
+      : "";
+    return `${head}${files}${session}\n${renderOutput(outcome.output ?? "")}${quarantined}${integration}`;
   }
   const detail = outcome.error ?? "no output";
   const session =
     outcome.sessionFile !== undefined
       ? `\n${recoveryLines(outcome.sessionFile).join("\n")}`
       : "";
-  const partial = outcome.output ? `\n${render(outcome.output)}` : "";
-  return `${head}${files}\n${detail}${session}${partial}${quarantined}${integration}`;
+  const partial = outcome.output ? `\n\nPartial output:\n${renderOutput(outcome.output)}` : "";
+  return `${head}${files}${detail}${session}${partial}${quarantined}${integration}`;
 }
 
 /**
@@ -368,6 +379,7 @@ function ticketView(
   whole = false,
   renderedOutputs?: WeakMap<TaskOutcome, string>,
   live?: LiveState,
+  spillDir?: string,
 ): string {
   const warning = recoveryWarning(ticket);
   const brief = briefNote(ticket.brief);
@@ -384,7 +396,7 @@ function ticketView(
   for (let index = 0; index < ticket.outcomes.length; index++) {
     const outcome = ticket.outcomes[index];
     if (outcome) {
-      lines.push("", taskSection(diagnostics, ticket, outcome, whole, renderedOutputs));
+      lines.push("", taskSection(diagnostics, ticket, outcome, whole, renderedOutputs, spillDir));
     } else if (!isTerminal(ticket.status)) {
       // A running ticket shows each unfinished task's live line — a
       // polling caller can tell a healthy worker from a spinning one.
@@ -475,6 +487,8 @@ function knownTickets(store: TicketStore, sessionId: string | undefined): string
 export class TicketStore {
   private readonly tickets = new Map<string, TicketEntry>();
   private journal: TicketJournal | undefined;
+  /** Spill directory under the connected agent dir (#145); set by connect. */
+  private spillDir: string | undefined;
   /**
    * Optional lifecycle observer (extension-owned): fired after every
    * caller-visible mutation so visibility signals can resync. The store
@@ -552,6 +566,7 @@ export class TicketStore {
       }
       return;
     }
+    this.spillDir = spillDirOf(agentDir);
     const journal = new TicketJournal(this.diagnostics, agentDir);
     const saved = journal.load();
     // #54 owner liveness: a journaled `running` ticket settles
@@ -608,7 +623,14 @@ export class TicketStore {
         totalTasks: item.tasks.length,
         outcomes,
         questions: [],
-        outputBounds: item.outputBounds,
+        // Records written before #145 carry no errorTailChars; recovery
+        // renders them under the shipped default.
+        outputBounds: {
+          ...item.outputBounds,
+          errorTailChars:
+            item.outputBounds.errorTailChars ??
+            DEFAULT_CONFIG.output.errorTailChars,
+        },
         createdAt: item.createdAt,
         recovered: true,
         ...(item.owner !== undefined ? { owner: item.owner } : {}),
@@ -754,10 +776,10 @@ export class TicketStore {
       rt.batchFinishedGate.resolved &&
       rt.executions.size === 0
     ) {
-      rt.settledView ??= ticketView(this.diagnostics, record, false, rt.renderedOutputs, live);
+      rt.settledView ??= ticketView(this.diagnostics, record, false, rt.renderedOutputs, live, this.spillDir);
       return rt.settledView;
     }
-    return ticketView(this.diagnostics, record, false, rt.renderedOutputs, live);
+    return ticketView(this.diagnostics, record, false, rt.renderedOutputs, live, this.spillDir);
   }
 
   /**

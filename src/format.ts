@@ -1,7 +1,7 @@
 import type { DiagnosticSink } from "./diagnostics.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { relative } from "node:path";
-import { renderOutputForLLM } from "./spill.ts";
+import { renderOutputForLLM, renderPartialForLLM } from "./spill.ts";
 import type {
   FieldNormalization,
   OutputBounds,
@@ -390,11 +390,12 @@ export function overlapLines(
 
 /**
  * Synchronous dispatch result body: one section per task, in input order.
- * Task output is projected through the spill boundary — over-threshold
- * output becomes a tail plus a temp-file pointer; `outcome.output` itself
- * stays complete for the details/recovery surface (the always-on
- * single surface renders every pointer unconditionally, ADR 0002).
- * A failed task's partial output is bounded the same way.
+ * Task output is projected through the spill boundary — over-valve output
+ * becomes a tail plus a pointer to a content-addressed file under the
+ * agent directory; `outcome.output` itself stays complete for the
+ * details/recovery surface (the always-on single surface renders every
+ * pointer unconditionally, ADR 0002). A failed task's partial output is
+ * capped at the error tail instead (#145).
  */
 export function formatDispatchResult(
   diagnostics: DiagnosticSink,
@@ -402,6 +403,7 @@ export function formatDispatchResult(
   tasks: Ticket["tasks"],
   bounds: OutputBounds,
   brief?: string,
+  spillDir?: string,
 ): string {
   const sections = outcomes.map((outcome) => {
     const task = tasks[outcome.index];
@@ -437,7 +439,13 @@ export function formatDispatchResult(
       .join("\n");
     const files = evidence !== "" ? `\n${evidence}` : "";
     if (outcome.status === "ok") {
-      return `${head}${files}\n${renderOutputForLLM(diagnostics, outcome.output ?? "", label, bounds)}${quarantined}${integration}`;
+      // #145: a successful outcome names its session transcript — the
+      // durable full trajectory the parent can read on demand. Plain
+      // pointer only; the resume hint is failure-recovery teaching.
+      const session = outcome.sessionFile !== undefined
+        ? `\nsession: ${outcome.sessionFile}`
+        : "";
+      return `${head}${files}${session}\n${renderOutputForLLM(diagnostics, outcome.output ?? "", label, bounds, spillDir)}${quarantined}${integration}`;
     }
     const detail = outcome.error ?? "no output";
     const session =
@@ -445,7 +453,7 @@ export function formatDispatchResult(
         ? `\n${recoveryLines(outcome.sessionFile).join("\n")}`
         : "";
     const partial = outcome.output
-      ? `\n\nPartial output:\n${renderOutputForLLM(diagnostics, outcome.output, label, bounds)}`
+      ? `\n\nPartial output:\n${renderPartialForLLM(outcome.output, bounds.errorTailChars)}`
       : "";
     return `${head}${files}\n${detail}${partial}${session}${quarantined}${integration}`;
   });

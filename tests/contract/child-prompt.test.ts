@@ -19,7 +19,9 @@ import {
  * from the child's own inventory. The composition appends the built-in
  * role line and closes with the fixed subagent framing, which carries no
  * parent identity. Authored prompts — an explicit task `systemPrompt` or a
- * Markdown profile body — are verbatim: no inheritance, no framing. An
+ * Markdown profile body — keep their base verbatim with no inheritance,
+ * but the fixed subagent framing is appended (#145 ruling 2026-10-16: the
+ * final-message contract reaches authored profiles too). An
  * extension-force-replaced parent prompt disables inheritance with a
  * logged skip.
  */
@@ -189,7 +191,7 @@ describe("composed child base prompt contract (#33)", () => {
   );
 
   test(
-    "a Markdown profile body is verbatim: no inheritance, no framing",
+    "a Markdown profile body keeps its verbatim base: no inheritance, framing appended (#145)",
     async () => {
       session = await openDelegateBoundary({ systemPrompt: PERSONA });
       const dir = join(session.cwd, "agents");
@@ -215,8 +217,11 @@ describe("composed child base prompt contract (#33)", () => {
 
       expect(result.isError).toBe(false);
       expect(seenPrompt).toContain("PROFILE-BODY: carve stone.");
+      // The parent's persona never reaches an authored body; the fixed
+      // subagent framing does (#145 ruling 2026-10-16) — the final-message
+      // contract reaches authored profiles too.
       expect(seenPrompt).not.toContain("PARENT-PERSONA");
-      expect(seenPrompt).not.toContain(FRAMING);
+      expect(seenPrompt).toContain(FRAMING);
     },
   );
 

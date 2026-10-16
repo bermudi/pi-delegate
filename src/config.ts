@@ -75,10 +75,14 @@ export interface DelegateConfig {
    */
   readonly providerExtensions: Readonly<Record<string, readonly string[]>>;
   /**
-   * LLM-facing output bounding: over `spillThresholdChars` a settled task's
-   * output spills to an owner-only temp file and only a `spillTailChars`
-   * tail stays in-context (see `spill.ts`). Dispatch-scoped: tickets
-   * snapshot these at creation.
+   * LLM-facing output bounding (#145 ruling, 2026-10-16): a successful
+   * task's output stays verbatim (the incumbent default — Claude Code
+   * delivers finals uncapped) until a high emergency valve, then only a
+   * `spillTailChars` tail stays in-context and the rest spills to a
+   * content-addressed file under the agent directory (see `spill.ts`). A
+   * failed task's partial output is capped at an `errorTailChars` tail
+   * (Codex error-payload parity). Dispatch-scoped: tickets snapshot these
+   * at creation.
    */
   readonly output: OutputBounds;
 }
@@ -109,7 +113,13 @@ export const DEFAULT_CONFIG: DelegateConfig = {
   // checked-out sessions are never counted (in-flight never unloads).
   sessions: { maxIdle: 4 },
   providerExtensions: {},
-  output: { spillThresholdChars: 8000, spillTailChars: 2000 },
+  // #145 ruling (2026-10-16): successful finals deliver verbatim like the
+  // incumbents (Claude Code ships no cap); the valve exists only for the
+  // pathological case and is set at ~25k tokens (100,000 chars at the
+  // 4 chars/token heuristic — the field's ceiling: opencode 50KiB, Letta
+  // 30k chars). The 8k v2 threshold taxed ordinary results. Failed
+  // partials cap at ~900 tokens (3,600 chars) — Codex error-payload parity.
+  output: { spillThresholdChars: 100_000, spillTailChars: 2_000, errorTailChars: 3_600 },
 };
 
 /**
@@ -554,8 +564,9 @@ function parseProviderExtensions(
 
 /**
  * Parse the optional `output` block: LLM-facing output bounding
- * (`{ spillThresholdChars?, spillTailChars? }`). A malformed bound fails
- * loudly — silently ignoring it could flood the caller's context.
+ * (`{ spillThresholdChars?, spillTailChars?, errorTailChars? }`). A
+ * malformed bound fails loudly — silently ignoring it could flood the
+ * caller's context.
  */
 function parseOutput(value: unknown, path: string): OutputBounds {
   if (value === undefined) return DEFAULT_CONFIG.output;
@@ -578,10 +589,21 @@ function parseOutput(value: unknown, path: string): OutputBounds {
       `${path}: output.spillTailChars must be a non-negative integer; got ${JSON.stringify(tail)}.`,
     );
   }
+  const errorTail = raw.errorTailChars;
+  if (
+    errorTail !== undefined &&
+    (typeof errorTail !== "number" || !Number.isInteger(errorTail) || errorTail < 0)
+  ) {
+    throw new Error(
+      `${path}: output.errorTailChars must be a non-negative integer; got ${JSON.stringify(errorTail)}.`,
+    );
+  }
   return {
     spillThresholdChars:
       (threshold as number) ?? DEFAULT_CONFIG.output.spillThresholdChars,
     spillTailChars: (tail as number) ?? DEFAULT_CONFIG.output.spillTailChars,
+    errorTailChars:
+      (errorTail as number) ?? DEFAULT_CONFIG.output.errorTailChars,
   };
 }
 

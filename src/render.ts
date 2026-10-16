@@ -3,7 +3,8 @@
  * tools' results and for the delivered `delegate-result` custom message.
  *
  * Pi's stock result rendering only ever displays the LLM-facing `content`
- * text, which spill-bounds large outputs to a tail plus a file pointer —
+ * text, which spill-bounds over-valve outputs to a tail plus a pointer at a
+ * durable file under the agent directory —
  * so expanding a result never revealed the whole output even though
  * SPEC "Recovery" promises it ("a human expanding the result sees it
  * whole"). The expanded views below re-render from `details.results`, the

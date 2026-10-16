@@ -382,20 +382,24 @@ export async function resolveTasks(
     const prompt = task.prompt ?? (task.resumeFrom ? RESUME_DEFAULT_PROMPT : "");
 
     // Child base prompt (SPEC "Child base prompt"). Authored text — a
-    // Markdown profile body — is used verbatim with nothing appended.
-    // Everything else (inline tasks and
-    // built-in profiles) composes: the parent's user-authored prompt inputs
-    // (custom base prompt replacing the stock prefix, plus user-appended
-    // text), the built-in role line, and the fixed framing. Extension-
-    // contributed sections, guidelines, and tool documentation are never
-    // inherited — the structured prompt inputs expose only the user-authored
-    // fields here, and the child session builds tool docs from its own
-    // inventory. A force-replaced parent prompt disables inheritance.
+    // Markdown profile body — is used verbatim as the base prompt, with
+    // only the fixed subagent framing appended (#145 ruling 2026-10-16:
+    // the final-message contract reaches authored profiles too; everything
+    // else about the operator's voice stays untouched). Everything else
+    // (inline tasks and built-in profiles) composes: the parent's
+    // user-authored prompt inputs (custom base prompt replacing the stock
+    // prefix, plus user-appended text), the built-in role line, and the
+    // fixed framing. Extension-contributed sections, guidelines, and tool
+    // documentation are never inherited — the structured prompt inputs
+    // expose only the user-authored fields here, and the child session
+    // builds tool docs from its own inventory. A force-replaced parent
+    // prompt disables inheritance.
     const authoredPrompt = profile?.systemPrompt;
     let systemPrompt: string | undefined;
     const promptAppend: string[] = [];
     if (authoredPrompt !== undefined) {
       systemPrompt = authoredPrompt;
+      promptAppend.push(SUBAGENT_FRAMING);
     } else {
       const parentInputs = env.parentPrompt.inputs();
       if (parentInputs?.forced) {
