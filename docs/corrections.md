@@ -9,6 +9,16 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 
 ## Correction log
 
+- 2026-10-16 — follow-up review of #145 found the spill pointer telling
+  every reader the file was "retained with the ticket store" — sync
+  dispatches spill with no ticket in existence; the retention claim must
+  name where the file actually lives (the agent directory), not a
+  subsystem the dispatch may not use. Same review: the recovery
+  `errorTailChars` default-fill had no pinned assertion despite being
+  contract text in SPEC-V2 and the journal schema. Enforcement: recovery
+  default-fill pinned at the tool boundary (schema-fixtures);
+  model-facing pointer text keeps the swept-after-30-days fragment only.
+
 - 2026-10-16 — post-merge review of #145 found three escapes in the spill
   valve: a same-name file was trusted as identical content on EEXIST (a
   hard kill between create and write left a partial file owning the content

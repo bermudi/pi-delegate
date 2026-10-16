@@ -23,8 +23,9 @@ import {
  * false` — an internal field like `durationMs` must fail), while the
  * ticket journal's record schemas tolerate unknown keys so records
  * written by older versions keep loading (additive evolution;
- * #62/#123/#127). Tolerant means unknown KEYS pass — enumeration VALUES
- * are still the shared contract and an unknown status must not parse.
+ * #62/#123/#127/#145). Tolerant means unknown KEYS pass — enumeration
+ * VALUES are still the shared contract and an unknown status must not
+ * parse.
  */
 
 const TICKETS_DIR = "delegate-tickets";
@@ -107,6 +108,45 @@ describe("schema fixtures — strict emitted details vs tolerant journal records
     expect("futureNested" in integration).toBe(false);
     const conflicts = integration.conflicts as Record<string, unknown>[];
     expect("futureConflict" in conflicts[0]!).toBe(false);
+  });
+
+  test("a pre-#145 record (no errorTailChars) renders failed partials at the shipped default tail", async () => {
+    // #145 made `outputBounds.errorTailChars` optional in the journal:
+    // records written before it carry only the spill bounds, and cold
+    // recovery fills the shipped default (3600) rather than rendering
+    // failed partials unbounded. A cold poll must cap the failed
+    // outcome's partial at that default with the truncation note, while
+    // the record's complete text stays in details (lossless half).
+    session = await openDelegateBoundary();
+    const id = "t-00000000-0000-4000-8000-000000000004";
+    const partial = `PRE-#145-HEAD${"x".repeat(3600)}PARTIAL-#145-TAIL`;
+    writeRecord(session, id, {
+      version: 1,
+      id,
+      status: "partial",
+      tasks: [
+        { id: "t-ok", agent: "inline" },
+        { id: "t-fail", agent: "inline" },
+      ],
+      outcomes: [
+        { index: 0, id: "t-ok", status: "ok", output: "OUT-OK", retries: 0 },
+        { index: 1, id: "t-fail", status: "failed", error: "boom", output: partial, retries: 0 },
+      ],
+      outputBounds: { spillThresholdChars: 40000, spillTailChars: 8000 },
+      createdAt: 1_700_000_000_000,
+      notices: [],
+    });
+
+    const polled = await callDelegateTicket(session, { action: "poll", ticket: id });
+    expect(polled.isError).toBe(false);
+    expect(polled.text).toContain("partial output truncated to its last 3600 chars");
+    expect(polled.text).toContain("PARTIAL-#145-TAIL");
+    expect(polled.text).not.toContain("PRE-#145-HEAD");
+    const results = objectOf(polled.details, "details").results as Record<
+      string,
+      unknown
+    >[];
+    expect(results[1]!.output).toBe(partial);
   });
 
   test("a record covering every task status, integration status, and verdict parses through the journal path", async () => {

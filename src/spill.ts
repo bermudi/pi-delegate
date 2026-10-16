@@ -272,7 +272,7 @@ function spillPointer(
   filePath: string,
   fullChars: number,
 ): string {
-  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n retained with the ticket store and swept only after 30 days; \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
+  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n retained under the agent directory and swept only after 30 days; \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
 }
 
 /**

@@ -620,7 +620,10 @@ gaps.
   repair on re-render; surrogate-safe tail;
   empty/placeholder passthrough; malformed `output`
   bounds (including `errorTailChars`) reject before any task starts
-  (`tests/contract/output-bounds.test.ts`); the registered tool/message
+  (`tests/contract/output-bounds.test.ts`); cold-recovered pre-#145
+  records (no `errorTailChars`) render failed partials capped at the
+  shipped default (3600) with the complete text kept in `details`
+  (`tests/contract/schema-fixtures.test.ts`); the registered tool/message
   renderers show the complete recorded output when expanded — sync
   result, running and settled ticket polls, and the delivered
   `delegate-result` message — while collapsed views keep the bounded
@@ -1852,12 +1855,15 @@ journal open objects that tolerate additive evolution).
   cold-polled details `Check`ing strictly against
   `ticketDetailsSchema` and every tolerated key absent from the
   returned outcome — `publicOutcome`'s allowlist projection is the
-  boundary between tolerant load and strict emit; a record covering
-  every task status, integration status, and verdict parses through
-  the real journal load path; an unknown enumeration value rejects at
-  load; and a realistic emitted `details.results` entry `Check`s
-  strictly while an internal `durationMs` key, an unknown status, and a
-  stray integration key each fail.
+  boundary between tolerant load and strict emit; a pre-#145 record
+  without `outputBounds.errorTailChars` recovers with the shipped
+  default and cold-polls its failed outcome's partial capped at the
+  truncation note while `details.results` keep the complete text; a
+  record covering every task status, integration status, and verdict
+  parses through the real journal load path; an unknown enumeration
+  value rejects at load; and a realistic emitted `details.results`
+  entry `Check`s strictly while an internal `durationMs` key, an
+  unknown status, and a stray integration key each fail.
 
 ## First tranche
 
