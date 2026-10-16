@@ -1,5 +1,5 @@
 import { DiagnosticSink } from "./diagnostics.ts";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DELEGATE_TREES } from "./fsx.ts";
@@ -8,7 +8,8 @@ import type { OutputBounds } from "./types.ts";
 const SPILL_PREFIX = "delegate-output-";
 const SPILL_HASH_CHARS = 16;
 
-// Spill files older than this are swept when the ticket store connects.
+// Spill files older than this are swept once per extension instance, on the
+// pipeline's first dispatch (sync batches never connect the ticket store).
 const SPILL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 // ── Spill: keep subagent final-output bloat out of the LLM context ───────
@@ -112,9 +113,14 @@ function spillFilePath(
  *
  * The name is content-addressed (sha256 of the output), so any renderer of
  * the same output — this process or a cold restart — computes the same path.
- * Files are mode 0o600 in a 0o700 owner-only directory and opened with
- * `wx`: an existing name means identical content is already on disk, and no
- * create can ever clobber another spill.
+ * Files are mode 0o600 in a 0o700 owner-only directory. A target already on
+ * disk at the expected size is returned as-is — a re-render is read-only.
+ * Otherwise the write goes to a unique sibling name and renames into place:
+ * rename is atomic, so the content-addressed name can never hold a partial
+ * file — not from a hard kill mid-write, and not from a concurrent renderer
+ * in another process sharing the agent directory (both windows a bare-EEXIST
+ * trust would have pointed at forever). A crashed sibling is sweepable with
+ * the same SPILL_PREFIX.
  */
 function writeSpill(
   diagnostics: DiagnosticSink,
@@ -122,36 +128,30 @@ function writeSpill(
   output: string,
   label: string,
 ): string | null {
-  let fd: number | undefined;
   const target = spillFilePath(dir, label, output);
   try {
-    try {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    } catch (mkdirError) {
-      diagnostics.log("warn", "spill directory unavailable", { path: dir }, mkdirError);
-      return null;
-    }
-    fd = fs.openSync(target, "wx", 0o600);
-    fs.writeFileSync(fd, output);
-    fs.closeSync(fd);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (mkdirError) {
+    diagnostics.log("warn", "spill directory unavailable", { path: dir }, mkdirError);
+    return null;
+  }
+  try {
+    if (fs.statSync(target).size === Buffer.byteLength(output)) return target;
+  } catch {
+    // Absent — the ordinary first render. Fall through and write it.
+  }
+  const partial = `${target}.${process.pid}.${randomUUID()}.part`;
+  try {
+    fs.writeFileSync(partial, output, { mode: 0o600, flag: "wx" });
+    fs.renameSync(partial, target);
     return target;
   } catch (error) {
-    if (fd !== undefined) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // Continue to remove the incomplete file below.
-      }
-      try {
-        fs.rmSync(target, { force: true });
-      } catch (cleanupError) {
-        diagnostics.log("warn", "spill partial-file cleanup failed", { path: target }, cleanupError);
-      }
-    }
-    // A same-name file already on disk is the common success case
-    // (content-addressed re-render), not a failure.
-    if (errorCode(error) === "EEXIST") return target;
     diagnostics.log("warn", "spill write failed", { path: target }, error);
+    try {
+      fs.rmSync(partial, { force: true });
+    } catch (cleanupError) {
+      diagnostics.log("warn", "spill partial-file cleanup failed", { path: partial }, cleanupError);
+    }
     return null;
   }
 }
@@ -166,8 +166,14 @@ export function sweepSpills(diagnostics: DiagnosticSink, dir: string): void {
   let names: string[];
   try {
     names = fs.readdirSync(dir);
-  } catch {
-    return; // No spills yet — nothing to sweep.
+  } catch (listError) {
+    // ENOENT is the ordinary no-spills-yet case; anything else (EACCES,
+    // ENOTDIR, …) means the sweep cannot run at all and must not pass
+    // silently — same fail-loud line as the stat handling below.
+    if (errorCode(listError) !== "ENOENT") {
+      diagnostics.log("warn", "spill sweep readdir failed", { path: dir }, listError);
+    }
+    return;
   }
   const cutoff = Date.now() - SPILL_RETENTION_MS;
   let swept = 0;

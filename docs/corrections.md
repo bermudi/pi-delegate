@@ -9,6 +9,19 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 
 ## Correction log
 
+- 2026-10-16 — post-merge review of #145 found three escapes in the spill
+  valve: a same-name file was trusted as identical content on EEXIST (a
+  hard kill between create and write left a partial file owning the content
+  hash, and concurrent renders raced the same window) — write a unique
+  sibling and rename atomically, and verify size before trusting a
+  same-name file; `sweepSpills` swallowed every readdir failure as "no
+  spills yet" — only ENOENT is that case, the rest must warn; and three
+  labels said the sweep runs "when the ticket store connects" when it
+  rides the pipeline's first dispatch (src/spill.ts, output-bounds sweep
+  test, TEST-MIGRATION). Enforcement: truncated-spill repair regression at
+  the tool boundary; timing claims in comments/docs name the owning
+  subsystem.
+
 - 2026-10-15 — live-board review found optional recent-call validation hiding valid task rows and duplicated status definitions; isolate display-detail validation with visible warnings and derive schema/width/guard from shared statuses (render.ts, details.ts, schema-primitives.ts). Enforcement: registered-renderer regressions plus strict schema checks.
 
 - 2026-10-04 — put this repo's practice notes in the personal wiki

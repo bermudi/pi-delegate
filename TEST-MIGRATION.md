@@ -600,8 +600,10 @@ gaps.
   stable spill path across polls (the content-addressed name makes it
   stable across cold restarts too); the complete record stays in
   `details`.
-- **Regression:** surrogate-pair-safe tail cut; exclusive create (no
-  overwrite on collision); mode 0o600; expired-spill sweep.
+- **Regression:** surrogate-pair-safe tail cut; the content-addressed name
+  never holds a partial file (atomic rename into place; a truncated
+  same-name file is repaired by the next render); mode 0o600; expired-spill
+  sweep.
 - **Internal:** `decideSpill`/`writeSpill`/render helpers, the v1
   `spillFileOperations` test seam, exact pointer/note wording — v2
   exercises the whole behavior through the tool boundary, with the
@@ -614,7 +616,8 @@ gaps.
   ok-outcome session pointer; running-ticket poll tail-only with zero
   files, settling spills; pointer stability across settled polls;
   creation-time bounds snapshot; lossless write-failure fallback;
-  expired-spill sweep at store connect; surrogate-safe tail;
+  expired-spill sweep at the pipeline's first dispatch; truncated-spill
+  repair on re-render; surrogate-safe tail;
   empty/placeholder passthrough; malformed `output`
   bounds (including `errorTailChars`) reject before any task starts
   (`tests/contract/output-bounds.test.ts`); the registered tool/message

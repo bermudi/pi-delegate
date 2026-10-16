@@ -374,9 +374,11 @@ describe("delegate output bounding", () => {
     expect(result.text).not.toContain("spilled to");
   });
 
-  test("expired spill files are swept when the ticket store connects", async () => {
+  test("expired spill files are swept on the pipeline's first dispatch", async () => {
     // #145: spills live as long as the transcripts naming them (30 days),
-    // then go. The sweep runs at store connect — the first dispatch.
+    // then go. The sweep rides the first dispatch's agent-dir resolution —
+    // sync batches never connect the ticket store, and this dispatch is
+    // sync, so it proves the pipeline is the seam (see DispatchPipeline).
     session = await openDelegateBoundary();
     const dir = spillDirOf(session);
     fs.mkdirSync(dir, { recursive: true });
@@ -396,6 +398,45 @@ describe("delegate output bounding", () => {
     expect(result.isError).toBe(false);
     expect(fs.existsSync(stale)).toBe(false);
     expect(fs.existsSync(fresh)).toBe(true);
+  });
+
+  test("a truncated file at the spill path is repaired by the next render", async () => {
+    // Post-#145 review finding: a same-name file used to be trusted as
+    // identical content on EEXIST, so a hard kill between create and write
+    // left a partial file owning the content hash — every later render
+    // pointed at truncated content while advertising the full size, and
+    // only the 30-day sweep could fix it. A re-render must verify, not
+    // trust the name: same pointer path, complete file restored, and no
+    // stray write siblings left behind.
+    session = await openDelegateBoundary();
+    const dir = spillDirOf(session);
+    configureDelegate(session, {
+      output: { spillThresholdChars: 50, spillTailChars: 20 },
+    });
+    const subagents = await installSubagentModel(session);
+    const output = "R".repeat(300) + "REPAIR-END";
+    subagents.respond([fauxAssistantMessage(output)]);
+
+    const first = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "big" }],
+    });
+    const spillPath = spilledPathOf(first.text);
+    expect(spillPath).toBeDefined();
+    expect(fs.readFileSync(spillPath!, "utf8")).toBe(output);
+
+    // Simulate the crash window: a partial file owns the content hash.
+    fs.writeFileSync(spillPath!, output.slice(0, 120));
+
+    subagents.respond([fauxAssistantMessage(output)]);
+    const second = await callDelegate(session, {
+      async: false,
+      tasks: [{ prompt: "big again" }],
+    });
+    expect(second.isError).toBe(false);
+    expect(spilledPathOf(second.text)).toBe(spillPath);
+    expect(fs.readFileSync(spillPath!, "utf8")).toBe(output);
+    expect(spillFiles(dir)).toHaveLength(1);
   });
 
   test("the kept tail never begins with a lone surrogate half", async () => {
