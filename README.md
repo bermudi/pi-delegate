@@ -188,8 +188,9 @@ silently does nothing; see `COMPATIBILITY.md` for the mapping.
 | `telemetry.enabled` | `false` | Record dispatches in a local SQLite file. |
 | `telemetry.dbPath` | unset | Store location; falls back to `DELEGATE_TELEMETRY_DB`, then `<agentDir>/delegate-usage.db`. |
 | `providerExtensions` | `{"openai-codex": ["npm:@bermudi/pi-codex"]}` | Per-provider user-scope packages injected into that provider's subagents (e.g. `{"openai-codex": ["npm:@bermudi/pi-codex"]}`). A listed provider's array replaces the shipped default for that provider and its sources are required — missing or unverifiable, the dispatch fails. Providers never listed fall back to shipped defaults, which degrade silently to extension-free children. Empty arrays are ignored. |
-| `output.spillThresholdChars` | `8000` | Characters before a result spills to a file. |
+| `output.spillThresholdChars` | `100000` | Emergency valve (≈25k tokens): successful results render verbatim until this many chars, then spill to a file under the agent directory. |
 | `output.spillTailChars` | `2000` | Tail kept inline on spill. |
+| `output.errorTailChars` | `3600` | Tail kept for a failed task's partial output (≈900 tokens). |
 
 Telemetry writes a `calls` row per dispatch plus a `tasks` row per task —
 durations, token counts and cost, tool mix, workspace, outcome — and a
@@ -263,7 +264,8 @@ transcript.
 ## Parent conversation isolation
 
 Children do not share the parent's conversation. The child system prompt is a
-Markdown profile's body, verbatim, when the profile has one; otherwise —
+Markdown profile's body, verbatim, when the profile has one — with the fixed
+subagent framing appended (#145); otherwise —
 including the built-in profiles — it is composed from the parent's
 user-authored prompt inputs plus a subagent framing.
 Project context files under the task's cwd are kept; user-global context files

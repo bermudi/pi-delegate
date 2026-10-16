@@ -510,7 +510,8 @@ contract:
   pools, spill, delivery once-ness,
   evidence-bearing telemetry rows — except the scratch-copy admission
   strengthening below, the unordered-shared-writer rejection (#126),
-  and the isolated worktree dependency provisioning (#120) below.
+  the isolated worktree dependency provisioning (#120) below, and the
+  #145 result-delivery changes below.
 - **Scratch-copy admission (this repository's #50, owner-approved 2026-10-07).** Normative
   rules: INVARIANTS.md, "Scratch source copying" (copy reservation, rejection while copying,
   release before the scratch worker runs). Rejection, not queuing or a race warning, is the policy (INVARIANTS.md, overlap rule). Residual limit, not restated there: this is
@@ -568,6 +569,17 @@ contract:
   candidate worktrees, and drift checks are never provisioned; a
   source entry that vanishes between listing and copying is skipped,
   while any other provisioning failure fails the group loud.
+- **Result delivery (#145, owner-ruled 2026-10-16).** Successful finals
+  deliver verbatim — incumbent parity — up to a high emergency valve
+  (≈25k tokens), over which the result keeps a tail and points at a
+  content-addressed file under `<agentDir>/delegate-spills/` (owner-only,
+  swept after 30 days; never OS temp). Failed partials cap at ≈900-token
+  error tails (Codex parity) naming the durable copies. Every successful
+  outcome names its session transcript (`session: <path>`), and authored
+  Markdown profile bodies now carry the fixed subagent framing.
+  Normative text: SPEC-V2.md, "Settled output" through the bounds
+  paragraph, "Dependencies and handoffs", and "Child base prompt".
+  Decision record: docs/decisions/0003-verbatim-result-delivery.md.
 
 ## Compatibility posture
 

@@ -111,8 +111,11 @@ worker's child-only `ask_parent` capability. It asks the parent, not a
 human watching the child; inline workers still have no question tool.
 
 The framing carries no parent identity — never a model name. An explicit
-task `systemPrompt` (removed by #130) or a Markdown profile body is authored prompt text and
-is used verbatim: no inheritance, no framing appended. When an extension
+task `systemPrompt` (removed by #130) or a Markdown profile body is authored prompt text:
+its base is used verbatim with no inheritance, and the fixed subagent
+framing is appended (#145, ruled 2026-10-16 — the final-message contract
+reaches authored profiles too; the operator's voice stays untouched
+otherwise). When an extension
 has force-replaced the parent's prompt wholesale, inheritance is skipped —
 the child runs on the stock base prompt plus role line and framing — and
 the skip is logged.
@@ -288,8 +291,10 @@ settled can never unblock downstream work.
 A starting dependent receives each prerequisite's handoff appended to its
 prompt: the prerequisite's id, its terminal state (with the applied file
 list for an applied isolated prerequisite, or a discarded-edits note for a
-scratch one), and its final output bounded to the dispatch's
-`output.spillThresholdChars` as a tail. The complete output stays on the
+scratch one), and its final output bounded to a fixed 8000-char tail
+(#145: the handoff budget is the dependent worker's prompt, not the
+parent's result valve, so it is decoupled from
+`output.spillThresholdChars`). The complete output stays on the
 task record; the handoff is a projection of it, as with spill.
 
 Same-call overlapping shared and isolated tasks still reject — unless the
@@ -471,36 +476,54 @@ output, which is never truncated or discarded. What differs is the
 LLM-facing projection:
 
 - **Settled output** (a synchronous result, or a terminal ticket's
-  poll/wait/delivery text): output at or below `output.spillThresholdChars`
-  chars is returned verbatim. Over the threshold, the complete output is
-  written to a temp file and the text carries only a bounded tail of at
-  most `output.spillTailChars` chars plus a pointer naming the file, the
-  full size, and that retention follows OS temp policy. A failed task's
-  partial output is bounded the same way. The tail never begins with a
-  lone half of a surrogate pair.
+  poll/wait/delivery text): a successful task's output is returned
+  **verbatim** (#145, ruled 2026-10-16 — incumbent parity; Claude Code
+  delivers finals uncapped, and trimming ordinary results taxed every
+  caller). Over the emergency valve `output.spillThresholdChars` chars,
+  the complete output is written to a spill file and the text carries
+  only a bounded tail of at most `output.spillTailChars` chars plus a
+  pointer naming the file and the full size. A failed task's partial
+  output never spills: it is capped at an `output.errorTailChars` tail
+  plus a line naming the durable copies (the ticket record,
+  `details.results`, and the session transcript). The tail never begins
+  with a lone half of a surrogate pair. If the spill write itself fails,
+  the complete output is returned in-context instead — bounding degrades
+  losslessly, never to a hard truncation.
+- **Session pointers (#145)**: every successful outcome names its session
+  transcript — a plain `session: <path>` line beside the completion
+  evidence, before the output. The resume hint stays failure-recovery
+  teaching and never rides a success.
 - **Running-ticket views**: a poll or aborted wait (waits no longer time out, #130) on a running
   ticket bounds every recorded outcome to the tail budget only and never
   writes a spill file or names one — the note states whether completion
   will spill or include the full output.
 - **Recovery**: the complete output always remains on the ticket record
   and in the `results` field of the tool result's and delivered message's
-  `details`; a human expanding the result sees it whole. If the spill
-  write itself fails, the complete output is returned in-context instead —
-  bounding degrades losslessly, never to a hard truncation.
+  `details`; a human expanding the result sees it whole.
 - **Stability**: once a settled ticket's record can no longer change,
   repeated polls render one stable view — the same spill path, not a new
-  file per poll.
+  file per poll. The spill file name is content-addressed (a hash of the
+  output), so a cold restart re-derives the same path; an outcome
+  re-recorded with different output gets a different file.
 
-Spill files live under the OS temp directory, named
-`delegate-output-<agent>-<random>.md`, created exclusively with owner-only
-permissions, and are never deleted by Delegate (pointers can persist in
-transcripts; the OS temp policy owns their lifecycle).
+Spill files live under the agent directory, in
+`<agentDir>/delegate-spills/`, named
+`delegate-output-<agent>-<output-hash>.md`, created exclusively with
+owner-only permissions. Delegate never deletes them individually; files
+older than 30 days are swept once per extension lifetime at the first
+dispatch — a pointer persisted in a transcript outlives its file only
+past that window, and the complete output remains on the ticket record
+regardless.
 
-`output.spillThresholdChars` (positive integer, default 8000) and
-`output.spillTailChars` (non-negative integer, default 2000) are read from
+`output.spillThresholdChars` (positive integer, default 100000 — ≈25k
+tokens at 4 chars/token), `output.spillTailChars` (non-negative integer,
+default 2000), and `output.errorTailChars` (non-negative integer, default
+3600 — ≈900 tokens) are read from
 the user-global `delegate.json`; malformed values fail the call before any
 task starts. Each ticket snapshots the bounds at creation — a later config
 edit does not retroactively reshape a settled ticket's rendered result.
+Records written before #145 carry no `errorTailChars`; recovery fills the
+shipped default.
 
 ### Background delivery
 

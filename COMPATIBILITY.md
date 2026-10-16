@@ -742,10 +742,15 @@ from v1.
   2 000 characters per text event) feeding the interleaved view.
   Below ~96 columns the panes stack; below 40×16 the browser asks for a
   larger terminal.
-- **Large-output bounding (#25)** — shipped 2026-09-23 with v1's semantics. The normative rules
-  (thresholds, tail, failed-write fallback, stable spill path, owner-only files) are SPEC-V2.md,
+- **Large-output bounding (#25, re-ruled by #145)** — shipped 2026-09-23 with v1's semantics;
+  re-ruled 2026-10-16 (successful finals verbatim up to a 100k-char valve,
+  durable agent-dir spills, failed partials capped at an error tail,
+  ok-outcome session pointers). The normative rules
+  (valve, tails, failed-write fallback, stable spill path, owner-only
+  files, 30-day sweep) are SPEC-V2.md,
   "LLM-facing projection" (settled output through stability). Config defaults:
-  `output.spillThresholdChars` 8000, `output.spillTailChars` 2000.
+  `output.spillThresholdChars` 100000, `output.spillTailChars` 2000,
+  `output.errorTailChars` 3600.
 
 ## Known host limitations (accepted 2026-09-19, issue #3)
 

@@ -581,29 +581,42 @@ gaps.
   non-inheritance (no real session replacement is expressible through the
   harness — the emitted `session_shutdown` path is covered instead).
 
-### Output bounding (#25)
+### Output bounding (#25, re-ruled by #145)
 
-- **Contract:** LLM-facing output is bounded — settled/sync output over
-  `output.spillThresholdChars` spills the complete output to an
-  owner-only `delegate-output-<agent>-<rand>.md` temp file and renders a
-  `output.spillTailChars` tail plus pointer; running-ticket views render
+- **Contract:** LLM-facing output bounding as re-ruled by #145
+  (2026-10-16): successful output renders verbatim up to the emergency
+  valve `output.spillThresholdChars`; over it, the complete output spills
+  to a content-addressed owner-only
+  `delegate-output-<agent>-<hash>.md` file under
+  `<agentDir>/delegate-spills/` (never OS temp; swept after 30 days at
+  the first dispatch) and renders an `output.spillTailChars` tail plus
+  pointer; a failed task's partial output caps at an
+  `output.errorTailChars` tail naming the durable copies and never
+  writes a file; every successful outcome carries a `session: <path>`
+  line; running-ticket views render
   tail-only and never write or name a file; a failed write returns the
   complete output in-context; empty/`"(no output)"` outputs pass through;
   bounds snapshot per ticket at creation; a frozen settled view keeps one
-  stable spill path across polls; the complete record stays in `details`.
+  stable spill path across polls (the content-addressed name makes it
+  stable across cold restarts too); the complete record stays in
+  `details`.
 - **Regression:** surrogate-pair-safe tail cut; exclusive create (no
-  overwrite on collision); mode 0o600.
-- **Internal:** `decideSpill`/`spillToTempFile`/render helpers, the v1
+  overwrite on collision); mode 0o600; expired-spill sweep.
+- **Internal:** `decideSpill`/`writeSpill`/render helpers, the v1
   `spillFileOperations` test seam, exact pointer/note wording — v2
-  exercises the whole behavior through the tool boundary, steering the
-  spill directory with `TMPDIR` (`os.tmpdir()` reads it per call).
-- **Covered now:** pass-through under threshold; sync spill file
+  exercises the whole behavior through the tool boundary, with the
+  session's temp cwd as agent dir, so spills land in
+  `<cwd>/delegate-spills`.
+- **Covered now:** pass-through under threshold; verbatim delivery at
+  realistic sizes under the shipped valve; sync spill file
   contents/name/mode + stable tail pointer + complete `details.results`;
-  failed-task partial bounded; running-ticket poll tail-only with zero
+  failed-task partial capped with durable-copies pointer and no file;
+  ok-outcome session pointer; running-ticket poll tail-only with zero
   files, settling spills; pointer stability across settled polls;
   creation-time bounds snapshot; lossless write-failure fallback;
-  surrogate-safe tail; empty/placeholder passthrough; malformed `output`
-  bounds reject before any task starts
+  expired-spill sweep at store connect; surrogate-safe tail;
+  empty/placeholder passthrough; malformed `output`
+  bounds (including `errorTailChars`) reject before any task starts
   (`tests/contract/output-bounds.test.ts`); the registered tool/message
   renderers show the complete recorded output when expanded — sync
   result, running and settled ticket polls, and the delivered
@@ -1891,8 +1904,8 @@ the parent's custom persona and receives the fixed subagent framing; a
 stock parent still frames the child; built-in role lines (explore, coder)
 compose *under* the parent persona rather than beating it (deliberate
 divergence from v1 precedence, recorded in COMPATIBILITY); an explicit
-task `systemPrompt` and a Markdown profile body are verbatim with no
-framing; extension-contributed guidelines/sections (injected by a leading
+task `systemPrompt` rejects (#130) and a Markdown profile body keeps its
+base verbatim with the fixed subagent framing appended (#145); extension-contributed guidelines/sections (injected by a leading
 fault extension mutating `before_agent_start` prompt options) are never
 inherited; a force-replaced parent prompt skips inheritance with one
 logged warning. All assertions observe the child's provider-facing system
