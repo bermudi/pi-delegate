@@ -272,7 +272,10 @@ function spillPointer(
   filePath: string,
   fullChars: number,
 ): string {
-  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n retained under the agent directory and swept only after 30 days; \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
+  // The retention figure derives from SPILL_RETENTION_MS — a hand-written
+  // "30 days" here would silently lie the day the constant is tuned.
+  const retentionDays = SPILL_RETENTION_MS / 86_400_000;
+  return `…${tail}\n\n[full output (${humanSize(fullChars)}) spilled to ${filePath} —\n retained under the agent directory and swept only after ${retentionDays} days; \`read\`/\`grep\` it if completeness matters here; above is the tail]`;
 }
 
 /**

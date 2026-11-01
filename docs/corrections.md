@@ -9,6 +9,18 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 
 ## Correction log
 
+- 2026-10-16 — second follow-up review of #145 found two drift pairs
+  introduced by the unit itself: the two failed-outcome renderers
+  (format.ts formatDispatchResult vs tickets.ts taskSection) disagreed on
+  field order — detail→partial→session vs detail→session→partial — so the
+  same outcome's blocks traded places by surface; and the model-facing
+  spill pointer hand-wrote "30 days", restating SPILL_RETENTION_MS as
+  prose that would silently lie if the constant were tuned. Enforcement:
+  format.ts aligned to the ticket order with a comment naming the pair;
+  the pointer figure derives from the constant, and output-bounds'
+  "swept only after 30 days" assertion now fails if the constant moves
+  without contract reconciliation.
+
 - 2026-10-16 — follow-up review of #145 found the spill pointer telling
   every reader the file was "retained with the ticket store" — sync
   dispatches spill with no ticket in existence; the retention claim must

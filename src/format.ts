@@ -455,7 +455,9 @@ export function formatDispatchResult(
     const partial = outcome.output
       ? `\n\nPartial output:\n${renderPartialForLLM(outcome.output, bounds.errorTailChars)}`
       : "";
-    return `${head}${files}\n${detail}${partial}${session}${quarantined}${integration}`;
+    // Same field order as taskSection (ticket views): detail, session
+    // recovery lines, then the partial block — one contract, two surfaces.
+    return `${head}${files}\n${detail}${session}${partial}${quarantined}${integration}`;
   });
   // The result's aggregate usage rides `details.usage`; when any worker's
   // accounting is incomplete that total is a lower bound, not a sum — the
