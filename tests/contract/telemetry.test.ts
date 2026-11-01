@@ -22,7 +22,7 @@ import {
   fauxToolCall,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
-import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
+import { VERSION as PI_VERSION, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { diagnosticRecords } from "../support/diagnostic-records.ts";
 import {
   callDelegate,
@@ -31,6 +31,8 @@ import {
   openDelegateBoundary,
   ticketIdOf,
   callDelegateTicket,
+  callDelegateSession,
+  registeredTool,
 } from "../support/pi-boundary.ts";
 
 // The extension's own package version — the value telemetry rows must
@@ -159,6 +161,251 @@ describe("delegate telemetry contract", () => {
     },
   );
 
+  test("ticket and session operations have content-free rows independent of dispatch", async () => {
+    session = await openDelegateBoundary();
+    const dbPath = join(trackedTempDir(), "usage.db");
+    // Point disabled telemetry at the actual destination under test.
+    configureDelegate(session, { telemetry: { enabled: false, dbPath } });
+    await callDelegateTicket(session, { action: "poll" });
+    expect(existsSync(dbPath)).toBe(false);
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    await callDelegateTicket(session, { action: "wait", ticket: "PRIVATE-TICKET" });
+    await callDelegateSession(session, { action: "list" });
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = rowsOf(db, "tool_operations");
+      expect(rows).toHaveLength(2);
+      expect(rows[0]?.tool).toBe("delegate_ticket");
+      expect(rows[0]?.action).toBe("wait");
+      expect(rows[0]?.result).toBe("error");
+      expect(rows[1]?.tool).toBe("delegate_session");
+      expect(rows[1]?.action).toBe("list");
+      expect(rows[1]?.result).toBe("success");
+      for (const row of rows) {
+        expect(Number(row.duration_ms)).toBeGreaterThanOrEqual(0);
+        expect(Object.keys(row).sort()).toEqual(["action", "duration_ms", "result", "tool", "ts"]);
+      }
+      expect(JSON.stringify(rows)).not.toContain("PRIVATE-TICKET");
+      expect(rowsOf(db, "calls")).toHaveLength(0);
+      expect(rowsOf(db, "tasks")).toHaveLength(0);
+    } finally { db.close(); }
+  });
+
+  test("operation rejections record exactly once with allowlisted actions and no content", async () => {
+    session = await openDelegateBoundary();
+    const dbPath = join(trackedTempDir(), "operations.db");
+    // A rejected call also respects the opt-in at this destination.
+    configureDelegate(session, { telemetry: { enabled: false, dbPath } });
+    await callDelegateTicket(session, { action: "PRIVATE-ACTION" });
+    expect(existsSync(dbPath)).toBe(false);
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    for (const [tool, args] of [
+      ["ticket", { action: "PRIVATE-ACTION", message: "PRIVATE-TEXT" }],
+      ["ticket", { action: "wait", timeoutMs: 5 }],
+      ["ticket", { action: "cancel", force: ["PRIVATE-SCHEMA"] }],
+      ["ticket", { action: "answer", answer: "PRIVATE-ANSWER" }],
+      ["session", { action: "PRIVATE-SESSION" }],
+      ["session", { action: "close" }],
+    ] as const) {
+      const result = tool === "ticket" ? await callDelegateTicket(session, args) : await callDelegateSession(session, args);
+      expect(result.isError).toBe(true);
+    }
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = rowsOf(db, "tool_operations");
+      expect(rows.map((row) => [row.tool, row.action, row.result])).toEqual([
+        ["delegate_ticket", "unknown", "error"],
+        ["delegate_ticket", "wait", "error"],
+        ["delegate_ticket", "cancel", "error"],
+        ["delegate_ticket", "answer", "error"],
+        ["delegate_session", "unknown", "error"],
+        ["delegate_session", "close", "error"],
+      ]);
+      expect(JSON.stringify(rows)).not.toContain("PRIVATE");
+    } finally { db.close(); }
+  });
+
+  test("overlapping duplicate host ids never assign another operation's action", async () => {
+    session = await openDelegateBoundary();
+    const dbPath = join(trackedTempDir(), "duplicate-operations.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    const host = session.session as AgentSession;
+    const runner = host.extensionRunner;
+    const tool = registeredTool(session, "delegate_session") as unknown as {
+      execute(id: string, params: Record<string, unknown>, signal: AbortSignal, update: (value: unknown) => void, ctx: unknown): Promise<unknown>;
+    };
+    // Simulate host lifecycle events because the harness assigns unique ids.
+    for (const action of ["list", "close"]) {
+      await runner.emit({ type: "tool_execution_start", toolCallId: "duplicate", toolName: "delegate_session", args: { action } });
+    }
+    await tool.execute("duplicate", { action: "list" }, new AbortController().signal, () => {}, runner.createContext());
+    for (const isError of [true, false]) {
+      await runner.emit({ type: "tool_execution_end", toolCallId: "duplicate", toolName: "delegate_session", isError,
+        result: { content: [{ type: "text", text: "blocked" }], details: {} } });
+    }
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = rowsOf(db, "tool_operations");
+      expect(rows.map((row) => [row.action, row.result])).toEqual([["unknown", "success"]]);
+    } finally { db.close(); }
+  });
+
+  test("overlapping duplicate dispatch ids do not attribute another batch's metadata", async () => {
+    session = await openDelegateBoundary();
+    const dbPath = join(trackedTempDir(), "duplicate-dispatches.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    const runner = (session.session as AgentSession).extensionRunner;
+    for (const agent of ["first", "second"]) {
+      await runner.emit({ type: "tool_execution_start", toolCallId: "duplicate", toolName: "delegate", args: { tasks: [{ agent }] } });
+    }
+    for (const isError of [true, true]) {
+      await runner.emit({ type: "tool_execution_end", toolCallId: "duplicate", toolName: "delegate", isError,
+        result: { content: [{ type: "text", text: "blocked" }], details: {} } });
+    }
+    expect(existsSync(dbPath)).toBe(false);
+    // Once both ends arrive, the same id can safely represent a new call.
+    await runner.emit({ type: "tool_execution_start", toolCallId: "duplicate", toolName: "delegate", args: { tasks: [{ agent: "third" }] } });
+    await runner.emit({ type: "tool_execution_end", toolCallId: "duplicate", toolName: "delegate", isError: true,
+      result: { content: [{ type: "text", text: "blocked" }], details: {} } });
+    const db = new DatabaseSync(dbPath);
+    try {
+      const misfires = rowsOf(db, "misfires");
+      expect(misfires).toHaveLength(1);
+      expect(misfires[0]?.agents).toContain("third");
+    } finally { db.close(); }
+  });
+
+  test("operation telemetry failures do not change successful or rejected calls", async () => {
+    session = await openDelegateBoundary();
+    const dbPath = join(trackedTempDir(), "corrupt.db");
+    writeFileSync(dbPath, "not a database");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    const success = await callDelegateSession(session, { action: "list" });
+    const rejected = await callDelegateTicket(session, { action: "wait", timeoutMs: 1 });
+    expect(success.isError).toBe(false);
+    expect(rejected.isError).toBe(true);
+    expect(rejected.text).toContain("timeoutMs");
+  });
+
+  test("later handlers blocking operation calls leave one pre-execution row each", async () => {
+    session = await openDelegateBoundary({ trailingExtensions: [join(import.meta.dirname, "../support/block-operations.ts")] });
+    const dbPath = join(trackedTempDir(), "operations.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    expect((await callDelegateTicket(session, { action: "poll", ticket: "PRIVATE-ID" })).isError).toBe(true);
+    expect((await callDelegateSession(session, { action: "list" })).isError).toBe(true);
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = rowsOf(db, "tool_operations");
+      expect(rows.map((row) => [row.tool, row.action, row.result])).toEqual([
+        ["delegate_ticket", "poll", "error"], ["delegate_session", "list", "error"],
+      ]);
+      expect(JSON.stringify(rows)).not.toContain("PRIVATE");
+    } finally { db.close(); }
+  });
+
+  test("a settled ticket wait records its classification without its ticket id", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dbPath = join(trackedTempDir(), "usage.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    subagents.respond([fauxAssistantMessage("PRIVATE-OUTPUT")]);
+    const dispatch = await callDelegate(session, { async: true, tasks: [{ prompt: "PRIVATE-PROMPT" }] });
+    const ticket = ticketIdOf(dispatch.text);
+    const wait = await callDelegateTicket(session, { action: "wait", ticket });
+    expect(wait.isError).toBe(false);
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = rowsOf(db, "tool_operations");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.result).toBe("settled");
+      expect(JSON.stringify(rows)).not.toContain(ticket);
+      expect(JSON.stringify(rows)).not.toContain("PRIVATE");
+      expect(rowsOf(db, "calls")).toHaveLength(1);
+    } finally { db.close(); }
+  });
+
+  test("wait telemetry distinguishes question, interruption, and caller abort", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dbPath = join(trackedTempDir(), "waits.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    const first = gate();
+    const second = gate();
+    let releaseQuestion!: () => void;
+    const questionGate = new Promise<void>((resolve) => { releaseQuestion = resolve; });
+    subagents.respond([
+      async () => { await questionGate; return fauxAssistantMessage([fauxToolCall("ask_parent", { question: "PRIVATE-QUESTION" })]); },
+      fauxAssistantMessage("PRIVATE-ANSWERED"), first.step, second.step,
+    ]);
+    const askDispatch = await callDelegate(session, { async: true, tasks: [{ id: "asker", prompt: "PRIVATE-PROMPT" }] });
+    const askTicket = ticketIdOf(askDispatch.text);
+    const questionWait = callDelegateTicket(session, { action: "wait", ticket: askTicket });
+    releaseQuestion();
+    const question = await questionWait;
+    expect(question.text).toContain("PRIVATE-QUESTION");
+    const questionId = /question (q-\d+):/.exec(question.text)?.[1] ?? "";
+    expect(questionId).not.toBe("");
+    await callDelegateTicket(session, { action: "answer", ticket: askTicket, taskId: "asker", questionId, answer: "PRIVATE-ANSWER" });
+    await callDelegateTicket(session, { action: "wait", ticket: askTicket });
+
+    const dispatch = await callDelegate(session, { async: true, tasks: [
+      { prompt: "PRIVATE-FIRST", agent: "explore" }, { prompt: "PRIVATE-SECOND", agent: "explore" },
+    ] });
+    const ticket = ticketIdOf(dispatch.text);
+    try {
+      for (let i = 0; i < 250 && subagents.state.callCount < 4; i++) await Bun.sleep(20);
+      expect(subagents.state.callCount).toBe(4);
+      // Registered tool entry is used directly only for concurrent operations:
+      // the harness serializes parent turns while a wait is parked.
+      const tool = registeredTool(session, "delegate_ticket") as unknown as {
+        execute(id: string, params: Record<string, unknown>, signal: AbortSignal, update: (value: unknown) => void, ctx: unknown): Promise<{ content: readonly { text?: string }[]; isError?: boolean }>;
+      };
+      const ctx = (session.session as AgentSession).extensionRunner.createContext();
+      const invoke = (id: string, params: Record<string, unknown>, signal: AbortSignal) => tool.execute(id, params, signal, () => {}, ctx);
+      const controller = new AbortController();
+      const interruptedWait = callDelegateTicket(session, { action: "wait", ticket });
+      await Bun.sleep(50);
+      const interrupt = await invoke("telemetry-interrupt", { action: "interrupt", ticket, taskId: "task-1" }, controller.signal);
+      expect(interrupt.isError).not.toBe(true);
+      const interrupted = await interruptedWait;
+      expect(interrupted.text).toContain("was interrupted");
+      const abortController = new AbortController();
+      const abortedWait = invoke("telemetry-wait-abort", { action: "wait", ticket }, abortController.signal);
+      await Bun.sleep(50);
+      abortController.abort();
+      const aborted = await abortedWait;
+      expect(aborted.content[0]?.text).toContain("caller aborted the wait");
+      const db = new DatabaseSync(dbPath);
+      try {
+        const rows = rowsOf(db, "tool_operations");
+        expect(rows.filter((r) => r.action === "wait").map((r) => r.result)).toEqual(["question", "settled", "interrupted"]);
+        // Direct execution bypasses preflight action capture, but still records
+        // the registered tool's aborted classification exactly once.
+        expect(rows.filter((r) => r.result === "aborted").map((r) => [r.tool, r.action])).toEqual([["delegate_ticket", "unknown"]]);
+        expect(JSON.stringify(rows)).not.toContain("PRIVATE");
+        expect(JSON.stringify(rows)).not.toContain(ticket);
+        expect(JSON.stringify(rows)).not.toContain(askTicket);
+      } finally { db.close(); }
+    } finally { first.release(); second.release(); }
+  });
+
+  test("operation rows follow a changed telemetry destination", async () => {
+    session = await openDelegateBoundary();
+    const dir = trackedTempDir();
+    const first = join(dir, "first.db");
+    const second = join(dir, "second.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath: first } });
+    expect((await callDelegateSession(session, { action: "list" })).isError).toBe(false);
+    configureDelegate(session, { telemetry: { enabled: true, dbPath: second } });
+    expect((await callDelegateTicket(session, { action: "poll" })).isError).toBe(false);
+    const db1 = new DatabaseSync(first);
+    const db2 = new DatabaseSync(second);
+    try {
+      expect(rowsOf(db1, "tool_operations").map((r) => [r.tool, r.action])).toEqual([["delegate_session", "list"]]);
+      expect(rowsOf(db2, "tool_operations").map((r) => [r.tool, r.action])).toEqual([["delegate_ticket", "poll"]]);
+    } finally { db1.close(); db2.close(); }
+  });
+
   test(
     "explicit opt-in records one call row and one task row per task with content-free metadata",
     async () => {
@@ -184,7 +431,7 @@ describe("delegate telemetry contract", () => {
       expect(result.isError).toBe(false);
       const db = new DatabaseSync(dbPath);
       try {
-        expect(userVersionOf(db)).toBe(6);
+        expect(userVersionOf(db)).toBe(7);
         const calls = rowsOf(db, "calls");
         const tasks = rowsOf(db, "tasks").sort(
           (a, b) => Number(a.idx) - Number(b.idx),
@@ -515,7 +762,7 @@ describe("delegate telemetry contract", () => {
 
       const db = new DatabaseSync(dbPath);
       try {
-        expect(userVersionOf(db)).toBe(6);
+        expect(userVersionOf(db)).toBe(7);
         const columns = (db.prepare("PRAGMA table_info(tasks)").all() as {
           name?: unknown;
         }[]).map((row) => row.name);
@@ -624,7 +871,7 @@ describe("delegate telemetry contract", () => {
       }
       expect(callCount).toBe(8);
       expect(taskCount).toBe(8);
-      expect(version).toBe(6);
+      expect(version).toBe(7);
       expect(journal).toBe("wal");
     },
     120_000,
@@ -1263,6 +1510,58 @@ describe("delegate telemetry contract", () => {
     },
   );
 
+  for (const kind of ["journal", "workspace"] as const) {
+    test(`${kind} preparation rejection records one safe misfire`, async () => {
+      session = await openDelegateBoundary();
+      const subagents = await installSubagentModel(session);
+      const dbPath = join(trackedTempDir(), "preparation.db");
+      configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+      // A regular file where Delegate expects its private directory forces a
+      // deterministic filesystem failure even when tests run as root.
+      writeFileSync(join(session.cwd, kind === "journal" ? "delegate-tickets" : "delegate-scratch"), "PRIVATE-FILE-CONTENT");
+      const result = await callDelegate(session, {
+        async: kind === "journal",
+        tasks: [{ prompt: "PRIVATE-PROMPT-CONTENT", ...(kind === "workspace" ? { workspace: "scratch" } : {}) }],
+      });
+      expect(result.isError).toBe(true);
+      expect(subagents.state.callCount).toBe(0);
+      const db = new DatabaseSync(dbPath);
+      try {
+        const rows = rowsOf(db, "misfires");
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.phase).toBe("preparation");
+        expect(rows[0]?.message).toBe(result.text);
+        expect(JSON.stringify(rows)).not.toContain("PRIVATE-");
+        expect(rowsOf(db, "calls")).toHaveLength(0);
+      } finally { db.close(); }
+    });
+  }
+
+  test("known isolated workspace failures retain safe actionable guidance", async () => {
+    session = await openDelegateBoundary();
+    const subagents = await installSubagentModel(session);
+    const dbPath = join(trackedTempDir(), "isolated-errors.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    const nonRepo = trackedTempDir();
+    const emptyRepo = trackedTempDir();
+    execSync("git init -q", { cwd: emptyRepo });
+    for (const [cwd, guidance] of [[nonRepo, "requires a Git repository"], [emptyRepo, "at least one commit"]] as const) {
+      const result = await callDelegate(session, { async: false, tasks: [{ prompt: "PRIVATE-PROMPT", cwd, workspace: "isolated" }] });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(guidance);
+      expect(result.text).not.toContain(cwd);
+    }
+    expect(subagents.state.callCount).toBe(0);
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = rowsOf(db, "misfires");
+      expect(rows).toHaveLength(2);
+      expect(String(rows[0]?.message)).toContain("requires a Git repository");
+      expect(String(rows[1]?.message)).toContain("at least one commit");
+      expect(JSON.stringify(rows)).not.toContain("PRIVATE-PROMPT");
+    } finally { db.close(); }
+  });
+
   test(
     "a former agent alias rejects and records verbatim misfire metadata without translation",
     async () => {
@@ -1392,7 +1691,7 @@ describe("delegate telemetry contract", () => {
       try {
         const misfires = rowsOf(db, "misfires");
         expect(misfires).toHaveLength(2);
-        expect(misfires.map((row) => row.message).sort()).toEqual(messages.sort());
+        expect(misfires.map((row) => row.message)).toEqual(messages.map(() => "Dispatch rejected before execution."));
         for (const row of misfires) {
           expect(row.phase).toBe("validation");
           expect(row.task_count).toBe(1);
@@ -1431,7 +1730,7 @@ describe("delegate telemetry contract", () => {
     try {
       const rows = rowsOf(db, "misfires");
       expect(rows).toHaveLength(1);
-      expect(rows[0]?.message).toBe(result.text);
+      expect(rows[0]?.message).toBe("Dispatch rejected before execution.");
       expect(JSON.stringify(rows)).not.toContain("PRIVATE-");
       expect(rowsOf(db, "calls")).toHaveLength(0);
     } finally {
@@ -1450,7 +1749,7 @@ describe("delegate telemetry contract", () => {
     try {
       const rows = rowsOf(db, "misfires");
       expect(rows).toHaveLength(1);
-      expect(rows[0]?.message).toBe(result.text);
+      expect(rows[0]?.message).toBe("Dispatch rejected before execution.");
       expect(rows[0]?.phase).toBe("validation");
       expect(rows[0]?.task_count).toBe(0);
       expect(JSON.parse(String(rows[0]?.agents))).toEqual([]);
@@ -1512,7 +1811,9 @@ describe("delegate telemetry contract", () => {
     try {
       const rows = rowsOf(db, "misfires");
       expect(rows).toHaveLength(1);
-      expect(rows[0]?.message).toBe(result.text);
+      expect(result.text).toContain("PRIVATE-PROMPT");
+      expect(rows[0]?.message).toBe("Dispatch rejected before execution.");
+      expect(JSON.stringify(rows)).not.toContain("PRIVATE-PROMPT");
       expect(rows[0]?.task_count).toBe(1);
       expect(rowsOf(db, "calls")).toHaveLength(0);
     } finally {
@@ -1682,7 +1983,7 @@ describe("delegate telemetry contract", () => {
         expect(misfires).toHaveLength(1);
         const row = misfires[0];
         expect(row?.phase).toBe("validation");
-        expect(row?.message).toContain("deadlineMs field has been removed");
+        expect(row?.message).toBe("Dispatch rejected before execution.");
         expect(row?.task_count).toBe(1);
       } finally {
         db.close();

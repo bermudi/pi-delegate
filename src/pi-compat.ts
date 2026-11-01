@@ -1,3 +1,4 @@
+import { SafePreparationError } from "./preparation-error.ts";
 import {
   chmodSync,
   closeSync,
@@ -35,7 +36,7 @@ export function parentModelRuntime(ctx: ExtensionContext): ModelRuntime {
   const runtime = (ctx.modelRegistry as unknown as { runtime?: unknown })
     .runtime;
   if (!(runtime instanceof ModelRuntime)) {
-    throw new Error(
+    throw new SafePreparationError(
       "delegate cannot reach the parent session's model runtime; subagent dispatch is unavailable.",
     );
   }

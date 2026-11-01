@@ -1,3 +1,4 @@
+import { SafePreparationError } from "./preparation-error.ts";
 import type { AdmissionGrant } from "./admission.ts";
 import { DiagnosticSink, isDiagnosticPath } from "./diagnostics.ts";
 import { createHash, randomUUID } from "node:crypto";
@@ -54,8 +55,8 @@ async function copySourceOf(
     .lstat(path.join(root, ".git"))
     .catch(() => null);
   if (dotGit?.isFile()) {
-    throw new Error(
-      `workspace "scratch" cannot copy '${root}': its .git is a file redirecting into another repository (linked worktree or submodule), so Git commands inside the copy would mutate the real repository. ${FALLBACK_REMEDY}`,
+    throw new SafePreparationError(
+      `workspace "scratch" cannot copy a linked worktree or submodule: its .git redirects into another repository, so Git commands inside the copy would mutate the real repository. ${FALLBACK_REMEDY}`,
     );
   }
   return { root, cwd: physicalCwd, gitRoot };
@@ -80,10 +81,12 @@ async function copyTree(
         return !isDiagnosticPath(candidate);
       },
     });
-  } catch (error) {
-    throw new Error(
-      `workspace "scratch" could not copy '${source}': ${error instanceof Error ? error.message : String(error)} ${FALLBACK_REMEDY}`,
-    );
+  } catch {
+    // The underlying exception can include file contents or other untrusted
+    // text. Preserve cancellation and useful copy guidance without echoing it.
+    throw new SafePreparationError(signal?.aborted
+      ? `workspace "scratch" copy was cancelled. ${FALLBACK_REMEDY}`
+      : `workspace "scratch" copy failed (cp filter failure or filesystem error). Check workspace storage. ${FALLBACK_REMEDY}`);
   }
 }
 
@@ -298,7 +301,7 @@ export async function prepareScratch(
         releaseSource();
       }
       if (signal?.aborted) {
-        throw new Error("aborted");
+        throw new SafePreparationError('workspace "scratch" copy was cancelled.');
       }
       const workerCwd = path.join(copyRoot, path.relative(root, cwd));
       await fs.promises.mkdir(workerCwd, { recursive: true });

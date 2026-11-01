@@ -1,4 +1,5 @@
 import { DiagnosticSink } from "./diagnostics.ts";
+import { SafePreparationError } from "./preparation-error.ts";
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { dependsTransitively } from "./graph.ts";
@@ -440,8 +441,9 @@ export class AdmissionController {
             taskId: task.id, by: held.owner, path: root, operation: "source read acquisition",
             status: held.kind,
           });
-          throw new Error(
+          throw new SafePreparationError(
             `Scratch task ${task.id} cannot copy source ${root}: overlapping ${held.kind} writer ${held.taskId} (owner: ${held.owner}) is active or quarantined. Wait for confirmed quiescence, then retry.`,
+            "Scratch task cannot copy source: an overlapping writer is active or quarantined. Wait for confirmed quiescence, then retry.",
           );
         }
         const read = { root, owner, taskId: task.id };

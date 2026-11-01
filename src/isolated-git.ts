@@ -1,3 +1,4 @@
+import { SafePreparationError } from "./preparation-error.ts";
 import { DiagnosticSink, isDiagnosticPath } from "./diagnostics.ts";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -58,16 +59,12 @@ export function pathEntryExists(candidate: string): boolean {
  * submodules and cwds that do not map inside the discovered root fail closed.
  */
 export async function repositoryRoot(cwd: string, signal?: AbortSignal): Promise<string> {
-  const { physicalCwd, top, error } = await discoverGitRoot(cwd, signal);
+  const { physicalCwd, top } = await discoverGitRoot(cwd, signal);
   if (top === undefined) {
-    throw new Error(
-      `workspace "isolated" requires a Git repository: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    throw new SafePreparationError('workspace "isolated" requires a Git repository.');
   }
   if (!isWithin(top, physicalCwd)) {
-    throw new Error(
-      `Could not map the isolated task cwd '${physicalCwd}' into its Git root '${top}'.`,
-    );
+    throw new SafePreparationError("Could not map the isolated task cwd into its Git root.");
   }
   try {
     await git(["rev-parse", "--verify", "HEAD^{commit}"], {
@@ -76,13 +73,11 @@ export async function repositoryRoot(cwd: string, signal?: AbortSignal): Promise
     });
   } catch (verifyError) {
     if (signal?.aborted) throw verifyError;
-    throw new Error(
-      `workspace "isolated" requires a repository with at least one commit; '${top}' has none.`,
-    );
+    throw new SafePreparationError('workspace "isolated" requires a repository with at least one commit.');
   }
   if (fs.existsSync(path.join(top, ".gitmodules"))) {
-    throw new Error(
-      'workspace "isolated" does not yet support repositories with submodules.',
+    throw new SafePreparationError(
+      'workspace "isolated" does not yet support repositories with submodules; use shared workspace.',
     );
   }
   return top;

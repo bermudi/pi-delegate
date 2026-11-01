@@ -2,6 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { TestSession } from "@marcfargas/pi-test-harness";
@@ -97,6 +98,8 @@ describe("scratch source copying admission (#50)", () => {
     test(`an active ${workspace} writer rejects scratch copying of the canonical Git top-level`, async () => {
       session = await openDelegateBoundary();
       const model = await installSubagentModel(session);
+      const dbPath = join(tempDir(), "telemetry.db");
+      configureDelegate(session, { telemetry: { enabled: true, dbPath } });
       const root = tempDir();
       gitInit(root);
       // The writer has its own nested repository, disjoint from scratch's
@@ -123,6 +126,15 @@ describe("scratch source copying admission (#50)", () => {
         expect(textOf(rejected)).toMatch(/copy.*source|cannot copy source/i);
         expect(textOf(rejected)).toContain("holder");
         expect(textOf(rejected)).toMatch(/quiescence.*retry/i);
+        const db = new DatabaseSync(dbPath);
+        try {
+          const rows = db.prepare("SELECT message FROM misfires WHERE phase = 'preparation'").all();
+          expect(rows).toHaveLength(1);
+          expect(JSON.stringify(rows)).toContain("cannot copy source");
+          expect(JSON.stringify(rows)).not.toContain(root);
+          expect(JSON.stringify(rows)).not.toContain("holder");
+          expect(JSON.stringify(rows)).not.toContain(ticket);
+        } finally { db.close(); }
         expect(model.state.callCount).toBe(1);
       } finally { worker.release(); }
       await callDelegateTicket(session, { action: "wait", ticket });
@@ -193,6 +205,33 @@ describe("scratch source copying admission (#50)", () => {
       resume.release(); finishWorkers.release();
       await Promise.all([first, second]); copySpy.mockRestore();
     }
+  });
+
+  test("copy errors do not expose arbitrary filesystem exception text", async () => {
+    session = await openDelegateBoundary();
+    const model = await installSubagentModel(session);
+    const source = tempDir();
+    const dbPath = join(tempDir(), "telemetry.db");
+    configureDelegate(session, { telemetry: { enabled: true, dbPath } });
+    const original = fs.promises.cp;
+    const copy = spyOn(fs.promises, "cp").mockImplementation(async (src, dst, options) => {
+      if (String(src) === source) throw new Error("PRIVATE-COPY-EXCEPTION");
+      return original(src, dst, options);
+    });
+    try {
+      const result = await callDelegate(session, { async: false, tasks: [{ prompt: "copy", cwd: source, workspace: "scratch" }] });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("copy failed");
+      expect(result.text).not.toContain("PRIVATE-COPY-EXCEPTION");
+      expect(model.state.callCount).toBe(0);
+      const db = new DatabaseSync(dbPath);
+      try {
+        const rows = db.prepare("SELECT message FROM misfires WHERE phase = 'preparation'").all();
+        expect(rows).toHaveLength(1);
+        expect(JSON.stringify(rows)).not.toContain("PRIVATE-COPY-EXCEPTION");
+        expect(JSON.stringify(rows)).not.toContain(source);
+      } finally { db.close(); }
+    } finally { copy.mockRestore(); }
   });
 
   for (const ending of ["failure", "cancel"] as const) {

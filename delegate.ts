@@ -1378,7 +1378,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
     ctx: ExtensionContext,
     agentDir: string,
     config: TelemetryConfig,
-    phase: "config" | "validation" | "admission",
+    phase: "config" | "validation" | "admission" | "preparation",
     error: unknown,
     tasks: readonly TaskInput[] | undefined,
     batchWorkspace: "shared" | "scratch" | "isolated" | undefined,
@@ -1424,7 +1424,18 @@ export default function delegateExtension(api: ExtensionAPI): void {
     tasks: readonly TaskInput[];
     workspace: "shared" | "scratch" | "isolated" | undefined;
     async: boolean;
+    pending: number;
+    ambiguous: boolean;
+    claimed: boolean;
   }>();
+  // The host supplies only tool name and call id, not an invocation token.
+  // Keep entries until end (even after execute claims them), so overlapping
+  // reused ids cannot transfer one invocation's action to another.
+  const preflightOperations = new Map<string, {
+    pending: number; ambiguous: boolean; claimed: boolean;
+    finish: ReturnType<typeof operationSpan>;
+  }>();
+  const operationKey = (tool: string, id: string) => JSON.stringify([tool, id]);
   api.on("tool_execution_start", (event, ctx) => {
     captureDiagnosticContext(ctx);
     // Parent mutating-tool events flag every open evidence window —
@@ -1432,10 +1443,31 @@ export default function delegateExtension(api: ExtensionAPI): void {
     if (PARENT_MUTATING_TOOLS.has(event.toolName)) {
       attributionWindows.noteParentMutation();
     }
+    if (event.toolName === "delegate_ticket" || event.toolName === "delegate_session") {
+      const action = isRecord(event.args) ? event.args.action : undefined;
+      const allowed = event.toolName === "delegate_ticket" ? TICKET_ACTIONS : SESSION_ACTIONS;
+      const key = operationKey(event.toolName, event.toolCallId);
+      const existing = preflightOperations.get(key);
+      if (existing) {
+        existing.pending++;
+        existing.ambiguous = true;
+      } else {
+        preflightOperations.set(key, { pending: 1, ambiguous: false, claimed: false,
+          finish: operationSpan(ctx, event.toolName,
+            typeof action === "string" && allowed.includes(action) ? action : "unknown") });
+      }
+      return;
+    }
     if (event.toolName !== "delegate") return;
+    const existing = preflightDispatches.get(event.toolCallId);
+    if (existing) {
+      existing.pending++;
+      existing.ambiguous = true;
+      return;
+    }
     const raw: unknown = event.args;
     if (!isRecord(raw)) {
-      preflightDispatches.set(event.toolCallId, { tasks: [], workspace: undefined, async: true });
+      preflightDispatches.set(event.toolCallId, { tasks: [], workspace: undefined, async: true, pending: 1, ambiguous: false, claimed: false });
       return;
     }
     const rawTasks = typeof raw.tasks === "string" ? parseArray(raw.tasks) : raw.tasks;
@@ -1454,6 +1486,7 @@ export default function delegateExtension(api: ExtensionAPI): void {
       tasks,
       workspace: workspace === "shared" || workspace === "scratch" || workspace === "isolated" ? workspace : undefined,
       async: raw.async !== false,
+      pending: 1, ambiguous: false, claimed: false,
     });
   });
   api.on("tool_execution_end", (event, ctx) => {
@@ -1462,17 +1495,29 @@ export default function delegateExtension(api: ExtensionAPI): void {
     if (PARENT_MUTATING_TOOLS.has(event.toolName)) {
       attributionWindows.noteParentMutation();
     }
+    if (event.toolName === "delegate_ticket" || event.toolName === "delegate_session") {
+      const key = operationKey(event.toolName, event.toolCallId);
+      const entry = preflightOperations.get(key);
+      if (entry) {
+        if (!entry.ambiguous && !entry.claimed && event.isError) entry.finish("error");
+        if (--entry.pending === 0) preflightOperations.delete(key);
+      }
+      return;
+    }
     if (event.toolName !== "delegate") return;
     const metadata = preflightDispatches.get(event.toolCallId);
-    preflightDispatches.delete(event.toolCallId);
-    if (!metadata || !event.isError) return;
+    if (!metadata) return;
+    if (--metadata.pending === 0) preflightDispatches.delete(event.toolCallId);
+    // Overlapping reused IDs cannot be correlated with their ends or execute
+    // entries. Suppress attribution rather than attach another batch's metadata.
+    // The host provides no invocation token, so non-overlapping reuse and
+    // missing or reordered host events cannot be distinguished here.
+    if (metadata.ambiguous || metadata.claimed || !event.isError) return;
     try {
       const agentDir = resolveAgentDir(ctx).dir;
-      const result: unknown = event.result;
-      const content = isRecord(result) && Array.isArray(result.content) ? result.content : [];
-      const message = content.flatMap((part: unknown) =>
-        isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : [],
-      ).join("\n");
+      // Later extensions can echo arbitrary arguments in their block reason.
+      // Host result text has no trusted provenance, even for schema errors.
+      const message = "Dispatch rejected before execution.";
       noteMisfire(ctx, agentDir, telemetryConfigHint(agentDir), "validation",
         new Error(message), metadata.tasks, metadata.workspace, metadata.async);
     } catch (error) {
@@ -1560,6 +1605,21 @@ export default function delegateExtension(api: ExtensionAPI): void {
     await teardown.run(event.reason, ctx);
   });
 
+  // Telemetry is deliberately outside the RPC's failure domain. Only validated
+  // action names enter this table; no arguments or response text are retained.
+  function operationSpan(ctx: ExtensionContext, tool: "delegate_ticket" | "delegate_session", action: string) {
+    try {
+      const dir = resolveAgentDir(ctx).dir;
+      const finish = telemetry.beginOperation(telemetryConfigHint(dir), dir, tool, action);
+      return (result: "success" | "error" | "settled" | "question" | "interrupted" | "aborted" | "detached") => {
+        try { finish(result); } catch (error) { diagnostic("error", "operation telemetry failed", {}, error); }
+      };
+    } catch (error) {
+      diagnostic("error", "operation telemetry failed", {}, error);
+      return (_result: "success" | "error" | "settled" | "question" | "interrupted" | "aborted" | "detached") => {};
+    }
+  }
+
   function registerTools(): void {
     api.registerTool(
       managedTool(defineTool<TUnsafe<DelegateArguments>, DelegateDetails>({
@@ -1596,7 +1656,8 @@ export default function delegateExtension(api: ExtensionAPI): void {
         async execute(toolCallId, params, signal, onUpdate, ctx) {
           // Later tool_call handlers may block after our preflight. Only actual
           // execute entry transfers error-record ownership to the engine.
-          preflightDispatches.delete(toolCallId);
+          const preflight = preflightDispatches.get(toolCallId);
+          if (preflight) preflight.claimed = true;
           // Synchronous prefix: everything before the first await runs in
           // the same microtask as the host's tool dispatch, so a shutdown
           // handler cannot interleave here. A dispatch that arrives after
@@ -1919,89 +1980,102 @@ export default function delegateExtension(api: ExtensionAPI): void {
         renderResult: createResultRenderer(tickets),
 
         async execute(toolCallId, params, signal, _onUpdate, ctx) {
-          const call = validateTicketCall(params);
-          visibility.captureFooterCtx(ctx);
-          // Ticket RPCs need the saved journal; a corrupt or inaccessible one
-          // fails this call visibly but does not affect dispatch or sessions.
-          tickets.connect(resolveAgentDir(ctx).dir);
-          // `toolCallId` seeds the steer key (#44): every steer receipts
-          // under `steer:<toolCallId>`, so a transport-level retry of the
-          // same tool call replays rather than re-injecting.
-          const result = await handleTicketRpc(
-            call,
-            tickets,
-            signal,
-            toolCallId,
-            // #64: the roster and known-ticket lists show only this
-            // session's tickets; explicit ids still reach others.
-            ctx.sessionManager.getSessionId(),
-          );
-          // SPEC v3 "Wake delivery": a wait/poll that returned the
-          // ticket's terminal view has already shown the model its
-          // content — record the fingerprint so the flush drops a wake
-          // that would only repeat it.
-          if (
-            (call.action === "poll" || call.action === "wait") &&
-            result.consumedView !== undefined &&
-            result.ticket !== undefined
-          ) {
-            delivery.noteConsumed(
-              result.ticket.id,
-              call.action === "poll" ? "poll" : "wait",
-              result.consumedView,
+          const entry = preflightOperations.get(operationKey("delegate_ticket", toolCallId));
+          const finishOperation = entry && !entry.ambiguous && !entry.claimed
+            ? (entry.claimed = true, entry.finish)
+            : operationSpan(ctx, "delegate_ticket", "unknown");
+          let operationResult: "success" | "error" | "settled" | "question" | "interrupted" | "aborted" | "detached" = "error";
+          try {
+            const call = validateTicketCall(params);
+            visibility.captureFooterCtx(ctx);
+            // Ticket RPCs need the saved journal; a corrupt or inaccessible one
+            // fails this call visibly but does not affect dispatch or sessions.
+            tickets.connect(resolveAgentDir(ctx).dir);
+            // `toolCallId` seeds the steer key (#44): every steer receipts
+            // under `steer:<toolCallId>`, so a transport-level retry of the
+            // same tool call replays rather than re-injecting.
+            const result = await handleTicketRpc(
+              call,
+              tickets,
+              signal,
+              toolCallId,
+              // #64: the roster and known-ticket lists show only this
+              // session's tickets; explicit ids still reach others.
+              ctx.sessionManager.getSessionId(),
             );
+            operationResult = result.isError ? "error" : result.waitResult ?? "success";
+            // SPEC v3 "Wake delivery": a wait/poll that returned the
+            // ticket's terminal view has already shown the model its
+            // content — record the fingerprint so the flush drops a wake
+            // that would only repeat it.
+            if (
+              (call.action === "poll" || call.action === "wait") &&
+              result.consumedView !== undefined &&
+              result.ticket !== undefined
+            ) {
+              delivery.noteConsumed(
+                result.ticket.id,
+                call.action === "poll" ? "poll" : "wait",
+                result.consumedView,
+              );
+            }
+            return {
+              content: [{ type: "text" as const, text: result.text }],
+              details: ({
+                mode: "ticket" as const,
+                action: call.action,
+                ticket: result.ticket?.id,
+                // The rendered text may be spill-bounded; the record is not —
+                // details keep the complete outcomes for the expanded view.
+                // Only poll/wait carry them: cancel/pause/resume expand to
+                // their action response text, not the ticket document.
+                results:
+                  call.action === "poll" || call.action === "wait"
+                    ? result.ticket?.outcomes.map((outcome) =>
+                        publicOutcome(outcome),
+                      )
+                    : undefined,
+                // SPEC v3 "Observability — Completion evidence":
+                // machine-readable attribution per task — recorded outcomes,
+                // plus observed-so-far evidence for tasks still running.
+                attributedFiles:
+                  (call.action === "poll" || call.action === "wait") &&
+                  result.ticket !== undefined
+                    ? tickets.attributionDetails(result.ticket)
+                    : undefined,
+                // Verifier verdicts (#49) — {verdict, taskId} per recorded
+                // outcome that parsed one; poll/wait only, same as results.
+                verdict:
+                  (call.action === "poll" || call.action === "wait") &&
+                  result.ticket !== undefined
+                    ? tickets.verdictDetails(result.ticket)
+                    : undefined,
+                ...(result.ticket !== undefined &&
+                result.ticket.notices.length > 0
+                  ? { notices: result.ticket.notices }
+                  : {}),
+                ...(call.action === "poll" || call.action === "wait"
+                  ? { questions: result.ticket?.questions }
+                  : {}),
+                // A wait's tail sentence (timeout/detached/roster note)
+                // rides details so the collapsed view shows it too (#63).
+                ...(result.note !== undefined ? { note: result.note } : {}),
+                // SPEC v3 "Steering": the receipt's machine half rides
+                // details.steer (status, taskId, replayed original status);
+                // an interrupt's rides details.interrupt the same way. A tail
+                // read's {text, nextOffset, done, taskState} rides
+                // details.tail (#52).
+                ...(result.steer !== undefined ? { steer: result.steer } : {}),
+                ...(result.interrupt !== undefined ? { interrupt: result.interrupt } : {}),
+              } satisfies TicketDetails),
+              isError: result.isError,
+            };
+          } catch (error) {
+            operationResult = "error";
+            throw error;
+          } finally {
+            finishOperation(operationResult);
           }
-          return {
-            content: [{ type: "text" as const, text: result.text }],
-            details: ({
-              mode: "ticket" as const,
-              action: call.action,
-              ticket: result.ticket?.id,
-              // The rendered text may be spill-bounded; the record is not —
-              // details keep the complete outcomes for the expanded view.
-              // Only poll/wait carry them: cancel/pause/resume expand to
-              // their action response text, not the ticket document.
-              results:
-                call.action === "poll" || call.action === "wait"
-                  ? result.ticket?.outcomes.map((outcome) =>
-                      publicOutcome(outcome),
-                    )
-                  : undefined,
-              // SPEC v3 "Observability — Completion evidence":
-              // machine-readable attribution per task — recorded outcomes,
-              // plus observed-so-far evidence for tasks still running.
-              attributedFiles:
-                (call.action === "poll" || call.action === "wait") &&
-                result.ticket !== undefined
-                  ? tickets.attributionDetails(result.ticket)
-                  : undefined,
-              // Verifier verdicts (#49) — {verdict, taskId} per recorded
-              // outcome that parsed one; poll/wait only, same as results.
-              verdict:
-                (call.action === "poll" || call.action === "wait") &&
-                result.ticket !== undefined
-                  ? tickets.verdictDetails(result.ticket)
-                  : undefined,
-              ...(result.ticket !== undefined &&
-              result.ticket.notices.length > 0
-                ? { notices: result.ticket.notices }
-                : {}),
-              ...(call.action === "poll" || call.action === "wait"
-                ? { questions: result.ticket?.questions }
-                : {}),
-              // A wait's tail sentence (timeout/detached/roster note)
-              // rides details so the collapsed view shows it too (#63).
-              ...(result.note !== undefined ? { note: result.note } : {}),
-              // SPEC v3 "Steering": the receipt's machine half rides
-              // details.steer (status, taskId, replayed original status);
-              // an interrupt's rides details.interrupt the same way. A tail
-              // read's {text, nextOffset, done, taskState} rides
-              // details.tail (#52).
-              ...(result.steer !== undefined ? { steer: result.steer } : {}),
-              ...(result.interrupt !== undefined ? { interrupt: result.interrupt } : {}),
-            } satisfies TicketDetails),
-            isError: result.isError,
-          };
         },
       })),
     );
@@ -2019,19 +2093,32 @@ export default function delegateExtension(api: ExtensionAPI): void {
         renderCall: renderSessionCall,
         renderResult: createResultRenderer(tickets),
 
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-          const call = validateSessionCall(params);
-          visibility.captureFooterCtx(ctx);
-          const result = handleSessionRpc(call, sessions, admission);
-          return {
-            content: [{ type: "text" as const, text: result.text }],
-            details: ({
-              mode: "session" as const,
-              action: call.action,
-              sessionId: call.sessionId,
-            } satisfies SessionDetails),
-            isError: result.isError,
-          };
+        async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+          const entry = preflightOperations.get(operationKey("delegate_session", toolCallId));
+          const finishOperation = entry && !entry.ambiguous && !entry.claimed
+            ? (entry.claimed = true, entry.finish)
+            : operationSpan(ctx, "delegate_session", "unknown");
+          let operationResult: "success" | "error" = "error";
+          try {
+            const call = validateSessionCall(params);
+            visibility.captureFooterCtx(ctx);
+            const result = handleSessionRpc(call, sessions, admission);
+            operationResult = result.isError ? "error" : "success";
+            return {
+              content: [{ type: "text" as const, text: result.text }],
+              details: ({
+                mode: "session" as const,
+                action: call.action,
+                sessionId: call.sessionId,
+              } satisfies SessionDetails),
+              isError: result.isError,
+            };
+          } catch (error) {
+            operationResult = "error";
+            throw error;
+          } finally {
+            finishOperation(operationResult);
+          }
         },
       })),
     );

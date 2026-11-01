@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
   callDelegate,
+  configureDelegate,
   callDelegateTicket,
   installSubagentModel,
   openDelegateBoundary,
@@ -161,6 +163,8 @@ describe("owner-liveness startup recovery (issue #54)", () => {
     const { ticket, release } = await dispatchRunning(first, provider);
     try {
       const next = await openAt(first.cwd);
+      const dbPath = join(first.cwd, "operation-telemetry.db");
+      configureDelegate(first, { telemetry: { enabled: true, dbPath } });
       const before = journalOf(first.cwd, ticket);
       expect(before.status).toBe("running");
 
@@ -171,6 +175,11 @@ describe("owner-liveness startup recovery (issue #54)", () => {
       expect(waited.isError).toBe(false);
       expect(waited.text).toContain("running");
       expect(waited.text).not.toContain("timed out");
+      const db = new DatabaseSync(dbPath);
+      try {
+        const rows = db.prepare("SELECT action, result FROM tool_operations").all();
+        expect(rows.map((row) => [row.action, row.result])).toEqual([["wait", "detached"]]);
+      } finally { db.close(); }
 
       const cancel = await callDelegateTicket(next, {
         action: "cancel",

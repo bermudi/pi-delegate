@@ -167,7 +167,7 @@ This section supersedes the older alias and cardinality entries below.
   wording is in git history.
 - Malformed supplied non-array `tasks` reject instead of being discarded by
   flat recovery. Schema diagnostics exclude request-body dumps; pre-schema
-  rejection telemetry stores those safe messages verbatim, never prompts or
+  host pre-execution rejection telemetry uses a fixed message, never prompts or
   base instructions. Non-object calls also record empty-shape misfires.
   Recovery guards omit malformed values; correction examples retain relevant
   addresses but use placeholders for task/message/answer bodies.
@@ -202,7 +202,10 @@ v3 is a contract layer on the same engine. Caller-visible changes:
   `models.explore`. Built-in semantics (toolset, role, read-only
   concurrency) are unchanged.
 - **Additive — misfire telemetry.** Dispatches rejected before
-  execution record a telemetry row. No behavior change.
+  execution record a telemetry row, including ticket journal and initial
+  workspace preparation failures (`preparation` phase). Unexpected preparation
+  errors use safe stage-level caller messages rather than raw filesystem or
+  subprocess details; cancellation returned as a ticket is not a misfire.
 - **Superseded — cross-harness task-field spellings (#41, retired by #61).**
   `subagent_type`, `agent_type`, `task_name`, `run_in_background`, `timeout_ms`, and a
   task-level `message` now reject with teaching
@@ -445,6 +448,13 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   now rejects before execution with enumerated remedies (dependsOn,
   `isolated`, separate calls) — the strictness direction, replacing silent
   serialization whose advisory notice was measurably ignored.
+- **Additive — tool-operation telemetry.** Opt-in telemetry now adds a
+  separate `tool_operations` table for ticket and session calls, including
+  preflight and validation rejections. It records only timestamp, tool, action, elapsed duration and
+  result class; no identifiers or contents. Dispatch rows remain unchanged,
+  existing databases migrate in place, and unknown actions are recorded only as
+  `unknown`. A nonterminal wait without a specific wake reason is `detached`,
+  not `settled`.
 - Opt-in, fail-open local telemetry that never stores prompt/output content,
   with stable call/task outcome meaning and explicit migration or versioning
   for existing databases. Telemetry stays disabled unless the user sets
@@ -464,7 +474,9 @@ release notes and migration guidance; it must not arrive as rewrite drift.
   **Current override (SPEC.md, "Misfire rows"):** the
   completed-dispatch-only description is historical. Pre-execution
   rejections also record sanitized batch metadata and the caller-visible
-  rejection message verbatim. That explicit message exception does not
+  rejection message when Delegate owns and sanitizes it; preparation guidance
+  may omit caller-owned paths or IDs. Untrusted host or third-party
+  pre-execution results use a fixed content-free message. That exception does not
   authorize arbitrary prompt, output, credential, or path payloads.
 
 ## v2 deliberate breaking changes

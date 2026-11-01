@@ -328,7 +328,8 @@ _Status: the compact/full split described below was removed by ADR 0002. These b
   events, retaining sanitized batch metadata only, without duplicate execute
   rows. `telemetry.test.ts` proves removed-field rows, non-object root rows,
   safe schema diagnostics without prompt/base-instruction dumps, and existing
-  phases. Recovery-guard and wrong-tool examples also avoid copying private
+  phases, plus journal and workspace preparation failures with safe messages.
+  Recovery-guard and wrong-tool examples also avoid copying private
   bodies; a later extension blocking tool_call still records exactly one row,
   because execution—not preflight approval—transfers telemetry ownership.
   `surface.test.ts` also rejects malformed supplied task lists instead
@@ -1786,6 +1787,20 @@ session's leftover queues must clear before reuse.
   append prompt+assistant entries after the durable header.
 
 ### Telemetry write contention (#142, under #138)
+
+Hardening, not migrated v1 evidence: tool-operation telemetry is covered at
+`tests/contract/telemetry.test.ts` through ticket and session boundaries,
+including disabled collection, preflight and validation rejects, later-handler
+blocks, allowlisted/unknown actions, an unknown-ticket error, settled,
+question and interrupted waits, content/identifier exclusion, preservation of
+dispatch rows, and successive operations after a destination change. A
+registered-tool execution with an abort signal also checks the aborted wait
+classification; without preflight its action is `unknown`. Disabled tests
+configure the destination explicitly before asserting no database is created.
+`owner-liveness.test.ts` checks a recovered live sibling wait is `detached`
+rather than falsely classified as settled. The ticket
+cancellation contention test in `tests/regression/telemetry-contention.test.ts`
+also checks deferred operation rows land after the database lock releases.
 
 Hardening, not migrated v1 evidence: telemetry must never stall the
 calling thread on a SQLite lock — writes defer onto the store's owned,

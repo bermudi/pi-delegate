@@ -19,7 +19,7 @@ const EXTENSION_VERSION =
     ? pkg.version
     : "unknown";
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const BUSY_WINDOW_MS = 500;
 const BUSY_RETRY_BASE_MS = 10;
 const BUSY_RETRY_MAX_MS = 50;
@@ -136,11 +136,20 @@ const TABLES = [
       ["parent_cwd", "TEXT"],
     ],
   },
+  {
+    name: "tool_operations",
+    create: `CREATE TABLE IF NOT EXISTS tool_operations(
+      ts INTEGER, tool TEXT, action TEXT, duration_ms INTEGER, result TEXT)`,
+    columns: [
+      ["ts", "INTEGER"], ["tool", "TEXT"], ["action", "TEXT"],
+      ["duration_ms", "INTEGER"], ["result", "TEXT"],
+    ],
+  },
 ] as const;
 
 /** The batch shape a misfire row carries — what the caller asked for. */
 export interface MisfireShape {
-  readonly phase: "config" | "validation" | "admission";
+  readonly phase: "config" | "validation" | "admission" | "preparation";
   /** The caller-visible rejection message, verbatim. */
   readonly message: string;
   readonly taskCount: number;
@@ -208,6 +217,16 @@ interface MisfireJobData {
   readonly parentCwd: string;
 }
 
+type OperationResult = "success" | "error" | "settled" | "question" | "interrupted" | "aborted" | "detached";
+interface OperationJobData {
+  readonly op: "operation";
+  readonly ts: number;
+  readonly tool: "delegate_ticket" | "delegate_session";
+  readonly action: string;
+  readonly durationMs: number;
+  readonly result: OperationResult;
+}
+
 /**
  * One unit of deferred telemetry work. The payload is immutable; only the
  * scheduling fields (nextAttemptAt, backoffMs) move as retries elapse.
@@ -219,7 +238,7 @@ interface WriteJob {
   readonly deadline: number;
   nextAttemptAt: number;
   backoffMs: number;
-  readonly data: SpanJobData | MisfireJobData;
+  readonly data: SpanJobData | MisfireJobData | OperationJobData;
 }
 
 type AttemptOutcome = "done" | "busy" | "failed";
@@ -417,6 +436,25 @@ export class TelemetryStore {
     };
   }
 
+  beginOperation(
+    config: TelemetryConfig, agentDir: string,
+    tool: OperationJobData["tool"], action: string,
+  ): (result: OperationResult) => void {
+    if (!config.enabled) return () => {};
+    const destination = destinationOf(config, agentDir);
+    this.selectDestination(destination);
+    if (this.closed || destination === this.failedDestination) return () => {};
+    const generation = this.generation;
+    const ts = Date.now();
+    const start = performance.now();
+    return (result) => {
+      if (this.closed || generation !== this.generation ||
+          destination !== this.destination || destination === this.failedDestination) return;
+      this.submit(destination, { op: "operation", ts, tool, action,
+        durationMs: Math.max(0, Math.round(performance.now() - start)), result });
+    };
+  }
+
   /**
    * Record one misfire row (SPEC v3 "Observability"): a dispatch that
    * ended before execution. Telemetry config may come from the loaded
@@ -490,7 +528,7 @@ export class TelemetryStore {
    */
   private submit(
     destination: string,
-    data: SpanJobData | MisfireJobData,
+    data: SpanJobData | MisfireJobData | OperationJobData,
   ): void {
     const job: WriteJob = {
       destination,
@@ -619,7 +657,14 @@ export class TelemetryStore {
     return "done";
   }
 
-  private writeJob(db: DatabaseSync, data: SpanJobData | MisfireJobData): void {
+  private writeJob(db: DatabaseSync, data: SpanJobData | MisfireJobData | OperationJobData): void {
+    if (data.op === "operation") {
+      transact(db, () => {
+        db.prepare(`INSERT INTO tool_operations(ts, tool, action, duration_ms, result)
+          VALUES (?,?,?,?,?)`).run(data.ts, data.tool, data.action, data.durationMs, data.result);
+      });
+      return;
+    }
     if (data.op === "misfire") {
       transact(db, () => {
         db.prepare(
@@ -801,13 +846,13 @@ export class TelemetryStore {
         handle.exec("PRAGMA journal_mode = WAL");
       }
       ensureSchema(handle);
+      tightenPermissions(destination);
     } catch (error) {
       try {
         handle.close();
       } catch {}
       throw error;
     }
-    tightenPermissions(destination);
     this.db = handle;
     return handle;
   }

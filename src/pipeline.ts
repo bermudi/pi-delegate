@@ -1,3 +1,4 @@
+import { SafePreparationError } from "./preparation-error.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AdmissionController, AdmissionGrant } from "./admission.ts";
@@ -61,7 +62,7 @@ export interface DispatchPipelineDependencies {
     ctx: ExtensionContext,
     agentDir: string,
     config: TelemetryConfig,
-    phase: "config" | "validation" | "admission",
+    phase: "config" | "validation" | "admission" | "preparation",
     error: unknown,
     tasks: readonly TaskInput[] | undefined,
     batchWorkspace: "shared" | "scratch" | "isolated" | undefined,
@@ -231,8 +232,13 @@ export class DispatchPipeline {
     // which shutdown force-cancels — their preparation aborts on its own
     // and the catch below settles the ticket as cancelled.)
     const relabel = (label: string): void => lifetime.relabel(label);
+    let recordedMisfire = false;
+    let preparationStage: "ticket" | "dispatch" | "workspace" = createTicket ? "ticket" : "dispatch";
+    let agentDir: string | undefined;
+    let telemetryConfig: TelemetryConfig | undefined;
     let ticket: Ticket | undefined;
     let plan: WorkspacePlan | undefined;
+    let admittedGrant: AdmissionGrant | undefined;
     // Everything the failure routine below may still need once admission
     // has run. Admission is synchronous and immediately follows ticket
     // creation, so a ticket that exists at all always has its batch here:
@@ -259,6 +265,8 @@ export class DispatchPipeline {
         tickets.connect(resolveAgentDir(ctx).dir);
       }
       const agentDirResolution = resolveAgentDir(ctx);
+      agentDir = agentDirResolution.dir;
+      preparationStage = "dispatch";
       if (agentDirResolution.source === "cwd" && !this.warnedAgentDirFallback) {
         this.warnedAgentDirFallback = true;
         diagnostic("warn", "Falling back to agent directory; config and workspace trees use this path. Set DELEGATE_AGENT_DIR explicitly. Diagnostics destination is independent", { path: agentDirResolution.dir });
@@ -290,6 +298,7 @@ export class DispatchPipeline {
           catalog.globalNames,
         );
       } catch (error) {
+        recordedMisfire = true;
         noteMisfire(
           ctx, agentDirResolution.dir,
           telemetryConfigHint(agentDirResolution.dir),
@@ -299,11 +308,13 @@ export class DispatchPipeline {
         throw error;
       }
       const config = configLoad.config;
+      telemetryConfig = config.telemetry;
       this.warnOnUnknownConfigKeys(configLoad.path, configLoad);
       let tasks: readonly ResolvedTask[];
       try {
         tasks = await resolveTasks(requestedTasks, env, config, catalog);
       } catch (error) {
+        recordedMisfire = true;
         noteMisfire(
           ctx, agentDirResolution.dir, config.telemetry,
           "validation", error, requestedTasks, undefined,
@@ -315,13 +326,14 @@ export class DispatchPipeline {
       // Neither a pre-ticket async call nor a pre-admission sync call may
       // start a worker after shutdown's snapshot of live work.
       if (isShuttingDown()) {
-        throw new Error(
+        throw new SafePreparationError(
           "Delegate shut down while this dispatch was preparing; no worker was started.",
         );
       }
       try {
         sessions.validateReuse(tasks);
       } catch (error) {
+        recordedMisfire = true;
         noteMisfire(
           ctx, agentDirResolution.dir, config.telemetry,
           "validation", error, requestedTasks, undefined,
@@ -329,7 +341,9 @@ export class DispatchPipeline {
         );
         throw error;
       }
+      preparationStage = createTicket ? "ticket" : "dispatch";
       ticket = createTicket?.(tasks, relabel, config);
+      preparationStage = "dispatch";
       let owner = ticket?.id;
       if (owner === undefined) {
         this.callSeq += 1;
@@ -351,6 +365,7 @@ export class DispatchPipeline {
           },
         });
       } catch (error) {
+        recordedMisfire = true;
         noteMisfire(
           ctx, agentDirResolution.dir, config.telemetry,
           "admission", error, requestedTasks, undefined,
@@ -358,15 +373,17 @@ export class DispatchPipeline {
         );
         throw error;
       }
+      admittedGrant = grant;
       const notices = serializedNotices(tasks, grant.serialized);
-      if (ticket) tickets.setNotices(ticket, notices);
       batch = { tasks, env, config, grant, dispatchSignal, notices };
+      if (ticket) tickets.setNotices(ticket, notices);
       onNotices?.(notices);
       const telemetrySpan = telemetry.beginDispatch(
         config.telemetry,
         env.agentDir,
         { async: ticket !== undefined, startedAt: Date.now(), tasks },
       );
+      preparationStage = "workspace";
       plan = await prepareWorkspaces(
         diagnostics,
         tasks,
@@ -503,9 +520,9 @@ export class DispatchPipeline {
         // already-aborted signal `run` records a cancelled outcome for
         // every task, and its finally releases the grant, finishes the
         // gates, and its adopted full-quiescence work settles the lifetime
-        // through the same wiring as any batch. Telemetry records nothing —
+        // through the same wiring as any batch. Normal dispatch telemetry records nothing —
         // the span above is never finished for a failed preparation (SPEC.md
-        // "Telemetry": failed preparation records nothing).
+        // "Telemetry": failed preparation has no completed dispatch row).
         diagnostic("info", "async dispatch preparation aborted after cancellation; settling as cancelled", { ticketId: cancelledTicket.id }, error);
         return {
           notices: batch.notices,
@@ -537,6 +554,31 @@ export class DispatchPipeline {
             .finally(() => tickets.releaseSettlement(cancelledTicket)),
         };
       }
+      // Unexpected preparation errors may contain filesystem paths, Git output,
+      // or caller-controlled content. Make the public error safe first, then
+      // persist exactly that message. Known rejections already recorded their
+      // own phase and retain their established teaching.
+      let rejection = error;
+      if (!recordedMisfire) {
+        diagnostic("error", "dispatch preparation failed", { phase: preparationStage }, error);
+        rejection = error instanceof SafePreparationError ? error : new Error(preparationStage === "ticket"
+          ? "Ticket storage preparation failed; no worker was started. Check the owner-only ticket storage and diagnostics."
+          : preparationStage === "workspace"
+            ? "Workspace preparation failed; no worker was started. Check workspace storage and diagnostics."
+            : "Dispatch preparation failed; no worker was started. Check Delegate diagnostics.");
+        try {
+          const dir = agentDir ?? resolveAgentDir(ctx).dir;
+          const telemetryRejection = rejection instanceof SafePreparationError
+            ? new Error(rejection.telemetryMessage)
+            : rejection;
+          noteMisfire(ctx, dir, telemetryConfig ?? telemetryConfigHint(dir),
+            "preparation", telemetryRejection, requestedTasks, undefined, createTicket !== undefined);
+        } catch {
+          // Telemetry and config hint lookup must never replace the rejection.
+        }
+      }
+      // Release first: journal removal itself can fail.
+      admittedGrant?.release();
       if (ticket !== undefined && tickets.get(ticket.id) !== undefined) {
         // A ticket whose batch never started is removed rather than
         // exposed: the whole call fails with the cause instead. The get
@@ -544,10 +586,13 @@ export class DispatchPipeline {
         // when its own creation write throws — removing again would
         // delete another ticket's record if the id were ever reused, and
         // journal.remove() on an unsaved id can only throw noise.
-        tickets.remove(ticket.id);
+        try {
+          tickets.remove(ticket.id);
+        } catch (cleanupError) {
+          diagnostic("error", "ticket removal after preparation failure failed (root cause preserved)", {}, cleanupError);
+        }
       }
-      batch?.grant.release();
-      throw error;
+      throw rejection;
     }
   }
 }

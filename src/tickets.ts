@@ -1625,6 +1625,7 @@ export class TicketStore {
 }
 
 export interface TicketRpcResult {
+  readonly waitResult?: "settled" | "question" | "interrupted" | "aborted" | "detached";
   readonly text: string;
   readonly isError: boolean;
   /**
@@ -1806,6 +1807,7 @@ export async function handleTicketRpc(
         isError: false,
         ticket,
         consumedView,
+        waitResult: questionPending ? "question" : interrupted.length > 0 ? "interrupted" : aborted ? "aborted" : isTerminal(ticket.status) ? "settled" : "detached",
         ...(note !== undefined ? { note } : {}),
       };
     }

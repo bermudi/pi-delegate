@@ -226,7 +226,7 @@ describe("telemetry contention (#142)", () => {
         // The deferred write lands after the lock releases, exactly once.
         await hold.exited;
         expect(await pollRowCount(dbPath, "calls", 2, 3000)).toBe(2);
-        expect(userVersionOf(dbPath)).toBe(6);
+        expect(userVersionOf(dbPath)).toBe(7);
         const taskIds = rowsOf(dbPath, "tasks").map((row) => String(row.id));
         expect(taskIds).toHaveLength(2);
         expect(new Set(taskIds).size).toBe(2);
@@ -313,6 +313,10 @@ describe("telemetry contention (#142)", () => {
         expect(await pollRowCount(dbPath, "calls", 2, 3000)).toBe(2);
         const calls = rowsOf(dbPath, "calls");
         expect(calls.some((row) => row.status === "cancelled")).toBe(true);
+        expect(await pollRowCount(dbPath, "tool_operations", 2, 3000)).toBe(2);
+        const operations = rowsOf(dbPath, "tool_operations");
+        expect(operations.map((row) => row.action)).toEqual(["cancel", "wait"]);
+        expect(operations[1]?.result).toBe("settled");
       } finally {
         release();
         if (hold !== undefined) await hold.release();

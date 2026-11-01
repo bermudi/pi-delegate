@@ -428,8 +428,17 @@ mid-flight the parent can steer. The grammar:
   Decided (owner ratification, 2026-09-27): rows exist for every
   dispatch that ends before execution — validation rejections
   (including unknown exact agent names and pre-schema rejections), config-load
-  failures, and admission rejections. Each row carries the timestamp,
-  the phase, the caller-visible rejection message verbatim, the
+  failures, admission rejections, and other preparation failures (phase
+  `preparation`, including ticket journal and initial workspace setup). A
+  preparation aborted into an already-cancelled ticket is a cancellation,
+  not a rejected dispatch, and gets no misfire. Telemetry is fail-open;
+  before config loads, its valid raw telemetry block supplies the hint.
+  Unexpected preparation errors use safe caller-visible messages rather than
+  persisting raw filesystem or subprocess errors. Each row carries the timestamp,
+  the phase, the safe Delegate-owned rejection message (verbatim except where
+  preparation guidance contains caller-owned paths or IDs, which are omitted).
+  Host or third-party pre-execution results instead use a fixed content-free
+  message. Each row also carries the
   batch shape (task count, requested agents, workspace selections,
   sync/async), and the parent's working directory (`parent_cwd`).
   Retention is identical to dispatch rows — one policy,
@@ -445,11 +454,32 @@ mid-flight the parent can steer. The grammar:
 
   Pre-schema errors carry paths and diagnostic messages only, never Pi's
   request-body dump. Caller-visible diagnostics are safe before persistence,
-  so the saved misfire message remains verbatim without storing prompt or
+  while untrusted host result text is never persisted, avoiding prompt or
   base-instruction content. Non-object wire arguments also produce a row
   with empty sanitized batch metadata.
   Recovery diagnostics omit supplied malformed values and corrective
   examples use placeholders for task/message/answer bodies.
+
+- **Tool-operation telemetry.** When telemetry is enabled, `delegate_ticket`
+  and `delegate_session` calls, including preflight, schema and validation
+  rejections, record one row in
+  a separate `tool_operations` table, without changing dispatch rows. Rows
+  contain only the start timestamp, tool and canonical action, monotonic
+  elapsed milliseconds, and result classification. Normal actions classify as
+  `success` or `error`; waits classify as `settled`, `question`,
+  `interrupted`, `aborted`, `detached`, or `error` (question, interruption,
+  then abort precedence matches the returned note; `detached` means a
+  nonterminal view without those reasons). No ticket, task, session, tool-call
+  or other identifier, argument, response, or content is stored. An action
+  outside the tool's canonical allowlist is stored
+  as `unknown`, never verbatim. Ownership passes from host start/end events
+  to the tool at execute entry, including validation; later handler blocks
+  remain owned by the host events. Configuration and destination are captured
+  at start; a stale destination generation drops the row.
+  Overlapping calls with the same tool and call id cannot be distinguished by
+  host events: ambiguous execute entries use `unknown` and ambiguous blocked
+  calls may have no row, rather than attributing an action to the wrong call.
+  Recording is opt-in and fail-open and uses the same deferred write queue.
 
 - **Usage events (#60).** Task settlement emits `delegate:usage` on
   the shared `pi.events` bus: `{ticketId?, taskId?, provider, model,

@@ -247,6 +247,9 @@ use any design that makes these properties true and testable.
 
 ## Telemetry
 
+- Tool-operation telemetry MUST NOT contain identifiers, arguments, response
+  contents, or error text, and MUST NOT alter RPC results. It shares the
+  bounded, fail-open deferred write machinery with dispatch telemetry.
 - Telemetry writes MUST NOT stall dispatch: the calling thread MUST NOT wait
   on a SQLite lock or perform synchronous retry sleeps — no `Atomics.wait`,
   no `SharedArrayBuffer`, `busy_timeout` stays zero. An uncontended write MAY
