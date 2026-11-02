@@ -15,6 +15,7 @@ import {
   installSubagentModel,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
+import { waitFor } from "../support/poll.ts";
 
 const PROTOTYPE_NAMES = [
   "constructor",
@@ -51,11 +52,6 @@ function systemPromptText(message: unknown): string {
   ]
     .filter((part) => part.length > 0)
     .join("\n");
-}
-
-async function waitFor(probe: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 100 && !probe(); i++) await Bun.sleep(20);
-  expect(probe(), `${what} (timed out waiting)`).toBeTrue();
 }
 
 async function installNamedParentProvider(

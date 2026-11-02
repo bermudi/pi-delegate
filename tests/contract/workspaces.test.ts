@@ -30,15 +30,7 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
-import { gitFixtureEnv } from "../support/git-fixture.ts";
-
-function gitInit(dir: string): void {
-  // An initial commit is required: isolated baselines are built on HEAD.
-  execSync(
-    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-    { cwd: dir, env: gitFixtureEnv() },
-  );
-}
+import { gitFixtureEnv, gitInit, gitInitEmpty } from "../support/git-fixture.ts";
 
 /** Directory paths under `root` (recursively) whose basename starts with `prefix`. */
 function collectDirs(root: string, prefix: string): string[] {
@@ -2339,10 +2331,7 @@ exec '${realGit}' "$@"
       session = await openDelegateBoundary();
       const subagents = await installSubagentModel(session);
       const dir = tempDir();
-      execSync("git init -q && git config user.email t@t && git config user.name t", {
-        cwd: dir,
-        env: gitFixtureEnv(),
-      });
+      gitInitEmpty(dir);
 
       const escape: FauxResponseFactory = async (context) =>
         context.messages.some((m) => m.role === "toolResult")

@@ -13,6 +13,7 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
+import { waitFor } from "../support/poll.ts";
 
 /**
  * Inline-batch live board (issue #119): a synchronous `async:false`
@@ -34,12 +35,6 @@ function gate() {
     return fauxAssistantMessage("OUTPUT-RELEASED");
   };
   return { release, step };
-}
-
-/** Poll until true, bounded — live frames are scheduling-dependent. */
-async function waitFor(probe: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 450 && !probe(); i++) await Bun.sleep(10);
-  expect(probe(), `${what} (timed out waiting)`).toBe(true);
 }
 
 interface LiveTask {

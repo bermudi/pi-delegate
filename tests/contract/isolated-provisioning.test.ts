@@ -20,6 +20,7 @@ import {
   installSubagentModel,
   openDelegateBoundary,
 } from "../support/pi-boundary.ts";
+import { gitFixtureEnv, gitInit, gitInitEmpty } from "../support/git-fixture.ts";
 
 /**
  * #120: isolated worker worktrees are provisioned with the source root's
@@ -28,27 +29,19 @@ import {
  * own bash output, the source tree's bytes, and the task result text.
  */
 
-function gitInit(dir: string): void {
-  // An initial commit is required: isolated baselines are built on HEAD.
-  execSync(
-    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-    { cwd: dir },
-  );
-}
-
 /** A committed .gitignore plus an ignored marker dependency. */
 function gitInitWithIgnoredDeps(dir: string): void {
-  execSync(
-    "git init -q && git config user.email t@t && git config user.name t",
-    { cwd: dir },
-  );
+  gitInitEmpty(dir);
   writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
   mkdirSync(join(dir, "node_modules"), { recursive: true });
   writeFileSync(
     join(dir, "node_modules", "dep-marker.txt"),
     "provisioned-dep-42\n",
   );
-  execSync("git add .gitignore && git commit -qm init", { cwd: dir });
+  execSync("git add .gitignore && git commit -qm init", {
+    cwd: dir,
+    env: gitFixtureEnv(),
+  });
 }
 
 /** Concatenated toolResult text blocks of a worker transcript. */
@@ -191,6 +184,7 @@ describe("isolated worktree dependency provisioning contract (#120)", () => {
       mkdirSync(join(dir, ".trees"), { recursive: true });
       execSync("git add .gitignore && git commit -qm ignore-trees", {
         cwd: dir,
+        env: gitFixtureEnv(),
       });
 
       const probe: FauxResponseFactory = async (context) => {

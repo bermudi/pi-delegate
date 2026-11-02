@@ -24,19 +24,12 @@ import {
   ticketIdOf,
 } from "../support/pi-boundary.ts";
 import { diagnosticRecords } from "../support/diagnostic-records.ts";
-import { gitFixtureEnv } from "../support/git-fixture.ts";
+import { gitFixtureEnv, gitInit } from "../support/git-fixture.ts";
 
 // Workspace process cleanup's /proc scan is Linux-only; the stray-process
 // tests are gated on it. The retained-artifact recovery test is plain git
 // and runs everywhere.
 const linuxTest = process.platform === "linux" ? test : test.skip;
-
-function gitInit(dir: string): void {
-  execSync(
-    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-    { cwd: dir, env: gitFixtureEnv() },
-  );
-}
 
 /**
  * The state letter from /proc/<pid>/stat; undefined when the pid is gone.

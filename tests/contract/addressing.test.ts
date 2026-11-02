@@ -18,6 +18,7 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
+import { waitFor } from "../support/poll.ts";
 
 // Canonical task addressing (issue #53, new contract — no v1 analog): the
 // compound "<ticketId>#<taskId>" is accepted in the taskId field of
@@ -26,12 +27,6 @@ import {
 // in receipts, wakes, and delivered result views so the parent can copy
 // it verbatim. Plain ticket/task forms are untouched, and a task id that
 // literally contains "#" still resolves when the ticket field is sent.
-
-/** Poll until true, bounded — keeps in-flight ordering assertions stable. */
-async function waitFor(probe: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 250 && !probe(); i++) await Bun.sleep(20);
-  expect(probe(), `${what} (timed out waiting)`).toBeTrue();
-}
 
 /** A parked worker's question id, scraped from the ticket's poll view. */
 async function untilQuestion(session: TestSession, ticket: string): Promise<string> {

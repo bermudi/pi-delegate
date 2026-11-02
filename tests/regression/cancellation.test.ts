@@ -40,6 +40,7 @@ import {
   registeredTool,
   ticketIdOf,
 } from "../support/pi-boundary.js";
+import { gitInit } from "../support/git-fixture.ts";
 
 let session: TestSession | undefined;
 
@@ -643,14 +644,6 @@ test(
 // and park machinery is unchanged and dashboard-owned; a dashboard
 // integration test is the follow-up path for both scenarios.
 
-function gitInitForShutdownRace(dir: string): void {
-  // An initial commit is required: isolated baselines are built on HEAD.
-  execSync(
-    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-    { cwd: dir },
-  );
-}
-
 /**
  * Park a dispatch at a specific Git call, deterministically: a `git` shim
  * first in PATH counts invocations, lets calls below `parkAtCall` through,
@@ -735,7 +728,7 @@ test(
     // after the hold releases the workers run to completion under the
     // barrier and only then may the session boundary settle.
     const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
-    gitInitForShutdownRace(repo);
+    gitInit(repo);
     const hold = installGitHold(2);
     try {
       session = await openDelegateBoundary();
@@ -792,7 +785,7 @@ test(
     // ticket (cancelled, workers never started) and the shutdown barrier
     // resolves without waiting for the release file.
     const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
-    gitInitForShutdownRace(repo);
+    gitInit(repo);
     const hold = installGitHold(2);
     try {
       session = await openDelegateBoundary();
@@ -857,7 +850,7 @@ test(
     // state": a terminal cancellation response must not falsely imply
     // unsafe cleanup completed, and later results stay visible).
     const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
-    gitInitForShutdownRace(repo);
+    gitInit(repo);
     const hold = installGitHold(2);
     try {
       session = await openDelegateBoundary();
@@ -1021,7 +1014,7 @@ for (const async of [true, false]) {
         // shutdown-before-retry separate: a successful later dispatch must
         // not hide a lifetime leaked by the one that never started.
         const repo = mkdtempSync(join(tmpdir(), "delegate-shutdown-prep-"));
-        gitInitForShutdownRace(repo);
+        gitInit(repo);
         const failure = installGitFailure(2);
         try {
           session = await openDelegateBoundary();

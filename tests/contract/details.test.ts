@@ -35,6 +35,7 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
+import { waitFor } from "../support/poll.ts";
 
 /** A scripted subagent stream that blocks until `release` is invoked. */
 function gate(output = "OUTPUT-RELEASED") {
@@ -45,15 +46,6 @@ function gate(output = "OUTPUT-RELEASED") {
     return fauxAssistantMessage(output);
   };
   return { release, step };
-}
-
-/** Poll until true, bounded. */
-async function waitFor(probe: () => boolean, what: string): Promise<void> {
-  const end = Date.now() + 4000;
-  while (!probe()) {
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await Bun.sleep(10);
-  }
 }
 
 describe("details schemas (SPEC v3 Observability, issue #51)", () => {

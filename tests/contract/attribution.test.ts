@@ -16,7 +16,7 @@ import {
   when,
   type TestSession,
 } from "@marcfargas/pi-test-harness";
-import { gitFixtureEnv } from "../support/git-fixture.ts";
+import { gitFixtureEnv, gitInitEmpty } from "../support/git-fixture.ts";
 import {
   callDelegate,
   callDelegateTicket,
@@ -455,10 +455,7 @@ describe("completion evidence — git evidence windows (user decision 2026-10-02
   /** `git init` a directory; commits are made per test where needed. */
   function initRepo(dir: string): void {
     mkdirSync(dir, { recursive: true });
-    execSync(
-      "git init -q && git config user.email t@t && git config user.name t",
-      { cwd: dir },
-    );
+    gitInitEmpty(dir);
   }
 
   /** The window's absolute path basis is the canonical repository root. */
@@ -743,7 +740,7 @@ exec ${quote(realGit)} "$@"
     initRepo(repo);
     writeFileSync(join(repo, "touched.txt"), "ONE\n");
     writeFileSync(join(repo, "untouched.txt"), "TWO\n");
-    execSync("git add -A && git commit -qm base", { cwd: repo });
+    execSync("git add -A && git commit -qm base", { cwd: repo, env: gitFixtureEnv() });
     // Pre-window dirt on both files: neither is the worker's to report.
     writeFileSync(join(repo, "touched.txt"), "ONE dirty\n");
     writeFileSync(join(repo, "untouched.txt"), "TWO dirty\n");
@@ -774,7 +771,7 @@ exec ${quote(realGit)} "$@"
     const repo = join(session.cwd, "repo");
     initRepo(repo);
     writeFileSync(join(repo, "keep.txt"), "KEEP\n");
-    execSync("git add -A && git commit -qm base", { cwd: repo });
+    execSync("git add -A && git commit -qm base", { cwd: repo, env: gitFixtureEnv() });
     const model = await installSubagentModel(session);
     model.respond([
       fauxAssistantMessage([
@@ -801,7 +798,7 @@ exec ${quote(realGit)} "$@"
     const repo = join(session.cwd, "repo");
     initRepo(repo);
     writeFileSync(join(repo, "base.txt"), "BASE\n");
-    execSync("git add -A && git commit -qm base", { cwd: repo });
+    execSync("git add -A && git commit -qm base", { cwd: repo, env: gitFixtureEnv() });
     const model = await installSubagentModel(session);
     model.respond([
       fauxAssistantMessage([
@@ -1091,7 +1088,7 @@ exec ${quote(realGit)} "$@"
     const repo = join(session.cwd, "repo");
     initRepo(repo);
     writeFileSync(join(repo, "keep.txt"), "KEEP\n");
-    execSync("git add -A && git commit -qm base", { cwd: repo });
+    execSync("git add -A && git commit -qm base", { cwd: repo, env: gitFixtureEnv() });
     const model = await installSubagentModel(session);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

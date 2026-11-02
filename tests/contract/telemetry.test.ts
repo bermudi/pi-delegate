@@ -34,6 +34,7 @@ import {
   callDelegateSession,
   registeredTool,
 } from "../support/pi-boundary.ts";
+import { gitFixtureEnv, gitInit } from "../support/git-fixture.ts";
 
 // The extension's own package version — the value telemetry rows must
 // carry in `version`. `pi_version` is the host's VERSION export.
@@ -114,13 +115,6 @@ function gate() {
     return fauxAssistantMessage("OUTPUT-RELEASED");
   };
   return { release, step };
-}
-
-function gitInit(dir: string): void {
-  execSync(
-    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-    { cwd: dir },
-  );
 }
 
 describe("delegate telemetry contract", () => {
@@ -1544,7 +1538,7 @@ describe("delegate telemetry contract", () => {
     configureDelegate(session, { telemetry: { enabled: true, dbPath } });
     const nonRepo = trackedTempDir();
     const emptyRepo = trackedTempDir();
-    execSync("git init -q", { cwd: emptyRepo });
+    execSync("git init -q", { cwd: emptyRepo, env: gitFixtureEnv() });
     for (const [cwd, guidance] of [[nonRepo, "requires a Git repository"], [emptyRepo, "at least one commit"]] as const) {
       const result = await callDelegate(session, { async: false, tasks: [{ prompt: "PRIVATE-PROMPT", cwd, workspace: "isolated" }] });
       expect(result.isError).toBe(true);

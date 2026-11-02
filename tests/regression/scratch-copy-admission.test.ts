@@ -11,7 +11,7 @@ import {
   callDelegate, callDelegateTicket, configureDelegate, delegateTool,
   installSubagentModel, openDelegateBoundary, ticketIdOf,
 } from "../support/pi-boundary.ts";
-import { gitFixtureEnv } from "../support/git-fixture.ts";
+import { gitFixtureEnv, gitInit } from "../support/git-fixture.ts";
 
 // Literal repository #50: public copying/read-vs-write regression scenarios.
 // Registered-execute engine boundary: concurrent calls on one extension
@@ -52,9 +52,6 @@ async function bounded<T>(promise: Promise<T>): Promise<T> {
       timer = setTimeout(() => reject(new Error("copy admission test barrier timed out")), 5000);
     })]);
   } finally { clearTimeout(timer); }
-}
-function gitInit(root: string) {
-  execSync("git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty", { cwd: root, env: gitFixtureEnv() });
 }
 
 /** Pause the REAL fs.cp inside its asynchronous filter. Node's copy promise

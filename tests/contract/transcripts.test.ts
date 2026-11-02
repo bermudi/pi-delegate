@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { execSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -18,6 +17,8 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
+import { waitFor } from "../support/poll.ts";
+import { gitInit } from "../support/git-fixture.ts";
 
 /** A minimal valid Pi session transcript usable as a `resumeFrom` target. */
 function writeTranscript(dir: string, name: string): string {
@@ -47,20 +48,6 @@ function writeTranscript(dir: string, name: string): string {
     ].join("\n") + "\n",
   );
   return file;
-}
-
-/** Poll until true, bounded — keeps in-flight ordering assertions stable. */
-async function waitFor(probe: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 250 && !probe(); i++) await Bun.sleep(20);
-  expect(probe(), `${what} (timed out waiting)`).toBeTrue();
-}
-
-/** A minimal Git repository — scratch workspaces require one to copy. */
-function gitInit(dir: string): void {
-  execSync(
-    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-    { cwd: dir },
-  );
 }
 
 describe("transcript exclusivity contract", () => {

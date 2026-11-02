@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -23,6 +22,7 @@ import {
   callDelegateTicket,
 } from "../support/pi-boundary.ts";
 import { armHold, releaseHold } from "../support/parent-hold.ts";
+import { gitInit } from "../support/git-fixture.ts";
 import { diagnosticRecords } from "../support/diagnostic-records.ts";
 
 interface DirectResult {
@@ -318,10 +318,7 @@ describe("async result delivery", () => {
     // shutdown completes, finalization has finished: the pollable view
     // already carries the integration annotations.
     session = await openDelegateBoundary();
-    execSync(
-      "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-      { cwd: session.cwd },
-    );
+    gitInit(session.cwd);
     const host = session.session as AgentSession;
     const model = await installSubagentModel(session);
     const blocked = gate();
@@ -475,10 +472,7 @@ describe("async result delivery", () => {
     // before the outcome is safe to expose (reconciliation applied, final
     // annotations recorded).
     session = await openDelegateBoundary();
-    execSync(
-      "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-      { cwd: session.cwd },
-    );
+    gitInit(session.cwd);
     const host = session.session as AgentSession;
     const model = await installSubagentModel(session);
     const blocked = gate();

@@ -7,7 +7,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { TestSession } from "@marcfargas/pi-test-harness";
 import {
@@ -25,13 +24,7 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
-
-function gitInit(dir: string): void {
-  execSync(
-    "git init -q && git config user.email t@t && git config user.name t && git commit -qm init --allow-empty",
-    { cwd: dir },
-  );
-}
+import { gitInit } from "../support/git-fixture.ts";
 
 describe("delegate dependency graph and handoffs", () => {
   let session: TestSession | undefined;

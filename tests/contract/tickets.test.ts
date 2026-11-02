@@ -18,6 +18,7 @@ import {
   ticketIdOf,
   callDelegateTicket,
 } from "../support/pi-boundary.ts";
+import { waitFor } from "../support/poll.ts";
 
 interface DirectResult {
   readonly content: readonly {
@@ -73,12 +74,6 @@ function directTicket(session: TestSession) {
       ctx,
     );
   };
-}
-
-/** Poll until true, bounded — keeps in-flight ordering assertions stable. */
-async function waitFor(probe: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 250 && !probe(); i++) await Bun.sleep(20);
-  expect(probe(), `${what} (timed out waiting)`).toBeTrue();
 }
 
 describe("delegate ticket contract", () => {

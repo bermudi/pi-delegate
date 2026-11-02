@@ -16,6 +16,7 @@ import {
   openDelegateBoundary,
   ticketIdOf,
 } from "../support/pi-boundary.ts";
+import { waitFor } from "../support/poll.ts";
 import { join } from "node:path";
 
 /** A scripted subagent stream that blocks until `release` is invoked. */
@@ -27,12 +28,6 @@ function gate(output = "OUTPUT-RELEASED") {
     return fauxAssistantMessage(output);
   };
   return { release, step };
-}
-
-/** Poll until true, bounded — keeps in-flight ordering assertions stable. */
-async function waitFor(probe: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 250 && !probe(); i++) await Bun.sleep(20);
-  expect(probe(), `${what} (timed out waiting)`).toBeTrue();
 }
 
 function interruptDetails(result: { details?: unknown }): Record<string, unknown> {
