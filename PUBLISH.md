@@ -26,6 +26,20 @@ auth is not needed and `npm publish` should not be run by hand.
    (The suite cannot catch host-layer seams.)
 3. `npm pack` — inspect the tarball contents by hand once.
 
+## Publish-manifest strip (CI step, `prepare:publish`)
+
+Dev-only manifest fields are stripped from `package.json` in the disposable
+CI checkout just before `npm publish` (`scripts/prepare-publish.ts`, run as
+`bun run prepare:publish`). Today that is `patchedDependencies`: it declares
+the local pi-test-harness patch under `patches/`, which `files` keeps out of
+the tarball. Bun reads the field from the root `package.json` only and fails
+when a declared patch file is missing, so shipping the declaration breaks bun
+consumers. Do not rely on a packer dropping it — verified 2026-11-02 that
+npm 11.21.1 (CI's npm) and `bun pm pack` both keep it; only npm 12 happens to
+strip it, which is a version accident. The script verifies its own output by
+packing with npm and reading the tarball manifest, and it exits nonzero if the
+field survives. Publishing 0.6.4 was the last release that shipped the field.
+
 ## Publish
 
     git tag pi-delegate-v<version> && git push origin main pi-delegate-v<version>
