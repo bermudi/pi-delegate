@@ -9,7 +9,6 @@ import {
 import * as Value from "typebox/value";
 import {
   defineTool,
-  type AgentToolResult,
   type ExtensionAPI,
   type ToolDefinition,
   type ExtensionContext,
@@ -262,7 +261,6 @@ type DelegateArguments = Static<typeof delegateSchema>;
 type TicketToolArguments = Static<typeof ticketSchema>;
 type SessionToolArguments = Static<typeof sessionSchema>;
 type DelegateDetails = Record<string, unknown>;
-type DelegateResult = AgentToolResult<DelegateDetails>;
 
 /**
  * Issue #60: namespaced usage signal on `pi.events` — settled subagent

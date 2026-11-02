@@ -25,7 +25,6 @@ import type {
 } from "@marcfargas/pi-test-harness";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";

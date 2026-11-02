@@ -30,7 +30,6 @@ import { TicketJournal } from "./ticket-journal.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { DELEGATE_TREES } from "./fsx.ts";
 import { currentBootId, ownerIsDead } from "./owner.ts";
-import { assistantTextFromTranscript } from "./sessions.ts";
 import { renderOutputForLLM, renderOutputForPoll, renderPartialForLLM, spillDirOf } from "./spill.ts";
 import type {
   ExecutionHandle,
@@ -148,9 +147,6 @@ interface TicketEntry {
 function isTerminal(status: TicketStatus): boolean {
   return status !== "running";
 }
-
-/** How often an armed tail read re-polls its output source (ms). */
-const TAIL_POLL_MS = 50;
 
 function statusWord(ticket: Ticket): string {
   return ticket.status === "running" && ticket.paused ? "paused" : ticket.status;

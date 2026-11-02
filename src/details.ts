@@ -438,63 +438,57 @@ type TaskOutcomeDetails = Static<typeof taskOutcomeDetailsSchema>;
 type TaskIntegrationDetails = Static<typeof taskIntegrationSchema>;
 
 /**
- * The outcome keys `taskOutcomeDetailsSchema` admits, projected through
- * by `publicOutcome` below. Compile-time coupled to the schema in both
- * directions: `satisfies` rejects a tuple element that is not a schema
- * key (a typo or a removed field), and `CoversAll` rejects a schema key
- * missing from the tuple (a schema-added field that would otherwise be
- * silently dropped).
+ * The outcome keys `taskOutcomeDetailsSchema` admits, projected through by
+ * `publicOutcome` below, in projection order.
+ *
+ * Declared as a record against the schema type so the coupling is exact in
+ * both directions in one construct: a key that is not a schema key (a typo
+ * or a removed field) fails to compile, and so does a schema key missing
+ * from this list (a schema-added field that would otherwise be silently
+ * dropped from the projection).
  */
-const TASK_OUTCOME_DETAILS_KEYS = [
-  "index",
-  "id",
-  "status",
-  "output",
-  "error",
-  "retries",
-  "usage",
-  "integration",
-  "blockedBy",
-  "quarantined",
-  "sessionFile",
-  "transcriptStart",
-  "attributedFiles",
-  "observedFiles",
-  "uncertainFiles",
-  "shellObserved",
-  "concurrentWriters",
-  "verdict",
-] as const satisfies readonly (keyof TaskOutcomeDetails)[];
+const TASK_OUTCOME_DETAILS_KEYS = {
+  index: true,
+  id: true,
+  status: true,
+  output: true,
+  error: true,
+  retries: true,
+  usage: true,
+  integration: true,
+  blockedBy: true,
+  quarantined: true,
+  sessionFile: true,
+  transcriptStart: true,
+  attributedFiles: true,
+  observedFiles: true,
+  uncertainFiles: true,
+  shellObserved: true,
+  concurrentWriters: true,
+  verdict: true,
+} as const satisfies Record<keyof TaskOutcomeDetails, true>;
 
 /** Same coupling for `taskIntegrationSchema`'s nested strict object. */
-const TASK_INTEGRATION_DETAILS_KEYS = [
-  "status",
-  "reason",
-  "proposedFiles",
-  "appliedFiles",
-  "conflicts",
-  "baselineRef",
-  "proposalRef",
-  "patchPath",
-  "worktreePath",
-  "sourceDrift",
-] as const satisfies readonly (keyof TaskIntegrationDetails)[];
+const TASK_INTEGRATION_DETAILS_KEYS = {
+  status: true,
+  reason: true,
+  proposedFiles: true,
+  appliedFiles: true,
+  conflicts: true,
+  baselineRef: true,
+  proposalRef: true,
+  patchPath: true,
+  worktreePath: true,
+  sourceDrift: true,
+} as const satisfies Record<keyof TaskIntegrationDetails, true>;
 
-type CoversAll<Missing extends never> = Missing;
 /** Writable view of a readonly interface — projection assembly only. */
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
-type _OutcomeKeysCoverSchema = CoversAll<
-  Exclude<
-    keyof TaskOutcomeDetails,
-    (typeof TASK_OUTCOME_DETAILS_KEYS)[number]
-  >
->;
-type _IntegrationKeysCoverSchema = CoversAll<
-  Exclude<
-    keyof TaskIntegrationDetails,
-    (typeof TASK_INTEGRATION_DETAILS_KEYS)[number]
-  >
->;
+
+/** Key list of an exhaustive key record, typed by that record's own keys. */
+function keysOf<T extends object>(record: T): readonly (keyof T)[] {
+  return Object.keys(record) as (keyof T)[];
+}
 
 /**
  * #127: `durationMs` is internal telemetry evidence only — never a
@@ -519,7 +513,7 @@ export function publicOutcome(
   // from the input — `index`/`id`/`status`/`retries` are never
   // undefined on a recorded outcome.
   const projected = {} as Mutable<TaskOutcome>;
-  for (const key of TASK_OUTCOME_DETAILS_KEYS) {
+  for (const key of keysOf(TASK_OUTCOME_DETAILS_KEYS)) {
     copyIfDefined(outcome, projected, key);
   }
   if (outcome.integration !== undefined) {
@@ -546,7 +540,7 @@ function copyIfDefined<T, K extends keyof T>(
 
 function publicIntegration(integration: TaskIntegration): TaskIntegration {
   const projected = {} as Mutable<TaskIntegration>;
-  for (const key of TASK_INTEGRATION_DETAILS_KEYS) {
+  for (const key of keysOf(TASK_INTEGRATION_DETAILS_KEYS)) {
     copyIfDefined(integration, projected, key);
   }
   // `conflicts` entries are strict objects in the emitted schema and

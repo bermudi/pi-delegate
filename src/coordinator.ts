@@ -552,7 +552,7 @@ export class DispatchCoordinator {
               `blocked by ${blockers
                 .map(
                   (depIndex) =>
-                    `'${tasks[depIndex]!.id}' — it ${blockingReason(ledger.read(depIndex), tasks[depIndex]!)}`,
+                    `'${tasks[depIndex]!.id}' — it ${blockingReason(ledger.read(depIndex))}`,
                 )
                 .join("; ")}`,
             blockedBy: blockers.map((depIndex) => tasks[depIndex]!.id),

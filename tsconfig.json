@@ -23,8 +23,12 @@
     "noImplicitOverride": true,
 
     // Some stricter flags (disabled by default)
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
+    // Enabled: dead declarations accumulate silently otherwise — the
+    // `delegate_ticket` tail removal (#130) left an unused exported reader
+    // and its dead constant behind, unnoticed for weeks. Unused parameters
+    // are exempted with the standard `_name` convention.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noPropertyAccessFromIndexSignature": false
   }
 }

@@ -7,7 +7,6 @@ import {
   callDelegateTicket,
   installSubagentModel,
   openDelegateBoundary,
-  ticketIdOf,
 } from "../support/pi-boundary.ts";
 
 // Boundary input normalization (issue #27): null means "not given" at every

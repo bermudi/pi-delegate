@@ -281,7 +281,7 @@ describe("delegate session contract", () => {
       // v1 evidence: lifecycle.test.ts "resumeFrom with nonexistent file
       // returns error" and "placeholder string returns invalid path error".
       session = await openDelegateBoundary();
-      const subagents = await installSubagentModel(session);
+      await installSubagentModel(session);
 
       const result = await callDelegate(session, {
         async: false,

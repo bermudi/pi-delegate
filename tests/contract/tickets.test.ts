@@ -12,7 +12,6 @@ import {
   callDelegate,
   configureDelegate,
   installSubagentModel,
-  objectOf,
   openDelegateBoundary,
   registeredTool,
   ticketIdOf,

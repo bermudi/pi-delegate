@@ -149,7 +149,6 @@ export function prerequisiteSatisfied(
 /** Why a prerequisite blocks its dependent — for the `blocked` error. */
 export function blockingReason(
   outcome: TaskOutcome | undefined,
-  dep: ResolvedTask,
 ): string {
   if (outcome === undefined) {
     return "no outcome was recorded for it";

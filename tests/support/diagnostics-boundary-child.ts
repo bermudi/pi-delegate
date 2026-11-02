@@ -21,7 +21,6 @@ import {
   callDelegate,
   installSubagentModel,
   openDelegateBoundary,
-  objectOf,
   registeredTool,
   ticketIdOf,
 } from "./pi-boundary.ts";
@@ -421,12 +420,6 @@ try {
       assert(accesses === 0, "Diagnostic error accessors ran");
       safeCauses = true;
     } else {
-      const asks: FauxResponseFactory = (context) =>
-        JSON.stringify(context.messages).includes("PRIVATE_ANSWER")
-          ? fauxAssistantMessage("PRIVATE_ANSWERED_OUTPUT")
-          : fauxAssistantMessage([
-              fauxToolCall("ask_parent", { question: "PRIVATE_QUESTION" }),
-            ]);
       model.respond([
         fauxAssistantMessage([
           fauxToolCall("ask_parent", { question: "PRIVATE_QUESTION" }),

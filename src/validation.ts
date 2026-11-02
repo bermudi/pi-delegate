@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { resolveDependencyGraph } from "./graph.ts";
-import { expandTools } from "./profiles.ts";
 
 export interface TaskInput {
   readonly id?: string;
