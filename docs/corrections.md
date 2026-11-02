@@ -9,6 +9,17 @@ move. This file is the ledger; the reasoning behind the ladder lives in
 
 ## Correction log
 
+- 2026-11-01 — cache-warming consultation (chat analysis, no repo change):
+  a hazard analysis presented pooled `calls.wall_ms` as measured parent-stall
+  duration without reading the writer — async rows span dispatch→settlement
+  (background batch lifetime, not a stall), wait rows exist only under v1,
+  and v3 records no wait calls at all; an earlier query also filtered
+  `outcome IN ('succeeded','failed')` against actual values `success`/`ok`,
+  silently reducing the sample to fast-failing tasks. Enforcement: pin column
+  semantics from the writer before presenting telemetry as observed fact, and
+  label provider-rate assumptions as assumptions (pi's formulas were
+  source-verified; the fleet's rates were not).
+
 - 2026-10-16 — second follow-up review of #145 found two drift pairs
   introduced by the unit itself: the two failed-outcome renderers
   (format.ts formatDispatchResult vs tickets.ts taskSection) disagreed on
