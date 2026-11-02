@@ -59,17 +59,28 @@ const plainTheme = {
   bold: (text: string) => text,
 };
 
+/**
+ * Injects pi's real muted-styling shape (truecolor introducer, bare reset)
+ * so tests can tell styled text from its ESC-stripped remains: a sanitizer
+ * that runs over already-styled text leaves literal `[38;2;…m` behind.
+ */
+const ansiTheme = {
+  fg: (_color: string, text: string) => `\x1b[38;2;116;124;132m${text}\x1b[39m`,
+  bold: (text: string) => text,
+};
+
 function renderToolResult(
   session: TestSession,
   result: ToolResultRecord,
   expanded: boolean,
+  theme: unknown = plainTheme,
 ): string {
   const tool = delegateTool(session) as unknown as ResultRenderingTool;
   return tool
     .renderResult(
       { content: result.content, details: result.details },
       { expanded, isPartial: false },
-      plainTheme,
+      theme,
       { lastComponent: undefined },
     )
     // Wide enough that Text's word-wrap never splits a rendered output.
@@ -307,6 +318,35 @@ test(
     const help = await callDelegate(session, { async: false, tasks: [] });
     const expanded = renderToolResult(session, help, true);
     expect(expanded).toContain("Delegate Manual");
+  },
+);
+
+test(
+  "a collapsed fallback keeps the expand hint's styling intact",
+  async () => {
+    // Seen 2026-10-11 (live validation-failure row): a result with no
+    // recorded outcomes and multi-line content takes the collapsed
+    // fallback, which appended the already-styled expand hint before the
+    // whole string ran back through `styled`'s displaySafe. displaySafe
+    // strips ESC, so the hint's theme codes printed as literal
+    // `[38;2;116;124;132m` text. The hint must be appended after
+    // sanitization, not inside it.
+    session = await openDelegateBoundary();
+    const failed = {
+      content: [
+        {
+          type: "text",
+          text: 'Validation failed for tool "delegate":\nbad detail line\nanother line',
+        },
+      ],
+    } as unknown as ToolResultRecord;
+    const collapsed = renderToolResult(session, failed, false, ansiTheme);
+    expect(collapsed).toContain('Validation failed for tool "delegate":');
+    expect(collapsed).toContain("(… more");
+    // The styled hint's introducer must survive: if displaySafe ran over
+    // it, only a bare `[38;…m` without its ESC would remain.
+    expect(collapsed).toContain("\x1b[38;2;116;124;132m (… more");
+    expect(collapsed).not.toMatch(/(?<!\x1b)\[38;2;116;124;132m/);
   },
 );
 

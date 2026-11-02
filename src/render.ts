@@ -49,8 +49,6 @@ import type {
 } from "./types.ts";
 import type { SessionArguments, TicketArguments } from "./validation.ts";
 
-/** Matches the stock tool-result fallback's collapsed preview budget. */
-const COLLAPSED_PREVIEW_LINES = 10;
 /** How many task rows a delegate call lists before summarizing the rest. */
 const CALL_ROW_TASKS = 4;
 /** Display budget for a collapsed one-line task summary. */
@@ -1013,34 +1011,25 @@ export function createResultRenderer(tickets: TicketStore) {
         return component;
       }
       // Receipts and sessions: the first content line — ticket ids
-      // display-shortened — bounded to the collapsed budget, plus the
-      // expand hint when more exists.
+      // display-shortened and sanitized — bounded to the collapsed budget,
+      // plus the expand hint when more exists. The hint is appended after
+      // `styled`: displaySafe strips ESC, so a styled hint passing through
+      // it would lose its theme codes and print them as literal text
+      // (seen 2026-10-11 on live validation-failure rows).
       const lines = text.split("\n");
       const first = lines.find((line) => line.trim() !== "") ?? "";
       setText(
         styled(
-          truncateLine(shortenTicketIds(first), COLLAPSED_LINE_LIMIT) +
-            (lines.length > 1 ? expandHint(theme) : ""),
+          truncateLine(
+            displaySafe(shortenTicketIds(first)),
+            COLLAPSED_LINE_LIMIT,
+          ),
           theme,
-        ),
+        ) + (lines.length > 1 ? expandHint(theme) : ""),
       );
       return component;
     }
-    let body = options.expanded
-      ? (expandedText(result.details, tickets) ?? contentText(result))
-      : contentText(result);
-    if (!options.expanded) {
-      const lines = body.split("\n");
-      if (lines.length > COLLAPSED_PREVIEW_LINES) {
-        const keys = keyText("app.tools.expand");
-        body =
-          lines.slice(0, COLLAPSED_PREVIEW_LINES).join("\n") +
-          theme.fg(
-            "muted",
-            `\n... (${lines.length - COLLAPSED_PREVIEW_LINES} more lines${keys !== "" ? `, ${keys} to expand` : ""})`,
-          );
-      }
-    }
+    const body = expandedText(result.details, tickets) ?? contentText(result);
     setText(styled(body, theme));
     return component;
   };
